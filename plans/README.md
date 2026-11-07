@@ -31,6 +31,28 @@ Signal, without handing those services' credentials or unfiltered content to any
 | DEC-14 | No telemetry, update check or crash reporting. Egress is the source APIs, the Signal host, and a hosted classifier only if configured. |
 | DEC-15 | Nothing is specific to one organization. The Signal URL, sources, identities and rules are configuration. |
 | DEC-16 | Releases are reproducible from a tag, signed, notarized on macOS, and ship an SBOM. |
+| DEC-17 | Threads follow the native object. Beacon writes with `open` on the object's subject, so each pull request, issue, mail thread, Slack thread, calendar event and document is one thread. Links across sources are recorded only from explicit references (an issue key in a pull request's title or branch, a URL in a message) as `metadata.references`. Beacon never merges threads; a filer may. |
+| DEC-18 | A change of state is defined per source (see **Change markers**). Edits, reactions, read receipts and label churn are not events. |
+| DEC-19 | The person's own acts are events: a reply sent, a review submitted, an issue transitioned, a message posted in a thread Beacon follows. They are what closes an ask. Without them a reader has to guess whether something was answered. |
+| DEC-20 | An own act on a subject with an open ask to the person closes that ask (`closes`, outcome `handled`). Another person's answer in the same thread closes it only when a rule says so. |
+| DEC-21 | `ask: me` in a rule sets `to: me`, with priority from the rule and `due_at` from the source when the source has one (an issue's due date, a calendar start). Without `ask`, an event is recorded and asks no one. |
+| DEC-22 | The classifier is a local OpenAI-compatible endpoint (Ollama or llama.cpp) serving a small open-weights instruct model. Each decision is kept in a local decisions log with the model digest, the prompt hash and the answer. Decisions are never sent. Until Phase 6, rules and `hold` do the work. |
+| DEC-23 | The first run reads open state, not history: open pull requests the person wrote or was asked to review, unresolved issues assigned to them, inbox and starred mail from the last 14 days, direct messages, mentions and followed threads from the last 7 days, and calendar events in the next 7 days. It is always a dry run. Sending starts only after the person accepts its summary. |
+| DEC-24 | A seed file can carry decisions from an earlier triage system (`<source id>`: `never` or `send`), so items already dismissed stay dismissed. |
+| DEC-25 | One Beacon per person, one active instance. The instance holds a lease in Signal (a claim event renewed every few minutes); another machine collects but does not send while the lease is held. Cursors, the outbox, the queue and the decisions log stay local. |
+| DEC-26 | Local agent sessions are a source. A coding agent's session that finishes, fails or stops for a decision is an event on the work it was started for, so whoever delegated the work does not have to poll it. |
+
+## Change markers
+
+| Source | Events | Version marker |
+| --- | --- | --- |
+| GitHub | pull request opened, closed, merged, marked ready; review requested or removed; review submitted (state and commit); new head commit on a pull request the person reviewed; check suite conclusion changed on the person's own pull request; comment by someone else; the person's own review or comment | `updated_at` plus the change's own id |
+| Jira | assigned or unassigned; status transition; comment by someone else; mention; due date changed; the person's own transition or comment | changelog id or comment id |
+| Gmail | new message in a thread (from someone else, or sent by the person); starred | message id |
+| Calendar | created, changed or cancelled; the person's response needed; the person's response changed | event `updated` and `etag` |
+| Drive | comment or reply that mentions the person or is assigned to them; meeting notes created for a meeting the person attended | comment id, file id |
+| Slack | direct message; mention; reply in a thread the person posted in; the person's own message in a followed conversation | message `ts` |
+| Agent sessions | started, finished, failed, waiting for input | session id plus state |
 
 ## Phases
 
@@ -44,9 +66,10 @@ Signal, without handing those services' credentials or unfiltered content to any
 | 6 | Local classifier | pending | 5 |
 | 7 | Release engineering: reproducible builds, signing, notarization, SBOM, install docs | pending | 2 |
 | 8 | macOS menu-bar shell | pending | 5, 7 |
+| 9 | Local agent sessions as a source (DEC-26) | pending | 1 |
 
 Each phase gets its own plan file with goal, scope, out of scope, design notes, tests and an exit gate before work
-starts.
+starts. Phase 1 is [`phase-1.md`](phase-1.md).
 
 ### Phase 1 sketch
 
@@ -69,12 +92,24 @@ starts.
 | Redaction | Recovery from a rule that sent too much. | Designed, not built |
 | An integration actor and key per person, with `relay` prefixes | DEC-11 | Built |
 
-## Open questions
+## Dependencies on Signal, in order
 
-1. Threads: should Beacon open threads (`open`) for items it sends, or leave them unthreaded for a filer agent?
-2. Versions per source: which marker defines "a change of state" for each source, so that edits and reactions do
-   not each become an event?
-3. Which local model and runtime for the classifier, and how its prompt and version are recorded with each
-   decision.
-4. Backfill: how far back the first run reads, and whether backfilled items default to `hold`.
-5. Several machines: one Beacon per person, or one per machine sharing cursors through Signal.
+1. **Visibility for personal subjects.** Events on `gmail:`, `slack:` direct-message, `drive:` and `calendar:`
+   subjects are visible only to the person whose Beacon wrote them and to actors that person grants. This is a
+   first slice of Signal's subject visibility design, and it comes before any rule that sends a body from those
+   sources.
+2. **Batch append**, before the first real run of Phase 3.
+3. **Redaction**, before Beacon is offered to anyone else.
+
+## How a reading agent changes
+
+Written for a sweep agent that today polls each service and keeps its own ledger:
+
+- The sweep reads the log after its cursor and the person's open asks. It does not call the services.
+- Its triage (priority, next step, draft reply) is written back as events on the same thread, so the next run and
+  every other reader see it. The private ledger becomes a query.
+- What closed an item is an event: the person's own reply, a merge, a transition. Reconciling stops being a
+  heuristic.
+- Its own actions (a message sent, a pull request merged, a runner started) are events caused by the item they
+  answer, so the record of what was done and why is in one place.
+- A watcher on the log replaces the daily batch: a new ask for the person can be triaged within minutes.
