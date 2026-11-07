@@ -41,6 +41,8 @@ Signal, without handing those services' credentials or unfiltered content to any
 | DEC-24 | A seed file can carry decisions from an earlier triage system (`<source id>`: `never` or `send`), so items already dismissed stay dismissed. |
 | DEC-25 | One Beacon per person, one active instance. The instance holds a lease in Signal (a claim event renewed every few minutes); another machine collects but does not send while the lease is held. Cursors, the outbox, the queue and the decisions log stay local. |
 | DEC-26 | Local agent sessions are a source. A coding agent's session that finishes, fails or stops for a decision is an event on the work it was started for, so whoever delegated the work does not have to poll it. |
+| DEC-28 | Events carry a state snapshot. When a source returns the object's current state, the event's `state` holds the fields that describe it now (for a pull request: state, head commit, review decision at head, mergeable, checks; for an issue: status, assignee, due date), with `observed_at` and the source's version marker. The fields that may appear in `state` are listed per source like any other field, and a rule names them. |
+| DEC-29 | One authoritative event per act. When an executor or an agent already recorded an act the person's credentials performed (a merge, a comment, a message), Beacon does not record it again. It matches the act by the source's native id in `metadata.native`; when it cannot match, it records a plain observation linked to the authoritative event. |
 
 ## Change markers
 
@@ -100,6 +102,7 @@ starts. Phase 1 is [`phase-1.md`](phase-1.md).
    sources.
 2. **Batch append**, before the first real run of Phase 3.
 3. **Redaction**, before Beacon is offered to anyone else.
+4. **State snapshots and one authoritative event per act** (Signal phase 12), for DEC-28 and DEC-29.
 
 ## How a reading agent changes
 
