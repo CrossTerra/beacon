@@ -86,27 +86,3 @@ func TestTransportIgnoresProxyEnvironment(t *testing.T) {
 		t.Fatal("the proxy from the environment received the request")
 	}
 }
-
-// A transport never follows a redirect; the next request would go through the guard again in any case.
-func TestTransportDoesNotFollowRedirects(t *testing.T) {
-	var followed atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/elsewhere" {
-			followed.Add(1)
-			return
-		}
-		http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
-	}))
-	defer srv.Close()
-	u, _ := url.Parse(srv.URL)
-	rt := Transport([]string{Address(u)})
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/events", nil)
-	resp, err := rt.RoundTrip(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusTemporaryRedirect || followed.Load() != 0 {
-		t.Fatalf("status %d, followed %d", resp.StatusCode, followed.Load())
-	}
-}

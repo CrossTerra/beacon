@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -38,16 +39,35 @@ type Dropped struct {
 
 // Queue is the held and dropped records of one state directory.
 type Queue struct {
-	dir     string
-	held    map[string]Held
-	order   []string
-	dropped map[string]Dropped
+	dir      string
+	writable bool
+	held     map[string]Held
+	order    []string
+	dropped  map[string]Dropped
 }
 
-// Open loads the queue in dir.
-func Open(dir string) (*Queue, error) {
-	q := &Queue{dir: dir, held: map[string]Held{}, dropped: map[string]Dropped{}}
-	err := readLines(filepath.Join(dir, HeldFile), func(line []byte) error {
+// ErrReadOnly is returned by Hold and Drop on a queue opened with Read.
+var ErrReadOnly = errors.New("queue: opened read-only")
+
+// ErrNotLocked is returned by Open when the caller does not hold the outbox lock on the directory.
+var ErrNotLocked = errors.New("queue: opening for writing needs the outbox lock on the same state directory")
+
+// Read loads the queue in dir without changing anything: a torn last line is skipped, not cut, and Hold and Drop
+// fail. Dry runs and explain use it, since they run without the outbox lock and beside a sending process.
+func Read(dir string) (*Queue, error) { return load(dir, false) }
+
+// Open loads the queue in dir for writing. The caller must hold the outbox lock on dir (ob opened with outbox.Open),
+// so that cutting a torn last line can never cut a record another process is appending.
+func Open(dir string, ob *outbox.Outbox) (*Queue, error) {
+	if ob == nil || !ob.Locked(dir) {
+		return nil, ErrNotLocked
+	}
+	return load(dir, true)
+}
+
+func load(dir string, writable bool) (*Queue, error) {
+	q := &Queue{dir: dir, writable: writable, held: map[string]Held{}, dropped: map[string]Dropped{}}
+	err := readLines(filepath.Join(dir, HeldFile), writable, func(line []byte) error {
 		var h Held
 		if err := json.Unmarshal(line, &h); err != nil {
 			return err
@@ -61,7 +81,7 @@ func Open(dir string) (*Queue, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = readLines(filepath.Join(dir, DroppedFile), func(line []byte) error {
+	err = readLines(filepath.Join(dir, DroppedFile), writable, func(line []byte) error {
 		var d Dropped
 		if err := json.Unmarshal(line, &d); err != nil {
 			return err
@@ -75,10 +95,14 @@ func Open(dir string) (*Queue, error) {
 	return q, nil
 }
 
-// readLines calls fn for each complete line. A last line torn by a crash (no newline, or not JSON) is cut off the
-// file, so the next append starts on a line of its own.
-func readLines(path string, fn func([]byte) error) error {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+// readLines calls fn for each complete line. A last line torn by a crash (no newline, or not JSON) is skipped and,
+// when cut is true, cut off the file, so the next append starts on a line of its own.
+func readLines(path string, cut bool, fn func([]byte) error) error {
+	mode := os.O_RDONLY
+	if cut {
+		mode = os.O_RDWR
+	}
+	f, err := os.OpenFile(path, mode, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -106,6 +130,9 @@ func readLines(path string, fn func([]byte) error) error {
 			return fmt.Errorf("%s line %d: %w", path, n, err)
 		}
 		good += int64(len(line))
+	}
+	if !cut {
+		return nil
 	}
 	st, err := f.Stat()
 	if err != nil {
@@ -161,6 +188,9 @@ func syncDir(dir string) error {
 
 // Hold adds an item to the hold queue. Holding a key twice is a no-op.
 func (q *Queue) Hold(h Held) error {
+	if !q.writable {
+		return ErrReadOnly
+	}
 	if _, ok := q.held[h.Key]; ok {
 		return nil
 	}
@@ -192,6 +222,9 @@ func (q *Queue) DroppedBy(key string) (rule string, ok bool) {
 
 // Drop records a dropped key once.
 func (q *Queue) Drop(d Dropped) error {
+	if !q.writable {
+		return ErrReadOnly
+	}
 	if prev, ok := q.dropped[d.Key]; ok && prev.Rule == d.Rule {
 		return nil
 	}

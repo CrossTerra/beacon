@@ -63,9 +63,11 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
 | `instance` | This instance's random id, used in lease claims | Inside lease claims |
 
-The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A line torn
-by a crash is cut off when the file is next opened. A writer holds an exclusive `flock` on the outbox, so two
-`beacon run` processes cannot share a state directory.
+The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
+an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue
+files are opened for writing only under that lock. A line torn by a crash is cut off when a send pass opens the
+file under the lock. A dry run and `beacon explain` take no lock and change nothing: they read the outbox and the
+queue files, skip a torn last line (it may be a record a sending process is appending), and create no file.
 
 ## Adding a source
 

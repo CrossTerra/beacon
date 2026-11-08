@@ -303,7 +303,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		if err != nil {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
-		q, err := queue.Open(e.cfg.StatePath())
+		q, err := queue.Read(e.cfg.StatePath())
 		if err != nil {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
@@ -321,7 +321,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	defer ob.Close()
-	q, err := queue.Open(e.cfg.StatePath())
+	q, err := queue.Open(e.cfg.StatePath(), ob)
 	if err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
@@ -470,7 +470,7 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	q, err := queue.Open(e.cfg.StatePath())
+	q, err := queue.Read(e.cfg.StatePath())
 	if err != nil {
 		return err
 	}

@@ -108,7 +108,12 @@ func (f *fixture) runner(send bool, w lease.Writer) (*Runner, func()) {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	q, err := queue.Open(f.dir)
+	var q *queue.Queue
+	if send {
+		q, err = queue.Open(f.dir, ob)
+	} else {
+		q, err = queue.Read(f.dir)
+	}
 	if err != nil {
 		f.t.Fatal(err)
 	}

@@ -240,7 +240,7 @@ func stateOf(t *testing.T, cfg string) (*outbox.Outbox, *queue.Queue) {
 	dir := filepath.Join(filepath.Dir(cfg), "state")
 	ob, err := outbox.Read(dir)
 	must(t, err)
-	q, err := queue.Open(dir)
+	q, err := queue.Read(dir)
 	must(t, err)
 	return ob, q
 }
@@ -704,5 +704,51 @@ func TestProductionTransportRefusesOtherHosts(t *testing.T) {
 	var denied *egress.DeniedError
 	if !errors.As(err, &denied) || denied.Address != "telemetry.example.net:443" {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A dry run and explain read the state directory without changing it, even while a sending process is appending:
+// a half-written record at the end of the queue files is left exactly as it is.
+func TestDryRunAndExplainLeaveStateUntouched(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "readonly")
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	state := filepath.Join(dir, "state")
+	for name, partial := range map[string]string{queue.DroppedFile: `{"key":"fixture:x:1","dropped_at":"2026-`, queue.HeldFile: `{"key":"fixture:y:1","ru`} {
+		f, err := os.OpenFile(filepath.Join(state, name), os.O_APPEND|os.O_WRONLY, 0)
+		must(t, err)
+		_, _ = f.WriteString(partial)
+		f.Close()
+	}
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		entries, err := os.ReadDir(state)
+		must(t, err)
+		for _, e := range entries {
+			data, err := os.ReadFile(filepath.Join(state, e.Name()))
+			must(t, err)
+			out[e.Name()] = string(data)
+		}
+		return out
+	}
+	before := snapshot()
+	if code := h.run(h.app(allowed), "run", "--dry-run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if code := h.run(h.app(allowed), "explain", "--config", cfg, want[4].key); code != 0 || !strings.Contains(h.stdout.String(), "Hold queue: held") {
+		t.Fatalf("explain: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	after := snapshot()
+	if len(after) != len(before) {
+		t.Fatalf("files before %d, after %d", len(before), len(after))
+	}
+	for name, data := range before {
+		if after[name] != data {
+			t.Fatalf("%s changed:\nbefore %q\nafter  %q", name, data, after[name])
+		}
 	}
 }

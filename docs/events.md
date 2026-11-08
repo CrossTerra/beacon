@@ -92,7 +92,7 @@ records Signal's answer and is the key's state from then on:
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
 `kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
-only. A line torn by a crash while it was written is cut off the file on the next open; it was never synced, so its
+only. A line torn by a crash while it was written is cut off the file when a send pass next opens it under the lock (a dry run skips it and changes nothing); it was never synced, so its
 body was never sent. The directory is synced when the outbox file is created, so the file itself survives a crash.
 
 ### How Signal's answers are handled

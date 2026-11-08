@@ -26,12 +26,12 @@ from the linker and does not affect the tests.
 | `internal/rules` | Every match type, first match wins, default `never`, unknown and blank keys rejected, every YAML spelling of `own` and `addressed`, one document only, `state` lists, unreachable rules, the own-act identity warning. |
 | `internal/project` | Every subset of fields: an unlisted field never appears in the bytes. `by`, `to`, `closes`, `priority`, `due_at`, the state snapshot. |
 | `internal/outbox` | Append, mark, reload; torn last line; tampered body; the lock; expired lease claims. |
-| `internal/queue` | Hold and drop; a torn last line is cut so the next append stays readable. |
+| `internal/queue` | Hold and drop; a torn last line is cut, under the outbox lock, so the next append stays readable; read-only opens change nothing and refuse writes; opening for writing needs the outbox lock on the same directory. |
 | `internal/signal` | 201, replay, 409, 422, 401, 429 with `Retry-After`, 5xx backoff with the same bytes, the egress guard, redirects not followed, a deadline ending a wait. |
-| `internal/egress` | The host list; the guard; the production transport ignores proxy settings in the environment and follows no redirect. |
+| `internal/egress` | The host list; the guard; the production transport ignores proxy settings in the environment. |
 | `internal/lease` | One holder; renewal; takeover within two periods; restart keeps the lease; claim shape; stale claims expire; refusals; a claim ends with its period. |
 | `internal/runner` | A pass on its own: dry run writes nothing, send, the dropped record does not grow, the lease bounds a send, lease errors fail the pass, error text never reaches the log, error classes. |
-| `cmd/beacon` | The commands against a fake Signal, through the egress-recording transport wrapped around the production transport: tiers, nothing held or dropped on the wire, `beacon egress` covers every host seen, a crash between append and send, a crash after send, a retry after a rules change, 409, a second instance, logs, exit codes on refusal, bodies printed only on request, error text kept off standard error. |
+| `cmd/beacon` | The commands against a fake Signal, through the egress-recording transport wrapped around the production transport: tiers, nothing held or dropped on the wire, `beacon egress` covers every host seen, a crash between append and send, a crash after send, a retry after a rules change, 409, a second instance, logs, exit codes on refusal, bodies printed only on request, error text kept off standard error, a dry run and explain leaving the state directory byte-for-byte unchanged. |
 
 The crash tests run the test binary as a helper process that stops itself with `os.Exit` at the exact point: after
 the body is appended and synced, or after Signal answered and before the outbox records it. `os.Exit` skips deferred

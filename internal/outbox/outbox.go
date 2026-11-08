@@ -310,6 +310,17 @@ func SyncDir(dir string) error {
 	return d.Sync()
 }
 
+// Locked reports whether this outbox holds the lock on dir: it was opened with Open on that directory and is not
+// closed.
+func (o *Outbox) Locked(dir string) bool {
+	if o.file == nil {
+		return false
+	}
+	want, err1 := filepath.Abs(filepath.Join(dir, FileName))
+	have, err2 := filepath.Abs(o.path)
+	return err1 == nil && err2 == nil && want == have
+}
+
 // Close releases the lock.
 func (o *Outbox) Close() error {
 	if o.file == nil {
