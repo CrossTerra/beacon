@@ -39,8 +39,8 @@ person's queue.
   - Check suite conclusions on the person's own open pull requests, when they change.
 - **Items (DEC-18):** `opened`, `ready`, `review_requested`, `review_request_removed`, `reviewed`
   (field `review_state`), `commented`, `pushed` (only on pull requests the person reviewed), `checks_changed`
-  (own pull requests only), `merged`, `closed`. The person's own reviews, comments, merges and closes have
-  `own: true`.
+  (own pull requests only), `merged`, `closed`. A merge yields `merged` only, never also `closed`; `closed` is a
+  close without a merge. The person's own reviews, comments, merges and closes have `own: true`.
 - **Subject:** `github:pr:<owner>/<repo>#<n>`. **Key:** `github:<owner>/<repo>#<n>:<change id>`, where the change id
   is the timeline item's or review's id, or `checks:<head sha>:<conclusion>`.
 - **Fields:** `repo`, `number`, `title`, `url`, `author`, `review_state`, `body` (comment or review text),
@@ -59,7 +59,11 @@ person's queue.
   or mentioned, updated since the cursor (JQL on `updated`, in the site's time zone), with the changelog and
   comments since the cursor.
 - **Items (DEC-18):** `assigned`, `unassigned`, `transitioned` (fields `from_status`, `to_status`), `commented`,
-  `mentioned`, `due_changed`. The person's own transitions and comments have `own: true`.
+  `mentioned`, `due_changed`. A comment yields one item: `commented`, with `addressed: true` when it mentions the
+  person. `mentioned` is only for a mention added to the description or another field, so one change never yields
+  two items. The person's own transitions and comments have `own: true`.
+- **Addressed:** assignment to the person, a comment or field change that mentions the person, and a transition
+  on an issue assigned to the person by someone else.
 - **Subject:** `jira:<KEY>`. **Key:** `jira:<KEY>:<changelog id or comment id>`.
 - **Fields:** `project`, `key`, `summary`, `url`, `issue_type`, `priority`, `body` (comment text).
   **State fields:** `status`, `assignee`, `resolution`, `due`, `priority`.
