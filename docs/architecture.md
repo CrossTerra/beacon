@@ -26,9 +26,9 @@ One pass of `beacon run`:
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
    builds the request body with the projection and appends it to the outbox, synced to disk, before anything is
    sent (DEC-8).
-5. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored. If
-   Signal is unavailable the pass stops and the rest stay pending, because a later body may close an ask an earlier
-   one opens.
+5. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored,
+   each under a deadline at the end of the lease. If Signal is unavailable, or the lease runs out, the pass stops
+   and the rest stay pending, because a later body may close an ask an earlier one opens.
 
 A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes and contacts nothing. It reads the
 outbox and the hold queue, so it shows what a send pass would do next.
@@ -60,14 +60,16 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | --- | --- | --- |
 | `outbox.jsonl` | Every request body, exactly as sent, and Signal's answers | The bodies, once each |
 | `held.jsonl` | Held items, in full | No |
-| `dropped.jsonl` | Keys of dropped items and the rule that dropped them | No |
+| `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
 | `instance` | This instance's random id, used in lease claims | Inside lease claims |
 
-The directory is created `0700` and the files `0600`. A writer holds an exclusive `flock` on the outbox, so two
+The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A line torn
+by a crash is cut off when the file is next opened. A writer holds an exclusive `flock` on the outbox, so two
 `beacon run` processes cannot share a state directory.
 
 ## Adding a source
 
-A source implements `source.Source`: a name, a fixed field list, the hosts it contacts, and `Collect`. Its hosts
+A source implements `source.Source`: a name, a fixed field list, a fixed state field list (DEC-28), the hosts it
+contacts, and `Collect`. Its hosts
 appear in `beacon egress` and in the transport guard without other changes. A source keeps its own credentials in
 the keychain through `internal/keychain`, and its own cursor.

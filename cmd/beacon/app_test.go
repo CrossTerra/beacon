@@ -27,6 +27,82 @@ import (
 
 const token = "sig_TOKEN_must_never_be_logged"
 
+// A send pass prints decisions without bodies; --bodies adds them. A dry run always shows them.
+func TestSendModeBodies(t *testing.T) {
+	h := newHarness(t)
+	cfg, want := writeSetup(t, t.TempDir(), h.server.URL, "send", "bodies")
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	out := h.stdout.String()
+	if strings.Contains(out, `"subject"`) || !strings.Contains(out, "send   "+want[0].key) {
+		t.Fatalf("send pass printed bodies or lacks decisions:\n%s", out)
+	}
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if strings.Contains(h.stdout.String(), want[0].key+"  rule") || strings.Contains(h.stdout.String(), "skip ") {
+		t.Fatalf("a later pass repeats earlier decisions:\n%s", h.stdout.String())
+	}
+	cfg2, want2 := writeSetup(t, t.TempDir(), h.server.URL, "send", "bodies2")
+	h2 := newHarness(t)
+	if code := h2.run(h2.app(h2.egressList(cfg2)), "run", "--once", "--bodies", "--config", cfg2); code != 0 {
+		t.Fatal(h2.stderr.String())
+	}
+	if !strings.Contains(h2.stdout.String(), `"key":"`+want2[0].key+`"`) {
+		t.Fatalf("--bodies printed no body:\n%s", h2.stdout.String())
+	}
+}
+
+// A refused key, or a refused lease claim, fails the run with the reason, not "held by another instance".
+func TestRunExitsOnRefusal(t *testing.T) {
+	for name, c := range map[string]struct {
+		token  string
+		script func(int, signaltest.Request) signaltest.Reply
+		want   string
+	}{
+		"401": {token: "sig_wrong", want: "Signal refused the key (401)"},
+		"claim refused": {token: token, want: "Signal refused the lease claim with 403 forbidden", script: func(int, signaltest.Request) signaltest.Reply {
+			return signaltest.Reply{Status: 403, Body: `{"error":{"code":"forbidden","message":"No."}}`}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			h.store.Put("test", c.token)
+			h.server.Script = c.script
+			cfg, _ := writeSetup(t, t.TempDir(), h.server.URL, "send", "refused")
+			code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg)
+			if code == 0 || !strings.Contains(h.stderr.String(), c.want) || strings.Contains(h.stdout.String(), "held by another") {
+				t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, h.stdout.String(), h.stderr.String())
+			}
+			if !strings.Contains(h.stderr.String(), `"msg":"run_failed"`) {
+				t.Fatalf("no run_failed log line:\n%s", h.stderr.String())
+			}
+		})
+	}
+}
+
+// During run, error text that names keys or rule patterns stays off standard error.
+func TestRunErrorsNameNoKeysOrPatterns(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "errs")
+	data, _ := fixture("errs")
+	dup := strings.Replace(string(data), `"fixture:chat5-errs:1"`, `"fixture:misc6-errs:1"`, 1)
+	must(t, os.WriteFile(filepath.Join(dir, "fixture.json"), []byte(dup), 0o600))
+	code := h.run(h.app(nil), "run", "--once", "--config", cfg)
+	if code == 0 || strings.Contains(h.stderr.String(), "misc6") || !strings.Contains(h.stderr.String(), "beacon rules check shows why") {
+		t.Fatalf("exit %d, stderr:\n%s", code, h.stderr.String())
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "fixture.json"), data, 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules:\n  - name: r\n    match: {type: {regex: \"SECRET(\"}}\n    tier: send\n"), 0o600))
+	code = h.run(h.app(nil), "run", "--once", "--config", cfg)
+	if code == 0 || strings.Contains(h.stderr.String(), "SECRET") {
+		t.Fatalf("exit %d, stderr:\n%s", code, h.stderr.String())
+	}
+}
+
 // TestMain doubles as a helper process: with BEACON_TEST_HELPER set, the test binary runs `beacon run --once` and
 // stops at the point the variable names, so a test can kill Beacon at an exact step and restart it.
 func TestMain(m *testing.M) {
@@ -106,8 +182,9 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// app returns an app whose every request goes through the recorder, which allows only allowed. The guard Beacon
-// adds sits behind the recorder, so the recorder sees every request Beacon attempts.
+// app returns an app whose every request goes through the recorder, which allows only allowed. Behind it is the
+// production transport, guard included, so the recorder sees every request Beacon attempts and the requests go out
+// exactly as they would in use.
 func (h *harness) app(allowed []string) *app {
 	if h.rec == nil {
 		h.rec = egresstest.New(h.t, allowed, http.DefaultTransport)
@@ -118,7 +195,7 @@ func (h *harness) app(allowed []string) *app {
 		stdin: strings.NewReader(""), stdout: &h.stdout, stderr: &h.stderr, now: time.Now,
 		keychain: func() (keychain.Store, error) { return h.store, nil },
 		transport: func(allowed []string) http.RoundTripper {
-			return h.rec.Wrap(egress.Guard(allowed, http.DefaultTransport))
+			return h.rec.Wrap(egress.Transport(allowed))
 		},
 		configureClient: func(c *signal.Client) {
 			c.Sleep = func(context.Context, time.Duration) error { return nil }
@@ -294,6 +371,12 @@ func TestEventShapes(t *testing.T) {
 	}
 	if md := ask["metadata"].(map[string]any); md["actor"] != "fixture:user:dana" {
 		t.Errorf("ask metadata: %v", md)
+	}
+	if st := fmt.Sprint(ask["state"]); st != "map[observed_at:2026-11-07T09:01:30.000Z status:open version:1]" {
+		t.Errorf("ask state (DEC-28): %s", st)
+	}
+	if get(want[2].key)["state"] != nil {
+		t.Errorf("state on an item without a snapshot")
 	}
 	own := get(want[1].key)
 	if fmt.Sprint(own["by"]) != "map[identity:fixture:user:winton]" || fmt.Sprint(own["closes"]) != fmt.Sprintf("[map[key:%s]]", want[0].key) || own["to"] != nil {

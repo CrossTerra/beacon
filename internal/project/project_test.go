@@ -194,3 +194,53 @@ func TestTitleLimit(t *testing.T) {
 		t.Fatalf("title has %d runes, want 299: 298 units and one surrogate pair make Signal's 300", n)
 	}
 }
+
+func stateItem() source.Item {
+	it := baseItem()
+	at := time.Date(2026, 11, 7, 12, 30, 0, 0, time.UTC)
+	it.Key, it.Version, it.ObservedAt = "github:pr:acme/app#7:v42", "v42", &at
+	it.State = map[string]string{"state": "open", "head": "SECRET-HEAD", "mergeable": "SECRET-MERGEABLE"}
+	return it
+}
+
+// DEC-28: the snapshot holds only the state fields the rule lists, with observed_at and the version marker.
+func TestState(t *testing.T) {
+	r := rule("title")
+	r.State = []string{"state", "checks"}
+	b, data, err := Project(Input{Item: stateItem(), Rule: r, Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"state": "open", "observed_at": "2026-11-07T12:30:00.000Z", "version": "v42"}
+	if len(b.State) != len(want) {
+		t.Fatalf("state %v", b.State)
+	}
+	for k, v := range want {
+		if b.State[k] != v {
+			t.Fatalf("state %v", b.State)
+		}
+	}
+	if bytes.Contains(data, []byte("SECRET-HEAD")) || bytes.Contains(data, []byte("SECRET-MERGEABLE")) {
+		t.Fatalf("unlisted state field sent: %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"state":{"observed_at":"2026-11-07T12:30:00.000Z","state":"open","version":"v42"}`)) {
+		t.Fatalf("%s", data)
+	}
+}
+
+func TestNoStateUnlessListedAndPresent(t *testing.T) {
+	for name, in := range map[string]Input{
+		"rule lists none":           {Item: stateItem(), Rule: rule("title")},
+		"item has no snapshot":      {Item: baseItem(), Rule: &rules.Rule{Tier: rules.Send, State: []string{"state"}}},
+		"listed fields all missing": {Item: stateItem(), Rule: &rules.Rule{Tier: rules.Send, State: []string{"checks"}}},
+	} {
+		in.Person = person
+		_, data, err := Project(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(`"state":{`)) || bytes.Contains(data, []byte("observed_at")) {
+			t.Errorf("%s: %s", name, data)
+		}
+	}
+}

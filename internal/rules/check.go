@@ -9,29 +9,46 @@ import (
 // Problem is one finding of Check about one rule.
 type Problem struct {
 	Rule *Rule
-	// Unreachable is true when the rule can never match; otherwise the problem is an error in the rule.
+	// Unreachable is true when the rule can never match.
 	Unreachable bool
-	Message     string
+	// Warning is true for a rule that works but may not do what was meant.
+	Warning bool
+	Message string
 }
+
+// Error reports whether the problem is an error in the rule: neither unreachable nor a warning.
+func (p Problem) Error() bool { return !p.Unreachable && !p.Warning }
 
 func (p Problem) String() string {
 	at := fmt.Sprintf("rule %d %q", p.Rule.Index, p.Rule.Name)
 	if p.Rule.Line > 0 {
 		at += fmt.Sprintf(" (line %d)", p.Rule.Line)
 	}
-	if p.Unreachable {
+	switch {
+	case p.Unreachable:
 		return at + ": can never match: " + p.Message
+	case p.Warning:
+		return "warning: " + at + ": " + p.Message
 	}
 	return at + ": " + p.Message
 }
 
-// Check reports rules that can never match under the enabled sources, and fields a rule sends that no source it can
-// match has. sources maps each enabled source name to its fixed field list.
+// Source is what Check knows about one enabled source.
+type Source struct {
+	Fields      []string
+	StateFields []string
+	// Identity is true when the config names the person's own identity in this source.
+	Identity bool
+}
+
+// Check reports rules that can never match under the enabled sources, fields and state fields a rule sends that no
+// source it can match has, and own-act rules for sources where the person has no identity, whose events therefore
+// carry no `by` (DEC-27).
 //
 // A rule is reported unreachable when it matches no enabled source, matches on a field none of its sources have, or
 // is covered by an earlier rule: every item it could match, the earlier rule matches first. The cover check is
 // conservative; it reports only cases it can prove.
-func (f *File) Check(sources map[string][]string) []Problem {
+func (f *File) Check(sources map[string]Source) []Problem {
 	var out []Problem
 	names := make([]string, 0, len(sources))
 	for name := range sources {
@@ -50,8 +67,13 @@ func (f *File) Check(sources map[string][]string) []Problem {
 			continue
 		}
 		reported := false
+		fields := map[string][]string{}
+		state := map[string][]string{}
+		for n, s := range sources {
+			fields[n], state[n] = s.Fields, s.StateFields
+		}
 		for _, field := range sortedKeys(r.Match.Fields) {
-			if !anyHas(sources, srcs, field) {
+			if !anyHas(fields, srcs, field) {
 				out = append(out, Problem{Rule: r, Unreachable: true,
 					Message: fmt.Sprintf("field %q is not a field of %s", field, strings.Join(srcs, ", "))})
 				reported = true
@@ -61,9 +83,23 @@ func (f *File) Check(sources map[string][]string) []Problem {
 			if field == FieldActor || field == FieldReferences {
 				continue
 			}
-			if !anyHas(sources, srcs, field) {
+			if !anyHas(fields, srcs, field) {
 				out = append(out, Problem{Rule: r,
 					Message: fmt.Sprintf("fields: %q is not a field of %s", field, strings.Join(srcs, ", "))})
+			}
+		}
+		for _, name := range r.State {
+			if !anyHas(state, srcs, name) {
+				out = append(out, Problem{Rule: r,
+					Message: fmt.Sprintf("state: %q is not a state field of %s", name, strings.Join(srcs, ", "))})
+			}
+		}
+		if r.Tier != Never && r.Match.Own != nil && *r.Match.Own {
+			for _, n := range srcs {
+				if !sources[n].Identity {
+					out = append(out, Problem{Rule: r, Warning: true, Message: fmt.Sprintf(
+						"own acts from %s are sent without by: person.identities has no %s entry, so Signal records them as Beacon's acts, not yours", n, n)})
+				}
 			}
 		}
 		if reported {

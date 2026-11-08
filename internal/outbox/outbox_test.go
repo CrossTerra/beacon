@@ -144,3 +144,27 @@ func TestFilePermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestExpireOnlyLeaseClaims(t *testing.T) {
+	dir := t.TempDir()
+	o, _ := Open(dir, clock())
+	_ = o.Append(Lease, "claim:x:1", "s", "", []byte(`{"a":1}`))
+	_ = o.Append(Event, "e1", "s", "", []byte(`{"b":1}`))
+	if err := o.Expire("e1"); err == nil {
+		t.Fatal("expired an event")
+	}
+	if err := o.Expire("claim:x:1"); err != nil {
+		t.Fatal(err)
+	}
+	if p := o.PendingEvents(); len(p) != 1 || p[0].Key != "e1" {
+		t.Fatalf("%+v", p)
+	}
+	o.Close()
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := r.Get("claim:x:1"); e.State != Expired {
+		t.Fatalf("%+v", e)
+	}
+}

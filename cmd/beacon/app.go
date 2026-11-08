@@ -177,10 +177,10 @@ func (a *app) load(p string) (*env, error) {
 	return e, nil
 }
 
-func (e *env) sourceFields() map[string][]string {
-	out := map[string][]string{}
+func (e *env) checkSources() map[string]rules.Source {
+	out := map[string]rules.Source{}
 	for _, s := range e.sources {
-		out[s.Name()] = s.Fields()
+		out[s.Name()] = rules.Source{Fields: s.Fields(), StateFields: s.StateFields(), Identity: e.cfg.Person.Identities[s.Name()] != ""}
 	}
 	return out
 }
@@ -270,63 +270,72 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("run")
 	dry := fs.Bool("dry-run", false, "print what would be sent, and send nothing (the default until the config says mode: send)")
 	once := fs.Bool("once", false, "make one pass and exit")
+	bodies := fs.Bool("bodies", false, "in send mode, print the body of each item decided in the pass (a dry run always does)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	log := logs.New(a.stderr)
+	// From here on, an error's text never reaches standard error: it can name keys, paths and rule patterns. The
+	// person sees a fixed message for its reason, and the commands that show details.
+	fail := func(reason logs.Reason, text string) error {
+		log.Log(logs.RunFailed, logs.Why(reason))
+		return runFailure{text: text}
+	}
 	e, err := a.load(*cfgPath)
 	if err != nil {
-		return err
+		return fail(logs.ReasonConfig, "the config, the rules file or a source could not be loaded; beacon rules check shows why")
 	}
-	if problems := errorsOnly(e.rules.Check(e.sourceFields())); len(problems) > 0 {
-		for _, p := range problems {
-			fmt.Fprintln(a.stderr, p)
+	var problems int
+	for _, p := range e.rules.Check(e.checkSources()) {
+		if p.Error() {
+			problems++
 		}
-		return fmt.Errorf("the rules file has errors; run beacon rules check")
+	}
+	if problems > 0 {
+		return fail(logs.ReasonConfig, fmt.Sprintf("the rules file has %d errors; beacon rules check shows them", problems))
 	}
 	send := e.cfg.Mode == config.Send && !*dry
-	log := logs.New(a.stderr)
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
 		AfterAppend: a.afterAppend}
 
 	if !send {
 		ob, err := outbox.Read(e.cfg.StatePath())
 		if err != nil {
-			return err
+			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
 		q, err := queue.Open(e.cfg.StatePath())
 		if err != nil {
-			return err
+			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
 		r.Outbox, r.Queue = ob, q
-		r.Send = false
 		rep, err := r.Run(ctx)
 		if err != nil {
-			return err
+			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
-		a.printReport(rep)
+		a.printReport(rep, true)
 		return nil
 	}
 
 	ob, err := outbox.Open(e.cfg.StatePath(), a.now)
 	if err != nil {
-		return err
+		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	defer ob.Close()
 	q, err := queue.Open(e.cfg.StatePath())
 	if err != nil {
-		return err
+		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	store, err := a.keychain()
 	if err != nil {
-		return err
+		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
-		return fmt.Errorf("reading the Signal key (%s/%s): %w", keychain.Service, e.cfg.KeychainAccount(), err)
+		return fail(logs.ReasonKeychain, failText(logs.ReasonKeychain, e))
 	}
 	instance, err := lease.Instance(e.cfg.StatePath())
 	if err != nil {
-		return err
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
 	}
 	u, _ := config.SignalURL(e.cfg.Signal.URL)
 	client := signal.New(u, a.transport(egress.Addresses(e.egress())), secret)
@@ -340,10 +349,15 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	for {
 		rep, err := r.Run(ctx)
 		if rep != nil {
-			a.printReport(rep)
+			a.printReport(rep, *bodies)
 		}
 		if err != nil {
-			return err
+			reason := runner.Classify(err)
+			var refused *lease.RefusedError
+			if errors.As(err, &refused) {
+				return fail(reason, refused.Error()+"; check that Beacon's key has write scope and the lease subject is allowed")
+			}
+			return fail(reason, failText(reason, e))
 		}
 		if *once {
 			return nil
@@ -358,17 +372,35 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 }
 
-func errorsOnly(ps []rules.Problem) []rules.Problem {
-	var out []rules.Problem
-	for _, p := range ps {
-		if !p.Unreachable {
-			out = append(out, p)
-		}
+// runFailure is an error whose text is safe to print during `beacon run`.
+type runFailure struct{ text string }
+
+func (f runFailure) Error() string { return f.text }
+
+// failText is the message `beacon run` prints for a reason. It names no key, path or pattern.
+func failText(reason logs.Reason, e *env) string {
+	switch reason {
+	case logs.ReasonUnauthorized:
+		return "Signal refused the key (401); store a valid key with beacon init --force"
+	case logs.ReasonUnavailable:
+		return "Signal did not answer; pending bodies are kept and sent by the next pass"
+	case logs.ReasonLeaseRefused:
+		return "Signal refused the lease claim"
+	case logs.ReasonEgress:
+		return "a request was refused because its host is not on the egress list; beacon egress lists the hosts"
+	case logs.ReasonLocked:
+		return "another beacon process holds the outbox in this state directory"
+	case logs.ReasonKeychain:
+		return fmt.Sprintf("the Signal key is not in the keychain as %s/%s; store it with beacon init", keychain.Service, e.cfg.KeychainAccount())
+	case logs.ReasonState:
+		return "the state directory could not be read or written; beacon outbox shows the outbox"
+	case logs.ReasonCanceled:
+		return "interrupted"
 	}
-	return out
+	return "the pass failed (" + string(reason) + "); beacon outbox shows what was recorded"
 }
 
-func (a *app) printReport(rep *runner.Report) {
+func (a *app) printReport(rep *runner.Report, bodies bool) {
 	w := a.stdout
 	if !rep.Send {
 		fmt.Fprintln(w, "Dry run: nothing is sent.")
@@ -380,18 +412,21 @@ func (a *app) printReport(rep *runner.Report) {
 		} else {
 			rule = "rule " + rule
 		}
-		switch {
-		case p.Skipped != "":
-			fmt.Fprintf(w, "skip   %s  %s\n", p.Item.Key, p.Skipped)
+		if p.Skipped != "" {
+			// A send pass repeats every earlier decision; only a dry run lists them.
+			if !rep.Send {
+				fmt.Fprintf(w, "skip   %s  %s\n", p.Item.Key, p.Skipped)
+			}
 			continue
-		default:
-			fmt.Fprintf(w, "%-6s %s  %s\n", p.Tier, p.Item.Key, rule)
 		}
-		if p.Err != nil {
+		fmt.Fprintf(w, "%-6s %s  %s\n", p.Tier, p.Item.Key, rule)
+		switch {
+		case p.Err != nil:
 			fmt.Fprintf(w, "       error: %v\n", p.Err)
-		} else if p.Tier == rules.Send && p.Body != nil {
+		case !bodies || p.Body == nil:
+		case p.Tier == rules.Send:
 			fmt.Fprintf(w, "       %s\n", p.Body)
-		} else if p.Tier == rules.Hold && p.Body != nil {
+		case p.Tier == rules.Hold:
 			fmt.Fprintf(w, "       held; on approval: %s\n", p.Body)
 		}
 	}
@@ -401,10 +436,13 @@ func (a *app) printReport(rep *runner.Report) {
 		return
 	}
 	if rep.Lease != nil {
-		if rep.Lease.Held {
+		switch {
+		case rep.Lease.Held:
 			fmt.Fprintf(w, "Lease: held until %s.\n", rep.Lease.Until.UTC().Format(time.RFC3339))
-		} else {
+		case rep.LeaseReason == "":
 			fmt.Fprintln(w, "Lease: held by another instance; nothing was sent.")
+		default:
+			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
 		}
 	}
 	for _, res := range rep.Results {
@@ -564,19 +602,21 @@ func (a *app) cmdRulesCheck(args []string) error {
 	if err != nil {
 		return err
 	}
-	problems := e.rules.Check(e.sourceFields())
+	problems := e.rules.Check(e.checkSources())
+	failed := false
 	for _, p := range problems {
 		fmt.Fprintln(a.stdout, p)
+		failed = failed || !p.Warning
 	}
 	names := make([]string, 0, len(e.sources))
 	for _, s := range e.sources {
 		names = append(names, s.Name())
 	}
 	sort.Strings(names)
-	if len(problems) > 0 {
+	if failed {
 		return exitError{code: 1}
 	}
-	fmt.Fprintf(a.stdout, "%s: %d rules, no problems (sources: %s)\n", e.cfg.RulesPath(), len(e.rules.Rules), strings.Join(names, ", "))
+	fmt.Fprintf(a.stdout, "%s: %d rules, %d warnings, no errors (sources: %s)\n", e.cfg.RulesPath(), len(e.rules.Rules), len(problems), strings.Join(names, ", "))
 	return nil
 }
 

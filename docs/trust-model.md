@@ -8,7 +8,7 @@ same pull request.
 
 | Leaves the machine | Never leaves the machine |
 | --- | --- |
-| Events a rule sent: the projected fields only | Source credentials (OAuth refresh tokens, API tokens) |
+| Events a rule sent: the projected fields and state fields only | Source credentials (OAuth refresh tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | Requests to the source APIs, made with your credentials | The rules file, the review queue, the outbox, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
@@ -23,8 +23,9 @@ same pull request.
    yet; it arrives in Phase 6.)
 3. **Projection is explicit.** Each source has a fixed list of fields, and an item with any other field is refused.
    A rule lists the fields it sends. Message bodies, attachments and file contents leave only when a rule lists
-   them. Attachments and file contents are out of scope for the first release. Who caused a change leaves only
-   when a rule lists `actor`; your own identity leaves as `by` on your own acts (DEC-27).
+   them. Attachments and file contents are out of scope for the first release. A state snapshot carries only the
+   state fields a rule lists (DEC-28). Who caused a change leaves only when a rule lists `actor`; your own identity
+   leaves as `by` on your own acts (DEC-27).
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
@@ -38,10 +39,11 @@ same pull request.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
    never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. The
    Signal URL must be `https`, except to a loopback address.
-8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses
-   and Signal error codes: no item content, no rule matches, no keys, no bodies, no tokens.
-9. **One sender per person.** Only the instance holding the lease sends (DEC-25). Another instance collects and
-   keeps its bodies pending.
+8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
+   Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
+   error text, which can name any of those. `beacon run` prints a fixed message for each reason.
+9. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
+   Another instance collects and keeps its bodies pending.
 10. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
     request). Signed releases, notarized macOS builds and an SBOM per release arrive in Phase 7.
 
@@ -59,6 +61,9 @@ same pull request.
 - **Asks are tracked locally.** Beacon knows which asks are open from its own outbox. If the person closes an ask in
   Signal directly, Beacon's next own act on that subject still names it in `closes`, Signal refuses the event with
   `409 conflict`, and the event is recorded as rejected instead of sent.
+- **Signal does not keep state snapshots yet.** Beacon sends the state fields a rule lists (DEC-28). Signal `main`
+  accepts them and discards them until its plan 12.01; they still leave the machine, so list state fields with the
+  same care as other fields.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -31,7 +32,20 @@ type Item struct {
 	References []string `json:"references,omitempty"`
 	// DueAt is the source's own due time, when it has one (DEC-21).
 	DueAt *time.Time `json:"due_at,omitempty"`
+	// State is the object's current state, when the source returned it (DEC-28). Only names in the source's state
+	// field list.
+	State map[string]string `json:"state,omitempty"`
+	// ObservedAt is when the source returned State.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	// Version is the source's version marker for this change: the last part of Key (DEC-9).
+	Version string `json:"version,omitempty"`
 }
+
+// Names a source may not use in its state field list: the state snapshot carries them itself (DEC-28).
+const (
+	StateObservedAt = "observed_at"
+	StateVersion    = "version"
+)
 
 // Source yields items. It holds its own credentials and cursor.
 type Source interface {
@@ -39,6 +53,8 @@ type Source interface {
 	Name() string
 	// Fields is the source's fixed field list (DEC-6).
 	Fields() []string
+	// StateFields is the source's fixed list of state fields (DEC-28).
+	StateFields() []string
 	// Hosts are the hosts the source contacts, as host or host:port. Every one is listed by `beacon egress`.
 	Hosts() []string
 	// Collect returns the items available now.
@@ -54,8 +70,23 @@ var (
 // ValidName reports whether s can be a source name.
 func ValidName(s string) bool { return namePattern.MatchString(s) }
 
-// Validate checks an item against its source's field list and Signal's limits on subjects, keys and types.
-func Validate(it Item, fields []string) error {
+// ValidStateFields checks a source's state field list.
+func ValidStateFields(names []string) error {
+	seen := map[string]bool{}
+	for _, n := range names {
+		if n == "" || n == StateObservedAt || n == StateVersion {
+			return fmt.Errorf("state field %q is reserved or empty", n)
+		}
+		if seen[n] {
+			return fmt.Errorf("state field %q is listed twice", n)
+		}
+		seen[n] = true
+	}
+	return nil
+}
+
+// Validate checks an item against its source's field lists and Signal's limits on subjects, keys and types.
+func Validate(it Item, fields, stateFields []string) error {
 	if !ValidName(it.Source) {
 		return fmt.Errorf("source name %q is invalid", it.Source)
 	}
@@ -82,6 +113,21 @@ func Validate(it Item, fields []string) error {
 		if !allowed[name] {
 			return fmt.Errorf("field %q is not in the source's field list", name)
 		}
+	}
+	allowedState := make(map[string]bool, len(stateFields))
+	for _, f := range stateFields {
+		allowedState[f] = true
+	}
+	for name := range it.State {
+		if !allowedState[name] {
+			return fmt.Errorf("state field %q is not in the source's state field list", name)
+		}
+	}
+	if it.Version != "" && !strings.HasSuffix(it.Key, ":"+it.Version) {
+		return fmt.Errorf("version is not the last part of the key")
+	}
+	if len(it.State) > 0 && (it.ObservedAt == nil || it.ObservedAt.IsZero() || it.Version == "") {
+		return fmt.Errorf("a state snapshot needs observed_at and version")
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -46,6 +47,7 @@ type Rule struct {
 	Match         Match    `yaml:"match"`
 	Tier          Tier     `yaml:"tier"`
 	Fields        []string `yaml:"fields,omitempty"`
+	State         []string `yaml:"state,omitempty"`
 	Ask           string   `yaml:"ask,omitempty"`
 	Priority      string   `yaml:"priority,omitempty"`
 	CloseByOthers bool     `yaml:"close_by_others,omitempty"`
@@ -108,6 +110,9 @@ func (m *Matcher) UnmarshalYAML(n *yaml.Node) error {
 		}
 	default:
 		return fmt.Errorf("line %d: a match value is a string, or one of exact, glob or regex", n.Line)
+	}
+	if m.Pattern == "" {
+		return fmt.Errorf("line %d: a match value is blank", n.Line)
 	}
 	return m.compile()
 }
@@ -182,6 +187,10 @@ func Parse(data []byte) (*File, error) {
 		if err := dec.Decode(&f); err != nil {
 			return nil, err
 		}
+		var extra yaml.Node
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return nil, errors.New("the rules file holds more than one YAML document; keep every rule in one")
+		}
 		nodes := ruleNodes(&root)
 		for i, r := range f.Rules {
 			if r == nil {
@@ -245,8 +254,8 @@ func (f *File) validate() error {
 		switch r.Tier {
 		case Send, Hold:
 		case Never:
-			if len(r.Fields) > 0 || r.Ask != "" || r.Priority != "" || r.CloseByOthers {
-				errs = append(errs, fmt.Errorf("%s: a never rule takes no fields, ask, priority or close_by_others", at))
+			if len(r.Fields) > 0 || len(r.State) > 0 || r.Ask != "" || r.Priority != "" || r.CloseByOthers {
+				errs = append(errs, fmt.Errorf("%s: a never rule takes no fields, state, ask, priority or close_by_others", at))
 			}
 		case "":
 			errs = append(errs, fmt.Errorf("%s: tier is required: send, hold or never", at))
@@ -264,15 +273,20 @@ func (f *File) validate() error {
 				errs = append(errs, fmt.Errorf("%s: priority applies to an ask: set ask: me", at))
 			}
 		}
-		seen := map[string]bool{}
-		for _, field := range r.Fields {
-			if field == "" {
-				errs = append(errs, fmt.Errorf("%s: a field name is empty", at))
+		for _, list := range []struct {
+			key   string
+			names []string
+		}{{"fields", r.Fields}, {"state", r.State}} {
+			seen := map[string]bool{}
+			for _, name := range list.names {
+				if name == "" {
+					errs = append(errs, fmt.Errorf("%s: a name in %s is empty", at, list.key))
+				}
+				if seen[name] {
+					errs = append(errs, fmt.Errorf("%s: %s lists %q twice", at, list.key, name))
+				}
+				seen[name] = true
 			}
-			if seen[field] {
-				errs = append(errs, fmt.Errorf("%s: field %q is listed twice", at, field))
-			}
-			seen[field] = true
 		}
 	}
 	return errors.Join(errs...)
@@ -310,10 +324,12 @@ func (m *Match) UnmarshalYAML(n *yaml.Node) error {
 				m.Actor = &mt
 			}
 		case "own", "addressed":
-			if v.Kind != yaml.ScalarNode || v.Tag != "!!bool" {
+			// Only YAML booleans (true, True, TRUE, false, False, FALSE). yes, no, on, off, 1, 0 and quoted
+			// strings are refused rather than guessed.
+			var b bool
+			if v.Kind != yaml.ScalarNode || v.Tag != "!!bool" || v.Decode(&b) != nil {
 				return fmt.Errorf("line %d: match.%s is true or false", k.Line, k.Value)
 			}
-			b := v.Value == "true"
 			if k.Value == "own" {
 				m.Own = &b
 			} else {

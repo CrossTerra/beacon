@@ -52,6 +52,8 @@ type Body struct {
 	DueAt      string         `json:"due_at,omitempty"`
 	Closes     []Ref          `json:"closes,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	// State is the object's state snapshot (DEC-28): the state fields the rule lists, observed_at and version.
+	State map[string]string `json:"state,omitempty"`
 }
 
 // Open makes sure the subject has a thread (DEC-17).
@@ -126,6 +128,19 @@ func Project(in Input) (*Body, []byte, error) {
 	}
 	if len(meta) > 0 {
 		b.Metadata = meta
+	}
+	if len(it.State) > 0 && it.ObservedAt != nil {
+		state := map[string]string{}
+		for _, name := range r.State {
+			if v, ok := it.State[name]; ok {
+				state[name] = v
+			}
+		}
+		if len(state) > 0 {
+			state[source.StateObservedAt] = Instant(*it.ObservedAt)
+			state[source.StateVersion] = it.Version
+			b.State = state
+		}
 	}
 	if it.Own {
 		if id := in.Person.Identities[it.Source]; id != "" {

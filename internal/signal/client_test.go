@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,5 +154,48 @@ func TestEgressGuardIsFinal(t *testing.T) {
 	var denied *egress.DeniedError
 	if !errors.As(err, &denied) || denied.Address != "signal.example.test:443" {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// The client, on the production transport, treats a redirect as a final answer and never follows it.
+func TestRedirectNotFollowed(t *testing.T) {
+	var followed atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/events" {
+			followed.Add(1)
+			return
+		}
+		http.Redirect(w, r, "/elsewhere", http.StatusPermanentRedirect)
+	}))
+	defer srv.Close()
+	store := keychain.NewMemory()
+	store.Put("a", token)
+	secret, _ := store.Get("a")
+	u, _ := url.Parse(srv.URL)
+	c := signal.New(u, egress.Transport([]string{egress.Address(u)}), secret)
+	res, err := c.Write(context.Background(), body)
+	if err != nil || res.Outcome != signal.Refused || res.Status != http.StatusPermanentRedirect || followed.Load() != 0 {
+		t.Fatalf("%+v %v, followed %d", res, err, followed.Load())
+	}
+}
+
+// A context deadline ends a write, including a wait Signal asked for.
+func TestDeadlineEndsRetryAfter(t *testing.T) {
+	s := signaltest.New(token)
+	defer s.Close()
+	s.Script = func(int, signaltest.Request) signaltest.Reply {
+		return signaltest.Reply{Status: 429, Body: `{}`, Headers: map[string]string{"Retry-After": "60"}}
+	}
+	store := keychain.NewMemory()
+	store.Put("acct", token)
+	secret, _ := store.Get("acct")
+	u, _ := url.Parse(s.URL)
+	c := signal.New(u, egress.Transport([]string{egress.Address(u)}), secret)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := c.Write(ctx, body)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
 	}
 }

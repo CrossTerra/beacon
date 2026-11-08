@@ -20,7 +20,15 @@ Collects, applies rules and projection, and records what it decided.
 - With `mode: dry-run`, or with `--dry-run`, it prints each item's tier, the rule that decided it and the body it
   would send, and writes and contacts nothing.
 - With `mode: send`, it appends send items to the outbox, holds and drops the rest locally, takes the lease, and
-  sends pending bodies while it holds it. It prints each answer and how many bodies are still pending.
+  sends pending bodies while it holds it. It prints each new decision (tier, key, rule) without its body, the
+  lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
+  new decision. Decisions from earlier passes are not printed again.
+
+It exits non-zero when the pass cannot go on: Signal refused the key (401) or the lease claim, another process holds
+the outbox, the key is not in the keychain, or the config, rules or a source cannot be loaded. The message names the
+reason and the command that shows details (`beacon rules check`, `beacon outbox`); it never repeats an error's text,
+which can name item keys or rule patterns. An unreachable Signal is not an error: bodies stay pending for the next
+pass.
 
 `--once` makes one pass and exits; without it, `run` makes a pass every `poll_interval` until interrupted. The log
 goes to standard error.
@@ -56,8 +64,8 @@ the build flags Go recorded (`-trimpath`, `-ldflags`, `-tags`, `CGO_ENABLED`, `-
 ## The log
 
 JSON lines on standard error. Each line has `time`, `level`, `msg` (the event name) and attributes that are counts,
-source names, the mode, outcomes, HTTP statuses, Signal error codes and lease periods. A log line never holds item
-content, a rule's match, an item key, a request body or a credential.
+source names, the mode, outcomes, HTTP statuses, Signal error codes, lease periods and a fixed `reason` code. A log
+line never holds item content, a rule's match, an item key, a request body, a credential or an error's text.
 
 | Event | When |
 | --- | --- |
@@ -66,5 +74,9 @@ content, a rule's match, an item key, a request body or a credential.
 | `decided` | Counts per tier. |
 | `project_failed` | An item a send rule matched could not be built. |
 | `dry_run` | A dry run ended without sending. |
-| `lease_held`, `lease_not_held`, `lease_failed` | The lease. |
+| `lease_held`, `lease_not_held`, `lease_failed`, `lease_expired` | The lease; `lease_expired` is a pass stopped because the lease ran out. |
 | `send_result`, `send_stopped` | Each answer from Signal; a pass that stopped sending. |
+| `run_failed` | `beacon run` stopped with an error. |
+
+Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
+`egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`.

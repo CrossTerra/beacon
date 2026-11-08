@@ -3,6 +3,7 @@ package lease_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -150,5 +151,75 @@ func TestInstanceStable(t *testing.T) {
 	b, _ := lease.Instance(dir)
 	if a != b || len(a) != 16 {
 		t.Fatalf("%q %q", a, b)
+	}
+}
+
+// A claim left pending (Signal never answered) expires once its period has passed, instead of staying pending.
+func TestStaleClaimsExpire(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	s.Script = func(int, signaltest.Request) signaltest.Reply { return signaltest.Reply{Status: 503, Body: `{}`} }
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	a.Writer.(*signal.Client).Attempts = 1
+	if _, err := a.Ensure(context.Background()); !errors.Is(err, signal.ErrUnavailable) {
+		t.Fatalf("err %v", err)
+	}
+	pending := ob.Pending()
+	if len(pending) != 1 {
+		t.Fatalf("pending %d", len(pending))
+	}
+	c.t = c.t.Add(5 * time.Minute)
+	s.Script = nil
+	st, err := a.Ensure(context.Background())
+	if err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if e, _ := ob.Get(pending[0].Key); e.State != outbox.Expired {
+		t.Fatalf("stale claim is %s", e.State)
+	}
+	for _, e := range ob.Pending() {
+		t.Fatalf("still pending: %s", e.Key)
+	}
+}
+
+// A refusal other than another holder is an error naming Signal's status and code, on this pass and the next.
+func TestRefusedClaim(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	s.Script = func(int, signaltest.Request) signaltest.Reply {
+		return signaltest.Reply{Status: 403, Body: `{"error":{"code":"forbidden","message":"x"}}`}
+	}
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, _ := instance(t, s, t.TempDir(), "a:lease", c)
+	for i := 0; i < 2; i++ {
+		st, err := a.Ensure(context.Background())
+		var refused *lease.RefusedError
+		if st.Held || !errors.Is(err, lease.ErrRefused) || !errors.As(err, &refused) || refused.Status != 403 || refused.Code != "forbidden" {
+			t.Fatalf("pass %d: %+v %v", i, st, err)
+		}
+	}
+	if n := len(s.Requests()); n != 1 {
+		t.Fatalf("a refused claim was sent %d times", n)
+	}
+}
+
+// A claim's write ends with its period, however long Signal asks Beacon to wait.
+func TestClaimEndsWithItsPeriod(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	s.Script = func(int, signaltest.Request) signaltest.Reply {
+		return signaltest.Reply{Status: 429, Body: `{}`, Headers: map[string]string{"Retry-After": "3600"}}
+	}
+	// One second before the period ends.
+	c := &clock{time.Date(2026, 11, 7, 12, 4, 59, 0, time.UTC)}
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	start := time.Now()
+	_, err := a.Ensure(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
+	}
+	if len(ob.Pending()) != 1 {
+		t.Fatal("the claim should stay pending, to expire later")
 	}
 }

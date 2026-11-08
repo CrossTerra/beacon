@@ -44,6 +44,19 @@ type Lease struct {
 // ErrRefused means Signal refused a claim for a reason other than another instance holding it.
 var ErrRefused = errors.New("lease: Signal refused the claim")
 
+// RefusedError is Signal's refusal of a claim: its status and error code.
+type RefusedError struct {
+	Status int
+	Code   string
+}
+
+func (e *RefusedError) Error() string {
+	return fmt.Sprintf("Signal refused the lease claim with %d %s", e.Status, e.Code)
+}
+
+// Is makes errors.Is(err, ErrRefused) true.
+func (e *RefusedError) Is(target error) bool { return target == ErrRefused }
+
 // Subject is the subject lease claims are written about.
 func Subject(person string) string {
 	return "beacon:lease:" + strings.TrimPrefix(person, "@")
@@ -56,6 +69,27 @@ func (l *Lease) Key(p int64) string {
 
 func (l *Lease) period(t time.Time) int64 { return t.Unix() / int64(l.Period/time.Second) }
 
+// end is when period p ends.
+func (l *Lease) end(p int64) time.Time { return time.Unix((p+1)*int64(l.Period/time.Second), 0) }
+
+// expire marks pending claims for periods before p as expired: they can no longer be held, and would otherwise stay
+// pending for ever.
+func (l *Lease) expire(p int64) error {
+	prefix := "claim:" + Subject(l.Person) + ":"
+	for _, e := range l.Outbox.Pending() {
+		if e.Kind != outbox.Lease || !strings.HasPrefix(e.Key, prefix) {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimPrefix(e.Key, prefix), 10, 64)
+		if err != nil || n < p {
+			if err := l.Outbox.Expire(e.Key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Status is what Ensure found.
 type Status struct {
 	Held bool
@@ -65,25 +99,30 @@ type Status struct {
 }
 
 // Ensure makes sure this instance holds the current period if it can, and claims the next one ahead. It reports
-// whether this instance holds the lease now.
+// whether this instance holds the lease now. An error says why it could not find out: Signal was unreachable
+// (signal.ErrUnavailable), the key was refused (signal.ErrUnauthorized), Signal refused the claim (ErrRefused), or
+// the period ended first (context.DeadlineExceeded). With no error and Held false, another instance holds it.
 func (l *Lease) Ensure(ctx context.Context) (Status, error) {
 	if l.Period < time.Minute {
 		return Status{}, errors.New("lease: period under a minute")
 	}
 	p := l.period(l.Now())
 	st := Status{Period: p}
+	if err := l.expire(p); err != nil {
+		return st, err
+	}
 	held, err := l.claim(ctx, p)
 	if err != nil || !held {
 		return st, err
 	}
 	st.Held = true
-	st.Until = time.Unix((p+1)*int64(l.Period/time.Second), 0)
+	st.Until = l.end(p)
 	next, err := l.claim(ctx, p+1)
 	if err != nil {
 		return st, err
 	}
 	if next {
-		st.Until = time.Unix((p+2)*int64(l.Period/time.Second), 0)
+		st.Until = l.end(p + 1)
 	}
 	return st, nil
 }
@@ -112,9 +151,17 @@ func (l *Lease) claim(ctx context.Context, p int64) (bool, error) {
 	case outbox.Sent, outbox.Replayed:
 		return true, nil
 	case outbox.Rejected:
+		if e.Code != "idempotency_conflict" {
+			return false, &RefusedError{Status: e.Status, Code: e.Code}
+		}
+		return false, nil
+	case outbox.Expired:
 		return false, nil
 	}
-	res, err := l.Writer.Write(ctx, e.Body)
+	// A claim is worth nothing once its period has ended, so its write, with its retries, ends then too.
+	wctx, cancel := context.WithTimeout(ctx, l.end(p).Sub(l.Now()))
+	defer cancel()
+	res, err := l.Writer.Write(wctx, e.Body)
 	if err != nil {
 		return false, err
 	}
@@ -129,7 +176,7 @@ func (l *Lease) claim(ctx context.Context, p int64) (bool, error) {
 		if err := l.Outbox.Mark(key, outbox.Rejected, "", res.Status, res.Code, res.Message); err != nil {
 			return false, err
 		}
-		return false, fmt.Errorf("%w: %d %s", ErrRefused, res.Status, res.Code)
+		return false, &RefusedError{Status: res.Status, Code: res.Code}
 	}
 }
 

@@ -17,6 +17,9 @@ Every source yields the same shape (`internal/source.Item`):
 | `fields` | The source's fixed fields; only names in the source's field list. |
 | `references` | Explicit references to other subjects (DEC-17). |
 | `due_at` | The source's own due time, when it has one (DEC-21). |
+| `state` | The object's current state, when the source returned it (DEC-28): only names in the source's state field list. |
+| `observed_at` | When the source returned `state`. Required with `state`. |
+| `version` | The source's version marker for this change: the last part of `key` (DEC-9). Required with `state`. |
 
 ## The request body
 
@@ -34,7 +37,8 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
   "to": ["@winton"],
   "priority": "high",
   "due_at": "2026-11-09T17:00:00.000Z",
-  "metadata": {"actor": "github:user:dana", "fields": {"repository": "acme/app", "url": "https://…"}}
+  "metadata": {"actor": "github:user:dana", "fields": {"repository": "acme/app", "url": "https://…"}},
+  "state": {"status": "open", "observed_at": "2026-11-07T11:00:05.000Z", "version": "42"}
 }
 ```
 
@@ -49,6 +53,14 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `priority` | The rule's priority, with `to`. |
 | `due_at` | The item's due time, with `to`. |
 | `closes` | On the person's own acts, and on items a `close_by_others` rule sends: the keys of open asks on the same subject, oldest first, at most 20. |
+| `state` | The state snapshot (DEC-28): the state fields the rule lists in `state` that the item has, with `observed_at` and `version`. Omitted when the rule lists none, the item has no snapshot, or none of the listed fields is present. |
+
+`state` is a top-level field, as Signal's phase 12 proposal (P-1) defines it. Signal `main` accepts it and does not
+store it yet; it keeps the latest snapshot per subject from Signal plan 12.01. Signal's replay check covers the whole
+request, so a retry with the same snapshot replays as before.
+
+DEC-29 (one authoritative event per act, matched by `metadata.native`) needs Signal phase 12 and is not part of
+Phase 1: Beacon records every own act it is sent.
 
 Open asks are read from the outbox: bodies on the subject with `to` that are pending, sent or replayed, minus
 those any such body closes. Beacon writes every ask without `by`, so its integration actor is the asker; an own
@@ -77,9 +89,11 @@ records Signal's answer and is the key's state from then on:
 | `sent` | `201`: Signal wrote it. | Final. |
 | `replayed` | `200` with `replayed: true`: Signal already had these bytes under this key, for example after a crash between send and record. | Final. |
 | `rejected` | Signal refused it: `409 idempotency_conflict` (the key holds another request), or another final 4xx. `status`, `code` and `message` say why. | Final. Never sent again, never rewritten. |
+| `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
-`kind` is `event` for items and `lease` for lease claims. A line torn by a crash while it was written is dropped on
-the next open; it was never synced, so its body was never sent.
+`kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
+only. A line torn by a crash while it was written is cut off the file on the next open; it was never synced, so its
+body was never sent. The directory is synced when the outbox file is created, so the file itself survives a crash.
 
 ### How Signal's answers are handled
 
@@ -91,7 +105,8 @@ the next open; it was never synced, so its body was never sent.
 | `409 conflict` on `/by/identity` | Retried: the identity moved while Signal wrote, and Signal asks for the same request again. |
 | `429` | Waits for `Retry-After` (at most two minutes), then retries. |
 | `5xx`, network error | Retries with backoff (1 s doubling to 30 s, five attempts). Then the body stays pending and the pass stops sending. |
-| `401` | The pass stops; the body stays pending. |
+| The lease runs out | Every write, with its retries and waits, runs under a deadline at the end of the lease. A write still waiting then is stopped, its body stays pending, and the pass ends (`lease_expired`). |
+| `401` | The pass stops and `beacon run` exits non-zero; the body stays pending. |
 | Any other 4xx | `rejected`. |
 
 ## The lease
@@ -116,6 +131,11 @@ each period. A claim is a Signal claim (a keyed ask to the writer itself, with `
   period after the current one, and keeps the lease for as long as it runs.
 - Another instance's claim on a held period differs in `metadata.run` and gets `409 idempotency_conflict`: it does
   not hold the lease, and sends nothing. It still collects and appends to its own outbox.
+- Any other answer is not "held by another instance". A refused key (`401`) or a refused claim (another 4xx) fails
+  the pass, and `beacon run` exits non-zero with the reason; an unreachable Signal ends the pass with the lease not
+  taken, and the next pass tries again.
+- A claim's write, with its retries, ends with its period. A claim still pending when its period has passed is
+  marked `expired`, since no one can hold that period any more.
 - When the holder stops, another instance takes over within two periods.
 - A restarted instance has the same instance id and outbox, so its claims are the same requests and replay.
 - Each claim closes the holder's previous claim, so at most two of its asks to itself stay open.

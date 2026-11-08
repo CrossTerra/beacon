@@ -35,6 +35,8 @@ const (
 	Replayed State = "replayed"
 	// Rejected was refused by Signal. It is reported and never sent again.
 	Rejected State = "rejected"
+	// Expired is a lease claim whose period ended before Signal answered it. It is never sent again.
+	Expired State = "expired"
 )
 
 // Kind says what a body is for.
@@ -106,9 +108,18 @@ func Open(dir string, now func() time.Time) (*Outbox, error) {
 		return nil, err
 	}
 	path := filepath.Join(dir, FileName)
+	_, statErr := os.Stat(path)
+	created := errors.Is(statErr, os.ErrNotExist)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	if created {
+		// The new file's directory entry must be durable before any body in it counts as appended.
+		if err := SyncDir(dir); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
@@ -202,6 +213,10 @@ func (o *Outbox) apply(rec record) error {
 	}
 	switch rec.State {
 	case Sent, Replayed, Rejected:
+	case Expired:
+		if e.Kind != Lease {
+			return fmt.Errorf("key %q: only a lease claim expires", rec.Key)
+		}
 	default:
 		return fmt.Errorf("key %q: unknown state %q", rec.Key, rec.State)
 	}
@@ -276,6 +291,25 @@ func (o *Outbox) Mark(key string, state State, eventID string, status int, code,
 	return o.apply(rec)
 }
 
+// Expire records that a pending lease claim's period ended unanswered.
+func (o *Outbox) Expire(key string) error {
+	e, ok := o.entries[key]
+	if !ok || e.Kind != Lease {
+		return errors.New("outbox: only a lease claim expires")
+	}
+	return o.Mark(key, Expired, "", 0, "", "")
+}
+
+// SyncDir syncs a directory, so a file created in it survives a crash.
+func SyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
 // Close releases the lock.
 func (o *Outbox) Close() error {
 	if o.file == nil {
@@ -310,6 +344,17 @@ func (o *Outbox) Pending() []Entry {
 	for _, k := range o.order {
 		if e := o.entries[k]; e.State == Pending {
 			out = append(out, *e)
+		}
+	}
+	return out
+}
+
+// PendingEvents returns the pending event bodies, leaving out lease claims.
+func (o *Outbox) PendingEvents() []Entry {
+	var out []Entry
+	for _, e := range o.Pending() {
+		if e.Kind == Event {
+			out = append(out, e)
 		}
 	}
 	return out

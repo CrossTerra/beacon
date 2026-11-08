@@ -73,6 +73,18 @@ Built as scoped, with these differences from the text above:
 - **Hold.** Held items are kept in the local queue. Approving them is Phase 5.
 - **First run.** `mode: dry-run` is the default and the person sets `mode: send`. The first-run window and summary
   acceptance of DEC-23 belong to the real sources.
+- **DEC-28, added after this plan.** Items carry an optional state snapshot (`state`, `observed_at`, `version`),
+  sources list their state fields, a rule names the state fields it sends (`state:`), and the projection writes a
+  top-level `state` with only those fields, `observed_at` and the version marker. Signal `main` accepts the field and
+  discards it until Signal plan 12.01 stores snapshots.
+- **DEC-29 is not in Phase 1.** One authoritative event per act needs Signal phase 12 (executors, and matching by
+  `metadata.native`). Until then Beacon records every own act a rule sends. It belongs to the phase that adds a
+  source whose acts an executor can also record.
+- **Review.** After review: `own` and `addressed` decode YAML booleans correctly; logs carry reason codes instead of
+  error text; the lease bounds every write; a refused key or lease claim fails the run; a torn queue line is cut;
+  stale lease claims expire; send passes print bodies only with `--bodies`; the outbox directory is synced on
+  creation; the production transport is tested against proxy settings and redirects; `rules check` warns about
+  own-act rules without an identity; a second YAML document or a blank value is an error.
 
 Exit gate, and how each line was checked:
 

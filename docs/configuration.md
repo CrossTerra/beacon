@@ -55,6 +55,7 @@ A fixture is a JSON file of recorded items, used by tests and to try rules:
 {
   "source": "fixture",
   "fields": ["title", "body", "repository", "url", "label"],
+  "state_fields": ["status", "head"],
   "items": [
     {
       "subject": "fixture:pr:acme/app#1",
@@ -66,11 +67,17 @@ A fixture is a JSON file of recorded items, used by tests and to try rules:
       "addressed": true,
       "fields": {"title": "Add retries", "repository": "acme/app"},
       "references": [],
-      "due_at": null
+      "due_at": null,
+      "state": {"status": "open"},
+      "observed_at": "2026-11-07T09:01:30Z",
+      "version": "1"
     }
   ]
 }
 ```
 
-`fields` is the source's fixed field list; an item with any other field is refused. The item shape is described in
+`fields` is the source's fixed field list and `state_fields` its state field list (DEC-28); an item with any other
+field or state field is refused. `observed_at` and `version` are reserved and cannot be state fields. An item with
+`state` needs `observed_at` and `version`, and `version` must be the last part of its key. The file holds one JSON
+value. The item shape is described in
 [`events.md`](events.md#items).

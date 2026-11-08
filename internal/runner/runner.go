@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sort"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/egress"
+	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/lease"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/outbox"
@@ -70,7 +73,9 @@ type Report struct {
 	Items   []Planned
 	Lease   *lease.Status
 	Results []Sent
-	// Pending is how many bodies are still waiting to be sent after the pass.
+	// LeaseReason says why the lease could not be checked, when it could not; empty when Signal answered.
+	LeaseReason logs.Reason
+	// Pending is how many event bodies are still waiting to be sent after the pass. Lease claims are not counted.
 	Pending int
 }
 
@@ -97,13 +102,17 @@ func (r *Runner) Collect(ctx context.Context) []source.Item {
 	for _, s := range r.Sources {
 		got, err := s.Collect(ctx)
 		if err != nil {
-			r.Log.Log(logs.CollectFailed, logs.Source(s.Name()), logs.Err(err))
+			reason := logs.ReasonSource
+			if Classify(err) == logs.ReasonEgress {
+				reason = logs.ReasonEgress
+			}
+			r.Log.Log(logs.CollectFailed, logs.Source(s.Name()), logs.Why(reason))
 			continue
 		}
-		fields := s.Fields()
+		fields, stateFields := s.Fields(), s.StateFields()
 		invalid := 0
 		for _, it := range got {
-			if it.Source != s.Name() || source.Validate(it, fields) != nil {
+			if it.Source != s.Name() || source.Validate(it, fields, stateFields) != nil {
 				invalid++
 				continue
 			}
@@ -182,7 +191,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		return rep, nil
 	}
 	err := r.sendPending(ctx, rep)
-	rep.Pending = len(r.Outbox.Pending())
+	rep.Pending = len(r.Outbox.PendingEvents())
 	r.Log.Log(logs.RunFinished, logs.Mode(mode), logs.Count("results", len(rep.Results)), logs.Count("pending", rep.Pending))
 	return rep, err
 }
@@ -206,10 +215,15 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	}
 	switch d.Tier {
 	case rules.Never:
-		if r.Send {
-			return p, r.Queue.Drop(queue.Dropped{Key: it.Key, Rule: p.Rule, DroppedAt: r.Now().UTC()})
+		if !r.Send {
+			return p, nil
 		}
-		return p, nil
+		// Every pass decides dropped items again, since the rules may have changed; the record is written only
+		// when the key is new or another rule dropped it.
+		if rule, ok := r.Queue.DroppedBy(it.Key); ok && rule == p.Rule {
+			return p, nil
+		}
+		return p, r.Queue.Drop(queue.Dropped{Key: it.Key, Rule: p.Rule, DroppedAt: r.Now().UTC()})
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
 		_, body, err := project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: view.open(it.Subject)})
@@ -239,11 +253,49 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	return p, nil
 }
 
+// Classify maps an error to a fixed reason code, for logs and for what `beacon run` prints.
+func Classify(err error) logs.Reason {
+	var denied *egress.DeniedError
+	var pathErr *fs.PathError
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, signal.ErrUnauthorized):
+		return logs.ReasonUnauthorized
+	case errors.Is(err, signal.ErrUnavailable):
+		return logs.ReasonUnavailable
+	case errors.Is(err, lease.ErrRefused):
+		return logs.ReasonLeaseRefused
+	case errors.Is(err, context.DeadlineExceeded):
+		return logs.ReasonLeaseExpired
+	case errors.Is(err, context.Canceled):
+		return logs.ReasonCanceled
+	case errors.As(err, &denied):
+		return logs.ReasonEgress
+	case errors.Is(err, outbox.ErrLocked):
+		return logs.ReasonLocked
+	case errors.Is(err, keychain.ErrNotFound):
+		return logs.ReasonKeychain
+	case errors.As(err, &pathErr):
+		return logs.ReasonState
+	}
+	return logs.ReasonInternal
+}
+
+// transient reports whether a pass can end normally after err, leaving bodies pending for the next pass.
+func transient(err error) bool {
+	return errors.Is(err, signal.ErrUnavailable) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 	st, err := r.Lease.Ensure(ctx)
 	rep.Lease = &st
 	if err != nil {
-		r.Log.Log(logs.LeaseFailed, logs.Err(err))
+		rep.LeaseReason = Classify(err)
+		r.Log.Log(logs.LeaseFailed, logs.Why(rep.LeaseReason))
+		if !transient(err) || ctx.Err() != nil {
+			return err
+		}
 		if !st.Held {
 			return nil
 		}
@@ -253,20 +305,21 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 		return nil
 	}
 	r.Log.Log(logs.LeaseHeld, logs.Period(st.Period), logs.Until(st.Until))
-	for _, e := range r.Outbox.Pending() {
-		if e.Kind != outbox.Event {
-			continue
-		}
+	for _, e := range r.Outbox.PendingEvents() {
 		if !r.Now().Before(st.Until) {
-			r.Log.Log(logs.SendStopped, logs.Err(errors.New("the lease ran out during the pass")))
+			r.Log.Log(logs.LeaseExpired, logs.Period(st.Period))
 			return nil
 		}
-		res, err := r.Writer.Write(ctx, e.Body)
+		// The lease bounds the send: no write, with its retries and waits, outlasts it.
+		wctx, cancel := context.WithTimeout(ctx, st.Until.Sub(r.Now()))
+		res, err := r.Writer.Write(wctx, e.Body)
+		cancel()
 		if err != nil {
-			r.Log.Log(logs.SendStopped, logs.Err(err))
-			if errors.Is(err, signal.ErrUnauthorized) {
-				return err
+			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				r.Log.Log(logs.LeaseExpired, logs.Period(st.Period))
+				return nil
 			}
+			r.Log.Log(logs.SendStopped, logs.Why(Classify(err)))
 			if errors.Is(err, signal.ErrUnavailable) {
 				// Later bodies may close asks this one opens, so they wait for it.
 				return nil

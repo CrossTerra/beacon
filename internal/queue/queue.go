@@ -75,8 +75,10 @@ func Open(dir string) (*Queue, error) {
 	return q, nil
 }
 
+// readLines calls fn for each complete line. A last line torn by a crash (no newline, or not JSON) is cut off the
+// file, so the next append starts on a line of its own.
 func readLines(path string, fn func([]byte) error) error {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -85,18 +87,37 @@ func readLines(path string, fn func([]byte) error) error {
 	}
 	defer f.Close()
 	br := bufio.NewReader(f)
+	var good int64
 	for n := 1; ; n++ {
 		line, err := br.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
-			return nil // a line without its newline was torn by a crash
+			break
 		}
 		if err != nil {
 			return err
 		}
+		if !json.Valid(line) {
+			if _, peek := br.Peek(1); errors.Is(peek, io.EOF) {
+				break
+			}
+			return fmt.Errorf("%s line %d: not JSON", path, n)
+		}
 		if err := fn(line); err != nil {
 			return fmt.Errorf("%s line %d: %w", path, n, err)
 		}
+		good += int64(len(line))
 	}
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() > good {
+		if err := f.Truncate(good); err != nil {
+			return err
+		}
+		return f.Sync()
+	}
+	return nil
 }
 
 func appendLine(path string, v any) error {
@@ -107,9 +128,16 @@ func appendLine(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	_, statErr := os.Stat(path)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		if err := syncDir(filepath.Dir(path)); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		f.Close()
@@ -120,6 +148,15 @@ func appendLine(path string, v any) error {
 		return err
 	}
 	return f.Close()
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // Hold adds an item to the hold queue. Holding a key twice is a no-op.
@@ -145,6 +182,12 @@ func (q *Queue) HeldItems() []Held {
 		out = append(out, q.held[k])
 	}
 	return out
+}
+
+// DroppedBy reports whether a key is recorded as dropped, and by which rule ("" for the default).
+func (q *Queue) DroppedBy(key string) (rule string, ok bool) {
+	d, ok := q.dropped[key]
+	return d.Rule, ok
 }
 
 // Drop records a dropped key once.

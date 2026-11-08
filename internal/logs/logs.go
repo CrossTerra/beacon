@@ -1,8 +1,8 @@
 // Package logs writes Beacon's log: JSON lines with fixed event names.
 //
-// A log line never holds item content, a rule's match on content, a key, a token or a request body. The attribute
-// helpers below take only counts, source and rule names, outcomes, status codes and Signal's error codes, so a call
-// site cannot pass content by accident.
+// A log line never holds item content, a rule's match on content, a key, a token, a request body or an error's
+// text. The attribute helpers below take only counts, source names, outcomes, status codes, Signal's error codes and
+// fixed reason codes, so a call site cannot pass content by accident.
 package logs
 
 import (
@@ -29,6 +29,28 @@ const (
 	SendResult      Event = "send_result"
 	SendStopped     Event = "send_stopped"
 	DryRunNoSending Event = "dry_run"
+	LeaseExpired    Event = "lease_expired"
+	RunFailed       Event = "run_failed"
+)
+
+// Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths
+// and rule patterns.
+type Reason string
+
+// Reasons.
+const (
+	ReasonConfig       Reason = "config"
+	ReasonSource       Reason = "source_failed"
+	ReasonUnauthorized Reason = "unauthorized"
+	ReasonUnavailable  Reason = "unavailable"
+	ReasonLeaseRefused Reason = "lease_refused"
+	ReasonLeaseExpired Reason = "lease_expired"
+	ReasonEgress       Reason = "egress_denied"
+	ReasonLocked       Reason = "outbox_locked"
+	ReasonState        Reason = "state_files"
+	ReasonKeychain     Reason = "keychain"
+	ReasonCanceled     Reason = "canceled"
+	ReasonInternal     Reason = "internal"
 )
 
 // Attr is a log attribute built by one of the helpers below.
@@ -61,8 +83,8 @@ func Until(t time.Time) Attr { return Attr{slog.Time("until", t)} }
 // Kind is an outbox kind.
 func Kind(k string) Attr { return Attr{slog.String("kind", k)} }
 
-// Err is an error from Beacon's own code. Beacon's errors name files, keys' sources and HTTP statuses, not content.
-func Err(err error) Attr { return Attr{slog.String("error", err.Error())} }
+// Why is a failure's reason code.
+func Why(r Reason) Attr { return Attr{slog.String("reason", string(r))} }
 
 // Logger writes events.
 type Logger struct{ l *slog.Logger }

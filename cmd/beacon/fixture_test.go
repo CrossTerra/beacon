@@ -30,6 +30,7 @@ const testRules = `rules:
       fields: {repository: {glob: "acme/*"}}
     tier: send
     fields: [title, url, repository, actor]
+    state: [status]
     ask: me
     priority: high
   - name: assigned
@@ -58,6 +59,9 @@ type fixtureItem struct {
 	Addressed  bool              `json:"addressed"`
 	Fields     map[string]string `json:"fields"`
 	DueAt      *time.Time        `json:"due_at,omitempty"`
+	State      map[string]string `json:"state,omitempty"`
+	ObservedAt *time.Time        `json:"observed_at,omitempty"`
+	Version    string            `json:"version,omitempty"`
 }
 
 // expected is an item's key, its tier, and the rule that must decide it ("" for the default).
@@ -72,12 +76,15 @@ type expected struct {
 func fixture(n string) ([]byte, []expected) {
 	at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
 	due := time.Date(2026, 11, 9, 17, 0, 0, 0, time.UTC)
+	observed := at.Add(90 * time.Second)
 	pr1 := "fixture:pr:acme/app#1-" + n
 	issue3 := "fixture:issue:3-" + n
 	items := []fixtureItem{
 		{Subject: pr1, Key: "fixture:pr1-" + n + ":1", Type: "review_requested", OccurredAt: at.Add(1 * time.Minute),
 			Actor: "fixture:user:dana", Addressed: true,
-			Fields: map[string]string{"title": "Add retries", "body": "UNLISTED-SECRET-BODY", "repository": "acme/app", "url": "https://example.test/pr/1"}},
+			Fields:     map[string]string{"title": "Add retries", "body": "UNLISTED-SECRET-BODY", "repository": "acme/app", "url": "https://example.test/pr/1"},
+			State:      map[string]string{"status": "open", "head": "UNLISTED-SECRET-HEAD"},
+			ObservedAt: &observed, Version: "1"},
 		{Subject: pr1, Key: "fixture:pr1-" + n + ":2", Type: "review_submitted", OccurredAt: at.Add(2 * time.Minute),
 			Actor: "fixture:user:winton", Own: true,
 			Fields: map[string]string{"title": "Add retries", "body": "UNLISTED-SECRET-REVIEW", "url": "https://example.test/pr/1#review"}},
@@ -107,9 +114,10 @@ func fixture(n string) ([]byte, []expected) {
 		{items[6].Key, rules.Never, ""},
 	}
 	data, err := json.MarshalIndent(map[string]any{
-		"source": "fixture",
-		"fields": []string{"title", "body", "repository", "url", "label"},
-		"items":  items,
+		"source":       "fixture",
+		"fields":       []string{"title", "body", "repository", "url", "label"},
+		"state_fields": []string{"status", "head"},
+		"items":        items,
 	}, "", "  ")
 	if err != nil {
 		panic(err)
