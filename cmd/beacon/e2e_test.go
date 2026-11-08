@@ -57,8 +57,10 @@ func TestE2E(t *testing.T) {
 		stdout.Reset()
 		stderr.Reset()
 		a := &app{stdin: strings.NewReader(""), stdout: &stdout, stderr: &stderr, now: time.Now,
-			keychain:  func() (keychain.Store, error) { return store, nil },
-			transport: func(allowed []string) http.RoundTripper { return rec.Wrap(egress.Guard(allowed, http.DefaultTransport)) }}
+			keychain: func() (keychain.Store, error) { return store, nil },
+			transport: func(allowed []string) http.RoundTripper {
+				return rec.Wrap(egress.Guard(allowed, http.DefaultTransport))
+			}}
 		return a.main(context.Background(), args)
 	}
 	h := &harness{t: t}
