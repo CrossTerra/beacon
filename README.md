@@ -8,8 +8,30 @@ Beacon is the trust boundary between your accounts and a shared store. Your sour
 machine. Nothing leaves it unless a rule you wrote allows it, and every byte that does leave is kept in a local
 log you can read.
 
-**Status:** design. There is no code yet. The design and the work plan are in [`plans/`](plans/README.md), and
-the trust model is in [`docs/trust-model.md`](docs/trust-model.md).
+**Status:** Phase 1, the trust core, is built: config, keychain, rules, projection, outbox, Signal client, lease and
+the commands below, with a fixture source. There are no real sources yet; GitHub and Jira come in Phase 2. The plan
+is in [`plans/`](plans/README.md), and the trust model is in [`docs/trust-model.md`](docs/trust-model.md).
+
+## Try it
+
+```bash
+go build -trimpath -o beacon ./cmd/beacon
+./beacon init --signal-url https://signal.example.com --handle @you   # asks for the Signal key; stores it in the keychain
+./beacon rules check
+./beacon run --once            # a dry run until the config says mode: send
+./beacon explain <key>         # the rule, and the exact body
+./beacon egress                # every host Beacon may contact
+./beacon outbox                # what was sent
+```
+
+| Read | For |
+| --- | --- |
+| [`docs/configuration.md`](docs/configuration.md) | The config file, the Signal key, the fixture source |
+| [`docs/rules.md`](docs/rules.md) | The rules file |
+| [`docs/events.md`](docs/events.md) | Items, request bodies, the outbox, the lease |
+| [`docs/commands.md`](docs/commands.md) | The CLI and the log |
+| [`docs/architecture.md`](docs/architecture.md) | How an item reaches Signal, package by package |
+| [`docs/development.md`](docs/development.md) | Gates, tests, the end-to-end run against Signal |
 
 ## Why a local agent
 

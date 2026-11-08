@@ -1,6 +1,6 @@
 # Phase 1 — Trust core
 
-Status: pending.
+Status: complete. What was built is described in [`docs/`](../docs/); see [Outcome](#outcome).
 
 ## Goal
 
@@ -56,3 +56,42 @@ Real sources, the review queue UI, the classifier, releases and signing, the men
 All gates green. With the fixture source: every item lands in its expected tier, held and dropped items never
 reach the network, a crash between append and send produces exactly one event, and `beacon egress` lists every
 host the test transport saw.
+
+## Outcome
+
+Built as scoped, with these differences from the text above:
+
+- **DEC-27.** Signal accepts `by` only for identities an actor holds, reads `me` in `to` as the acting actor, and
+  lets only the addressee or the asker close an ask. The projection therefore writes `to` as the person's handle,
+  sets `by` only on own acts, records other people in `metadata.actor` when a rule lists `actor`, and closes as the
+  asker for `close_by_others`. DEC-11 is narrowed accordingly, and external identities are a new dependency on
+  Signal.
+- **Lease.** One claim key per period, with the next period claimed ahead. The answer to a claim says who holds the
+  period, so Beacon does not read `GET /api/log` at all.
+- **Packages.** Beside the listed layout: `internal/runner` (one pass, the only path from an item to the client),
+  `internal/queue` (hold queue and dropped record), `internal/logs` (fixed event names, typed attributes).
+- **Hold.** Held items are kept in the local queue. Approving them is Phase 5.
+- **First run.** `mode: dry-run` is the default and the person sets `mode: send`. The first-run window and summary
+  acceptance of DEC-23 belong to the real sources.
+- **DEC-28, added after this plan.** Items carry an optional state snapshot (`state`, `observed_at`, `version`),
+  sources list their state fields, a rule names the state fields it sends (`state:`), and the projection writes a
+  top-level `state` with only those fields, `observed_at` and the version marker. Signal `main` accepts the field and
+  discards it until Signal plan 12.01 stores snapshots.
+- **DEC-29 is not in Phase 1.** One authoritative event per act needs Signal phase 12 (executors, and matching by
+  `metadata.native`). Until then Beacon records every own act a rule sends. It belongs to the phase that adds a
+  source whose acts an executor can also record.
+- **Review.** After review: `own` and `addressed` decode YAML booleans correctly; logs carry reason codes instead of
+  error text; the lease bounds every write; a refused key or lease claim fails the run; a torn queue line is cut;
+  stale lease claims expire; send passes print bodies only with `--bodies`; the outbox directory is synced on
+  creation; the production transport is tested against proxy settings and redirects; `rules check` warns about
+  own-act rules without an identity; a second YAML document or a blank value is an error.
+
+Exit gate, and how each line was checked:
+
+| Line | Check |
+| --- | --- |
+| All gates green | `scripts/gates.sh`: gofmt, go vet, staticcheck, `go test -race`, `scripts/repro.sh`. Run locally on macOS and in CI on macOS and Linux. |
+| Every item lands in its expected tier | `TestExitGateTiersAndEgress`: seven fixture items, each with an expected tier and rule, checked in the dry-run output, the outbox, the hold queue and the fake Signal. `TestE2E` repeats it against Signal `main` in Docker. |
+| Held and dropped items never reach the network | The same tests: no request body names a held or dropped key or carries their content markers, and against real Signal their subjects have no thread and their keys no event. |
+| A crash between append and send produces exactly one event | `TestCrashBetweenAppendAndSend` kills a real process after the append is synced and before the send, restarts, and finds one request and one event with the stored bytes. `TestE2E` repeats it against real Signal. |
+| `beacon egress` lists every host the test transport saw | `TestExitGateTiersAndEgress` builds the egress-recording transport from the output of `beacon egress`; it fails on any other host, and every host it saw is checked against the list. |
