@@ -41,7 +41,9 @@ Signal, without handing those services' credentials or unfiltered content to any
 | DEC-24 | A seed file can carry decisions from an earlier triage system (`<source id>`: `never` or `send`), so items already dismissed stay dismissed. |
 | DEC-25 | One Beacon per person, one active instance. The instance holds a lease in Signal (a claim event renewed every few minutes); another machine collects but does not send while the lease is held. Cursors, the outbox, the queue and the decisions log stay local. |
 | DEC-26 | Local agent sessions are a source. A coding agent's session that finishes, fails or stops for a decision is an event on the work it was started for, so whoever delegated the work does not have to poll it. |
-| DEC-27 | Signal resolves `by` only to an identity an actor already holds (otherwise `422 identity_not_found`), reads `me` in `to` as the acting actor (Signal DEC-122), and lets only the addressee or the asker close an ask. So: `to` names the person's Signal handle from the config, never `me`. `by` is set only on the person's own acts, from the identities the config lists for the person. Anyone else who caused a change is recorded in `metadata.actor`, and only when the rule lists `actor`. Beacon writes every ask without `by`, so Beacon is the asker, and an event written for `close_by_others` (also without `by`) closes the ask as the asker. Email identities are `email:`, not `mailto:`. When Signal records external identities (Dependencies on Signal, item 4), attribution can move from `metadata.actor` back to `by`. |
+| DEC-27 | Signal resolves `by` only to an identity an actor already holds (otherwise `422 identity_not_found`), reads `me` in `to` as the acting actor (Signal DEC-122), and lets only the addressee or the asker close an ask. So: `to` names the person's Signal handle from the config, never `me`. `by` is set only on the person's own acts, from the identities the config lists for the person. Anyone else who caused a change is recorded in `metadata.actor`, and only when the rule lists `actor`. Beacon writes every ask without `by`, so Beacon is the asker, and an event written for `close_by_others` (also without `by`) closes the ask as the asker. Email identities are `email:`, not `mailto:`. When Signal records external identities (Dependencies on Signal, item 5), attribution can move from `metadata.actor` back to `by`. |
+| DEC-28 | Events carry a state snapshot. When a source returns the object's current state, the event's `state` holds the fields that describe it now (for a pull request: state, head commit, review decision at head, mergeable, checks; for an issue: status, assignee, due date), with `observed_at` and the source's version marker. The fields that may appear in `state` are listed per source like any other field, and a rule names them. |
+| DEC-29 | One authoritative event per act. When an executor or an agent already recorded an act the person's credentials performed (a merge, a comment, a message), Beacon does not record it again. It matches the act by the source's native id in `metadata.native`; when it cannot match, it records a plain observation linked to the authoritative event. |
 
 ## Change markers
 
@@ -102,7 +104,8 @@ starts. Phase 1 is [`phase-1.md`](phase-1.md).
    sources.
 2. **Batch append**, before the first real run of Phase 3.
 3. **Redaction**, before Beacon is offered to anyone else.
-4. **External identities.** Signal records people who are not actors, for example by registering an identity the
+4. **State snapshots and one authoritative event per act** (Signal phase 12), for DEC-28 and DEC-29.
+5. **External identities.** Signal records people who are not actors, for example by registering an identity the
    first time a relay names it in `by`, so a relayed event can say who caused it without an admin attaching every
    outside identity first. Until then Beacon records other people in `metadata.actor` (DEC-27); with it,
    attribution moves back to `by`.
