@@ -2,14 +2,17 @@ package keychain
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 const value = "sig_supersecretvalue"
@@ -46,17 +49,57 @@ func TestAuthorize(t *testing.T) {
 }
 
 func TestReadSecret(t *testing.T) {
-	s, err := ReadSecret(strings.NewReader("  " + value + "  \nmore"))
+	s, err := ReadSecret(context.Background(), strings.NewReader("  "+value+"  \nmore"))
 	if err != nil || string(s.value) != value {
 		t.Fatalf("%v", err)
 	}
-	if _, err := ReadSecret(strings.NewReader(value)); err != nil {
+	if _, err := ReadSecret(context.Background(), strings.NewReader(value)); err != nil {
 		t.Fatalf("no newline: %v", err)
 	}
 	for _, in := range []string{"", "\n", "   \n"} {
-		if _, err := ReadSecret(strings.NewReader(in)); err == nil {
+		if _, err := ReadSecret(context.Background(), strings.NewReader(in)); err == nil {
 			t.Fatalf("read %q as a secret", in)
 		}
+	}
+}
+
+// An interrupt while the hidden prompt waits ends the read at once and restores echo first, so the terminal is
+// never left with echo off.
+func TestReadSecretInterrupted(t *testing.T) {
+	restored := make(chan struct{}, 1)
+	echoOff = func(io.Reader) func() { return func() { restored <- struct{}{} } }
+	defer func() { echoOff = noEcho }()
+
+	r, w := io.Pipe()
+	defer w.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		_, err := ReadSecret(ctx, r)
+		got <- err
+	}()
+	cancel()
+	select {
+	case err := <-got:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadSecret kept waiting for input after the interrupt")
+	}
+	select {
+	case <-restored:
+	default:
+		t.Fatal("echo was not restored")
+	}
+	// A line read normally restores echo too.
+	if _, err := ReadSecret(context.Background(), strings.NewReader(value+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-restored:
+	default:
+		t.Fatal("echo was not restored after a normal read")
 	}
 }
 

@@ -47,7 +47,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `subject`, `key`, `occurred_at` | Always, from the item. `occurred_at` is UTC with milliseconds. |
 | `type` | Always: `<source>.<item type>`. |
 | `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the title when the rule lists `title`. |
-| `title`, `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). |
+| `title`, `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
 | `priority` | The rule's priority, with `to`. |

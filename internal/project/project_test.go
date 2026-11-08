@@ -244,3 +244,21 @@ func TestNoStateUnlessListedAndPresent(t *testing.T) {
 		}
 	}
 }
+
+// DEC-27: metadata.actor names other people only. On the person's own act the identity leaves only as by, even when
+// the rule lists actor.
+func TestActorNotSentForOwnActs(t *testing.T) {
+	own := baseItem()
+	own.Own, own.Actor = true, "github:user:winton"
+	b, data, err := Project(Input{Item: own, Rule: rule("title", "actor"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["actor"] != nil || bytes.Count(data, []byte("github:user:winton")) != 1 || b.By == nil {
+		t.Fatalf("own act: %s", data)
+	}
+	b, _, _ = Project(Input{Item: baseItem(), Rule: rule("actor"), Person: person})
+	if b.Metadata["actor"] != "github:user:dana" {
+		t.Fatalf("other person's act lost metadata.actor: %v", b.Metadata)
+	}
+}

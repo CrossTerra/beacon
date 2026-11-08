@@ -6,6 +6,7 @@ package keychain
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -61,12 +62,32 @@ type Store interface {
 	Delete(account string) error
 }
 
+// echoOff turns terminal echo off for r and returns the function that restores it. Tests replace it.
+var echoOff = noEcho
+
 // ReadSecret reads one line from r as a secret, trimming surrounding space. When r is a terminal, echo is off while
-// it reads. An empty line is an error.
-func ReadSecret(r io.Reader) (Secret, error) {
-	restore := noEcho(r)
-	line, err := bufio.NewReader(r).ReadString('\n')
-	restore()
+// it reads, and is restored before ReadSecret returns, also when ctx ends first (an interrupt): then it returns the
+// context's error without waiting for the line. An empty line is an error.
+func ReadSecret(ctx context.Context, r io.Reader) (Secret, error) {
+	restore := echoOff(r)
+	defer restore()
+	type read struct {
+		line string
+		err  error
+	}
+	done := make(chan read, 1)
+	go func() {
+		line, err := bufio.NewReader(r).ReadString('\n')
+		done <- read{line, err}
+	}()
+	var line string
+	var err error
+	select {
+	case <-ctx.Done():
+		return Secret{}, ctx.Err()
+	case got := <-done:
+		line, err = got.line, got.err
+	}
 	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
 		if errors.Is(err, io.EOF) {
 			return Secret{}, errors.New("keychain: no secret given")

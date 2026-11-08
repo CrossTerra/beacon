@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -750,5 +751,36 @@ func TestDryRunAndExplainLeaveStateUntouched(t *testing.T) {
 		if after[name] != data {
 			t.Fatalf("%s changed:\nbefore %q\nafter  %q", name, data, after[name])
 		}
+	}
+}
+
+// An interrupt during init's hidden prompt ends init with an error and writes nothing.
+func TestInitInterrupted(t *testing.T) {
+	r, w := io.Pipe()
+	defer w.Close()
+	store := keychain.NewMemory()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	var out bytes.Buffer
+	a := &app{stdin: r, stdout: &out, stderr: &out, now: time.Now, keychain: func() (keychain.Store, error) { return store, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	code := make(chan int, 1)
+	go func() {
+		code <- a.main(ctx, []string{"init", "--config", path, "--signal-url", "https://signal.example.com", "--handle", "@winton"})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case c := <-code:
+		if c == 0 {
+			t.Fatal("init succeeded after an interrupt")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("init kept waiting after the interrupt")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("init wrote a config after an interrupt")
+	}
+	if _, err := store.Get("signal:signal.example.com:443"); err == nil {
+		t.Fatal("init stored a key after an interrupt")
 	}
 }

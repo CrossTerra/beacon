@@ -10,7 +10,8 @@ beacon init --signal-url https://signal.example.com --handle @winton
 ```
 
 Writes the config (mode `dry-run`, no sources), an empty rules file beside it and the state directory, and stores
-the Signal key, read from standard input, in the keychain. It refuses to overwrite a config without `--force`.
+the Signal key, read from standard input, in the keychain. Echo is off while it reads from a terminal, and Ctrl+C
+restores it and ends `init` without writing anything. It refuses to overwrite a config without `--force`.
 `--keychain-account` names the keychain account.
 
 ## `beacon run`

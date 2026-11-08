@@ -294,3 +294,40 @@ func TestClassify(t *testing.T) {
 		}
 	}
 }
+
+// A key the same rule already dropped is an earlier decision: later passes report it as skipped, not as a new never.
+// A rules change that drops it by another rule is a new decision again.
+func TestDroppedEarlierIsSkipped(t *testing.T) {
+	f := newFixture(t)
+	r, done := f.runner(true, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	for _, send := range []bool{true, false} {
+		r, done := f.runner(send, nil)
+		rep, err := r.Run(context.Background())
+		done()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s, h, n, k := rep.Counts(); s != 0 || h != 0 || n != 0 || k != 4 {
+			t.Fatalf("send=%v: counts %d %d %d %d, want every item handled earlier", send, s, h, n, k)
+		}
+		for _, p := range rep.Items {
+			if p.Tier == rules.Never && p.Skipped != "dropped earlier" {
+				t.Fatalf("send=%v: %s skipped %q", send, p.Item.Key, p.Skipped)
+			}
+		}
+	}
+	r, done = f.runner(true, nil)
+	defer done()
+	r.Rules, _ = rules.Parse([]byte(strings.Replace(ruleFile, "name: noise", "name: renamed-noise", 1)))
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, n, _ := rep.Counts(); n != 1 {
+		t.Fatalf("a key another rule drops is a new decision; never count %d", n)
+	}
+}

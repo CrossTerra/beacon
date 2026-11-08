@@ -215,12 +215,16 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	}
 	switch d.Tier {
 	case rules.Never:
-		if !r.Send {
-			return p, nil
+		// Every pass decides dropped items again, since the rules may have changed. A key the same rule already
+		// dropped is an earlier decision: it is reported as skipped and not recorded again. A key another rule
+		// dropped, or a new key, is a new decision.
+		if r.Queue != nil {
+			if rule, ok := r.Queue.DroppedBy(it.Key); ok && rule == p.Rule {
+				p.Skipped = "dropped earlier"
+				return p, nil
+			}
 		}
-		// Every pass decides dropped items again, since the rules may have changed; the record is written only
-		// when the key is new or another rule dropped it.
-		if rule, ok := r.Queue.DroppedBy(it.Key); ok && rule == p.Rule {
+		if !r.Send {
 			return p, nil
 		}
 		return p, r.Queue.Drop(queue.Dropped{Key: it.Key, Rule: p.Rule, DroppedAt: r.Now().UTC()})

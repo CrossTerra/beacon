@@ -79,7 +79,7 @@ func (a *app) main(ctx context.Context, args []string) int {
 	var err error
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "init":
-		err = a.cmdInit(rest)
+		err = a.cmdInit(ctx, rest)
 	case "run":
 		err = a.cmdRun(ctx, rest)
 	case "explain":
@@ -197,7 +197,7 @@ const emptyRules = `# Beacon rules. First match wins; an item no rule matches is
 rules: []
 `
 
-func (a *app) cmdInit(args []string) error {
+func (a *app) cmdInit(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("init")
 	url := fs.String("signal-url", "", "Signal base URL, https (or http to a loopback address)")
 	handle := fs.String("handle", "", "your Signal handle, @handle or act_…")
@@ -236,7 +236,7 @@ func (a *app) cmdInit(args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.stderr, "Signal key for %s (input hidden): ", cfg.Signal.URL)
-	secret, err := keychain.ReadSecret(a.stdin)
+	secret, err := keychain.ReadSecret(ctx, a.stdin)
 	fmt.Fprintln(a.stderr)
 	if err != nil {
 		return err

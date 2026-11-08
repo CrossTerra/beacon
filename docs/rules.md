@@ -85,7 +85,7 @@ A matcher is a plain string (exact), or a mapping with exactly one of the forms 
 | --- | --- |
 | `title` | The event title, and the thread title when the event opens one. Trimmed, and shortened to Signal's 300 characters. |
 | `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). |
-| `actor` | `metadata.actor`: who caused the change, when it was not the person (DEC-27). |
+| `actor` | `metadata.actor`: who caused the change, when it was not the person (DEC-27). On the person's own acts it is left out; their identity leaves only as `by`. |
 | `references` | `metadata.references`: explicit references to other subjects (DEC-17). |
 | any other source field | `metadata.fields.<name>`. |
 

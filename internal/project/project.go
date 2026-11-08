@@ -100,7 +100,8 @@ func Project(in Input) (*Body, []byte, error) {
 	for _, name := range r.Fields {
 		switch name {
 		case rules.FieldActor:
-			if it.Actor != "" {
+			// Other people only (DEC-27): the person's own identity leaves only as by, on own acts.
+			if it.Actor != "" && !it.Own {
 				meta["actor"] = it.Actor
 			}
 		case rules.FieldReferences:
