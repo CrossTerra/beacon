@@ -223,10 +223,15 @@ func (s *Source) serverNow() time.Time {
 }
 
 func cursorFrom(server time.Time, items []source.Item) ([]byte, error) {
+	// A server Date caps the cursor. A git author date can be ahead of GitHub; advancing to it would skip the
+	// window until that date. Events already collected are deduped by key. With no Date, the newest event time
+	// is the only clock the server gave us.
 	t := server
-	for _, it := range items {
-		if it.OccurredAt.After(t) {
-			t = it.OccurredAt
+	if t.IsZero() {
+		for _, it := range items {
+			if it.OccurredAt.After(t) {
+				t = it.OccurredAt
+			}
 		}
 	}
 	if t.IsZero() {

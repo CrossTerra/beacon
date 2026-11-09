@@ -578,7 +578,8 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		}
 		switch e.Event {
 		case "committed":
-			if err := emit(e.SHA, loginOf(e.Author), eventTime(e)); err != nil {
+			// Author date is not the push time, and a skewed author clock must not stamp the item. The key is the sha.
+			if err := emit(e.SHA, loginOf(e.Author), in.Observed); err != nil {
 				return err
 			}
 		case "head_ref_force_pushed":

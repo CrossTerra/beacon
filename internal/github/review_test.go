@@ -157,6 +157,47 @@ func TestPushIgnoresCommitTime(t *testing.T) {
 	}
 }
 
+func TestFutureAuthorDateDoesNotJumpCursor(t *testing.T) {
+	const date = "Sun, 08 Nov 2026 12:00:00 GMT"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", date)
+		switch {
+		case r.URL.Path == "/user":
+			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/user/teams":
+			io.WriteString(w, `[]`)
+		case r.URL.Path == "/search/issues" && strings.Contains(r.URL.Query().Get("q"), "is:open"):
+			io.WriteString(w, `{"total_count":0,"items":[]}`)
+		case r.URL.Path == "/search/issues":
+			io.WriteString(w, `{"total_count":1,"items":[{"number":1,"updated_at":"2026-11-08T12:00:00Z","user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
+			io.WriteString(w, `{"id":1,"number":1,"title":"Skew","html_url":"https://github.com/acme/app/pull/1","state":"open","user":{"login":"dana"},"created_at":"2026-10-01T00:00:00Z","head":{"ref":"x","sha":"future"},"base":{"ref":"main"}}`)
+		case strings.HasSuffix(r.URL.Path, "/issues/1/timeline"):
+			io.WriteString(w, `[{"id":1,"event":"reviewed","user":{"login":"winton"},"state":"APPROVED","commit_id":"old","submitted_at":"2026-11-01T00:00:00Z"},{"event":"committed","sha":"future","author":{"email":"a@b.c","date":"2030-01-01T00:00:00Z"}}]`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Next) != "2026-11-08T12:00:00Z" {
+		t.Fatalf("author date moved the cursor: %s", got.Next)
+	}
+	found := false
+	for _, it := range got.Items {
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:future") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("push with a future author date was dropped")
+	}
+}
+
 func TestBare403FailsThePass(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")

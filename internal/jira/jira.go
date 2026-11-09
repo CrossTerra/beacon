@@ -165,10 +165,13 @@ func (s *Source) serverNow() time.Time {
 }
 
 func jiraCursor(server time.Time, items []source.Item) ([]byte, error) {
+	// A server Date caps the cursor. An event time ahead of the server must not skip the window until that time.
 	t := server
-	for _, it := range items {
-		if it.OccurredAt.After(t) {
-			t = it.OccurredAt
+	if t.IsZero() {
+		for _, it := range items {
+			if it.OccurredAt.After(t) {
+				t = it.OccurredAt
+			}
 		}
 	}
 	if t.IsZero() {

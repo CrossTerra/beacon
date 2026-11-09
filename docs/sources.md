@@ -15,10 +15,11 @@ limit or a failed collect leaves the cursor where it is. An item that fails vali
 could not be projected, is dropped and logged by count, with a fixed reason code and no item content. That does not
 freeze the source: the cursor still moves.
 
-The next cursor is the later of the newest event time in the pass and the latest `Date` header the server sent. It
-is never the local clock. A pass reads from the committed cursor minus 15 minutes, so indexing lag and clock skew
-land in an overlap. Keys make that overlap harmless. If the server sent no `Date` and the pass saw no event time,
-the cursor is not moved.
+The next cursor is the latest `Date` header the server sent. It is never the local clock, and an event time ahead of
+that header (a git author date can be) does not move it: the event was already collected, and keys make a later pass
+that sees it again harmless. With no `Date`, the cursor is the newest event time. If the server sent no `Date` and
+the pass saw no event time, the cursor is not moved. A pass reads from the committed cursor minus 15 minutes, so
+indexing lag and clock skew land in an overlap.
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run).
@@ -117,8 +118,8 @@ since 15 minutes before the cursor. The JQL date is formatted in the account's t
 evaluates `updated` for this token. The `text ~ account id` clause is not verified against live ADF mentions.
 Mentions are also taken from fetched comments, including ADF mention nodes, so a mention in a comment Beacon
 fetched is addressed even when that search clause misses it. The changelog is fetched in full; entries before the
-lookback window are not emitted. Comments before that window are not emitted. The next cursor is the later of the
-newest event time and the server `Date` header, never the local clock.
+lookback window are not emitted. Comments before that window are not emitted. The next cursor is the server `Date`
+header, never the local clock or an event time ahead of that header.
 
 **First run.** Unresolved issues assigned to the person. Not their history: comments are not read. One `assigned`
 item per issue, keyed by the latest assignment's changelog id, or `open` when the issue has none.
