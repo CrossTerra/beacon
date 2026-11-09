@@ -27,10 +27,11 @@ import (
 )
 
 type fakeSource struct {
-	items  []source.Item
-	err    error
-	next   []byte
-	cursor []byte
+	items   []source.Item
+	dropped int
+	err     error
+	next    []byte
+	cursor  []byte
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
@@ -39,7 +40,7 @@ func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
 func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
 	f.cursor = append([]byte(nil), cursor...)
-	return source.Collected{Items: f.items, Next: f.next}, f.err
+	return source.Collected{Items: f.items, Next: f.next, Dropped: f.dropped}, f.err
 }
 
 func items() []source.Item {
@@ -425,6 +426,24 @@ func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
 		if p.Item.Key == "fx:obj:4:1" && p.Err == nil {
 			t.Fatal("an item that still does not fit was not held as a projection error")
 		}
+	}
+}
+
+func TestDroppedDoesNotUndercountCollected(t *testing.T) {
+	f := newFixture(t)
+	f.src.items = items()[:1]
+	f.src.dropped = 3
+	r, done := f.runner(false, nil)
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	log := f.log.String()
+	if strings.Contains(log, `"items":-`) || !strings.Contains(log, `"msg":"collected"`) {
+		t.Fatalf("collected count: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"item_invalid"`) || !strings.Contains(log, `"items":3`) {
+		t.Fatalf("dropped count: %s", log)
 	}
 }
 

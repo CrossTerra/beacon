@@ -52,7 +52,8 @@ owner's user or organization, and a result from any other repository is not fetc
 search API. The qualifier is `updated:>=` with an RFC3339 timestamp, one repository qualifier per query (an OR of
 `repo:` qualifiers matches nothing). A hit whose `updated_at` is before that window is not fetched, so a pass does
 not re-read every pull request updated that day. If an owner search reports more than 1000 results, it is split into one query per repository in that owner, so the
-newest are not cut off and the source does not stall. A single repository that itself reports more than 1000 fails
+newest are not cut off and the source does not stall. The token user's repositories, including private ones, are
+listed from `/user/repos`. A single repository that itself reports more than 1000 fails
 the pass and the cursor stays: results are ordered oldest first. The search does not use a login
 qualifier: some tokens can read the repositories and still cannot search a user. A pull request the person is not
 involved in (author, assignee, reviewer, review requested of them or of a team they are in, mentioned, or commenter)

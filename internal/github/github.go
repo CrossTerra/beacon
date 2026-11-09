@@ -49,6 +49,7 @@ type Source struct {
 	now      func() time.Time
 	clock    source.Clock
 	teams    map[string]bool
+	login    string
 }
 
 // New builds a source. It does not read the token.
@@ -160,6 +161,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if s.identity != "" && !strings.EqualFold(s.identity, "github:user:"+login) {
 		return source.Collected{}, source.ErrIdentity
 	}
+	s.login = login
 	s.teams, err = s.userTeams(ctx, secret)
 	if err != nil {
 		return source.Collected{}, err
@@ -456,9 +458,13 @@ func stripOwnerQualifier(q, kind, owner string) string {
 }
 
 func (s *Source) listRepos(ctx context.Context, secret keychain.Secret, owner, kind string) ([]string, error) {
-	path := s.base + "/users/" + url.PathEscape(owner) + "/repos?per_page=100"
-	if kind == "org" {
-		path = s.base + "/orgs/" + url.PathEscape(owner) + "/repos?per_page=100"
+	// /users/{owner}/repos is public repos only. The token user's own repos, including private ones, are /user/repos.
+	path := s.base + "/users/" + url.PathEscape(owner) + "/repos?per_page=100&type=owner"
+	switch {
+	case kind == "org":
+		path = s.base + "/orgs/" + url.PathEscape(owner) + "/repos?per_page=100&type=all"
+	case strings.EqualFold(owner, s.login):
+		path = s.base + "/user/repos?per_page=100&visibility=all"
 	}
 	var names []string
 	err := s.each(ctx, secret, path, func(body []byte) error {

@@ -164,19 +164,21 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			commit = false
 		}
 		fields, stateFields := s.Fields(), s.StateFields()
-		invalid := got.Dropped
+		invalid := 0
+		kept := 0
 		for _, it := range got.Items {
 			if it.Source != s.Name() || source.Validate(it, fields, stateFields) != nil {
 				invalid++
 				continue
 			}
+			kept++
 			items = append(items, it)
 		}
-		if invalid > 0 {
-			// A bad item is counted and dropped. It must not freeze the source: the cursor still moves.
-			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid), logs.Why(logs.ReasonItem))
+		// Dropped items were never in Items. Count them apart so the collected count cannot go negative.
+		if invalid+got.Dropped > 0 {
+			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid+got.Dropped), logs.Why(logs.ReasonItem))
 		}
-		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", len(got.Items)-invalid))
+		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept))
 		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
 	}
 	sort.SliceStable(items, func(i, j int) bool {

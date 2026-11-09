@@ -102,7 +102,7 @@ func (s scope) allow(raw string) error {
 	path := strings.TrimPrefix(u.Path, "/api/v3")
 	path = strings.Trim(path, "/")
 	switch path {
-	case "user", "user/teams", "search/issues":
+	case "user", "user/teams", "user/repos", "search/issues":
 		return nil
 	}
 	parts := strings.Split(path, "/")

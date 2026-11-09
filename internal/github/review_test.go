@@ -522,6 +522,43 @@ func TestSearchSplitsByRepository(t *testing.T) {
 	}
 }
 
+func TestUserSplitListsPrivateRepos(t *testing.T) {
+	var sawUserRepos, sawPublicOnly bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		switch {
+		case r.URL.Path == "/user" && r.URL.RawQuery == "":
+			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/user/teams":
+			io.WriteString(w, `[]`)
+		case r.URL.Path == "/users/winton":
+			io.WriteString(w, `{"login":"winton","type":"User"}`)
+		case r.URL.Path == "/user/repos":
+			sawUserRepos = true
+			io.WriteString(w, `[{"name":"app"}]`)
+		case r.URL.Path == "/users/winton/repos":
+			sawPublicOnly = true
+			io.WriteString(w, `[]`)
+		case r.URL.Path == "/search/issues" && strings.Contains(r.URL.Query().Get("q"), "user:winton"):
+			io.WriteString(w, `{"total_count":1001,"items":[]}`)
+		case r.URL.Path == "/search/issues":
+			io.WriteString(w, `{"total_count":1,"items":[{"number":1,"updated_at":"2026-11-08T12:00:00Z","user":{"login":"winton"},"repository_url":"https://api.github.com/repos/winton/app","pull_request":{"url":"x"}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
+			io.WriteString(w, strings.ReplaceAll(pr9, "acme/app", "winton/app"))
+		case strings.Contains(r.URL.Path, "check-suites"):
+			io.WriteString(w, `{"check_suites":[]}`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"winton/*"}, nil)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err != nil || got.Next == nil || !sawUserRepos || sawPublicOnly {
+		t.Fatalf("private repos missed: err %v next %s user %v public %v", err, got.Next, sawUserRepos, sawPublicOnly)
+	}
+}
+
 func TestOldPushNotEmitted(t *testing.T) {
 	in := buildInput{
 		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
