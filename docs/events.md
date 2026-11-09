@@ -124,7 +124,7 @@ requires `mode: send` and the lease. It logs counts only.
 - A rejected event with no stored item is counted and not sent by this command. The refused body is not enough to rebuild the item.
 - The current rules decide. `send` projects again, and a field leaves only when both the stored decision and the current rule list it. `hold` or `never`, including a seed `never`, records the entry `superseded` and does not send.
 - The new body is appended and synced before it is sent. The refused body stays in the file. A pending retry, including one left pending because the lease ran out, is sent later as those exact bytes.
-- `closes` includes an ask an earlier retry in the same pass opened, and an ask the outbox still has open.
+- `closes` includes an ask the outbox still has open, including one an earlier retry in this pass sent. A refusal is not an open ask.
 
 A `400` with no stored item does not count as decided. Signal never stored it, so it must not block a later
 decision. When a collect yields that key again, Beacon decides it, appends a new attempt with the decided item, and

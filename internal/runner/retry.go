@@ -81,7 +81,7 @@ func (r *Runner) RetryRejected(ctx context.Context) (*RetryReport, error) {
 			rep.LeaseReason = logs.ReasonLeaseExpired
 			break
 		}
-		b, body, tier, perr := r.reproject(e.Decision, view)
+		_, body, tier, perr := r.reproject(e.Decision, view)
 		if perr != nil {
 			rep.Failed++
 			continue
@@ -98,8 +98,6 @@ func (r *Runner) RetryRejected(ctx context.Context) (*RetryReport, error) {
 			}
 			continue
 		}
-		// Record the ask before the next item's closes are computed, including one this pass just requeued.
-		view.record(e.Subject, e.Key, b)
 		if err := r.Outbox.Requeue(e.Key, body); err != nil {
 			r.logRetry(rep)
 			return rep, err
