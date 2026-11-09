@@ -32,6 +32,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/queue"
 	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/runner"
+	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
@@ -628,6 +629,9 @@ func (a *app) cmdOutbox(args []string) error {
 		if e.State == outbox.Rejected {
 			ev = fmt.Sprintf("%d %s", e.Status, e.Code)
 		}
+		if e.State == outbox.Superseded {
+			ev = e.Code
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.AppendedAt.Format(time.RFC3339), e.UpdatedAt.Format(time.RFC3339),
 			e.State, e.Kind, e.Key, dash(ev), dash(e.Rule))
 		if *bodies {
@@ -689,8 +693,12 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 	if a.configureClient != nil {
 		a.configureClient(client)
 	}
+	sf, err := seed.ReadDir(e.cfg.StatePath())
+	if err != nil {
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
+	}
 	r := &runner.Runner{
-		Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now,
+		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf,
 		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 			Period: e.cfg.LeasePeriod(), Now: a.now},
 	}
@@ -723,8 +731,8 @@ func (a *app) printRetry(rep *runner.RetryReport) {
 			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
 		}
 	}
-	fmt.Fprintf(w, "Retry: sent %d, replayed %d, refused %d, conflict %d, missing %d, failed %d.\n",
-		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed)
+	fmt.Fprintf(w, "Retry: sent %d, replayed %d, refused %d, conflict %d, missing %d, failed %d, hold %d, never %d.\n",
+		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed, rep.Held, rep.Never)
 	fmt.Fprintf(w, "Pending: %d.\n", rep.Pending)
 	if rep.Missing > 0 {
 		fmt.Fprintf(w, "%d rejected events have no stored item and were not sent by this command. beacon cursor reset SOURCE, then beacon run --once, re-collects open state and sends a 400 if that collect yields the key. It does not re-read history. A 409 is not sent.\n", rep.Missing)

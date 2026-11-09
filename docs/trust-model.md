@@ -10,7 +10,7 @@ same pull request.
 | --- | --- |
 | Events a rule sent: the projected fields and state fields only | Source credentials (OAuth refresh tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
-| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (including the decided item stored with an append), the cursors, the seed file, classifier input and output |
+| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (the stored decision keeps listed fields only, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
@@ -34,9 +34,10 @@ same pull request.
    already holds. A body Signal accepted (`sent`, `replayed`) is never resent and never rewritten. A `409` is never
    retried and never decided again. A `400` with no stored item is not a decision: `beacon run` may decide that key
    again when a source yields it, append a new attempt, and send it. The refused lines stay in the file. Any other
-   refusal is not sent again by `beacon run`. `beacon outbox retry --rejected` may re-project a refusal from the
-   decided item stored with the append, append the new body, and send it. The command logs counts only. The decided
-   item does not leave the machine.
+   refusal is not sent again by `beacon run`. `beacon outbox retry --rejected` runs the current rules on the stored
+   item. It sends only when they still send, and only fields both the stored decision and the current rule list. If
+   they hold or drop it, the entry is recorded superseded and not sent. The command logs counts only. The stored
+   decision keeps listed fields only; an unlisted field, including a body, is not written and does not leave.
 6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
    hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
    refuses any other host before connecting. Proxy settings from the environment are ignored and redirects are not

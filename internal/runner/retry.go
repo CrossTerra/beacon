@@ -9,6 +9,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/project"
+	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/signal"
 )
 
@@ -22,21 +23,26 @@ type RetryReport struct {
 	// Missing is rejected entries with no stored decision. They cannot be rebuilt.
 	Missing int
 	// Failed is entries that could not be projected. They stay rejected.
-	Failed  int
+	Failed int
+	// Held and Never are refusals the current rules no longer send. They were not sent.
+	Held    int
+	Never   int
 	Pending int
 	Lease   *lease.Status
 	// LeaseReason is set when the lease could not be taken, or the pass stopped because it ran out.
 	LeaseReason logs.Reason
 }
 
-// RetryRejected re-projects rejected events Signal did not store and sends the new bodies. It never sends an entry
-// Signal accepted, and it never touches a 409. An entry with no stored decision is counted and left as it is.
-// Sending still requires the lease. A body is appended and synced before it is sent; if the lease runs out after
-// that, the body stays pending for the next pass, which sends those exact bytes.
+// RetryRejected re-decides rejected events from the stored item and the current rules, and sends only what those
+// rules still send. It never sends an entry Signal accepted, and it never touches a 409. A field leaves only when
+// both the stored decision and the current rule list it. An entry the rules now hold or drop is recorded as
+// superseded and not sent. An entry with no stored item is counted and left as it is. Sending still requires the
+// lease. A body is appended and synced before it is sent; if the lease runs out after that, the body stays pending
+// for the next pass, which sends those exact bytes.
 func (r *Runner) RetryRejected(ctx context.Context) (*RetryReport, error) {
 	rep := &RetryReport{}
-	if r.Outbox == nil || r.Writer == nil || r.Lease == nil {
-		return rep, errors.New("runner: retrying needs an outbox, a writer and a lease")
+	if r.Outbox == nil || r.Writer == nil || r.Lease == nil || r.Rules == nil {
+		return rep, errors.New("runner: retrying needs an outbox, a writer, a lease and the rules")
 	}
 	st, err := r.Lease.Ensure(ctx)
 	rep.Lease = &st
@@ -75,11 +81,25 @@ func (r *Runner) RetryRejected(ctx context.Context) (*RetryReport, error) {
 			rep.LeaseReason = logs.ReasonLeaseExpired
 			break
 		}
-		body, perr := r.reproject(e.Decision, view)
+		b, body, tier, perr := r.reproject(e.Decision, view)
 		if perr != nil {
 			rep.Failed++
 			continue
 		}
+		if tier != rules.Send {
+			if err := r.Outbox.Supersede(e.Key, string(tier)); err != nil {
+				r.logRetry(rep)
+				return rep, err
+			}
+			if tier == rules.Hold {
+				rep.Held++
+			} else {
+				rep.Never++
+			}
+			continue
+		}
+		// Record the ask before the next item's closes are computed, including one this pass just requeued.
+		view.record(e.Subject, e.Key, b)
 		if err := r.Outbox.Requeue(e.Key, body); err != nil {
 			r.logRetry(rep)
 			return rep, err
@@ -106,17 +126,38 @@ func (r *Runner) logRetry(rep *RetryReport) {
 		logs.Count("conflict", rep.Conflict),
 		logs.Count("missing", rep.Missing),
 		logs.Count("failed", rep.Failed),
+		logs.Count("hold", rep.Held),
+		logs.Count("never", rep.Never),
 		logs.Count("pending", rep.Pending),
 	)
 }
 
-func (r *Runner) reproject(raw []byte, view *asks) ([]byte, error) {
+// reproject runs the current rules on the stored item. A send uses only fields both the stored decision and the
+// current rule list. Hold and never are returned without a body.
+func (r *Runner) reproject(raw []byte, view *asks) (*project.Body, []byte, rules.Tier, error) {
 	var d project.Decision
 	if err := json.Unmarshal(raw, &d); err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
-	_, body, _, err := r.project(d.Item, d.Rule(), view)
-	return body, err
+	if r.Seed != nil && r.Seed.Drops(d.Item.Subject) {
+		return nil, nil, rules.Never, nil
+	}
+	decided := r.Rules.Decide(d.Item)
+	if decided.Tier != rules.Send {
+		if decided.Tier == rules.Hold {
+			return nil, nil, rules.Hold, nil
+		}
+		return nil, nil, rules.Never, nil
+	}
+	rule := d.Narrow(decided.Rule)
+	if rule == nil {
+		return nil, nil, rules.Never, nil
+	}
+	b, body, _, err := r.project(d.Item, rule, view)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return b, body, rules.Send, nil
 }
 
 // sendRequeued writes one requeued body and records Signal's answer. stopped is true when the pass should end and

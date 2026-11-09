@@ -35,10 +35,18 @@ const (
 	// Replayed was already in Signal from an earlier send of the same bytes (200, replayed).
 	Replayed State = "replayed"
 	// Rejected was refused by Signal. beacon run does not send it again. A 409 stays final. Any other refusal may be
-	// re-projected by an explicit retry when the decided item was stored.
+	// re-projected by an explicit retry when the decided item was stored, and only if the current rules still send it.
 	Rejected State = "rejected"
+	// Superseded is a refusal the current rules no longer send. It is not sent. Code is hold or never.
+	Superseded State = "superseded"
 	// Expired is a lease claim whose period ended before Signal answered it. It is never sent again.
 	Expired State = "expired"
+)
+
+// Tiers recorded on a superseded refusal. They are fixed codes, not item content.
+const (
+	TierHold  = "hold"
+	TierNever = "never"
 )
 
 // Kind says what a body is for.
@@ -233,6 +241,19 @@ func (o *Outbox) apply(rec record) error {
 		o.order = append(o.order, rec.Key)
 		return nil
 	}
+	if rec.State == Superseded {
+		if !ok {
+			return fmt.Errorf("key %q superseded before it was appended", rec.Key)
+		}
+		if e.Kind != Event || e.State != Rejected || conflict(e) {
+			return fmt.Errorf("key %q: cannot supersede %s", rec.Key, e.State)
+		}
+		if rec.Code != TierHold && rec.Code != TierNever {
+			return fmt.Errorf("key %q: superseded tier %q", rec.Key, rec.Code)
+		}
+		e.State, e.Code, e.UpdatedAt = Superseded, rec.Code, rec.At
+		return nil
+	}
 	if !ok {
 		return fmt.Errorf("key %q changes state before it was appended", rec.Key)
 	}
@@ -386,11 +407,29 @@ func (o *Outbox) AppendAttempt(key, subject, rule string, body, decision []byte)
 	return o.apply(rec)
 }
 
+// Supersede records that the current rules no longer send a rejected event. It does not send. The refused lines stay.
+// tier is hold or never.
+func (o *Outbox) Supersede(key, tier string) error {
+	e, ok := o.entries[key]
+	if !ok || e.Kind != Event || e.State != Rejected || conflict(e) || len(e.Decision) == 0 {
+		return ErrNotRetryable
+	}
+	if tier != TierHold && tier != TierNever {
+		return errors.New("outbox: a superseded entry is hold or never")
+	}
+	rec := record{Key: key, State: Superseded, At: o.now().UTC(), Code: tier}
+	if err := o.write(rec); err != nil {
+		return err
+	}
+	return o.apply(rec)
+}
+
 // Requeue appends a new body for a rejected event Signal did not store and sets the key pending. It refuses an
-// entry Signal accepted, a pending entry, a lease claim, and any 409. The original refused body stays in the file.
+// entry Signal accepted, a pending entry, a lease claim, a 409, and a refusal with no stored item. The original
+// refused body stays in the file.
 func (o *Outbox) Requeue(key string, body []byte) error {
 	e, ok := o.entries[key]
-	if !ok || e.Kind != Event || e.State != Rejected || conflict(e) {
+	if !ok || e.Kind != Event || e.State != Rejected || conflict(e) || len(e.Decision) == 0 {
 		return ErrNotRetryable
 	}
 	if !json.Valid(body) {
@@ -501,12 +540,12 @@ func (o *Outbox) PendingEvents() []Entry {
 }
 
 // OpenAsks returns the keys of event bodies on subject that ask someone and that no other body closes, oldest
-// first. Rejected bodies count for neither.
+// first. Rejected and superseded bodies count for neither: they were not sent.
 func (o *Outbox) OpenAsks(subject string) []string {
 	closed := map[string]bool{}
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.State == Rejected {
+		if e.State == Rejected || e.State == Superseded {
 			continue
 		}
 		for _, c := range e.Closes {
@@ -516,7 +555,7 @@ func (o *Outbox) OpenAsks(subject string) []string {
 	var out []string
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.Kind == Event && e.Subject == subject && e.Asks && e.State != Rejected && !closed[k] {
+		if e.Kind == Event && e.Subject == subject && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
 			out = append(out, k)
 		}
 	}

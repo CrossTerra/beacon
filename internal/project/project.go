@@ -91,8 +91,8 @@ type Input struct {
 	Truncated bool
 }
 
-// Decision is the item and the rule snapshot a send used, kept so a refused event can be projected again.
-// It stays on the machine. Only the body Project builds from it leaves.
+// Decision is what a later pass needs to decide the item again and project it. It keeps the ids, times, and the
+// fields the rule listed. It does not keep an unlisted field, including a body. It stays on the machine.
 type Decision struct {
 	Item          source.Item `json:"item"`
 	Fields        []string    `json:"fields,omitempty"`
@@ -103,9 +103,15 @@ type Decision struct {
 	Truncated     bool        `json:"truncated,omitempty"`
 }
 
-// Decide records what Project needs from a send that was already decided.
+// Decide records the ids, times, and listed fields a send used. An unlisted field is not copied.
 func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
-	d := Decision{Item: it, Truncated: truncated}
+	d := Decision{
+		Truncated: truncated,
+		Item: source.Item{
+			Source: it.Source, Subject: it.Subject, Key: it.Key, Type: it.Type,
+			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
+		},
+	}
 	if rule == nil {
 		return d
 	}
@@ -114,19 +120,73 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
 	d.Ask = rule.Ask
 	d.Priority = rule.Priority
 	d.CloseByOthers = rule.CloseByOthers
+	fields := map[string]string{}
+	for _, name := range rule.Fields {
+		switch name {
+		case rules.FieldActor:
+			d.Item.Actor = it.Actor
+		case rules.FieldReferences:
+			if len(it.References) > 0 {
+				d.Item.References = append([]string(nil), it.References...)
+			}
+		default:
+			if v, ok := it.Fields[name]; ok {
+				fields[name] = v
+			}
+		}
+	}
+	if len(fields) > 0 {
+		d.Item.Fields = fields
+	}
+	state := map[string]string{}
+	for _, name := range rule.State {
+		if name == source.StateObservedAt || name == source.StateVersion {
+			continue
+		}
+		if v, ok := it.State[name]; ok {
+			state[name] = v
+		}
+	}
+	if len(state) > 0 {
+		d.Item.State = state
+		d.Item.ObservedAt = it.ObservedAt
+		d.Item.Version = it.Version
+	}
 	return d
 }
 
-// Rule is the snapshot Project needs. The tier is send: the item was already decided.
-func (d Decision) Rule() *rules.Rule {
-	return &rules.Rule{
-		Tier:          rules.Send,
-		Fields:        append([]string(nil), d.Fields...),
-		State:         append([]string(nil), d.State...),
-		Ask:           d.Ask,
-		Priority:      d.Priority,
-		CloseByOthers: d.CloseByOthers,
+// Narrow is a send rule whose fields, state, ask, and close are listed by both this decision and the current rule.
+// Nil when the current rule does not send: a retry must not widen what leaves.
+func (d Decision) Narrow(current *rules.Rule) *rules.Rule {
+	if current == nil || current.Tier != rules.Send {
+		return nil
 	}
+	r := &rules.Rule{
+		Name:   current.Name,
+		Tier:   rules.Send,
+		Fields: intersect(d.Fields, current.Fields),
+		State:  intersect(d.State, current.State),
+	}
+	if d.Ask == "me" && current.Ask == "me" {
+		r.Ask = "me"
+		r.Priority = current.Priority
+	}
+	r.CloseByOthers = d.CloseByOthers && current.CloseByOthers
+	return r
+}
+
+func intersect(stored, current []string) []string {
+	have := map[string]bool{}
+	for _, name := range current {
+		have[name] = true
+	}
+	var out []string
+	for _, name := range stored {
+		if have[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Project builds the request body and its bytes. It fails if the rule does not send or hold, or if the body would

@@ -78,9 +78,9 @@ A body over Signal's 64 KB request limit, or with a body over 64 KB, is not appe
 ```
 
 `body` is the exact request body as a JSON string; `sha256` is its digest, checked on every load. `decision` is the
-item and the rule snapshot used to project it, also checked against `decision_sha256`. It stays on the machine and
-is not part of the request. `beacon outbox` does not print it. An append from before this was stored has no
-`decision`. Each later line records Signal's answer and is the key's state from then on:
+ids, times, and listed fields used to project the body, also checked against `decision_sha256`. An unlisted field,
+including a body, is not stored. It stays on the machine and is not part of the request. `beacon outbox` does not
+print it. An append from before this was stored has no `decision`. Each later line records Signal's answer and is the key's state from then on:
 
 ```json
 {"key":"github:pr:acme/app#7:42","state":"sent","at":"…","event_id":"evt_…","status":201}
@@ -91,7 +91,8 @@ is not part of the request. `beacon outbox` does not print it. An append from be
 | `pending` | Appended and synced; not yet answered. | Sent, with the stored bytes, by the next pass that holds the lease. |
 | `sent` | `201`: Signal wrote it. | Final. |
 | `replayed` | `200` with `replayed: true`: Signal already had these bytes under this key, for example after a crash between send and record. | Final. |
-| `rejected` | Signal refused it: `409` (the key holds another request, or another conflict), or another final 4xx. `status`, `code` and `message` say why. | A `409` is final. A `400` with no stored item is not a decision: the next collect that yields the key decides it again and appends a new attempt. Any other refusal is final for `beacon run`, and may be re-projected by `beacon outbox retry --rejected` when `decision` was stored. The refused lines stay in the file. |
+| `rejected` | Signal refused it: `409` (the key holds another request, or another conflict), or another final 4xx. `status`, `code` and `message` say why. | A `409` is final. A `400` with no stored item is not a decision: the next collect that yields the key decides it again and appends a new attempt. Any other refusal may be re-decided by `beacon outbox retry --rejected` when `decision` was stored. The refused lines stay in the file. |
+| `superseded` | The current rules no longer send a refusal. `code` is `hold` or `never`. | Final. Not sent. |
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
 `kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
@@ -115,14 +116,15 @@ body was never sent. The directory is synced when the outbox file is created, so
 
 ### Retrying a refusal
 
-`beacon outbox retry --rejected` re-projects rejected events from the stored decision and sends the new bodies. It
+`beacon outbox retry --rejected` runs the current rules on the stored item and sends only what they still send. It
 requires `mode: send` and the lease. It logs counts only.
 
 - An entry Signal accepted (`sent`, `replayed`) is not sent again.
 - A `409` is not touched. Signal already holds a request under that key, or refused a conflict a new body must not paper over.
-- A rejected event with no stored decision is counted and not sent by this command. The refused body is not enough to rebuild the item.
+- A rejected event with no stored item is counted and not sent by this command. The refused body is not enough to rebuild the item.
+- The current rules decide. `send` projects again, and a field leaves only when both the stored decision and the current rule list it. `hold` or `never`, including a seed `never`, records the entry `superseded` and does not send.
 - The new body is appended and synced before it is sent. The refused body stays in the file. A pending retry, including one left pending because the lease ran out, is sent later as those exact bytes.
-- The field list is the one that decided the send, not the rules file as it is now, so a later rule cannot add fields. The projection code is the current one. `closes` is taken from the outbox as it is now, so a retry does not name an ask that is no longer open.
+- `closes` includes an ask an earlier retry in the same pass opened, and an ask the outbox still has open.
 
 A `400` with no stored item does not count as decided. Signal never stored it, so it must not block a later
 decision. When a collect yields that key again, Beacon decides it, appends a new attempt with the decided item, and

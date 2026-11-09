@@ -28,8 +28,9 @@ One pass of `beacon run`:
    refusal that still has its decided item, and does not touch a `409`.
 3. **Decide.** The first rule that matches sets the tier. No match is `never` (DEC-3).
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
-   builds the request body with the projection and appends it to the outbox, with the decided item, synced to disk,
-   before anything is sent (DEC-8). The decided item does not leave the machine. A body or request over Signal's limit is projected again without the body and marked truncated; if
+   builds the request body with the projection and appends it to the outbox, with the listed fields and the ids and
+   times needed to decide it again, synced to disk, before anything is sent (DEC-8). An unlisted field is not
+   stored. The stored decision does not leave the machine. A body or request over Signal's limit is projected again without the body and marked truncated; if
    that still does not fit, the item is held, not dropped. A source whose first run has not been accepted is
    reported and not recorded.
 5. **Commit.** The source's cursor is stored only after every item of the pass has been recorded, and only on a

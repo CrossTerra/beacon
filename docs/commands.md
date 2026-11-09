@@ -53,11 +53,12 @@ prints one JSON object per entry, with the body. Neither prints the decided item
 
 ## `beacon outbox retry --rejected`
 
-Re-projects rejected events from the decided item stored with the append, and sends the new bodies. It requires
-`mode: send` and the lease. It does not send an entry Signal accepted, and it does not touch a `409`. An entry
-with no stored item is not sent by this command. A `400` of that kind is decided again when the key is collected.
-The log and the summary are counts only: sent, replayed,
-refused, conflict, missing, failed, pending. See [`events.md`](events.md#retrying-a-refusal).
+Runs the current rules on each stored item and sends only what they still send. A field leaves only when both the
+stored decision and the current rule list it. If the rules now hold or drop the item, the entry is recorded
+`superseded` and not sent. It requires `mode: send` and the lease. It does not send an entry Signal accepted, and
+it does not touch a `409`. An entry with no stored item is not sent by this command. A `400` of that kind is
+decided again when a later collect yields the key. The log and the summary are counts only: sent, replayed,
+refused, conflict, missing, failed, hold, never, pending. See [`events.md`](events.md#retrying-a-refusal).
 
 ```bash
 beacon outbox retry --rejected

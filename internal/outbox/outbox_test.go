@@ -197,6 +197,15 @@ func TestRequeueRefusedOnly(t *testing.T) {
 			t.Fatalf("requeue %s: %v", key, err)
 		}
 	}
+	if err := o.Append(Event, "k-bare", "s", "", []byte(`{"key":"k-bare"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Mark("k-bare", Rejected, "", 400, "invalid", "no item"); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Requeue("k-bare", next); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("requeue without an item: %v", err)
+	}
 	if err := o.Requeue("k-refused", next); err != nil {
 		t.Fatal(err)
 	}

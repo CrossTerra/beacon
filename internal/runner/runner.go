@@ -204,11 +204,14 @@ func (a *asks) open(subject string) []string {
 	if a.ob != nil {
 		base = a.ob.OpenAsks(subject)
 	}
+	seen := map[string]bool{}
 	var out []string
 	for _, k := range append(base, a.added[subject]...) {
-		if !a.closed[k] {
-			out = append(out, k)
+		if a.closed[k] || seen[k] {
+			continue
 		}
+		seen[k] = true
+		out = append(out, k)
 	}
 	return out
 }

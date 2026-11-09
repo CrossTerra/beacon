@@ -821,7 +821,7 @@ func TestRetryRejected(t *testing.T) {
 		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
 	}
 	out, logs := h.stdout.String(), h.stderr.String()
-	if !strings.Contains(out, "Retry: sent 3, replayed 0, refused 0, conflict 1, missing 1, failed 0.") {
+	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1.") {
 		t.Fatalf("stdout:\n%s", out)
 	}
 	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
@@ -853,6 +853,9 @@ func TestRetryRejected(t *testing.T) {
 	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {
 		t.Fatalf("missing item was touched: %+v", e)
 	}
+	if e, _ := obRead.Get(want[3].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
+		t.Fatalf("a match on an unlisted field was sent: %+v", e)
+	}
 
 	sentEvents := len(eventRequests(h.server))
 	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
@@ -861,7 +864,7 @@ func TestRetryRejected(t *testing.T) {
 	if n := len(eventRequests(h.server)); n != sentEvents {
 		t.Fatalf("second retry sent %d more events", n-sentEvents)
 	}
-	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0.") {
+	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 0.") {
 		t.Fatalf("second retry:\n%s", h.stdout.String())
 	}
 }
@@ -931,6 +934,115 @@ func TestLegacyRejectionIsCollectedAgain(t *testing.T) {
 	}
 	if n := len(h.server.RequestsFor(want[0].key)); n != sent {
 		t.Fatalf("second run sent the key again: %d", n-sent)
+	}
+}
+
+// The current rules decide a retry. A removed field is not sent. Hold and never supersede the refusal and send nothing.
+func TestRetryObeysCurrentRules(t *testing.T) {
+	refuse := func(h *harness, cfg string) {
+		t.Helper()
+		h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+			if strings.HasPrefix(r.Key, "claim:") {
+				return signaltest.Reply{}
+			}
+			return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+		}
+		if code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg); code != 0 {
+			t.Fatal(h.stderr.String())
+		}
+		h.server.Script = nil
+	}
+	t.Run("removed field", func(t *testing.T) {
+		h := newHarness(t)
+		dir := t.TempDir()
+		cfg, want := writeSetup(t, dir, h.server.URL, "send", "narrow")
+		refuse(h, cfg)
+		rules := strings.Replace(testRules, "fields: [title, url, repository, actor]", "fields: [title, body]", 1)
+		must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(rules), 0o600))
+		before := len(h.server.RequestsFor(want[0].key))
+		if code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+			t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+		}
+		reqs := h.server.RequestsFor(want[0].key)
+		if len(reqs) != before+1 {
+			t.Fatalf("sent %d times", len(reqs)-before)
+		}
+		body := reqs[len(reqs)-1].Body
+		if !bytes.Contains(body, []byte(`"title":"Add retries"`)) || bytes.Contains(body, []byte(`"repository"`)) || bytes.Contains(body, []byte("UNLISTED-SECRET")) {
+			t.Fatalf("narrowed body: %s", body)
+		}
+	})
+	for _, c := range []struct {
+		name, rules, tier string
+	}{
+		{"hold", "rules:\n  - name: later\n    match: {}\n    tier: hold\n", outbox.TierHold},
+		{"never", "rules:\n  - name: later\n    match: {}\n    tier: never\n", outbox.TierNever},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			dir := t.TempDir()
+			cfg, want := writeSetup(t, dir, h.server.URL, "send", c.name)
+			refuse(h, cfg)
+			must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(c.rules), 0o600))
+			n := len(eventRequests(h.server))
+			if code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+				t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+			}
+			if got := len(eventRequests(h.server)); got != n {
+				t.Fatalf("superseded retry sent %d events", got-n)
+			}
+			ob, err := outbox.Read(filepath.Join(dir, "state"))
+			must(t, err)
+			if e, _ := ob.Get(want[0].key); e.State != outbox.Superseded || e.Code != c.tier {
+				t.Fatalf("%s: %+v", c.name, e)
+			}
+			if strings.Contains(h.stderr.String(), want[0].key) || strings.Contains(h.stderr.String(), "UNLISTED-SECRET") {
+				t.Fatalf("logs:\n%s", h.stderr.String())
+			}
+		})
+	}
+}
+
+// An ask requeued earlier in the same retry is closed by a later own act.
+func TestRetryClosesAskOpenedEarlier(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "closes")
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	var own []byte
+	for _, r := range h.server.RequestsFor(want[1].key) {
+		own = r.Body
+	}
+	if !bytes.Contains(own, []byte(`"closes":[{"key":"`+want[0].key+`"}]`)) {
+		t.Fatalf("own act did not close the ask opened earlier in the pass: %s", own)
+	}
+}
+
+// An unlisted body is not written to the outbox, including the stored decision.
+func TestOutboxOmitsUnlistedBody(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "omit")
+	if code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "state", outbox.FileName))
+	must(t, err)
+	if strings.Contains(string(data), "UNLISTED-SECRET") {
+		t.Fatalf("unlisted body was written to the outbox:\n%s", data)
 	}
 }
 
