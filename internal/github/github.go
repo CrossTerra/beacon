@@ -37,18 +37,18 @@ type Options struct {
 
 // Source reads GitHub.
 type Source struct {
-	name       string
-	host       string
-	hostPort   string
-	base       string
-	scope      scope
-	projects   map[string]bool
-	identity   string
-	token      func() (keychain.Secret, error)
-	http       *limited.Client
-	now        func() time.Time
-	serverDate time.Time
-	teams      map[string]bool
+	name     string
+	host     string
+	hostPort string
+	base     string
+	scope    scope
+	projects map[string]bool
+	identity string
+	token    func() (keychain.Secret, error)
+	http     *limited.Client
+	now      func() time.Time
+	clock    source.Clock
+	teams    map[string]bool
 }
 
 // New builds a source. It does not read the token.
@@ -136,6 +136,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
+	s.clock.Reset()
 	first := len(cursor) == 0
 	var since time.Time
 	if !first {
@@ -197,7 +198,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		if !s.scope.allowsRepo(hit.owner, hit.name) {
 			continue
 		}
-		got, err := s.pull(ctx, secret, hit, login, floor, first, s.serverNow())
+		got, err := s.pull(ctx, secret, hit, login, floor, first, s.observed())
 		if err != nil {
 			return source.Collected{Items: items}, err
 		}
@@ -206,38 +207,35 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if openErr != nil {
 		return source.Collected{Items: items}, openErr
 	}
-	next, err := cursorFrom(s.serverDate, items)
+	next, err := s.clock.Next(since, s.now(), sourceTimes(items))
 	if err != nil {
 		return source.Collected{Items: items}, err
 	}
 	return source.Collected{Items: items, Next: next}, nil
 }
 
-// serverNow is the latest Date header seen this pass, or the local clock only as a timestamp on items when the
-// server sent none. The cursor itself never uses the local clock.
-func (s *Source) serverNow() time.Time {
-	if !s.serverDate.IsZero() {
-		return s.serverDate
+// observed is the timestamp on a state snapshot. It is the server Date when we have one, and the local clock
+// only as "when we saw it". That local time is not a cursor.
+func (s *Source) observed() time.Time {
+	if t := s.clock.First(); !t.IsZero() {
+		return t
 	}
 	return s.now().UTC()
 }
 
-func cursorFrom(server time.Time, items []source.Item) ([]byte, error) {
-	// A server Date caps the cursor. A git author date can be ahead of GitHub; advancing to it would skip the
-	// window until that date. Events already collected are deduped by key. With no Date, the newest event time
-	// is the only clock the server gave us.
-	t := server
-	if t.IsZero() {
-		for _, it := range items {
-			if it.OccurredAt.After(t) {
-				t = it.OccurredAt
-			}
+// sourceTimes is the no-Date cursor fallback. Pushed and checks_changed are omitted: those stamps can be the
+// local clock, and must not move the cursor.
+func sourceTimes(items []source.Item) []time.Time {
+	var out []time.Time
+	for _, it := range items {
+		if it.Type == TypePushed || it.Type == TypeChecksChanged {
+			continue
+		}
+		if !it.OccurredAt.IsZero() {
+			out = append(out, it.OccurredAt)
 		}
 	}
-	if t.IsZero() {
-		return nil, errors.New("github: the server sent no Date and there is no event time")
-	}
-	return []byte(t.UTC().Format(time.RFC3339)), nil
+	return out
 }
 
 type hit struct {
@@ -254,16 +252,17 @@ func (h hit) key() string {
 func (s *Source) userTeams(ctx context.Context, secret keychain.Secret) (map[string]bool, error) {
 	out := map[string]bool{}
 	err := s.each(ctx, secret, s.base+"/user/teams?per_page=100", func(body []byte) error {
-		var page []struct {
-			Slug string `json:"slug"`
-		}
+		var page []ghTeam
 		if err := json.Unmarshal(body, &page); err != nil {
 			return errors.New("github: teams could not be read")
 		}
-		for _, t := range page {
-			if t.Slug != "" {
-				out[strings.ToLower(t.Slug)] = true
+		for i := range page {
+			key := page[i].key()
+			org, _, _ := strings.Cut(key, "/")
+			if key == "" || !s.scope.ownerConfigured(org) {
+				continue
 			}
+			out[key] = true
 		}
 		return nil
 	})
@@ -366,7 +365,29 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 			if err := json.Unmarshal(body, &resp); err != nil {
 				return nil, errors.New("github: the search response could not be read")
 			}
-			if resp.Incomplete || resp.Total > 1000 {
+			if resp.Total > 1000 {
+				split, err := s.splitSearch(ctx, secret, q)
+				if err != nil {
+					return nil, err
+				}
+				if len(split) == 0 {
+					return nil, errors.New("github: the search is incomplete; the newest results would be cut off")
+				}
+				got, err := s.search(ctx, secret, split, floor)
+				if err != nil {
+					return nil, err
+				}
+				for _, h := range got {
+					if seen[h.key()] {
+						continue
+					}
+					seen[h.key()] = true
+					hits = append(hits, h)
+				}
+				page = ""
+				break
+			}
+			if resp.Incomplete {
 				return nil, errors.New("github: the search is incomplete; the newest results would be cut off")
 			}
 			for _, item := range resp.Items {
@@ -394,6 +415,67 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 		}
 	}
 	return hits, nil
+}
+
+// splitSearch turns an owner query over the 1000-result cap into one query per repository. A single repository
+// that is itself over the cap cannot be split this way; the caller fails that pass.
+func (s *Source) splitSearch(ctx context.Context, secret keychain.Secret, q string) ([]string, error) {
+	owner, kind, ok := ownerInQuery(q)
+	if !ok || !s.scope.ownerConfigured(owner) {
+		return nil, nil
+	}
+	repos, err := s.listRepos(ctx, secret, owner, kind)
+	if err != nil {
+		return nil, err
+	}
+	prefix := stripOwnerQualifier(q, kind, owner)
+	var out []string
+	for _, name := range repos {
+		if !s.scope.allowsRepo(owner, name) {
+			continue
+		}
+		out = append(out, strings.TrimSpace(prefix)+" repo:"+owner+"/"+name)
+	}
+	return out, nil
+}
+
+func ownerInQuery(q string) (owner, kind string, ok bool) {
+	for _, part := range strings.Fields(q) {
+		switch {
+		case strings.HasPrefix(part, "org:"):
+			return strings.TrimPrefix(part, "org:"), "org", true
+		case strings.HasPrefix(part, "user:"):
+			return strings.TrimPrefix(part, "user:"), "user", true
+		}
+	}
+	return "", "", false
+}
+
+func stripOwnerQualifier(q, kind, owner string) string {
+	return strings.TrimSpace(strings.ReplaceAll(q, kind+":"+owner, ""))
+}
+
+func (s *Source) listRepos(ctx context.Context, secret keychain.Secret, owner, kind string) ([]string, error) {
+	path := s.base + "/users/" + url.PathEscape(owner) + "/repos?per_page=100"
+	if kind == "org" {
+		path = s.base + "/orgs/" + url.PathEscape(owner) + "/repos?per_page=100"
+	}
+	var names []string
+	err := s.each(ctx, secret, path, func(body []byte) error {
+		var page []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return errors.New("github: repositories could not be read")
+		}
+		for _, r := range page {
+			if r.Name != "" {
+				names = append(names, r.Name)
+			}
+		}
+		return nil
+	})
+	return names, err
 }
 
 func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login string, since time.Time, first bool, observed time.Time) ([]source.Item, error) {
@@ -615,23 +697,12 @@ func (s *Source) do(ctx context.Context, secret keychain.Secret, raw string) ([]
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, resp.StatusCode, "", source.ErrUnauthorized
 	}
-	s.noteDate(resp.Header)
+	s.clock.Note(resp.Header)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, resp.StatusCode, "", err
 	}
 	return body, resp.StatusCode, nextLink(resp.Header), nil
-}
-
-func (s *Source) noteDate(h http.Header) {
-	t, err := http.ParseTime(h.Get("Date"))
-	if err != nil {
-		return
-	}
-	t = t.UTC()
-	if t.After(s.serverDate) {
-		s.serverDate = t
-	}
 }
 
 func nextLink(h http.Header) string {

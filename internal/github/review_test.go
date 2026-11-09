@@ -139,7 +139,7 @@ func TestPushIgnoresCommitTime(t *testing.T) {
 			}{SHA: "newhead"}},
 		Timeline: []timelineEvent{
 			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "old", SubmittedAt: "2026-11-01T00:00:00Z"},
-			{Event: "committed", SHA: "newhead", Author: &ghUser{Email: "a@b.c", Date: "2026-10-01T00:00:00Z"}},
+			{Event: "committed", SHA: "newhead", Author: &ghUser{Email: "a@b.c", Date: "2026-10-01T00:00:00Z"}, Committer: &ghUser{Date: "2026-11-08T01:00:00Z"}},
 		},
 	}
 	items, err := build(in)
@@ -173,7 +173,7 @@ func TestFutureAuthorDateDoesNotJumpCursor(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
 			io.WriteString(w, `{"id":1,"number":1,"title":"Skew","html_url":"https://github.com/acme/app/pull/1","state":"open","user":{"login":"dana"},"created_at":"2026-10-01T00:00:00Z","head":{"ref":"x","sha":"future"},"base":{"ref":"main"}}`)
 		case strings.HasSuffix(r.URL.Path, "/issues/1/timeline"):
-			io.WriteString(w, `[{"id":1,"event":"reviewed","user":{"login":"winton"},"state":"APPROVED","commit_id":"old","submitted_at":"2026-11-01T00:00:00Z"},{"event":"committed","sha":"future","author":{"email":"a@b.c","date":"2030-01-01T00:00:00Z"}}]`)
+			io.WriteString(w, `[{"id":1,"event":"reviewed","user":{"login":"winton"},"state":"APPROVED","commit_id":"old","submitted_at":"2026-11-01T00:00:00Z"},{"event":"committed","sha":"future","author":{"email":"a@b.c","date":"2030-01-01T00:00:00Z"},"committer":{"date":"2026-11-08T01:00:00Z"}}]`)
 		default:
 			io.WriteString(w, `[]`)
 		}
@@ -291,13 +291,13 @@ func TestTeamReviewRequest(t *testing.T) {
 		case r.URL.Path == "/user":
 			io.WriteString(w, `{"login":"winton"}`)
 		case r.URL.Path == "/user/teams":
-			io.WriteString(w, `[{"slug":"eng"}]`)
+			io.WriteString(w, `[{"slug":"eng","organization":{"login":"acme"}},{"slug":"eng","organization":{"login":"other"}}]`)
 		case r.URL.Path == "/search/issues":
 			io.WriteString(w, `{"total_count":1,"items":[{"number":4,"user":{"login":"dana"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/pulls/4"):
-			io.WriteString(w, `{"id":4,"number":4,"title":"Team","html_url":"https://github.com/acme/app/pull/4","state":"open","user":{"login":"dana"},"created_at":"2026-11-02T00:00:00Z","requested_teams":[{"slug":"eng"}],"head":{"sha":"abc","ref":"t"},"base":{"ref":"main"}}`)
+			io.WriteString(w, `{"id":4,"number":4,"title":"Team","html_url":"https://github.com/acme/app/pull/4","state":"open","user":{"login":"dana"},"created_at":"2026-11-02T00:00:00Z","requested_teams":[{"slug":"eng","organization":{"login":"acme"}}],"head":{"sha":"abc","ref":"t"},"base":{"ref":"main"}}`)
 		case strings.HasSuffix(r.URL.Path, "/issues/4/timeline"):
-			io.WriteString(w, `[{"id":40,"event":"review_requested","created_at":"2026-11-02T01:00:00Z","review_requester":{"login":"dana"},"requested_team":{"slug":"eng"}}]`)
+			io.WriteString(w, `[{"id":40,"event":"review_requested","created_at":"2026-11-02T01:00:00Z","review_requester":{"login":"dana"},"requested_team":{"slug":"eng","organization":{"login":"acme"}}},{"id":41,"event":"review_requested","created_at":"2026-11-02T01:00:00Z","review_requester":{"login":"dana"},"requested_team":{"slug":"eng","organization":{"login":"other"}}}]`)
 		default:
 			io.WriteString(w, `[]`)
 		}
@@ -316,6 +316,11 @@ func TestTeamReviewRequest(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("team review request was not addressed on the first run")
+	}
+	for _, it := range got.Items {
+		if strings.Contains(it.Key, "timeline:41") {
+			t.Fatal("a team outside the configured owners was addressed")
+		}
 	}
 }
 
@@ -415,6 +420,130 @@ func TestRestartDoesNotSendTwice(t *testing.T) {
 	}
 	if len(ob.Entries()) != entries {
 		t.Fatalf("restart grew the outbox: %d to %d", entries, len(ob.Entries()))
+	}
+}
+
+func TestFirstDateAndCursorBounds(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		} else {
+			w.Header().Set("Date", "Sun, 08 Nov 2026 12:40:00 GMT")
+		}
+		switch {
+		case r.URL.Path == "/user":
+			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/user/teams":
+			io.WriteString(w, `[]`)
+		case r.URL.Path == "/search/issues":
+			io.WriteString(w, `{"total_count":1,"items":[{"number":1,"updated_at":"2026-11-08T12:00:00Z","user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
+			io.WriteString(w, `{"id":1,"number":1,"title":"t","html_url":"https://github.com/acme/app/pull/1","state":"closed","user":{"login":"winton"},"created_at":"2026-10-01T00:00:00Z","head":{"sha":"abc","ref":"t"},"base":{"ref":"main"}}`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err != nil || string(got.Next) != "2026-11-08T12:00:00Z" {
+		t.Fatalf("latest date won: %s %v", got.Next, err)
+	}
+	back, err := s.Collect(context.Background(), []byte("2026-11-08T18:00:00Z"))
+	if err != nil || string(back.Next) != "2026-11-08T18:00:00Z" {
+		t.Fatalf("cursor moved backwards: %s %v", back.Next, err)
+	}
+
+	ahead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 15:00:00 GMT")
+		switch r.URL.Path {
+		case "/user":
+			io.WriteString(w, `{"login":"winton"}`)
+		case "/user/teams":
+			io.WriteString(w, `[]`)
+		default:
+			io.WriteString(w, `{"total_count":0,"items":[]}`)
+		}
+	}))
+	defer ahead.Close()
+	s = newTest(t, ahead, []string{"acme/app"}, nil)
+	s.now = func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) }
+	got, err = s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err == nil || got.Next != nil {
+		t.Fatalf("future Date committed: %v %s", err, got.Next)
+	}
+}
+
+func TestSearchSplitsByRepository(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		switch {
+		case r.URL.Path == "/user":
+			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/user/teams":
+			io.WriteString(w, `[]`)
+		case r.URL.Path == "/users/acme":
+			io.WriteString(w, `{"login":"acme","type":"Organization"}`)
+		case r.URL.Path == "/orgs/acme/repos":
+			io.WriteString(w, `[{"name":"app"},{"name":"lib"}]`)
+		case r.URL.Path == "/search/issues":
+			q := r.URL.Query().Get("q")
+			queries = append(queries, q)
+			if strings.Contains(q, "org:acme") {
+				io.WriteString(w, `{"total_count":1001,"items":[]}`)
+				return
+			}
+			io.WriteString(w, `{"total_count":1,"items":[{"number":1,"updated_at":"2026-11-08T12:00:00Z","user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
+			io.WriteString(w, pr9)
+		case strings.Contains(r.URL.Path, "check-suites"):
+			io.WriteString(w, `{"check_suites":[]}`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/*"}, nil)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err != nil || got.Next == nil {
+		t.Fatalf("over-cap owner search stalled: %v %s", err, got.Next)
+	}
+	split := false
+	for _, q := range queries {
+		if strings.Contains(q, "repo:acme/app") {
+			split = true
+		}
+	}
+	if !split {
+		t.Fatalf("did not split by repository: %v", queries)
+	}
+}
+
+func TestOldPushNotEmitted(t *testing.T) {
+	in := buildInput{
+		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+		Since: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC),
+		PR: pull{ID: 1, Number: 1, owner: "acme", name: "app", Title: "t", HTMLURL: "https://github.com/acme/app/pull/1",
+			User: &ghUser{Login: "winton"}, Head: &struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			}{SHA: "oldhead"}},
+		Timeline: []timelineEvent{
+			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "base", SubmittedAt: "2026-10-01T00:00:00Z"},
+			{Event: "committed", SHA: "oldhead", Author: &ghUser{Date: "2026-11-08T02:00:00Z"}, Committer: &ghUser{Date: "2026-10-02T00:00:00Z"}},
+		},
+	}
+	items, err := build(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Type == TypePushed {
+			t.Fatalf("push older than the first run was emitted: %+v", it)
+		}
 	}
 }
 

@@ -164,7 +164,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			commit = false
 		}
 		fields, stateFields := s.Fields(), s.StateFields()
-		invalid := 0
+		invalid := got.Dropped
 		for _, it := range got.Items {
 			if it.Source != s.Name() || source.Validate(it, fields, stateFields) != nil {
 				invalid++
@@ -311,20 +311,24 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		return r.finishNever(p)
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
-		_, body, err := project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: view.open(it.Subject)})
+		_, body, err := r.project(it, d.Rule, view)
+		p.Body = body
 		if err != nil {
 			p.Err = err
-			return p, nil
 		}
-		p.Body = body
 		if r.record(it) {
 			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
 		}
 		return p, nil
 	}
-	b, body, err := project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: view.open(it.Subject)})
+	b, body, err := r.project(it, d.Rule, view)
 	if err != nil {
+		// A body or request over Signal's limit is not dropped. Hold it so the person can still see it.
 		p.Err = err
+		p.Tier = rules.Hold
+		if r.record(it) && r.Queue != nil {
+			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
+		}
 		return p, nil
 	}
 	p.Body = body
@@ -339,6 +343,28 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		r.AfterAppend(it.Key)
 	}
 	return p, nil
+}
+
+// project builds the body. If the body or the request is over Signal's limit, it tries again without the body and
+// marks the event truncated. The marker is a fixed flag, not item content.
+func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project.Body, []byte, error) {
+	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.open(it.Subject)}
+	b, body, err := project.Project(in)
+	if err == nil {
+		return b, body, nil
+	}
+	stripped := it
+	if it.Fields != nil {
+		stripped.Fields = map[string]string{}
+		for k, v := range it.Fields {
+			if k != project.FieldBody {
+				stripped.Fields[k] = v
+			}
+		}
+	}
+	in.Item = stripped
+	in.Truncated = true
+	return project.Project(in)
 }
 
 // record reports whether this pass writes the item. A dry run writes nothing. A source whose first run has not been

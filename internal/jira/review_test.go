@@ -65,6 +65,33 @@ func TestLookbackAndServerCursor(t *testing.T) {
 
 // The JQL text clause is not verified against live ADF. A mention node in a fetched comment is addressed even
 // when the comment's plain text does not contain the account id.
+func TestMovedIssueIsDropped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		switch r.URL.Path {
+		case "/rest/api/3/myself":
+			io.WriteString(w, `{"accountId":"acc-winton","timeZone":"UTC"}`)
+		case "/rest/api/3/search/jql":
+			io.WriteString(w, `{"issues":[{"key":"ENG-1"}],"isLast":true}`)
+		case "/rest/api/3/issue/ENG-1":
+			io.WriteString(w, `{"key":"OTHER-1","fields":{"summary":"Moved","status":{"name":"Open"},"project":{"key":"OTHER"}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
+	if err != nil || got.Next == nil || got.Dropped == 0 {
+		t.Fatalf("moved issue failed the pass: %v next %s dropped %d", err, got.Next, got.Dropped)
+	}
+	for _, it := range got.Items {
+		if strings.Contains(it.Key, "OTHER") {
+			t.Fatal("out-of-scope issue was yielded")
+		}
+	}
+}
+
 func TestFetchedADFMentionIsAddressed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")

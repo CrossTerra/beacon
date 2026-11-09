@@ -15,11 +15,12 @@ limit or a failed collect leaves the cursor where it is. An item that fails vali
 could not be projected, is dropped and logged by count, with a fixed reason code and no item content. That does not
 freeze the source: the cursor still moves.
 
-The next cursor is the latest `Date` header the server sent. It is never the local clock, and an event time ahead of
-that header (a git author date can be) does not move it: the event was already collected, and keys make a later pass
-that sees it again harmless. With no `Date`, the cursor is the newest event time. If the server sent no `Date` and
-the pass saw no event time, the cursor is not moved. A pass reads from the committed cursor minus 15 minutes, so
-indexing lag and clock skew land in an overlap.
+The next cursor is the first `Date` header of the pass, or the stored cursor if that is later. It is never the
+local clock, and it never moves backwards. A later `Date` in the same pass is ignored, so a pass longer than the
+lookback does not skip events that arrived while it was running. A `Date` more than an hour ahead of the local
+clock fails the pass. With no `Date`, the cursor is the newest source event time, not a local-clock stamp on a
+push or a check change. If there is no `Date` and no such event time, the cursor is not moved. A pass reads from
+the committed cursor minus 15 minutes, so indexing lag and clock skew land in an overlap.
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run).
@@ -50,8 +51,9 @@ owner's user or organization, and a result from any other repository is not fetc
 **Each pass.** Pull requests in the configured repositories updated since 15 minutes before the cursor, through the
 search API. The qualifier is `updated:>=` with an RFC3339 timestamp, one repository qualifier per query (an OR of
 `repo:` qualifiers matches nothing). A hit whose `updated_at` is before that window is not fetched, so a pass does
-not re-read every pull request updated that day. If a search reports more than 1000 results, the pass fails and the
-cursor stays: results are ordered oldest first, so the newest would be cut off. The search does not use a login
+not re-read every pull request updated that day. If an owner search reports more than 1000 results, it is split into one query per repository in that owner, so the
+newest are not cut off and the source does not stall. A single repository that itself reports more than 1000 fails
+the pass and the cursor stays: results are ordered oldest first. The search does not use a login
 qualifier: some tokens can read the repositories and still cannot search a user. A pull request the person is not
 involved in (author, assignee, reviewer, review requested of them or of a team they are in, mentioned, or commenter)
 yields no items. The full timeline is fetched; events before the lookback window are not emitted. Own open pull
@@ -73,18 +75,20 @@ conclusion. A team request is addressed.
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
 only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
 `own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
-is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author time,
-which is often older than the push. It is emitted when the head sha differs from the commit the person last
-reviewed, or for a commit after that review. The key is the sha, so a later pass that sees it again does not send
-twice.
+is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author time, which is often older than the push. It is emitted for a
+commit after the person's last review whose committer time, or a force-push's event time, is inside the lookback
+window. A push older than the first run is not emitted on the first incremental pass (DEC-23). The key is the sha,
+so a later pass that sees it again does not send twice. A key longer than 200 characters is shortened with a hash
+of the original, so it stays stable and is not dropped.
 
 **Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is `opened`
 (the pull request's id; the open has no timeline event), `timeline` (ready, review requested or removed, merged,
 closed), `review`, `comment` (an issue comment), `review-comment`, `push` (the commit sha), or
 `checks:<head sha>:<conclusion>`. Kinds keep ids that overlap across those APIs from colliding.
 
-**Addressed.** A review request naming the person, or naming a team the person is in; `@login` in a comment, a
-review, or the pull request body or title on `opened`. `@login` does not match a longer login.
+**Addressed.** A review request naming the person, or naming a team the person is in. A team is `org/slug`, and only
+a team whose organization is a configured owner counts. `@login` in a comment, a review, or the pull request body
+or title on `opened`. `@login` does not match a longer login.
 
 **Fields.** `repo`, `number`, `title`, `url`, `author`, `review_state`, `body` (comment or review text), `base`,
 `head_ref`.
@@ -118,8 +122,9 @@ since 15 minutes before the cursor. The JQL date is formatted in the account's t
 evaluates `updated` for this token. The `text ~ account id` clause is not verified against live ADF mentions.
 Mentions are also taken from fetched comments, including ADF mention nodes, so a mention in a comment Beacon
 fetched is addressed even when that search clause misses it. The changelog is fetched in full; entries before the
-lookback window are not emitted. Comments before that window are not emitted. The next cursor is the server `Date`
-header, never the local clock or an event time ahead of that header.
+lookback window are not emitted. Comments before that window are not emitted. The next cursor is the first server `Date` of the pass, or the stored cursor if that is later. It never moves
+backwards, and a `Date` more than an hour ahead of the local clock fails the pass. An issue that has moved out of
+the configured projects is dropped and counted. It does not fail the pass.
 
 **First run.** Unresolved issues assigned to the person. Not their history: comments are not read. One `assigned`
 item per issue, keyed by the latest assignment's changelog id, or `open` when the issue has none.

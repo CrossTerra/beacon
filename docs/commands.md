@@ -19,10 +19,10 @@ restores it and ends `init` without writing anything. It refuses to overwrite a 
 Collects, applies rules and projection, and records what it decided.
 
 - With `mode: dry-run`, or with `--dry-run`, or with `--first`, it prints each item's tier, the rule that decided
-  it and the body it would send, and writes nothing. It may contact source APIs to collect. It does not contact
-  Signal.
+  it and the body it would send, and writes nothing except `--first`, which records in `first.json` which sources
+  completed that summary. It may contact source APIs to collect. It does not contact Signal.
 - `--first` is that dry run with a summary by source and type. A source with no cursor reads open state (DEC-23).
-  Sending for that source stays off until `beacon accept-first`.
+  Sending for that source stays off until `beacon accept-first`. A collect that failed is not written to `first.json`.
 - With `mode: send`, it appends send items to the outbox, holds and drops the rest locally, takes the lease, and
   sends pending bodies while it holds it. A source whose first run has not been accepted is printed and not
   recorded, and its cursor is not moved. It prints each new decision (tier, key, rule) without its body, the

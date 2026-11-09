@@ -213,10 +213,11 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 		if e.actor != "" {
 			actor = "jira:account:" + e.actor
 		}
+		key, version := source.FitKey("jira:"+iss.key+":"+changeID, changeID)
 		it := source.Item{
 			Source:     name,
 			Subject:    "jira:" + iss.key,
-			Key:        "jira:" + iss.key + ":" + changeID,
+			Key:        key,
 			Type:       e.typ,
 			OccurredAt: e.at.UTC(),
 			Actor:      actor,
@@ -226,7 +227,7 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 			DueAt:      due,
 			State:      stateOf(iss),
 			ObservedAt: &obs,
-			Version:    changeID,
+			Version:    version,
 		}
 		out = append(out, it)
 	}

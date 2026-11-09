@@ -112,7 +112,6 @@ func TestCollectEveryItem(t *testing.T) {
 		"github:acme/app#7:comment:13":         TypeCommented,
 		"github:acme/app#7:comment:14":         TypeCommented,
 		"github:acme/app#7:push:aaa111":        TypePushed,
-		"github:acme/app#7:push:abc111":        TypePushed,
 		"github:acme/app#7:timeline:15":        TypeMerged,
 		"github:acme/app#8:opened:800":         TypeOpened,
 		"github:acme/app#8:timeline:21":        TypeReviewRequested,
@@ -121,7 +120,6 @@ func TestCollectEveryItem(t *testing.T) {
 		"github:acme/app#8:timeline:24":        TypeReady,
 		"github:acme/app#8:comment:26":         TypeCommented,
 		"github:acme/app#8:push:ccc999":        TypePushed,
-		"github:acme/app#8:push:bbb222":        TypePushed,
 		"github:acme/app#8:timeline:25":        TypeClosed,
 		"github:acme/app#8:review-comment:77":  TypeCommented,
 		"github:acme/app#9:checks:def456:fail": TypeChecksChanged,
@@ -208,6 +206,7 @@ func TestFirstRunIsOpenState(t *testing.T) {
 	var query string
 	var comments bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if strings.HasSuffix(r.URL.Path, "/comments") {
 			comments = true
 		}
@@ -260,6 +259,7 @@ func TestPaginationAndRateLimit(t *testing.T) {
 	var slept time.Duration
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if r.URL.Path == "/user" {
 			io.WriteString(w, `{"login":"winton"}`)
 			return
@@ -370,6 +370,7 @@ func TestScopeAndEgress(t *testing.T) {
 
 func TestOpenSearchFailureKeepsUpdatedItems(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if r.URL.Path == "/user" {
 			io.WriteString(w, `{"login":"winton"}`)
 			return
@@ -401,6 +402,7 @@ func TestOpenSearchFailureKeepsUpdatedItems(t *testing.T) {
 
 func TestIdentityCase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if r.URL.Path == "/user" {
 			io.WriteString(w, `{"login":"winton"}`)
 			return
@@ -422,6 +424,7 @@ func TestIdentityCase(t *testing.T) {
 
 func TestSkippedPullDoesNotFreezeCursor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		switch {
 		case r.URL.Path == "/user":
 			io.WriteString(w, `{"login":"winton"}`)
@@ -516,7 +519,7 @@ const timeline7 = `[
   {"id": 12, "event": "reviewed", "user": {"login": "dana"}, "state": "APPROVED", "body": "LGTM", "submitted_at": "2026-11-02T00:00:00Z"},
   {"id": 13, "event": "commented", "user": {"login": "dana"}, "body": "see @winton", "created_at": "2026-11-02T01:00:00Z"},
   {"id": 14, "event": "commented", "user": {"login": "winton"}, "body": "done", "created_at": "2026-11-03T00:00:00Z"},
-  {"sha": "aaa111", "event": "committed", "author": {"email": "winton@example.com", "date": "2026-11-04T00:00:00Z"}},
+  {"sha": "aaa111", "event": "committed", "author": {"email": "winton@example.com", "date": "2026-10-01T00:00:00Z"}, "committer": {"email": "winton@example.com", "date": "2026-11-04T00:00:00Z"}},
   {"id": 15, "event": "merged", "actor": {"login": "winton"}, "created_at": "2026-11-05T00:00:00Z"},
   {"id": 16, "event": "closed", "actor": {"login": "winton"}, "created_at": "2026-11-05T00:00:01Z"}
 ]`
@@ -534,7 +537,7 @@ const timeline8 = `[
   {"id": 23, "event": "reviewed", "user": {"login": "winton"}, "state": "CHANGES_REQUESTED", "body": "fix this", "submitted_at": "2026-11-03T01:00:00Z"},
   {"id": 24, "event": "ready_for_review", "created_at": "2026-11-04T00:00:00Z", "actor": {"login": "dana"}},
   {"id": 26, "event": "commented", "user": {"login": "dana"}, "body": "hello @winton2", "created_at": "2026-11-04T01:00:00Z"},
-  {"sha": "ccc999", "event": "committed", "author": {"date": "2026-11-05T00:00:00Z"}},
+  {"sha": "ccc999", "event": "committed", "author": {"date": "2026-10-01T00:00:00Z"}, "committer": {"date": "2026-11-05T00:00:00Z"}},
   {"id": 25, "event": "closed", "created_at": "2026-11-06T00:00:00Z", "actor": {"login": "dana"}}
 ]`
 

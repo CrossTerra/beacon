@@ -109,7 +109,7 @@ func (s scope) allow(raw string) error {
 	if len(parts) == 2 && parts[0] == "users" && s.ownerConfigured(parts[1]) {
 		return nil
 	}
-	if len(parts) == 3 && parts[0] == "orgs" && parts[2] == "repos" && s.ownerConfigured(parts[1]) {
+	if len(parts) == 3 && (parts[0] == "orgs" || parts[0] == "users") && parts[2] == "repos" && s.ownerConfigured(parts[1]) {
 		return nil
 	}
 	if len(parts) >= 4 && parts[0] == "repos" && s.allowsRepo(parts[1], parts[2]) {

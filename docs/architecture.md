@@ -26,16 +26,19 @@ One pass of `beacon run`:
 3. **Decide.** The first rule that matches sets the tier. No match is `never` (DEC-3).
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
    builds the request body with the projection and appends it to the outbox, synced to disk, before anything is
-   sent (DEC-8). A source whose first run has not been accepted is reported and not recorded.
+   sent (DEC-8). A body or request over Signal's limit is projected again without the body and marked truncated; if
+   that still does not fit, the item is held, not dropped. A source whose first run has not been accepted is
+   reported and not recorded.
 5. **Commit.** The source's cursor is stored only after every item of the pass has been recorded, and only on a
    send pass. A crash before that collects the same items again; keys make that harmless.
 6. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored,
    each under a deadline at the end of the lease. If Signal is unavailable, or the lease runs out, the pass stops
    and the rest stay pending, because a later body may close an ask an earlier one opens.
 
-A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing. It may contact source APIs
-to collect; it does not contact Signal. It reads the outbox, the hold queue and the cursor, so it shows what a send
-pass would do next.
+A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing except `beacon run --first`,
+which records in `first.json` which sources completed that summary. It does not write cursors, the outbox, or the
+queue. It may contact source APIs to collect; it does not contact Signal. It reads the outbox, the hold queue and
+the cursor, so it shows what a send pass would do next.
 
 ## Packages
 

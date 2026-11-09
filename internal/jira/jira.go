@@ -37,16 +37,16 @@ type Options struct {
 
 // Source reads Jira.
 type Source struct {
-	name       string
-	site       string
-	hostPort   string
-	base       string
-	scope      scope
-	identity   string
-	creds      func() (keychain.Secret, error)
-	http       *limited.Client
-	now        func() time.Time
-	serverDate time.Time
+	name     string
+	site     string
+	hostPort string
+	base     string
+	scope    scope
+	identity string
+	creds    func() (keychain.Secret, error)
+	http     *limited.Client
+	now      func() time.Time
+	clock    source.Clock
 }
 
 // New builds a source. It does not read the credential.
@@ -115,6 +115,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
+	s.clock.Reset()
 	first := len(cursor) == 0
 	var since time.Time
 	if !first {
@@ -140,44 +141,40 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		return source.Collected{}, err
 	}
 	var items []source.Item
+	dropped := 0
 	for _, key := range keys {
 		if !s.scope.allowsKey(key) {
+			dropped++
 			continue
 		}
-		got, err := s.issueItems(ctx, secret, key, me, loc, floor, first, s.serverNow())
+		got, moved, err := s.issueItems(ctx, secret, key, me, loc, floor, first, s.observed())
+		if moved {
+			dropped++
+			continue
+		}
 		if err != nil {
-			return source.Collected{Items: items}, err
+			return source.Collected{Items: items, Dropped: dropped}, err
 		}
 		items = append(items, got...)
 	}
-	next, err := jiraCursor(s.serverDate, items)
-	if err != nil {
-		return source.Collected{Items: items}, err
-	}
-	return source.Collected{Items: items, Next: next}, nil
-}
-
-func (s *Source) serverNow() time.Time {
-	if !s.serverDate.IsZero() {
-		return s.serverDate
-	}
-	return s.now().UTC()
-}
-
-func jiraCursor(server time.Time, items []source.Item) ([]byte, error) {
-	// A server Date caps the cursor. An event time ahead of the server must not skip the window until that time.
-	t := server
-	if t.IsZero() {
-		for _, it := range items {
-			if it.OccurredAt.After(t) {
-				t = it.OccurredAt
-			}
+	var events []time.Time
+	for _, it := range items {
+		if !it.OccurredAt.IsZero() {
+			events = append(events, it.OccurredAt)
 		}
 	}
-	if t.IsZero() {
-		return nil, errors.New("jira: the server sent no Date and there is no event time")
+	next, err := s.clock.Next(since, s.now(), events)
+	if err != nil {
+		return source.Collected{Items: items, Dropped: dropped}, err
 	}
-	return []byte(t.UTC().Format(time.RFC3339)), nil
+	return source.Collected{Items: items, Next: next, Dropped: dropped}, nil
+}
+
+func (s *Source) observed() time.Time {
+	if t := s.clock.First(); !t.IsZero() {
+		return t
+	}
+	return s.now().UTC()
 }
 
 func (s *Source) myself(ctx context.Context, secret keychain.Secret) (string, *time.Location, error) {
@@ -271,35 +268,37 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, jql string)
 	return nil, errors.New("jira: search pagination did not end")
 }
 
-func (s *Source) issueItems(ctx context.Context, secret keychain.Secret, key, person string, loc *time.Location, since time.Time, first bool, observed time.Time) ([]source.Item, error) {
+func (s *Source) issueItems(ctx context.Context, secret keychain.Secret, key, person string, loc *time.Location, since time.Time, first bool, observed time.Time) ([]source.Item, bool, error) {
 	raw, err := s.get(ctx, secret, s.base+"/rest/api/3/issue/"+url.PathEscape(key)+"?fields=summary,status,assignee,priority,issuetype,duedate,resolution,project")
 	if unavailable(err) {
 		// The issue itself is gone or not readable. A changelog or comment failure is not this case: that
 		// returns the error, and the cursor stays.
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	iss, err := decodeIssue(raw, s.browse(key))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !s.scope.allowsKey(iss.key) {
-		return nil, source.ErrScope
+		// The issue moved out of the configured projects. Drop it; do not fail the pass.
+		return nil, true, nil
 	}
 	histories, err := s.changelog(ctx, secret, key)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var comments []comment
 	if !first {
 		comments, err = s.comments(ctx, secret, key)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
-	return itemsFrom(s.name, person, iss, histories, comments, since, first, observed, loc)
+	items, err := itemsFrom(s.name, person, iss, histories, comments, since, first, observed, loc)
+	return items, false, err
 }
 
 func (s *Source) changelog(ctx context.Context, secret keychain.Secret, key string) ([]history, error) {
@@ -497,9 +496,7 @@ func (s *Source) call(ctx context.Context, secret keychain.Secret, method, raw s
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, source.ErrUnauthorized
 	}
-	if t, err := http.ParseTime(resp.Header.Get("Date")); err == nil && t.UTC().After(s.serverDate) {
-		s.serverDate = t.UTC()
-	}
+	s.clock.Note(resp.Header)
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, err

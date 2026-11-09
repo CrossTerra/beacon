@@ -2,6 +2,7 @@ package github
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -34,7 +35,41 @@ const (
 var issueKeyPattern = regexp.MustCompile(`[A-Z][A-Z0-9]+-\d+`)
 
 type ghTeam struct {
-	Slug string `json:"slug"`
+	Slug         string `json:"slug"`
+	HTMLURL      string `json:"html_url"`
+	Organization *struct {
+		Login string `json:"login"`
+	} `json:"organization"`
+}
+
+func (t *ghTeam) key() string {
+	if t == nil || t.Slug == "" {
+		return ""
+	}
+	org := ""
+	if t.Organization != nil {
+		org = t.Organization.Login
+	}
+	if org == "" {
+		org = orgFromTeamURL(t.HTMLURL)
+	}
+	if org == "" {
+		return ""
+	}
+	return strings.ToLower(org) + "/" + strings.ToLower(t.Slug)
+}
+
+func orgFromTeamURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	// github.com/orgs/<org>/teams/<slug>
+	if len(parts) >= 4 && parts[0] == "orgs" && parts[2] == "teams" {
+		return parts[1]
+	}
+	return ""
 }
 
 type ghUser struct {
@@ -64,12 +99,10 @@ type pull struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
 	RequestedReviewers []ghUser `json:"requested_reviewers"`
-	RequestedTeams     []struct {
-		Slug string `json:"slug"`
-	} `json:"requested_teams"`
-	Assignees []ghUser `json:"assignees"`
-	owner     string
-	name      string
+	RequestedTeams     []ghTeam `json:"requested_teams"`
+	Assignees          []ghUser `json:"assignees"`
+	owner              string
+	name               string
 }
 
 func (p pull) author() string {
@@ -242,7 +275,11 @@ func build(in buildInput) ([]source.Item, error) {
 			if actor == "" {
 				actor = loginOf(e.Actor)
 			}
-			err = add(in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, teamSlug(e.RequestedTeam))))
+			team := ""
+			if e.RequestedTeam != nil {
+				team = e.RequestedTeam.key()
+			}
+			err = add(in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team)))
 		case "review_request_removed":
 			actor := loginOf(e.Actor)
 			if actor == "" {
@@ -296,9 +333,9 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 		pending[strings.ToLower(u.Login)] = true
 	}
 	pendingTeams := map[string]bool{}
-	for _, t := range in.PR.RequestedTeams {
-		if t.Slug != "" {
-			pendingTeams[strings.ToLower(t.Slug)] = true
+	for i := range in.PR.RequestedTeams {
+		if key := in.PR.RequestedTeams[i].key(); key != "" {
+			pendingTeams[key] = true
 		}
 	}
 	var items []source.Item
@@ -308,9 +345,12 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 			continue
 		}
 		who := loginOf(e.RequestedReviewer)
-		team := teamSlug(e.RequestedTeam)
+		team := ""
+		if e.RequestedTeam != nil {
+			team = e.RequestedTeam.key()
+		}
 		userPending := who != "" && pending[strings.ToLower(who)] && !seen[strings.ToLower(who)]
-		teamPending := team != "" && pendingTeams[strings.ToLower(team)] && in.Teams[strings.ToLower(team)] && !seen["team:"+strings.ToLower(team)]
+		teamPending := team != "" && pendingTeams[team] && in.Teams[team] && !seen["team:"+team]
 		if !userPending && !teamPending {
 			continue
 		}
@@ -318,7 +358,7 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 			seen[strings.ToLower(who)] = true
 		}
 		if team != "" {
-			seen["team:"+strings.ToLower(team)] = true
+			seen["team:"+team] = true
 		}
 		at := eventTime(e)
 		if at.IsZero() {
@@ -350,6 +390,10 @@ func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
 		}
 	}
 	if at.IsZero() {
+		// No check time and no server Date: do not invent a local-clock stamp that could become the cursor.
+		if obs.IsZero() {
+			return source.Item{}, false
+		}
 		at = obs
 	}
 	id := "checks:" + sha + ":" + conclusion
@@ -409,17 +453,18 @@ func (in buildInput) item(typ, changeID, actorLogin string, at time.Time, review
 		actor = "github:email:" + actorLogin
 	}
 	own := actorLogin != "" && strings.EqualFold(actorLogin, in.Login)
+	key, version := source.FitKey(fmt.Sprintf("github:%s/%s#%d:%s", pr.owner, pr.name, pr.Number, changeID), changeID)
 	return source.Item{
 		Source:     in.Name,
 		Subject:    fmt.Sprintf("github:pr:%s/%s#%d", pr.owner, pr.name, pr.Number),
-		Key:        fmt.Sprintf("github:%s/%s#%d:%s", pr.owner, pr.name, pr.Number, changeID),
+		Key:        key,
 		Type:       typ,
 		OccurredAt: at.UTC(),
 		Actor:      actor,
 		Own:        own,
 		Addressed:  addressed,
 		Fields:     fields,
-		Version:    changeID,
+		Version:    version,
 	}, nil
 }
 
@@ -524,19 +569,14 @@ func (in buildInput) addressedRequest(login, team string) bool {
 	if strings.EqualFold(login, in.Login) {
 		return true
 	}
-	return team != "" && in.Teams[strings.ToLower(team)]
-}
-
-func teamSlug(t *ghTeam) string {
-	if t == nil {
-		return ""
-	}
-	return t.Slug
+	return team != "" && in.Teams[team]
 }
 
 func inTeam(t *ghTeam, teams map[string]bool) bool {
-	slug := teamSlug(t)
-	return slug != "" && teams[strings.ToLower(slug)]
+	if t == nil {
+		return false
+	}
+	return teams[t.key()]
 }
 
 // addPushes emits a push when the head moved after the person's last review, ignoring git commit time. A rebased
@@ -563,35 +603,51 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 	}
 	seen := map[string]bool{}
 	emit := func(sha, actor string, at time.Time) error {
-		if sha == "" || seen[sha] || sha == lastSHA {
+		if sha == "" || seen[sha] || sha == lastSHA || at.IsZero() {
+			return nil
+		}
+		// A push older than this pass's window is history. The first incremental pass after the first run must
+		// not send it (DEC-23). Author date is not the push time; the caller passes the committer or event time.
+		if !in.Since.IsZero() && at.Before(in.Since) {
 			return nil
 		}
 		seen[sha] = true
-		if at.IsZero() {
-			at = in.Observed
-		}
 		return add(in.item(TypePushed, "push:"+sha, actor, at, "", "", false))
 	}
 	for i, e := range in.Timeline {
 		if last >= 0 && i <= last {
 			continue
 		}
+		at, ok := pushTime(e)
+		if !ok {
+			continue
+		}
 		switch e.Event {
 		case "committed":
-			// Author date is not the push time, and a skewed author clock must not stamp the item. The key is the sha.
-			if err := emit(e.SHA, loginOf(e.Author), in.Observed); err != nil {
+			if err := emit(e.SHA, loginOf(e.Author), at); err != nil {
 				return err
 			}
 		case "head_ref_force_pushed":
-			if err := emit(e.After, loginOf(e.Actor), eventTime(e)); err != nil {
+			if err := emit(e.After, loginOf(e.Actor), at); err != nil {
 				return err
 			}
 		}
 	}
-	if head := in.PR.headSHA(); head != "" && head != lastSHA {
-		return emit(head, "", in.Observed)
-	}
 	return nil
+}
+
+// pushTime is the push's own time, never the git author date and never the local clock. A committer date is the
+// rebase or push time. A force-push timeline event has created_at.
+func pushTime(e timelineEvent) (time.Time, bool) {
+	if e.Event == "head_ref_force_pushed" {
+		if t, err := parseTime(e.CreatedAt); err == nil {
+			return t, true
+		}
+	}
+	if t, err := parseTime(dateOf(e.Committer)); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }
 
 func reviewRequested(pr pull, login string, teams map[string]bool) bool {
@@ -600,8 +656,8 @@ func reviewRequested(pr pull, login string, teams map[string]bool) bool {
 			return true
 		}
 	}
-	for _, t := range pr.RequestedTeams {
-		if teams[strings.ToLower(t.Slug)] {
+	for i := range pr.RequestedTeams {
+		if teams[pr.RequestedTeams[i].key()] {
 			return true
 		}
 	}

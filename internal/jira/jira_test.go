@@ -20,6 +20,7 @@ func TestCollectEveryItem(t *testing.T) {
 	var jql string
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		paths = append(paths, r.URL.Path)
 		if strings.Contains(r.URL.Path, "OTHER-1") {
 			t.Errorf("request outside projects: %s", r.URL.Path)
@@ -131,6 +132,7 @@ func TestFirstRunAndScope(t *testing.T) {
 	var jql string
 	var comments bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if strings.HasSuffix(r.URL.Path, "/comment") {
 			comments = true
 		}
@@ -186,6 +188,7 @@ func TestRateLimitAndPagination(t *testing.T) {
 	var calls int
 	var slept time.Duration
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		switch r.URL.Path {
 		case "/rest/api/3/myself":
 			io.WriteString(w, `{"accountId":"acc-winton","timeZone":"UTC"}`)
@@ -284,7 +287,7 @@ func newTest(t *testing.T, srv *httptest.Server) *Source {
 		Site: "acme", Projects: []string{"ENG"}, Base: srv.URL,
 		Creds: func() (keychain.Secret, error) { return keychain.Pair("a@b.c", "jira-token") },
 		HTTP:  srv.Client(),
-		Now:   func() time.Time { return time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC) },
+		Now:   func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
 		t.Fatal(err)

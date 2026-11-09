@@ -42,8 +42,10 @@ person's queue.
   (field `review_state`), `commented`, `pushed` (only on pull requests the person reviewed), `checks_changed`
   (own pull requests only), `merged`, `closed`. A merge yields `merged` only, never also `closed`; `closed` is a
   close without a merge. The person's own reviews, comments, merges and closes have `own: true`.
-- **Subject:** `github:pr:<owner>/<repo>#<n>`. **Key:** `github:<owner>/<repo>#<n>:<change id>`, where the change id
-  is the timeline item's or review's id, or `checks:<head sha>:<conclusion>`.
+- **Subject:** `github:pr:<owner>/<repo>#<n>`. **Key:** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is
+  `opened`, `timeline`, `review`, `comment`, `review-comment`, `push`, or `checks:<head sha>:<conclusion>`. A key
+  longer than 200 characters is shortened with a hash of the original. The built behavior is in
+  [`docs/sources.md`](../docs/sources.md).
 - **Fields:** `repo`, `number`, `title`, `url`, `author`, `review_state`, `body` (comment or review text),
   `base`, `head_ref`. **State fields:** `state`, `draft`, `head_sha`, `review_decision`, `mergeable`, `checks`
   (`pass`, `fail`, `pending`, `none`), `requested_reviewers`.

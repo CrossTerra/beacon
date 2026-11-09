@@ -46,6 +46,10 @@ type Item struct {
 // window; keys make the overlap harmless.
 const Lookback = 15 * time.Minute
 
+// DateSkew is how far a server Date may be ahead of the local clock before the pass fails. A Date further ahead
+// would jump the cursor.
+const DateSkew = time.Hour
+
 // Names a source may not use in its state field list: the state snapshot carries them itself (DEC-28).
 const (
 	StateObservedAt = "observed_at"
@@ -53,10 +57,12 @@ const (
 )
 
 // Collected is one collect. Next is the cursor to store after every item of this pass is decided. A nil Next
-// leaves the committed cursor where it is.
+// leaves the committed cursor where it is. Dropped is items the source refused and did not return; the runner
+// logs the count and does not fail the pass.
 type Collected struct {
-	Items []Item
-	Next  []byte
+	Items   []Item
+	Next    []byte
+	Dropped int
 }
 
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.

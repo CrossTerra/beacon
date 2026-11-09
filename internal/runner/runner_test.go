@@ -373,10 +373,14 @@ func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
 	huge.Key = "fx:obj:3:1"
 	huge.Subject = "fx:obj:3"
 	huge.Fields = map[string]string{"title": "ok", "label": "send", "body": strings.Repeat("S", 70*1024)}
-	f.src.items = []source.Item{good, bad, huge}
+	stuck := good
+	stuck.Key = "fx:obj:4:1"
+	stuck.Subject = "fx:obj:4"
+	stuck.Fields = map[string]string{"title": "ok", "label": strings.Repeat("L", 70*1024)}
+	f.src.items = []source.Item{good, bad, huge, stuck}
 	f.src.next = []byte("cursor-ok")
 	cur := &memCursor{}
-	rs, err := rules.Parse([]byte("rules:\n  - name: sends\n    match: {fields: {label: send}}\n    tier: send\n    fields: [title, body]\n"))
+	rs, err := rules.Parse([]byte("rules:\n  - name: sends\n    match: {fields: {label: send}}\n    tier: send\n    fields: [title, body]\n  - name: labels\n    match: {}\n    tier: send\n    fields: [title, label]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,8 +401,15 @@ func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
 	if _, ok := r.Outbox.Get("fx:obj:2:1"); ok {
 		t.Fatal("the invalid item was recorded")
 	}
-	if _, ok := r.Outbox.Get("fx:obj:3:1"); ok {
-		t.Fatal("the unprojectable item was recorded")
+	sent, ok := r.Outbox.Get("fx:obj:3:1")
+	if !ok || strings.Contains(string(sent.Body), "SSSS") || !strings.Contains(string(sent.Body), `"truncated":true`) {
+		t.Fatal("oversized body was dropped or sent whole")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:4:1"); ok {
+		t.Fatal("an item that still does not fit was sent")
+	}
+	if !r.Queue.IsHeld("fx:obj:4:1") {
+		t.Fatal("an item that still does not fit was dropped")
 	}
 	log := f.log.String()
 	if strings.Contains(log, "SECRET") || strings.Contains(log, "fx:obj") {
@@ -411,8 +422,8 @@ func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
 		t.Fatalf("projection error not counted: %s", log)
 	}
 	for _, p := range rep.Items {
-		if p.Item.Key == "fx:obj:3:1" && p.Err == nil {
-			t.Fatal("projection error was not recorded on the item")
+		if p.Item.Key == "fx:obj:4:1" && p.Err == nil {
+			t.Fatal("an item that still does not fit was not held as a projection error")
 		}
 	}
 }
