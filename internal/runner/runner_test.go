@@ -27,16 +27,20 @@ import (
 )
 
 type fakeSource struct {
-	items []source.Item
-	err   error
+	items   []source.Item
+	dropped int
+	err     error
+	next    []byte
+	cursor  []byte
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
-func (f *fakeSource) Fields() []string      { return []string{"title", "label"} }
+func (f *fakeSource) Fields() []string      { return []string{"title", "label", "body"} }
 func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
-func (f *fakeSource) Collect(context.Context) ([]source.Item, error) {
-	return f.items, f.err
+func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
+	f.cursor = append([]byte(nil), cursor...)
+	return source.Collected{Items: f.items, Next: f.next, Dropped: f.dropped}, f.err
 }
 
 func items() []source.Item {
@@ -257,6 +261,189 @@ func TestLeaseErrorsFailThePass(t *testing.T) {
 				t.Fatalf("classified %q", Classify(err))
 			}
 		})
+	}
+}
+
+type memCursor struct {
+	m       map[string][]byte
+	commits int
+}
+
+func (m *memCursor) Get(name string) ([]byte, bool) {
+	b, ok := m.m[name]
+	return append([]byte(nil), b...), ok
+}
+
+func (m *memCursor) Commit(name string, next []byte) error {
+	if m.m == nil {
+		m.m = map[string][]byte{}
+	}
+	m.m[name] = append([]byte(nil), next...)
+	m.commits++
+	return nil
+}
+
+// The cursor moves only after a send pass has decided every item, and not on a dry run or a rate limit.
+func TestCursorCommitsAfterDecide(t *testing.T) {
+	f := newFixture(t)
+	f.src.next = []byte("cursor-1")
+	cur := &memCursor{}
+	r, done := f.runner(true, nil)
+	r.Cursors = cur
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 1 || string(cur.m["fx"]) != "cursor-1" {
+		t.Fatalf("%d %q", cur.commits, cur.m["fx"])
+	}
+	f.src.next = []byte("cursor-2")
+	r2, done2 := f.runner(false, nil)
+	r2.Cursors = cur
+	defer done2()
+	if _, err := r2.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if string(cur.m["fx"]) != "cursor-1" {
+		t.Fatal("a dry run moved the cursor")
+	}
+
+	done()
+	f.src.err = source.ErrRateLimited
+	f.src.next = []byte("nope")
+	r3, done3 := f.runner(true, nil)
+	r3.Cursors = &memCursor{}
+	defer done3()
+	if _, err := r3.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r3.Cursors.(*memCursor).commits != 0 {
+		t.Fatal("a rate limit moved the cursor")
+	}
+}
+
+func TestUnacceptedAndSeed(t *testing.T) {
+	f := newFixture(t)
+	f.src.next = []byte("c")
+	cur := &memCursor{}
+	r, done := f.runner(true, nil)
+	r.Cursors = cur
+	r.Unaccepted = map[string]bool{"fx": true}
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 0 || !rep.Items[0].Unaccepted {
+		t.Fatal("an unaccepted source was recorded or not marked")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); ok {
+		t.Fatal("an unaccepted item was appended")
+	}
+
+	f = newFixture(t)
+	r, done = f.runner(true, nil)
+	r.Seed = seedDrop{"fx:obj:1": true}
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); ok {
+		t.Fatal("a seeded never was sent")
+	}
+	if rule, ok := r.Queue.DroppedBy("fx:obj:1:1"); !ok || rule != "seed" {
+		t.Fatalf("dropped by %q", rule)
+	}
+}
+
+type seedDrop map[string]bool
+
+func (s seedDrop) Drops(subject string) bool { return s[subject] }
+
+// A bad item and a projection error are dropped and logged by count. They do not freeze the source.
+func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
+	f := newFixture(t)
+	at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	good := source.Item{Source: "fx", Subject: "fx:obj:1", Key: "fx:obj:1:1", Type: "changed", OccurredAt: at,
+		Fields: map[string]string{"title": "ok", "label": "send"}}
+	bad := good
+	bad.Key = "fx:obj:2:1"
+	bad.Subject = "fx:obj:2"
+	bad.Fields = map[string]string{"title": "SECRET-ITEM-TEXT", "nope": "SECRET-FIELD"}
+	huge := good
+	huge.Key = "fx:obj:3:1"
+	huge.Subject = "fx:obj:3"
+	huge.Fields = map[string]string{"title": "ok", "label": "send", "body": strings.Repeat("S", 70*1024)}
+	stuck := good
+	stuck.Key = "fx:obj:4:1"
+	stuck.Subject = "fx:obj:4"
+	stuck.Fields = map[string]string{"title": "ok", "label": strings.Repeat("L", 70*1024)}
+	f.src.items = []source.Item{good, bad, huge, stuck}
+	f.src.next = []byte("cursor-ok")
+	cur := &memCursor{}
+	rs, err := rules.Parse([]byte("rules:\n  - name: sends\n    match: {fields: {label: send}}\n    tier: send\n    fields: [title, body]\n  - name: labels\n    match: {}\n    tier: send\n    fields: [title, label]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, done := f.runner(true, nil)
+	r.Rules = rs
+	r.Cursors = cur
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 1 || string(cur.m["fx"]) != "cursor-ok" {
+		t.Fatalf("cursor frozen: %d %q", cur.commits, cur.m["fx"])
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); !ok {
+		t.Fatal("the good item was not recorded")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:2:1"); ok {
+		t.Fatal("the invalid item was recorded")
+	}
+	sent, ok := r.Outbox.Get("fx:obj:3:1")
+	if !ok || strings.Contains(string(sent.Body), "SSSS") || !strings.Contains(string(sent.Body), `"truncated":true`) {
+		t.Fatal("oversized body was dropped or sent whole")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:4:1"); ok {
+		t.Fatal("an item that still does not fit was sent")
+	}
+	if !r.Queue.IsHeld("fx:obj:4:1") {
+		t.Fatal("an item that still does not fit was dropped")
+	}
+	log := f.log.String()
+	if strings.Contains(log, "SECRET") || strings.Contains(log, "fx:obj") {
+		t.Fatalf("log holds content: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"item_invalid"`) || !strings.Contains(log, `"reason":"item_invalid"`) || !strings.Contains(log, `"items":1`) {
+		t.Fatalf("invalid item not counted: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"project_failed"`) || !strings.Contains(log, `"reason":"project_failed"`) {
+		t.Fatalf("projection error not counted: %s", log)
+	}
+	for _, p := range rep.Items {
+		if p.Item.Key == "fx:obj:4:1" && p.Err == nil {
+			t.Fatal("an item that still does not fit was not held as a projection error")
+		}
+	}
+}
+
+func TestDroppedDoesNotUndercountCollected(t *testing.T) {
+	f := newFixture(t)
+	f.src.items = items()[:1]
+	f.src.dropped = 3
+	r, done := f.runner(false, nil)
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	log := f.log.String()
+	if strings.Contains(log, `"items":-`) || !strings.Contains(log, `"msg":"collected"`) {
+		t.Fatalf("collected count: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"item_invalid"`) || !strings.Contains(log, `"items":3`) {
+		t.Fatalf("dropped count: %s", log)
 	}
 }
 

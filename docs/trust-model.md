@@ -10,7 +10,7 @@ same pull request.
 | --- | --- |
 | Events a rule sent: the projected fields and state fields only | Source credentials (OAuth refresh tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
-| Requests to the source APIs, made with your credentials | The rules file, the review queue, the outbox, classifier input and output |
+| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox, the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 

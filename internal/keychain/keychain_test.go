@@ -3,6 +3,7 @@ package keychain
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,30 @@ func TestAuthorize(t *testing.T) {
 	secret().Authorize(h)
 	if h.Get("Authorization") != "Bearer "+value {
 		t.Fatalf("header %q", h.Get("Authorization"))
+	}
+}
+
+func TestAuthorizeBasic(t *testing.T) {
+	s, err := Pair("winton@example.com", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{}
+	if err := s.AuthorizeBasic(h); err != nil {
+		t.Fatal(err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("winton@example.com:"+value))
+	if h.Get("Authorization") != want {
+		t.Fatal("basic header")
+	}
+	if strings.Contains(s.String(), value) || strings.Contains(fmt.Sprint(s), "winton@example.com") {
+		t.Fatal("pair printed")
+	}
+	if _, err := Pair("", value); err == nil {
+		t.Fatal("empty email")
+	}
+	if err := secret().AuthorizeBasic(http.Header{}); err == nil {
+		t.Fatal("bearer secret used as basic")
 	}
 }
 

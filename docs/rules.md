@@ -52,6 +52,9 @@ A `never` rule takes none of `fields`, `state`, `ask`, `priority` or `close_by_o
 
 The file holds one YAML document. A second document (after `---`) is an error, not ignored.
 
+A seed file can drop a subject before these rules. See [`commands.md`](commands.md#beacon-seed). That drop is the built-in
+rule `seed`; it is not in this file, and a rule here cannot override it.
+
 ## Conditions
 
 Every condition in `match` must hold.

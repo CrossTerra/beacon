@@ -25,7 +25,8 @@ func TestFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, _ := f.Collect(context.Background())
+	got, _ := f.Collect(context.Background(), nil)
+	items := got.Items
 	if f.Name() != "fixture" || len(items) != 1 || items[0].Source != "fixture" || f.Hosts() != nil {
 		t.Fatalf("%+v", items)
 	}
@@ -66,7 +67,8 @@ func TestFixtureState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, _ := f.Collect(context.Background())
+	got, _ := f.Collect(context.Background(), nil)
+	items := got.Items
 	if items[0].State["status"] != "open" || items[0].Version != "1" || f.StateFields()[0] != "status" {
 		t.Fatalf("%+v", items[0])
 	}

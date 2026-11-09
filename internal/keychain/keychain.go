@@ -7,6 +7,7 @@ package keychain
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,44 @@ func (s Secret) Empty() bool { return len(s.value) == 0 }
 // Authorize sets the bearer Authorization header on h.
 func (s Secret) Authorize(h http.Header) {
 	h.Set("Authorization", "Bearer "+string(s.value))
+}
+
+// SourceAccount is the keychain account for one source's credential, under Service.
+func SourceAccount(name string) string { return "source:" + name }
+
+// FromString stores s as a secret. The caller must not log s. This is how `gh auth token` is imported.
+func FromString(s string) (Secret, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.ContainsAny(s, "\r\n") {
+		return Secret{}, errors.New("keychain: no secret given")
+	}
+	return Secret{value: []byte(s)}, nil
+}
+
+// PairWith stores an email and a token secret as one basic-auth secret. The token's bytes are read only here.
+func PairWith(email string, token Secret) (Secret, error) {
+	return Pair(email, string(token.value))
+}
+
+// Pair stores an email and a token as one secret for HTTP basic auth. Neither value leaves this package except as
+// the Authorization header AuthorizeBasic sets.
+func Pair(email, token string) (Secret, error) {
+	email = strings.TrimSpace(email)
+	token = strings.TrimSpace(token)
+	if email == "" || token == "" || strings.ContainsAny(email, "\r\n") || strings.ContainsAny(token, "\r\n") {
+		return Secret{}, errors.New("keychain: email and token are required")
+	}
+	return Secret{value: []byte(email + "\n" + token)}, nil
+}
+
+// AuthorizeBasic sets a basic Authorization header from a secret stored by Pair.
+func (s Secret) AuthorizeBasic(h http.Header) error {
+	email, token, ok := strings.Cut(string(s.value), "\n")
+	if !ok || email == "" || token == "" || strings.Contains(token, "\n") {
+		return errors.New("keychain: credential is not an email and a token")
+	}
+	h.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(email+":"+token)))
+	return nil
 }
 
 // String implements fmt.Stringer without revealing the value.

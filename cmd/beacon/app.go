@@ -20,8 +20,11 @@ import (
 
 	"github.com/CrossTerra/beacon/internal/config"
 	"github.com/CrossTerra/beacon/internal/egress"
+	"github.com/CrossTerra/beacon/internal/github"
+	"github.com/CrossTerra/beacon/internal/jira"
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/lease"
+	"github.com/CrossTerra/beacon/internal/limited"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/project"
@@ -51,6 +54,8 @@ type app struct {
 	configureClient func(*signal.Client)
 	// afterAppend is passed to the runner (tests stop the process there).
 	afterAppend func(key string)
+	// ghToken reads a GitHub token. Nil runs `gh auth token`. Tests set it so the token is never printed.
+	ghToken func(context.Context, string) (string, error)
 }
 
 const usage = `usage: beacon <command> [flags]
@@ -62,6 +67,9 @@ Commands:
   outbox        list what was sent, with keys, times and Signal event ids
   egress        print every host Beacon may contact under the current config
   rules check   validate the rules file and report rules that can never match
+  source add    store a source token in the keychain and enable the source
+  seed          import a seed file of subjects already decided never or send
+  accept-first  allow sending for sources whose first run has been reviewed
   version       print the version, commit and build flags
 
 Every command but version takes --config PATH (default: $BEACON_CONFIG, else the user config directory).
@@ -94,6 +102,12 @@ func (a *app) main(ctx context.Context, args []string) int {
 			return 2
 		}
 		err = a.cmdRulesCheck(rest[1:])
+	case "source":
+		err = a.cmdSource(ctx, rest)
+	case "seed":
+		err = a.cmdSeed(rest)
+	case "accept-first":
+		err = a.cmdAcceptFirst(rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "help", "-h", "--help":
@@ -153,22 +167,21 @@ func (a *app) load(p string) (*env, error) {
 		return nil, err
 	}
 	e := &env{cfg: cfg, person: project.Person{Handle: cfg.Person.Handle, Identities: cfg.Person.Identities}}
-	names := map[string]bool{}
-	for _, s := range cfg.Sources {
-		var src source.Source
-		switch s.Kind {
-		case "fixture":
-			f, err := source.LoadFixture(cfg.Resolve(s.Path))
-			if err != nil {
-				return nil, err
+	e.sources, err = a.buildSources(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if a.transport != nil {
+		u, _ := config.SignalURL(cfg.Signal.URL)
+		client := limited.HTTPClient(a.transport(egress.Addresses(egress.List(u, e.sources))))
+		for _, s := range e.sources {
+			switch s := s.(type) {
+			case *github.Source:
+				s.SetHTTP(client)
+			case *jira.Source:
+				s.SetHTTP(client)
 			}
-			src = f
 		}
-		if names[src.Name()] {
-			return nil, fmt.Errorf("two sources are named %q", src.Name())
-		}
-		names[src.Name()] = true
-		e.sources = append(e.sources, src)
 	}
 	e.rules, err = rules.Load(cfg.RulesPath())
 	if err != nil {
@@ -269,6 +282,7 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("run")
 	dry := fs.Bool("dry-run", false, "print what would be sent, and send nothing (the default until the config says mode: send)")
+	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
 	bodies := fs.Bool("bodies", false, "in send mode, print the body of each item decided in the pass (a dry run always does)")
 	if err := fs.Parse(args); err != nil {
@@ -294,9 +308,12 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	if problems > 0 {
 		return fail(logs.ReasonConfig, fmt.Sprintf("the rules file has %d errors; beacon rules check shows them", problems))
 	}
-	send := e.cfg.Mode == config.Send && !*dry
+	send := e.cfg.Mode == config.Send && !*dry && !*first
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
 		AfterAppend: a.afterAppend}
+	if err := a.prepare(e, r, send); err != nil {
+		return fail(runner.Classify(err), failText(runner.Classify(err), e))
+	}
 
 	if !send {
 		ob, err := outbox.Read(e.cfg.StatePath())
@@ -313,6 +330,12 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
 		a.printReport(rep, true)
+		if *first {
+			a.printFirst(rep)
+			if err := a.recordFirst(e, rep); err != nil {
+				return fail(runner.Classify(err), failText(runner.Classify(err), e))
+			}
+		}
 		return nil
 	}
 
@@ -405,6 +428,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	if !rep.Send {
 		fmt.Fprintln(w, "Dry run: nothing is sent.")
 	}
+	for _, f := range rep.Failed {
+		fmt.Fprintf(w, "source %s: not collected (%s)\n", f.Name, f.Reason)
+	}
 	for _, p := range rep.Items {
 		rule := p.Rule
 		if rule == "" {
@@ -420,6 +446,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			continue
 		}
 		fmt.Fprintf(w, "%-6s %s  %s\n", p.Tier, p.Item.Key, rule)
+		if p.Unaccepted {
+			fmt.Fprintln(w, "       first run not accepted; not recorded. Review, then beacon accept-first")
+		}
 		switch {
 		case p.Err != nil:
 			fmt.Fprintf(w, "       error: %v\n", p.Err)
@@ -451,6 +480,33 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	fmt.Fprintf(w, "Sent: %d. Pending: %d.\n", len(rep.Results), rep.Pending)
 }
 
+func (a *app) printFirst(rep *runner.Report) {
+	by := map[string]map[string]int{}
+	var names []string
+	for _, p := range rep.Items {
+		if by[p.Item.Source] == nil {
+			by[p.Item.Source] = map[string]int{}
+			names = append(names, p.Item.Source)
+		}
+		by[p.Item.Source][p.Item.Type]++
+	}
+	sort.Strings(names)
+	fmt.Fprintln(a.stdout, "First run summary:")
+	for _, n := range names {
+		types := make([]string, 0, len(by[n]))
+		for t := range by[n] {
+			types = append(types, t)
+		}
+		sort.Strings(types)
+		fmt.Fprintf(a.stdout, "  %s:", n)
+		for _, t := range types {
+			fmt.Fprintf(a.stdout, " %s %d", t, by[n][t])
+		}
+		fmt.Fprintln(a.stdout)
+	}
+	fmt.Fprintln(a.stdout, "First run is a dry run. Nothing is sent. Review the items, then beacon accept-first allows sending.")
+}
+
 // --- explain
 
 func (a *app) cmdExplain(ctx context.Context, args []string) error {
@@ -475,6 +531,9 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 		return err
 	}
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Outbox: ob, Queue: q, Log: logs.Discard(), Now: a.now}
+	if err := a.prepare(e, r, false); err != nil {
+		return err
+	}
 	ex, err := r.Explain(ctx, key)
 	if err != nil {
 		return err
@@ -483,9 +542,12 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 	fmt.Fprintf(w, "Key:        %s\n", ex.Key)
 	if ex.Item != nil {
 		fmt.Fprintf(w, "Source:     %s\nSubject:    %s\nType:       %s\n", ex.Item.Source, ex.Item.Subject, ex.Item.Type)
-		if ex.Rule != nil {
+		switch {
+		case ex.Seed:
+			fmt.Fprintln(w, "Rule:       seed (built-in, before the rules file)")
+		case ex.Rule != nil:
 			fmt.Fprintf(w, "Rule:       %d %q (line %d)\n", ex.Rule.Index, ex.Rule.Name, ex.Rule.Line)
-		} else {
+		default:
 			fmt.Fprintln(w, "Rule:       none matched; default never")
 		}
 		fmt.Fprintf(w, "Tier:       %s\n", ex.Tier)

@@ -79,6 +79,8 @@ type Input struct {
 	// OpenAsks are the keys of events Beacon wrote that ask the person and are not yet closed, on the item's subject,
 	// oldest first.
 	OpenAsks []string
+	// Truncated omits the body and marks the event truncated. The marker is a fixed flag, not item content.
+	Truncated bool
 }
 
 // Project builds the request body and its bytes. It fails if the rule does not send or hold, or if the body would
@@ -118,6 +120,9 @@ func Project(in Input) (*Body, []byte, error) {
 				b.Title = title(v)
 				b.Open.Title = b.Title
 			case FieldBody:
+				if in.Truncated {
+					continue
+				}
 				b.Body = v
 			default:
 				fields[name] = v
@@ -126,6 +131,9 @@ func Project(in Input) (*Body, []byte, error) {
 	}
 	if len(fields) > 0 {
 		meta["fields"] = fields
+	}
+	if in.Truncated {
+		meta["truncated"] = true
 	}
 	if len(meta) > 0 {
 		b.Metadata = meta

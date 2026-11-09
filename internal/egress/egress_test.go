@@ -17,11 +17,13 @@ type fakeSource struct {
 	hosts []string
 }
 
-func (f fakeSource) Name() string                                   { return f.name }
-func (f fakeSource) Fields() []string                               { return nil }
-func (f fakeSource) StateFields() []string                          { return nil }
-func (f fakeSource) Hosts() []string                                { return f.hosts }
-func (f fakeSource) Collect(context.Context) ([]source.Item, error) { return nil, nil }
+func (f fakeSource) Name() string          { return f.name }
+func (f fakeSource) Fields() []string      { return nil }
+func (f fakeSource) StateFields() []string { return nil }
+func (f fakeSource) Hosts() []string       { return f.hosts }
+func (f fakeSource) Collect(context.Context, []byte) (source.Collected, error) {
+	return source.Collected{}, nil
+}
 
 func TestList(t *testing.T) {
 	u, _ := url.Parse("https://Signal.Example.com")

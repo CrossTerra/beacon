@@ -62,7 +62,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | Phase | Plan | Status | Depends on |
 | --- | --- | --- | --- |
 | 1 | Trust core: config, keychain, rules engine, projection, outbox, Signal client, `explain`, `egress`, dry run | complete | — |
-| 2 | [First sources: GitHub and Jira](phase-2.md) | pending | 1 |
+| 2 | [First sources: GitHub and Jira](phase-2.md) | complete | 1 |
 | 3 | Google: Gmail, Calendar, Drive (comments and mentions) | pending | 1 |
 | 4 | Slack: direct messages, mentions, threads the person is in | pending | 1 |
 | 5 | Review: the hold queue and rule proposals, in the terminal first | pending | 2 |
