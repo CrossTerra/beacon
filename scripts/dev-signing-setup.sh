@@ -27,11 +27,21 @@ openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
 	-addext "basicConstraints=critical,CA:false" \
 	-addext "keyUsage=critical,digitalSignature" \
 	-addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
-openssl pkcs12 -export -legacy -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -name "$name" \
+# The keychain reads PKCS#12 with the older algorithms. OpenSSL 3 needs -legacy for them; the LibreSSL that ships
+# with macOS uses them by default and rejects the flag.
+legacy=()
+if openssl version | grep -q '^OpenSSL 3'; then
+	legacy=(-legacy)
+fi
+openssl pkcs12 -export "${legacy[@]}" -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -name "$name" \
 	-out "$tmp/id.p12" -passout "pass:$pass"
 
-# Only codesign may use the private key without asking.
+# Only codesign may use the private key: -T adds it to the key's access list, and the partition list must name
+# Apple's tools too, or codesign still prompts on every signing. set-key-partition-list asks for the login
+# keychain password here, once; it is never a command argument.
 security import "$tmp/id.p12" -k "$keychain" -P "$pass" -T /usr/bin/codesign
+echo "Enter your login keychain password to let codesign use the key without asking:"
+security set-key-partition-list -S apple-tool:,apple: -s -l "$name" "$keychain" >/dev/null
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$tmp/cert.pem"
 
 security find-identity -v -p codesigning "$keychain" | grep "\"$name\""
