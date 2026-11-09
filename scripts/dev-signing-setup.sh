@@ -27,13 +27,14 @@ openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
 	-addext "basicConstraints=critical,CA:false" \
 	-addext "keyUsage=critical,digitalSignature" \
 	-addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null
-# The keychain reads PKCS#12 with the older algorithms. OpenSSL 3 needs -legacy for them; the LibreSSL that ships
-# with macOS uses them by default and rejects the flag.
-legacy=()
-if openssl version | grep -q '^OpenSSL 3'; then
-	legacy=(-legacy)
+# The keychain reads PKCS#12 with the older algorithms. OpenSSL 3 and later need -legacy for them; the LibreSSL that
+# ships with macOS uses them by default and rejects the flag. Ask openssl whether it has the flag.
+legacy=""
+if openssl pkcs12 -help 2>&1 | grep -q -- '-legacy'; then
+	legacy="-legacy"
 fi
-openssl pkcs12 -export "${legacy[@]}" -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -name "$name" \
+# shellcheck disable=SC2086 # $legacy is empty or one flag
+openssl pkcs12 -export $legacy -inkey "$tmp/key.pem" -in "$tmp/cert.pem" -name "$name" \
 	-out "$tmp/id.p12" -passout "pass:$pass"
 
 # Only codesign may use the private key: -T adds it to the key's access list, and the partition list must name
