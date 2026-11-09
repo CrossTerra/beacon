@@ -6,7 +6,7 @@
 # a Beacon secret asks for the login password again. Release builds are signed with a Developer ID (Phase 7).
 #
 # This creates "Beacon Local Signing" in the login keychain and trusts it for code signing for this user only.
-# macOS asks for your password once to add the trust setting. The private key never leaves the keychain afterwards.
+# macOS asks for your login password twice: to let codesign use the key, and to add the trust setting. The private key never leaves the keychain afterwards.
 #   scripts/dev-signing-setup.sh
 set -euo pipefail
 

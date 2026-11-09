@@ -83,7 +83,8 @@ survive the next build.
 For local use, sign with a stable identity instead:
 
 1. Once: `scripts/dev-signing-setup.sh` creates the self-signed identity "Beacon Local Signing" in the login
-   keychain and trusts it for code signing for your user. macOS asks for your login password: once to let codesign use the key, and once to add the trust setting.
+   keychain and trusts it for code signing for your user. macOS asks for your login password twice: to let
+   `codesign` use the key, and to add the trust setting.
 2. Each build: `scripts/build-local.sh` builds with the same flags as `scripts/repro.sh`, signs with that identity
    and the identifier `dev.beacon.cli`, and installs to `~/.local/bin/beacon`.
 3. The first read of each secret after switching asks once. Choose "Always Allow". Later rebuilds keep access,
