@@ -609,7 +609,7 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		return add(in.item(TypePushed, "push:"+sha, actor, at, "", "", false))
 	}
 	// The current head is the push, stamped with the pass Date. A committer date before the window must not drop
-	// it. The actor comes from the timeline event that names that sha, so an own push stays own.
+	// it. The only actor is a signed-in GitHub user on a force-push.
 	head := in.PR.headSHA()
 	headActor := ""
 	for i, e := range in.Timeline {
@@ -619,11 +619,9 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		sha, actor := "", ""
 		switch e.Event {
 		case "committed":
-			// Git author is a name and email, not a login. Only a GitHub login or the person's noreply address is an actor.
-			sha, actor = e.SHA, gitActor(e.Author, in.Login)
-			if actor == "" {
-				actor = gitActor(e.Committer, in.Login)
-			}
+			// A git author is not a signed-in actor. Suggestion commits and forged noreply addresses must not
+			// become the person's own act (DEC-20).
+			sha = e.SHA
 		case "head_ref_force_pushed":
 			sha, actor = e.After, loginOf(e.Actor)
 		default:
@@ -651,37 +649,6 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		}
 	}
 	return nil
-}
-
-// gitActor returns a GitHub login from a timeline commit author. A raw email is not a login, except GitHub's
-// noreply form, which names the user.
-func gitActor(u *ghUser, login string) string {
-	if u == nil {
-		return ""
-	}
-	if u.Login != "" {
-		return u.Login
-	}
-	email := strings.ToLower(strings.TrimSpace(u.Email))
-	login = strings.ToLower(login)
-	if email == "" || login == "" || !noreplyFor(email, login) {
-		return ""
-	}
-	return login
-}
-
-// noreplyFor reports whether email is GitHub's private address for login, on github.com or a GitHub Enterprise host
-// (users.noreply.<host>).
-func noreplyFor(email, login string) bool {
-	local, host, ok := strings.Cut(email, "@")
-	if !ok || !strings.HasPrefix(host, "users.noreply.") || len(host) == len("users.noreply.") {
-		return false
-	}
-	if local == login {
-		return true
-	}
-	id, name, ok := strings.Cut(local, "+")
-	return ok && id != "" && name == login && !strings.Contains(id, "+")
 }
 
 // pushTime orders a timeline commit. It is not a filter. A committer date is the rebase time. A force-push

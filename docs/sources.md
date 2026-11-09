@@ -78,7 +78,7 @@ only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `c
 `own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
 is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author or committer time when it is the current head. A commit made
 earlier can be pushed later. The head sha is emitted when it differs from the commit the person last reviewed,
-stamped with the pass `Date`, and the actor is whoever the timeline names for that sha. Other commits stay inside
+stamped with the pass `Date`. A `committed` push has no actor and is not own: a git author, including a noreply address, is not a signed-in act and must not close the person's asks (DEC-20). The actor is set only from a force-push's GitHub user. Other commits stay inside
 the lookback window, so history from before the first run is not emitted (DEC-23). The key is the sha, so a later
 pass that sees the same head does not send twice. A key longer than 200 characters is shortened with a hash
 of the original, so it stays stable and is not dropped.

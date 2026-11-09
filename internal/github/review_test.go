@@ -594,8 +594,8 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 	if push == nil {
 		t.Fatal("head push with a committer date before the window was dropped")
 	}
-	if !push.OccurredAt.Equal(observed) || !push.Own || push.Actor != "github:user:winton" {
-		t.Fatalf("head push %+v", push)
+	if !push.OccurredAt.Equal(observed) || push.Own || push.Actor != "" {
+		t.Fatalf("a commit author made the push own: %+v", push)
 	}
 	noID := in
 	noID.Timeline = []timelineEvent{{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", SubmittedAt: "2026-11-08T08:00:00Z"}}
@@ -616,28 +616,27 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 	if !found {
 		t.Fatal("head push dropped when the review had no commit id")
 	}
-	noreply := in
-	noreply.Timeline = append([]timelineEvent(nil), in.Timeline...)
-	noreply.Timeline[2].Author = &ghUser{Email: "winton@users.noreply.github.com", Date: "2026-11-08T09:00:00Z"}
-	items, err = build(noreply)
+	suggestion := in
+	suggestion.Timeline = append([]timelineEvent(nil), in.Timeline...)
+	suggestion.Timeline[2].Author = &ghUser{Login: "winton", Email: "7+winton@users.noreply.ghe.example.com"}
+	items, err = build(suggestion)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range items {
-		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:pushed") && (!it.Own || it.Actor != "github:user:winton") {
-			t.Fatalf("noreply author not attributed: %+v", it)
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:pushed") && (it.Own || it.Actor != "") {
+			t.Fatalf("suggestion commit was an own act: %+v", it)
 		}
 	}
-	ghe := noreply
-	ghe.Timeline = append([]timelineEvent(nil), noreply.Timeline...)
-	ghe.Timeline[2].Author = &ghUser{Email: "7+winton@users.noreply.ghe.example.com"}
-	items, err = build(ghe)
+	forced := in
+	forced.Timeline = append(forced.Timeline, timelineEvent{Event: "head_ref_force_pushed", After: "pushed", Actor: &ghUser{Login: "winton"}, CreatedAt: "2026-11-08T11:00:00Z"})
+	items, err = build(forced)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, it := range items {
 		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:pushed") && (!it.Own || it.Actor != "github:user:winton") {
-			t.Fatalf("enterprise noreply author not attributed: %+v", it)
+			t.Fatalf("force-push actor dropped: %+v", it)
 		}
 	}
 	for _, it := range items {
