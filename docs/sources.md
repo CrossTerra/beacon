@@ -76,10 +76,10 @@ conclusion. A team request is addressed.
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
 only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
 `own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
-is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author time, which is often older than the push. It is emitted for a
-commit after the person's last review whose committer time, or a force-push's event time, is inside the lookback
-window. A push older than the first run is not emitted on the first incremental pass (DEC-23). The key is the sha,
-so a later pass that sees it again does not send twice. A key longer than 200 characters is shortened with a hash
+is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author or committer time. A commit made earlier can be pushed later.
+It is emitted when the head sha differs from the commit the person last reviewed, stamped with the pass `Date`.
+Committer and force-push times order other commits; they do not decide whether the push is emitted. The key is
+the sha, so a later pass that sees the same head does not send twice. A key longer than 200 characters is shortened with a hash
 of the original, so it stays stable and is not dropped.
 
 **Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is `opened`

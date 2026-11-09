@@ -565,28 +565,36 @@ func TestUserSplitListsPrivateRepos(t *testing.T) {
 	}
 }
 
-func TestOldPushNotEmitted(t *testing.T) {
+func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
+	observed := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	in := buildInput{
-		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
-		Since: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC),
+		Name: "github", Login: "winton", Observed: observed,
+		Since: time.Date(2026, 11, 8, 10, 45, 0, 0, time.UTC),
 		PR: pull{ID: 1, Number: 1, owner: "acme", name: "app", Title: "t", HTMLURL: "https://github.com/acme/app/pull/1",
 			User: &ghUser{Login: "winton"}, Head: &struct {
 				Ref string `json:"ref"`
 				SHA string `json:"sha"`
-			}{SHA: "oldhead"}},
+			}{SHA: "pushed"}},
 		Timeline: []timelineEvent{
-			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "base", SubmittedAt: "2026-10-01T00:00:00Z"},
-			{Event: "committed", SHA: "oldhead", Author: &ghUser{Date: "2026-11-08T02:00:00Z"}, Committer: &ghUser{Date: "2026-10-02T00:00:00Z"}},
+			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "reviewed", SubmittedAt: "2026-11-08T08:00:00Z"},
+			{Event: "committed", SHA: "pushed", Author: &ghUser{Date: "2026-11-08T09:00:00Z"}, Committer: &ghUser{Date: "2026-11-08T09:00:00Z"}},
 		},
 	}
 	items, err := build(in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, it := range items {
-		if it.Type == TypePushed {
-			t.Fatalf("push older than the first run was emitted: %+v", it)
+	var push *source.Item
+	for i := range items {
+		if items[i].Type == TypePushed && strings.HasSuffix(items[i].Key, ":push:pushed") {
+			push = &items[i]
 		}
+	}
+	if push == nil {
+		t.Fatal("head push with a committer date before the window was dropped")
+	}
+	if !push.OccurredAt.Equal(observed) {
+		t.Fatalf("head push stamped %s, want the pass Date", push.OccurredAt)
 	}
 }
 

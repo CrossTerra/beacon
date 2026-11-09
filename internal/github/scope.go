@@ -102,7 +102,13 @@ func (s scope) allow(raw string) error {
 	path := strings.TrimPrefix(u.Path, "/api/v3")
 	path = strings.Trim(path, "/")
 	switch path {
-	case "user", "user/teams", "user/repos", "search/issues":
+	case "user", "user/teams", "search/issues":
+		return nil
+	case "user/repos":
+		// Public-only and collaborator listings are not this list. affiliation=owner is the private-repo list.
+		if u.Query().Get("affiliation") != "owner" {
+			return source.ErrScope
+		}
 		return nil
 	}
 	parts := strings.Split(path, "/")

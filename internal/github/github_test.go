@@ -328,6 +328,7 @@ func TestScopeAndEgress(t *testing.T) {
 	for _, raw := range []string{
 		"https://api.github.com/user",
 		"https://api.github.com/user/teams",
+		"https://api.github.com/user/repos?per_page=100&visibility=all&affiliation=owner",
 		"https://api.github.com/search/issues?q=1",
 		"https://api.github.com/users/acme",
 		"https://api.github.com/repos/acme/app/pulls/1",
@@ -344,6 +345,9 @@ func TestScopeAndEgress(t *testing.T) {
 		"https://api.github.com/repos/acme/app/contents/README",
 		"https://api.github.com/repos/acme/app/git/trees/x",
 		"http://api.github.com/user",
+		"https://api.github.com/user/repos",
+		"https://api.github.com/user/repos?visibility=all",
+		"https://api.github.com/user/repos?affiliation=collaborator",
 	} {
 		if err := sc.allow(raw); err == nil {
 			t.Errorf("allowed %s", raw)

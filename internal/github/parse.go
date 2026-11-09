@@ -579,9 +579,8 @@ func inTeam(t *ghTeam, teams map[string]bool) bool {
 	return teams[t.key()]
 }
 
-// addPushes emits a push when the head moved after the person's last review, ignoring git commit time. A rebased
-// commit's author date is often before the cursor even though the push is new. The key is the sha, so a later pass
-// that sees it again does not send twice.
+// addPushes emits a push when the head moved after the person's last review. Git author and committer dates are
+// not the push time. The key is the sha, so a later pass that sees the same head does not send twice.
 func (in buildInput) addPushes(add func(source.Item, error) error) error {
 	if !personReviewed(in.Timeline, in.Reviews, in.Login) {
 		return nil
@@ -606,21 +605,23 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		if sha == "" || seen[sha] || sha == lastSHA || at.IsZero() {
 			return nil
 		}
-		// A push older than this pass's window is history. The first incremental pass after the first run must
-		// not send it (DEC-23). Author date is not the push time; the caller passes the committer or event time.
-		if !in.Since.IsZero() && at.Before(in.Since) {
-			return nil
-		}
 		seen[sha] = true
 		return add(in.item(TypePushed, "push:"+sha, actor, at, "", "", false))
+	}
+	// The current head is the push. Stamp it with the pass Date. A committer date before the window must not drop it.
+	if head := in.PR.headSHA(); head != "" && lastSHA != "" && head != lastSHA {
+		if err := emit(head, "", in.Observed); err != nil {
+			return err
+		}
 	}
 	for i, e := range in.Timeline {
 		if last >= 0 && i <= last {
 			continue
 		}
+		// Committer and force-push times order the commit. They do not filter it.
 		at, ok := pushTime(e)
 		if !ok {
-			continue
+			at = in.Observed
 		}
 		switch e.Event {
 		case "committed":
@@ -636,8 +637,8 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 	return nil
 }
 
-// pushTime is the push's own time, never the git author date and never the local clock. A committer date is the
-// rebase or push time. A force-push timeline event has created_at.
+// pushTime orders a timeline commit. It is not a filter. A committer date is the rebase time. A force-push
+// timeline event has created_at. Author date is not used.
 func pushTime(e timelineEvent) (time.Time, bool) {
 	if e.Event == "head_ref_force_pushed" {
 		if t, err := parseTime(e.CreatedAt); err == nil {
