@@ -59,7 +59,7 @@ func TestCollectEveryItem(t *testing.T) {
 	if err := json.Unmarshal([]byte(jql), &search); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(search.JQL, `updated >= "2026-11-07 12:00"`) || !strings.Contains(search.JQL, "project in (ENG)") || strings.Contains(search.JQL, "OTHER") {
+	if !strings.Contains(search.JQL, `updated >= "2026-11-07 11:45"`) || !strings.Contains(search.JQL, "project in (ENG)") || strings.Contains(search.JQL, "OTHER") {
 		t.Fatalf("jql %s", search.JQL)
 	}
 	byKey := map[string]source.Item{}

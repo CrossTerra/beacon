@@ -33,6 +33,10 @@ const (
 
 var issueKeyPattern = regexp.MustCompile(`[A-Z][A-Z0-9]+-\d+`)
 
+type ghTeam struct {
+	Slug string `json:"slug"`
+}
+
 type ghUser struct {
 	Login string `json:"login"`
 	Type  string `json:"type"`
@@ -60,9 +64,12 @@ type pull struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
 	RequestedReviewers []ghUser `json:"requested_reviewers"`
-	Assignees          []ghUser `json:"assignees"`
-	owner              string
-	name               string
+	RequestedTeams     []struct {
+		Slug string `json:"slug"`
+	} `json:"requested_teams"`
+	Assignees []ghUser `json:"assignees"`
+	owner     string
+	name      string
 }
 
 func (p pull) author() string {
@@ -105,6 +112,8 @@ type timelineEvent struct {
 	Body              string  `json:"body"`
 	ReviewRequester   *ghUser `json:"review_requester"`
 	RequestedReviewer *ghUser `json:"requested_reviewer"`
+	RequestedTeam     *ghTeam `json:"requested_team"`
+	CommitID          string  `json:"commit_id"`
 	After             string  `json:"after"`
 	Author            *ghUser `json:"author"`
 	Committer         *ghUser `json:"committer"`
@@ -160,6 +169,7 @@ type buildInput struct {
 	Checks   []checkSuite
 	Fetched  bool // checks were requested
 	Login    string
+	Teams    map[string]bool
 	Since    time.Time
 	First    bool
 	Observed time.Time
@@ -183,14 +193,13 @@ func build(in buildInput) ([]source.Item, error) {
 		}
 		return nil
 	}
-	reviewed := personReviewed(in.Timeline, in.Reviews, in.Login)
 	if in.First {
 		if strings.EqualFold(pr.State, "open") && !pr.Merged {
 			at, err := parseTime(pr.Created)
 			if err != nil {
 				return nil, err
 			}
-			if err := add(in.item(TypeOpened, strconv.FormatInt(pr.ID, 10), pr.author(), at, "", "", false)); err != nil {
+			if err := add(in.item(TypeOpened, "opened:"+strconv.FormatInt(pr.ID, 10), pr.author(), at, "", "", mentions(pr.Body, in.Login) || mentions(pr.Title, in.Login))); err != nil {
 				return nil, err
 			}
 			reqs, err := currentRequests(in, obs)
@@ -208,7 +217,7 @@ func build(in buildInput) ([]source.Item, error) {
 	}
 	created, err := parseTime(pr.Created)
 	if err == nil && !created.Before(in.Since) {
-		if err := add(in.item(TypeOpened, strconv.FormatInt(pr.ID, 10), pr.author(), created, "", "", false)); err != nil {
+		if err := add(in.item(TypeOpened, "opened:"+strconv.FormatInt(pr.ID, 10), pr.author(), created, "", "", mentions(pr.Body, in.Login) || mentions(pr.Title, in.Login))); err != nil {
 			return nil, err
 		}
 	}
@@ -218,7 +227,6 @@ func build(in buildInput) ([]source.Item, error) {
 			merged = true
 		}
 	}
-	pushed := map[string]bool{}
 	for _, e := range in.Timeline {
 		at := eventTime(e)
 		if at.IsZero() || at.Before(in.Since) {
@@ -227,58 +235,50 @@ func build(in buildInput) ([]source.Item, error) {
 		var err error
 		switch e.Event {
 		case "ready_for_review":
-			err = add(in.item(TypeReady, e.ID.String(), loginOf(e.Actor), at, "", "", false))
+			err = add(in.item(TypeReady, "timeline:"+e.ID.String(), loginOf(e.Actor), at, "", "", false))
 		case "review_requested":
 			who := loginOf(e.RequestedReviewer)
 			actor := loginOf(e.ReviewRequester)
 			if actor == "" {
 				actor = loginOf(e.Actor)
 			}
-			err = add(in.item(TypeReviewRequested, e.ID.String(), actor, at, "", "", strings.EqualFold(who, in.Login)))
+			err = add(in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, teamSlug(e.RequestedTeam))))
 		case "review_request_removed":
 			actor := loginOf(e.Actor)
 			if actor == "" {
 				actor = loginOf(e.ReviewRequester)
 			}
-			err = add(in.item(TypeReviewRequestRemoved, e.ID.String(), actor, at, "", "", false))
+			err = add(in.item(TypeReviewRequestRemoved, "timeline:"+e.ID.String(), actor, at, "", "", false))
 		case "reviewed":
 			actor := loginOf(e.User)
-			err = add(in.item(TypeReviewed, e.ID.String(), actor, at, strings.ToLower(e.State), e.Body, mentions(e.Body, in.Login)))
+			err = add(in.item(TypeReviewed, "review:"+e.ID.String(), actor, at, strings.ToLower(e.State), e.Body, mentions(e.Body, in.Login)))
 		case "commented":
 			actor := loginOf(e.User)
-			err = add(in.item(TypeCommented, e.ID.String(), actor, at, "", e.Body, mentions(e.Body, in.Login)))
-		case "committed":
-			if !reviewed || e.SHA == "" || pushed[e.SHA] {
-				continue
-			}
-			pushed[e.SHA] = true
-			err = add(in.item(TypePushed, e.SHA, loginOf(e.Author), at, "", "", false))
-		case "head_ref_force_pushed":
-			sha := e.After
-			if !reviewed || sha == "" || pushed[sha] {
-				continue
-			}
-			pushed[sha] = true
-			// The change id is the sha, which is stable if a committed event names the same commit.
-			err = add(in.item(TypePushed, sha, loginOf(e.Actor), at, "", "", false))
+			err = add(in.item(TypeCommented, "comment:"+e.ID.String(), actor, at, "", e.Body, mentions(e.Body, in.Login)))
+		case "committed", "head_ref_force_pushed":
+			// Commit author time is often older than the push. Do not filter pushes by that time; emit below.
+			continue
 		case "merged":
-			err = add(in.item(TypeMerged, e.ID.String(), loginOf(e.Actor), at, "", "", false))
+			err = add(in.item(TypeMerged, "timeline:"+e.ID.String(), loginOf(e.Actor), at, "", "", false))
 		case "closed":
 			if merged {
 				continue
 			}
-			err = add(in.item(TypeClosed, e.ID.String(), loginOf(e.Actor), at, "", "", false))
+			err = add(in.item(TypeClosed, "timeline:"+e.ID.String(), loginOf(e.Actor), at, "", "", false))
 		}
 		if err != nil {
 			return nil, err
 		}
+	}
+	if err := in.addPushes(add); err != nil {
+		return nil, err
 	}
 	for _, c := range in.Comments {
 		at, err := parseTime(c.CreatedAt)
 		if err != nil || at.Before(in.Since) {
 			continue
 		}
-		if err := add(in.item(TypeCommented, c.ID.String(), loginOf(c.User), at, "", c.Body, mentions(c.Body, in.Login))); err != nil {
+		if err := add(in.item(TypeCommented, "review-comment:"+c.ID.String(), loginOf(c.User), at, "", c.Body, mentions(c.Body, in.Login))); err != nil {
 			return nil, err
 		}
 	}
@@ -295,6 +295,12 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 	for _, u := range in.PR.RequestedReviewers {
 		pending[strings.ToLower(u.Login)] = true
 	}
+	pendingTeams := map[string]bool{}
+	for _, t := range in.PR.RequestedTeams {
+		if t.Slug != "" {
+			pendingTeams[strings.ToLower(t.Slug)] = true
+		}
+	}
 	var items []source.Item
 	seen := map[string]bool{}
 	for _, e := range in.Timeline {
@@ -302,16 +308,24 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 			continue
 		}
 		who := loginOf(e.RequestedReviewer)
-		if who == "" || !pending[strings.ToLower(who)] || seen[strings.ToLower(who)] {
+		team := teamSlug(e.RequestedTeam)
+		userPending := who != "" && pending[strings.ToLower(who)] && !seen[strings.ToLower(who)]
+		teamPending := team != "" && pendingTeams[strings.ToLower(team)] && in.Teams[strings.ToLower(team)] && !seen["team:"+strings.ToLower(team)]
+		if !userPending && !teamPending {
 			continue
 		}
-		seen[strings.ToLower(who)] = true
+		if who != "" {
+			seen[strings.ToLower(who)] = true
+		}
+		if team != "" {
+			seen["team:"+strings.ToLower(team)] = true
+		}
 		at := eventTime(e)
 		if at.IsZero() {
 			at = obs
 		}
 		actor := loginOf(e.ReviewRequester)
-		it, err := in.item(TypeReviewRequested, e.ID.String(), actor, at, "", "", strings.EqualFold(who, in.Login))
+		it, err := in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team))
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +353,8 @@ func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
 		at = obs
 	}
 	id := "checks:" + sha + ":" + conclusion
-	it, err := in.item(TypeChecksChanged, id, in.PR.author(), at, "", "", false)
+	// No actor and not own: a check finishing is not the person's act, and must not close their asks.
+	it, err := in.item(TypeChecksChanged, id, "", at, "", "", false)
 	if err != nil {
 		return source.Item{}, false
 	}
@@ -505,9 +520,87 @@ func aggregateChecks(suites []checkSuite) string {
 	}
 }
 
-func reviewRequested(pr pull, login string) bool {
+func (in buildInput) addressedRequest(login, team string) bool {
+	if strings.EqualFold(login, in.Login) {
+		return true
+	}
+	return team != "" && in.Teams[strings.ToLower(team)]
+}
+
+func teamSlug(t *ghTeam) string {
+	if t == nil {
+		return ""
+	}
+	return t.Slug
+}
+
+func inTeam(t *ghTeam, teams map[string]bool) bool {
+	slug := teamSlug(t)
+	return slug != "" && teams[strings.ToLower(slug)]
+}
+
+// addPushes emits a push when the head moved after the person's last review, ignoring git commit time. A rebased
+// commit's author date is often before the cursor even though the push is new. The key is the sha, so a later pass
+// that sees it again does not send twice.
+func (in buildInput) addPushes(add func(source.Item, error) error) error {
+	if !personReviewed(in.Timeline, in.Reviews, in.Login) {
+		return nil
+	}
+	last := -1
+	lastSHA := ""
+	for i, e := range in.Timeline {
+		if e.Event == "reviewed" && strings.EqualFold(loginOf(e.User), in.Login) && !strings.EqualFold(e.State, "pending") {
+			last = i
+			if e.CommitID != "" {
+				lastSHA = e.CommitID
+			}
+		}
+	}
+	for _, r := range in.Reviews {
+		if strings.EqualFold(loginOf(r.User), in.Login) && r.CommitID != "" {
+			lastSHA = r.CommitID
+		}
+	}
+	seen := map[string]bool{}
+	emit := func(sha, actor string, at time.Time) error {
+		if sha == "" || seen[sha] || sha == lastSHA {
+			return nil
+		}
+		seen[sha] = true
+		if at.IsZero() {
+			at = in.Observed
+		}
+		return add(in.item(TypePushed, "push:"+sha, actor, at, "", "", false))
+	}
+	for i, e := range in.Timeline {
+		if last >= 0 && i <= last {
+			continue
+		}
+		switch e.Event {
+		case "committed":
+			if err := emit(e.SHA, loginOf(e.Author), eventTime(e)); err != nil {
+				return err
+			}
+		case "head_ref_force_pushed":
+			if err := emit(e.After, loginOf(e.Actor), eventTime(e)); err != nil {
+				return err
+			}
+		}
+	}
+	if head := in.PR.headSHA(); head != "" && head != lastSHA {
+		return emit(head, "", in.Observed)
+	}
+	return nil
+}
+
+func reviewRequested(pr pull, login string, teams map[string]bool) bool {
 	for _, u := range pr.RequestedReviewers {
 		if strings.EqualFold(u.Login, login) {
+			return true
+		}
+	}
+	for _, t := range pr.RequestedTeams {
+		if teams[strings.ToLower(t.Slug)] {
 			return true
 		}
 	}
@@ -515,8 +608,8 @@ func reviewRequested(pr pull, login string) bool {
 }
 
 // involved reports whether the person is an author, assignee, reviewer, requested reviewer, mention, or commenter.
-func involved(pr pull, events []timelineEvent, reviews []review, comments []reviewComment, login string) bool {
-	if strings.EqualFold(pr.author(), login) || reviewRequested(pr, login) {
+func involved(pr pull, events []timelineEvent, reviews []review, comments []reviewComment, login string, teams map[string]bool) bool {
+	if strings.EqualFold(pr.author(), login) || reviewRequested(pr, login, teams) {
 		return true
 	}
 	for _, u := range pr.Assignees {
@@ -534,7 +627,7 @@ func involved(pr pull, events []timelineEvent, reviews []review, comments []revi
 		if e.Event == "commented" && strings.EqualFold(loginOf(e.User), login) {
 			return true
 		}
-		if e.Event == "review_requested" && strings.EqualFold(loginOf(e.RequestedReviewer), login) {
+		if e.Event == "review_requested" && (strings.EqualFold(loginOf(e.RequestedReviewer), login) || inTeam(e.RequestedTeam, teams)) {
 			return true
 		}
 		if e.Event == "commented" && mentions(e.Body, login) {

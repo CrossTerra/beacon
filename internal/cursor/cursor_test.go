@@ -30,8 +30,14 @@ func TestCommitAndAccept(t *testing.T) {
 	if err := s.Commit("github", []byte("2026-11-07T12:00:00Z")); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.MarkFirst([]string{"github"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Accept([]string{"github"}); err != nil {
 		t.Fatal(err)
+	}
+	if err := s.Accept([]string{"jira"}); err == nil {
+		t.Fatal("accepted without a completed --first")
 	}
 	again, err := Read(dir)
 	if err != nil {

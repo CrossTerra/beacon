@@ -24,6 +24,7 @@ const token = "ghp_TESTTOKEN"
 func TestCollectEveryItem(t *testing.T) {
 	var paths, queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -37,6 +38,8 @@ func TestCollectEveryItem(t *testing.T) {
 		switch {
 		case r.URL.Path == "/user":
 			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/user/teams":
+			io.WriteString(w, `[]`)
 		case r.URL.Path == "/users/acme":
 			io.WriteString(w, `{"login":"acme","type":"Organization"}`)
 		case r.URL.Path == "/search/issues":
@@ -88,7 +91,7 @@ func TestCollectEveryItem(t *testing.T) {
 		t.Fatalf("cursor %s", got.Next)
 	}
 	joined := strings.Join(queries, "\n")
-	if !strings.Contains(joined, "repo:acme/app") || !strings.Contains(joined, "org:acme") || !strings.Contains(joined, "is:open") || strings.Contains(joined, "other/secret") || !strings.Contains(joined, "updated:>=2026-11-01") {
+	if !strings.Contains(joined, "repo:acme/app") || !strings.Contains(joined, "org:acme") || !strings.Contains(joined, "is:open") || strings.Contains(joined, "other/secret") || !strings.Contains(joined, "updated:>=2026-10-31T23:45:00Z") {
 		t.Fatalf("query %q", queries)
 	}
 	byKey := map[string]source.Item{}
@@ -105,22 +108,24 @@ func TestCollectEveryItem(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"github:acme/app#7:12":                 TypeReviewed,
-		"github:acme/app#7:13":                 TypeCommented,
-		"github:acme/app#7:14":                 TypeCommented,
-		"github:acme/app#7:aaa111":             TypePushed,
-		"github:acme/app#7:15":                 TypeMerged,
-		"github:acme/app#8:800":                TypeOpened,
-		"github:acme/app#8:21":                 TypeReviewRequested,
-		"github:acme/app#8:22":                 TypeReviewRequestRemoved,
-		"github:acme/app#8:23":                 TypeReviewed,
-		"github:acme/app#8:24":                 TypeReady,
-		"github:acme/app#8:26":                 TypeCommented,
-		"github:acme/app#8:ccc999":             TypePushed,
-		"github:acme/app#8:25":                 TypeClosed,
-		"github:acme/app#8:77":                 TypeCommented,
+		"github:acme/app#7:review:12":          TypeReviewed,
+		"github:acme/app#7:comment:13":         TypeCommented,
+		"github:acme/app#7:comment:14":         TypeCommented,
+		"github:acme/app#7:push:aaa111":        TypePushed,
+		"github:acme/app#7:push:abc111":        TypePushed,
+		"github:acme/app#7:timeline:15":        TypeMerged,
+		"github:acme/app#8:opened:800":         TypeOpened,
+		"github:acme/app#8:timeline:21":        TypeReviewRequested,
+		"github:acme/app#8:timeline:22":        TypeReviewRequestRemoved,
+		"github:acme/app#8:review:23":          TypeReviewed,
+		"github:acme/app#8:timeline:24":        TypeReady,
+		"github:acme/app#8:comment:26":         TypeCommented,
+		"github:acme/app#8:push:ccc999":        TypePushed,
+		"github:acme/app#8:push:bbb222":        TypePushed,
+		"github:acme/app#8:timeline:25":        TypeClosed,
+		"github:acme/app#8:review-comment:77":  TypeCommented,
 		"github:acme/app#9:checks:def456:fail": TypeChecksChanged,
-		"github:acme/lib#3:31":                 TypeCommented,
+		"github:acme/lib#3:comment:31":         TypeCommented,
 	}
 	if len(byKey) != len(want) {
 		var keys []string
@@ -135,39 +140,42 @@ func TestCollectEveryItem(t *testing.T) {
 			t.Fatalf("%s: %+v", k, it)
 		}
 	}
-	if _, ok := byKey["github:acme/app#7:16"]; ok {
+	if _, ok := byKey["github:acme/app#7:timeline:16"]; ok {
 		t.Fatal("a merge also yielded closed")
 	}
-	if _, ok := byKey["github:acme/app#7:10"]; ok {
+	if _, ok := byKey["github:acme/app#7:review:10"]; ok {
 		t.Fatal("event before the cursor was emitted")
 	}
-	c13 := byKey["github:acme/app#7:13"]
+	c13 := byKey["github:acme/app#7:comment:13"]
 	if !c13.Addressed || c13.Own || c13.Fields["body"] != "see @winton" || c13.Actor != "github:user:dana" {
 		t.Fatalf("mention %+v", c13)
 	}
-	if byKey["github:acme/app#8:26"].Addressed {
+	if byKey["github:acme/app#8:comment:26"].Addressed {
 		t.Fatal("@winton2 was treated as a mention of winton")
 	}
-	if !byKey["github:acme/app#8:21"].Addressed || byKey["github:acme/app#8:21"].Actor != "github:user:dana" {
+	if !byKey["github:acme/app#8:timeline:21"].Addressed || byKey["github:acme/app#8:timeline:21"].Actor != "github:user:dana" {
 		t.Fatal("review request")
 	}
-	rev := byKey["github:acme/app#8:23"]
+	rev := byKey["github:acme/app#8:review:23"]
 	if !rev.Own || rev.Fields["review_state"] != "changes_requested" {
 		t.Fatalf("own review %+v", rev)
 	}
-	if !byKey["github:acme/app#7:15"].Own || byKey["github:acme/app#7:15"].Type != TypeMerged {
+	if !byKey["github:acme/app#7:timeline:15"].Own || byKey["github:acme/app#7:timeline:15"].Type != TypeMerged {
 		t.Fatal("own merge")
 	}
-	if !byKey["github:acme/app#8:25"].Own == false || byKey["github:acme/app#8:25"].Type != TypeClosed {
+	if !byKey["github:acme/app#8:timeline:25"].Own == false || byKey["github:acme/app#8:timeline:25"].Type != TypeClosed {
 		t.Fatal("close without merge")
 	}
-	refs := byKey["github:acme/app#7:15"].References
+	refs := byKey["github:acme/app#7:timeline:15"].References
 	if len(refs) != 1 || refs[0] != "jira:ENG-12" {
 		t.Fatalf("references %v", refs)
 	}
 	checks := byKey["github:acme/app#9:checks:def456:fail"]
 	if checks.State["checks"] != "fail" || checks.State["draft"] != "true" || checks.State["review_decision"] != "review_required" || checks.State["head_sha"] != "def456" || checks.Version != "checks:def456:fail" {
 		t.Fatalf("state %+v", checks)
+	}
+	if checks.Own || checks.Actor != "" {
+		t.Fatalf("checks must not be an own act: %+v", checks)
 	}
 	if checks.State["mergeable"] != "true" || checks.Fields["repo"] != "acme/app" || checks.Fields["number"] != "9" {
 		t.Fatalf("fields %+v", checks)
@@ -188,8 +196,10 @@ func TestCollectEveryItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(later.Items) != 0 {
-		t.Fatalf("cursor did not filter: %d", len(later.Items))
+	for _, it := range later.Items {
+		if byKey[it.Key].Type == "" || byKey[it.Key].Key != it.Key {
+			t.Fatalf("cursor admitted a new item %s", it.Key)
+		}
 	}
 	assertStarterRules(t, got.Items)
 }
@@ -240,7 +250,7 @@ func TestFirstRunIsOpenState(t *testing.T) {
 			t.Fatalf("first run emitted history %s", it.Key)
 		}
 	}
-	if !types["github:acme/app#9:900 "+TypeOpened] || !types["github:acme/app#9:checks:def456:pass "+TypeChecksChanged] || !types["github:acme/app#8:21 "+TypeReviewRequested] {
+	if !types["github:acme/app#9:opened:900 "+TypeOpened] || !types["github:acme/app#9:checks:def456:pass "+TypeChecksChanged] || !types["github:acme/app#8:timeline:21 "+TypeReviewRequested] {
 		t.Fatalf("%v", types)
 	}
 }
@@ -317,6 +327,7 @@ func TestScopeAndEgress(t *testing.T) {
 	}
 	for _, raw := range []string{
 		"https://api.github.com/user",
+		"https://api.github.com/user/teams",
 		"https://api.github.com/search/issues?q=1",
 		"https://api.github.com/users/acme",
 		"https://api.github.com/repos/acme/app/pulls/1",
@@ -392,6 +403,10 @@ func TestIdentityCase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/user" {
 			io.WriteString(w, `{"login":"winton"}`)
+			return
+		}
+		if r.URL.Path == "/user/teams" {
+			io.WriteString(w, `[]`)
 			return
 		}
 		io.WriteString(w, `{"items":[]}`)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,7 +180,7 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	token, err := a.readGitHubToken(ctx, *fromGH)
+	token, err := a.readGitHubToken(ctx, *fromGH, *host)
 	if err != nil {
 		return err
 	}
@@ -219,14 +220,25 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
+	// One reader for a pipe: a second bufio.Reader would miss the token, which the first reader already buffered.
+	in := bufio.NewReader(a.stdin)
 	fmt.Fprint(a.stderr, "Atlassian account email: ")
-	email, err := readLine(a.stdin)
+	email, err := readLineFrom(in)
 	if err != nil {
 		return err
 	}
 	fmt.Fprint(a.stderr, "API token (input hidden): ")
-	token, err := keychain.ReadSecret(ctx, a.stdin)
-	fmt.Fprintln(a.stderr)
+	var token keychain.Secret
+	if isTerminal(a.stdin) {
+		token, err = keychain.ReadSecret(ctx, a.stdin)
+		fmt.Fprintln(a.stderr)
+	} else {
+		var line string
+		line, err = readLineFrom(in)
+		if err == nil {
+			token, err = keychain.FromString(line)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -249,7 +261,7 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) readGitHubToken(ctx context.Context, fromGH bool) (keychain.Secret, error) {
+func (a *app) readGitHubToken(ctx context.Context, fromGH bool, host string) (keychain.Secret, error) {
 	if !fromGH {
 		fmt.Fprint(a.stderr, "GitHub token (input hidden): ")
 		s, err := keychain.ReadSecret(ctx, a.stdin)
@@ -259,9 +271,9 @@ func (a *app) readGitHubToken(ctx context.Context, fromGH bool) (keychain.Secret
 	var raw string
 	var err error
 	if a.ghToken != nil {
-		raw, err = a.ghToken(ctx)
+		raw, err = a.ghToken(ctx, host)
 	} else {
-		raw, err = ghAuthToken(ctx)
+		raw, err = ghAuthToken(ctx, host)
 	}
 	if err != nil {
 		return keychain.Secret{}, err
@@ -269,8 +281,23 @@ func (a *app) readGitHubToken(ctx context.Context, fromGH bool) (keychain.Secret
 	return keychain.FromString(raw)
 }
 
-func ghAuthToken(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "gh", "auth", "token")
+func splitHost(host string) (string, string, error) {
+	if !strings.Contains(host, ":") {
+		return host, "", nil
+	}
+	return net.SplitHostPort(host)
+}
+
+func ghAuthToken(ctx context.Context, host string) (string, error) {
+	args := []string{"auth", "token"}
+	if host != "" {
+		h, _, err := splitHost(host)
+		if err != nil {
+			h = host
+		}
+		args = append(args, "--hostname", h)
+	}
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", errors.New("gh auth token failed; run gh auth login")
@@ -308,7 +335,11 @@ func isTerminal(r io.Reader) bool {
 }
 
 func readLine(r io.Reader) (string, error) {
-	line, err := bufio.NewReader(r).ReadString('\n')
+	return readLineFrom(bufio.NewReader(r))
+}
+
+func readLineFrom(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
 	}
@@ -374,11 +405,40 @@ func (a *app) cmdAcceptFirst(args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, n := range names {
+		if !st.FirstDone(n) {
+			return fmt.Errorf("%s has no completed beacon run --first; review that summary first", n)
+		}
+	}
 	if err := st.Accept(names); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "Accepted the first run of %s. A send pass may now send their items.\n", strings.Join(names, ", "))
 	return nil
+}
+
+func (a *app) recordFirst(e *env, rep *runner.Report) error {
+	failed := map[string]bool{}
+	for _, f := range rep.Failed {
+		failed[f.Name] = true
+	}
+	var names []string
+	for _, s := range e.sources {
+		switch s.(type) {
+		case *github.Source, *jira.Source:
+			if !failed[s.Name()] {
+				names = append(names, s.Name())
+			}
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	st, err := cursor.Open(e.cfg.StatePath())
+	if err != nil {
+		return err
+	}
+	return st.MarkFirst(names)
 }
 
 func upsert(sources []config.Source, s config.Source) []config.Source {

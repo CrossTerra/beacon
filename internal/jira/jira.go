@@ -37,15 +37,16 @@ type Options struct {
 
 // Source reads Jira.
 type Source struct {
-	name     string
-	site     string
-	hostPort string
-	base     string
-	scope    scope
-	identity string
-	creds    func() (keychain.Secret, error)
-	http     *limited.Client
-	now      func() time.Time
+	name       string
+	site       string
+	hostPort   string
+	base       string
+	scope      scope
+	identity   string
+	creds      func() (keychain.Secret, error)
+	http       *limited.Client
+	now        func() time.Time
+	serverDate time.Time
 }
 
 // New builds a source. It does not read the credential.
@@ -114,7 +115,6 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
-	started := s.now().UTC()
 	first := len(cursor) == 0
 	var since time.Time
 	if !first {
@@ -124,6 +124,10 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		}
 		since = since.UTC()
 	}
+	floor := time.Time{}
+	if !since.IsZero() {
+		floor = since.Add(-source.Lookback)
+	}
 	me, loc, err := s.myself(ctx, secret)
 	if err != nil {
 		return source.Collected{}, err
@@ -131,7 +135,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if s.identity != "" && s.identity != "jira:account:"+me {
 		return source.Collected{}, source.ErrIdentity
 	}
-	keys, err := s.search(ctx, secret, s.jql(since, loc, first, me))
+	keys, err := s.search(ctx, secret, s.jql(floor, loc, first, me))
 	if err != nil {
 		return source.Collected{}, err
 	}
@@ -140,13 +144,37 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		if !s.scope.allowsKey(key) {
 			continue
 		}
-		got, err := s.issueItems(ctx, secret, key, me, loc, since, first, started)
+		got, err := s.issueItems(ctx, secret, key, me, loc, floor, first, s.serverNow())
 		if err != nil {
 			return source.Collected{Items: items}, err
 		}
 		items = append(items, got...)
 	}
-	return source.Collected{Items: items, Next: []byte(started.Format(time.RFC3339))}, nil
+	next, err := jiraCursor(s.serverDate, items)
+	if err != nil {
+		return source.Collected{Items: items}, err
+	}
+	return source.Collected{Items: items, Next: next}, nil
+}
+
+func (s *Source) serverNow() time.Time {
+	if !s.serverDate.IsZero() {
+		return s.serverDate
+	}
+	return s.now().UTC()
+}
+
+func jiraCursor(server time.Time, items []source.Item) ([]byte, error) {
+	t := server
+	for _, it := range items {
+		if it.OccurredAt.After(t) {
+			t = it.OccurredAt
+		}
+	}
+	if t.IsZero() {
+		return nil, errors.New("jira: the server sent no Date and there is no event time")
+	}
+	return []byte(t.UTC().Format(time.RFC3339)), nil
 }
 
 func (s *Source) myself(ctx context.Context, secret keychain.Secret) (string, *time.Location, error) {
@@ -186,6 +214,7 @@ func (s *Source) jql(since time.Time, loc *time.Location, first bool, account st
 		return clause + " AND resolution = Unresolved AND assignee = currentUser() ORDER BY updated ASC"
 	}
 	when := since.In(loc).Format("2006-01-02 15:04")
+	// text ~ account id is not verified against live ADF mentions. Mentions are also taken from fetched comments.
 	mention := ""
 	if account != "" && !strings.ContainsAny(account, "\"\\") {
 		mention = fmt.Sprintf(` OR text ~ "\"%s\""`, account)
@@ -465,9 +494,19 @@ func (s *Source) call(ctx context.Context, secret keychain.Secret, method, raw s
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, source.ErrUnauthorized
 	}
+	if t, err := http.ParseTime(resp.Header.Get("Date")); err == nil && t.UTC().After(s.serverDate) {
+		s.serverDate = t.UTC()
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		low := strings.ToLower(string(data))
+		if strings.Contains(low, "rate limit") {
+			return nil, source.ErrRateLimited
+		}
+		return nil, &statusError{resp.StatusCode}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &statusError{resp.StatusCode}
@@ -479,10 +518,11 @@ type statusError struct{ status int }
 
 func (e *statusError) Error() string { return fmt.Sprintf("jira: status %d", e.status) }
 
-// unavailable is one issue the token cannot read. The pass continues so that issue cannot freeze the cursor.
+// unavailable is one issue the token cannot read (gone). A 403 is not this: a rate limit often arrives as a 403
+// with no Retry-After, and skipping it would move the cursor past unread changes.
 func unavailable(err error) bool {
 	var se *statusError
-	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusForbidden)
+	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
 type flexID string

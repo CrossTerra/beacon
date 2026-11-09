@@ -173,8 +173,8 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			items = append(items, it)
 		}
 		if invalid > 0 {
-			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid))
-			commit = false
+			// A bad item is counted and dropped. It must not freeze the source: the cursor still moves.
+			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid), logs.Why(logs.ReasonItem))
 		}
 		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", len(got.Items)-invalid))
 		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
@@ -233,22 +233,31 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 
 	items, passes, failed := r.collect(ctx)
 	rep.Failed = failed
-	undecided := map[string]bool{}
+	projected := map[string]int{}
 	for _, it := range items {
 		p, err := r.decide(it, view)
 		if err != nil {
 			return rep, err
 		}
 		if p.Err != nil {
-			// Not sent, held or dropped: the cursor stays so the next pass can decide it.
-			undecided[it.Source] = true
+			projected[it.Source]++
 		}
 		rep.Items = append(rep.Items, p)
+	}
+	// A projection error is dropped and logged by count. It must not freeze the source, and the error text is
+	// not logged: it can name a field.
+	var names []string
+	for name := range projected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		r.Log.Log(logs.ProjectFailed, logs.Source(name), logs.Count("items", projected[name]), logs.Why(logs.ReasonProject))
 	}
 	// The cursor moves only after every item of the pass is decided. A crash before this collects the same items
 	// again; keys make that harmless.
 	for _, p := range passes {
-		if !p.commit || undecided[p.name] {
+		if !p.commit {
 			continue
 		}
 		if err := r.Cursors.Commit(p.name, p.next); err != nil {
@@ -303,7 +312,11 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
 		_, body, err := project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: view.open(it.Subject)})
-		p.Body, p.Err = body, err
+		if err != nil {
+			p.Err = err
+			return p, nil
+		}
+		p.Body = body
 		if r.record(it) {
 			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
 		}
@@ -312,7 +325,6 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	b, body, err := project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: view.open(it.Subject)})
 	if err != nil {
 		p.Err = err
-		r.Log.Log(logs.ProjectFailed, logs.Source(it.Source))
 		return p, nil
 	}
 	p.Body = body

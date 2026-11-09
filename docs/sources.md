@@ -11,7 +11,14 @@ each pass and set only as an Authorization header. They are never written to the
 `Collect` returns the items and an opaque next cursor. The runner stores it in `cursors.json` only after every item
 of that pass has been sent to the outbox, held, or dropped, and only on a send pass. A crash before that collects
 the same items again; keys make that harmless (DEC-9). A dry run reads the cursor and does not write it. A rate
-limit, a failed collect, an invalid item, or an item that could not be projected leaves the cursor where it is.
+limit or a failed collect leaves the cursor where it is. An item that fails validation, or that a rule matched but
+could not be projected, is dropped and logged by count, with a fixed reason code and no item content. That does not
+freeze the source: the cursor still moves.
+
+The next cursor is the later of the newest event time in the pass and the latest `Date` header the server sent. It
+is never the local clock. A pass reads from the committed cursor minus 15 minutes, so indexing lag and clock skew
+land in an overlap. Keys make that overlap harmless. If the server sent no `Date` and the pass saw no event time,
+the cursor is not moved.
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run).
@@ -31,39 +38,52 @@ the next pass resumes from it.
 ## GitHub
 
 `kind: github`. A fine-grained or classic token. `beacon source add github --from-gh` imports the token
-`gh auth token` prints, after confirmation (`--yes` when input is not a terminal).
+`gh auth token` prints, after confirmation (`--yes` when input is not a terminal). With `--host`, that command is
+`gh auth token --hostname <host>` (a port on `--host` is not passed).
 
 **Host.** `api.github.com`, or `host:` for GitHub Enterprise (`https://<host>/api/v3`). Listed by `beacon egress`.
 
 **Scope.** `repos`: `owner/name` or `owner/*`. Nothing outside them is requested. `owner/*` is searched as the
 owner's user or organization, and a result from any other repository is not fetched.
 
-**Each pass.** Pull requests in the configured repositories updated since the cursor, through the search API, one
-repository qualifier per query (an OR of `repo:` qualifiers matches nothing), then each pull request's timeline
-since the cursor. The search does not use a login qualifier: some tokens can read the repositories and still cannot
-search a user. A pull request the person is not involved in (author, assignee, reviewer, review requested,
-mentioned, or commenter) yields no items. Own open pull requests are also read for check suites, because a check
-conclusion does not change the pull request's `updated` time. If that extra search fails, items from the updated
-search are still returned and the cursor stays. A pull request or issue the token cannot read (404 or 403 on the
-object itself) is skipped. A failure reading its timeline, reviews, or changelog fails the pass and the cursor
-stays. Check suites and pull-request review comments the token cannot read are omitted rather than stalling every
-other event. The token needs permission to read the configured repositories.
+**Each pass.** Pull requests in the configured repositories updated since 15 minutes before the cursor, through the
+search API. The qualifier is `updated:>=` with an RFC3339 timestamp, one repository qualifier per query (an OR of
+`repo:` qualifiers matches nothing). A hit whose `updated_at` is before that window is not fetched, so a pass does
+not re-read every pull request updated that day. If a search reports more than 1000 results, the pass fails and the
+cursor stays: results are ordered oldest first, so the newest would be cut off. The search does not use a login
+qualifier: some tokens can read the repositories and still cannot search a user. A pull request the person is not
+involved in (author, assignee, reviewer, review requested of them or of a team they are in, mentioned, or commenter)
+yields no items. The full timeline is fetched; events before the lookback window are not emitted. Own open pull
+requests are also read for check suites, because a check conclusion does not change the pull request's `updated`
+time. If that extra search fails, items from the updated search are still returned and the cursor stays. A pull
+request the token cannot read (404, or a 403 that names a permission failure) is skipped. A bare 403 is not a skip:
+a secondary rate limit often arrives as a 403 with no `Retry-After`, and skipping it would move the cursor past
+unread events. That 403 fails the pass. A failure reading the timeline or reviews fails the pass and the cursor
+stays. Check suites and pull-request review comments the token cannot read (404 or a permission 403) are omitted
+rather than stalling every other event. A bare 403 on those fails the pass. The token needs permission to read the
+configured repositories.
 
-**First run.** Open pull requests in the configured repositories, kept when the person wrote them or is a
-requested reviewer. Not their history: no old comments. The current review requests and, on the person's own pull
-requests, the current check conclusion.
+**First run.** Open pull requests in the configured repositories, kept when the person wrote them, is a requested
+reviewer, or a requested team includes the person. Not their history: no old comments. The current review requests,
+including a request for a team the person is in, and, on the person's own pull requests, the current check
+conclusion. A team request is addressed.
 
 **Items.** `opened`, `ready`, `review_requested`, `review_request_removed`, `reviewed` (field `review_state`),
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
 only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
-`own` is set when the person caused the change.
+`own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
+is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author time,
+which is often older than the push. It is emitted when the head sha differs from the commit the person last
+reviewed, or for a commit after that review. The key is the sha, so a later pass that sees it again does not send
+twice.
 
-**Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<change id>`. The change id is the
-timeline event's or review's or comment's id, the pull request's id for `opened` (the open has no timeline event),
-the commit sha for `pushed` (a committed event has no numeric id), or `checks:<head sha>:<conclusion>`.
+**Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is `opened`
+(the pull request's id; the open has no timeline event), `timeline` (ready, review requested or removed, merged,
+closed), `review`, `comment` (an issue comment), `review-comment`, `push` (the commit sha), or
+`checks:<head sha>:<conclusion>`. Kinds keep ids that overlap across those APIs from colliding.
 
-**Addressed.** A review request naming the person, or `@login` in a comment or review. `@login` does not match a
-longer login.
+**Addressed.** A review request naming the person, or naming a team the person is in; `@login` in a comment, a
+review, or the pull request body or title on `opened`. `@login` does not match a longer login.
 
 **Fields.** `repo`, `number`, `title`, `url`, `author`, `review_state`, `body` (comment or review text), `base`,
 `head_ref`.
@@ -83,7 +103,8 @@ source's `projects` and to any Jira source's projects, becomes `jira:<KEY>`.
 ## Jira
 
 `kind: jira`. The Atlassian account email and API token, basic auth over HTTPS, both in the keychain.
-`beacon source add jira --site SITE` reads them from the terminal and does not print the token.
+`beacon source add jira --site SITE` reads the email, then the token, and does not print the token. A pipe is read
+with one reader, so the token line is not lost to buffering.
 
 **Host.** `<site>.atlassian.net`, from the site label. A site is not a hostname, so the config cannot name an
 arbitrary host. Listed by `beacon egress`.
@@ -92,8 +113,12 @@ arbitrary host. Listed by `beacon egress`.
 not fetched.
 
 **Each pass.** Issues in those projects where the person is assignee, reporter, watcher, or mentioned, updated
-since the cursor. The JQL date is formatted in the account's timezone, which is how Jira evaluates `updated` for
-this token. Then the changelog and comments since the cursor.
+since 15 minutes before the cursor. The JQL date is formatted in the account's timezone, which is how Jira
+evaluates `updated` for this token. The `text ~ account id` clause is not verified against live ADF mentions.
+Mentions are also taken from fetched comments, including ADF mention nodes, so a mention in a comment Beacon
+fetched is addressed even when that search clause misses it. The changelog is fetched in full; entries before the
+lookback window are not emitted. Comments before that window are not emitted. The next cursor is the later of the
+newest event time and the server `Date` header, never the local clock.
 
 **First run.** Unresolved issues assigned to the person. Not their history: comments are not read. One `assigned`
 item per issue, keyed by the latest assignment's changelog id, or `open` when the issue has none.

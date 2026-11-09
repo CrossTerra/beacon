@@ -42,6 +42,10 @@ type Item struct {
 	Version string `json:"version,omitempty"`
 }
 
+// Lookback is how far before a committed cursor a pass reads again. Indexing lag and clock skew land in this
+// window; keys make the overlap harmless.
+const Lookback = 15 * time.Minute
+
 // Names a source may not use in its state field list: the state snapshot carries them itself (DEC-28).
 const (
 	StateObservedAt = "observed_at"

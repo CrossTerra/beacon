@@ -44,7 +44,7 @@ pass would do next.
 | `cmd/beacon` | The CLI. Builds everything from the config; the only place that wires the keychain and the transport. |
 | `internal/source` | The `Item` shape, the `Source` interface, and the fixture source. |
 | `internal/github`, `internal/jira` | The GitHub and Jira sources. See [`sources.md`](sources.md). |
-| `internal/cursor` | Committed cursors, and which sources have had their first run accepted. |
+| `internal/cursor` | Committed cursors, which sources have completed `beacon run --first`, and which of those have been accepted. |
 | `internal/seed` | The seed file (DEC-24). |
 | `internal/limited` | Rate-limit backoff for source HTTP. |
 | `internal/config` | Reads and validates the config file. Holds no secrets. |
@@ -71,6 +71,7 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
 | `instance` | This instance's random id, used in lease claims | Inside lease claims |
 | `cursors.json` | Each source's committed cursor, opaque | No |
+| `first.json` | Sources whose `beacon run --first` completed. `accept-first` requires it | No |
 | `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
 | `seed` | Imported seed lines (DEC-24) | No |
 

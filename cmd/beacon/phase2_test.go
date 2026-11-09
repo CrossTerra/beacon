@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/keychain"
 )
 
@@ -31,7 +32,7 @@ sources: []
 	a := &app{
 		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
 		keychain: func() (keychain.Store, error) { return store, nil },
-		ghToken:  func(context.Context) (string, error) { return tok, nil },
+		ghToken:  func(context.Context, string) (string, error) { return tok, nil },
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh"}); code == 0 {
 		t.Fatal("import without --yes succeeded")
@@ -96,5 +97,93 @@ sources:
 		if !strings.Contains(got, host) {
 			t.Fatalf("missing %s in\n%s", host, got)
 		}
+	}
+}
+
+func TestFromGHUsesHost(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	must(t, os.WriteFile(cfg, []byte("signal:\n  url: https://signal.example.com\nperson:\n  handle: \"@winton\"\nrules: rules.yaml\nstate: state\nmode: dry-run\nsources: []\n"), 0o600))
+	store := keychain.NewMemory()
+	var host string
+	var out, errOut strings.Builder
+	a := &app{
+		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
+		keychain: func() (keychain.Store, error) { return store, nil },
+		ghToken: func(_ context.Context, h string) (string, error) {
+			host = h
+			return "ghe-token", nil
+		},
+	}
+	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--host", "ghe.example.com", "--from-gh", "--yes"}); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
+	}
+	if host != "ghe.example.com" {
+		t.Fatalf("gh auth token host %q", host)
+	}
+}
+
+func TestPipedJiraKeepsTheToken(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	must(t, os.WriteFile(cfg, []byte("signal:\n  url: https://signal.example.com\nperson:\n  handle: \"@winton\"\nrules: rules.yaml\nstate: state\nmode: dry-run\nsources: []\n"), 0o600))
+	store := keychain.NewMemory()
+	const email, tok = "winton@example.com", "jira-piped-secret"
+	var out, errOut strings.Builder
+	a := &app{
+		stdin: strings.NewReader(email + "\n" + tok + "\n"), stdout: &out, stderr: &errOut, now: time.Now,
+		keychain: func() (keychain.Store, error) { return store, nil },
+	}
+	if code := a.main(context.Background(), []string{"source", "add", "jira", "--config", cfg, "--site", "acme", "--project", "ENG"}); code != 0 {
+		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String()+errOut.String(), tok) {
+		t.Fatal("the token was printed")
+	}
+	secret, err := store.Get("source:jira")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{}
+	if err := secret.AuthorizeBasic(h); err != nil {
+		t.Fatal(err)
+	}
+	if h.Get("Authorization") == "" {
+		t.Fatal("piped token was not stored")
+	}
+}
+
+func TestAcceptFirstRequiresCompletedFirst(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	must(t, os.WriteFile(cfg, []byte("signal:\n  url: https://signal.example.com\nperson:\n  handle: \"@winton\"\nrules: rules.yaml\nstate: state\nmode: dry-run\nsources:\n  - kind: github\n    repos: [\"acme/app\"]\n"), 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules: []\n"), 0o600))
+	store := keychain.NewMemory()
+	a := &app{
+		stdout: &strings.Builder{}, stderr: &strings.Builder{}, now: time.Now,
+		keychain: func() (keychain.Store, error) { return store, nil },
+	}
+	var errOut strings.Builder
+	a.stderr = &errOut
+	if code := a.main(context.Background(), []string{"accept-first", "--config", cfg}); code == 0 || !strings.Contains(errOut.String(), "no completed beacon run --first") {
+		t.Fatalf("exit %d\n%s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := a.main(context.Background(), []string{"run", "--config", cfg, "--first", "--once"}); code != 0 {
+		t.Fatalf("first run exit %d\n%s", code, errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state", "first.json")); err == nil {
+		t.Fatal("a failed collect was marked as a completed first run")
+	}
+	st, err := cursor.Open(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkFirst([]string{"github"}); err != nil {
+		t.Fatal(err)
+	}
+	errOut.Reset()
+	if code := a.main(context.Background(), []string{"accept-first", "--config", cfg}); code != 0 {
+		t.Fatalf("exit %d\n%s", code, errOut.String())
 	}
 }

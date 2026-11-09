@@ -1,12 +1,14 @@
-// Package cursor stores each source's committed cursor, and which sources have had their first run accepted, in
-// the state directory. A cursor moves only after a pass has decided every item (the runner commits it). A dry run
-// reads and does not write.
+// Package cursor stores each source's committed cursor, which sources have completed `beacon run --first`, and which
+// of those have been accepted, in the state directory. A cursor moves only after a pass has decided every item (the
+// runner commits it). A dry run reads and does not write. `accept-first` writes the acceptance; `beacon run --first`
+// writes the completed-summary mark.
 package cursor
 
 import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -14,6 +16,7 @@ import (
 const (
 	cursorsFile  = "cursors.json"
 	acceptedFile = "accepted.json"
+	firstFile    = "first.json"
 )
 
 // Store is the cursors and the accepted-first set of one state directory.
@@ -21,12 +24,13 @@ type Store struct {
 	dir      string
 	cursors  map[string]string
 	accepted map[string]bool
+	first    map[string]bool
 	writable bool
 }
 
 // Read loads the store without creating files. Missing files are an empty store.
 func Read(dir string) (*Store, error) {
-	s := &Store{dir: dir, cursors: map[string]string{}, accepted: map[string]bool{}}
+	s := &Store{dir: dir, cursors: map[string]string{}, accepted: map[string]bool{}, first: map[string]bool{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -59,6 +63,17 @@ func (s *Store) load() error {
 	}
 	for _, n := range names {
 		s.accepted[n] = true
+	}
+	return s.loadFirst()
+}
+
+func (s *Store) loadFirst() error {
+	var names []string
+	if err := readJSON(filepath.Join(s.dir, firstFile), &names); err != nil {
+		return err
+	}
+	for _, n := range names {
+		s.first[n] = true
 	}
 	return nil
 }
@@ -106,7 +121,24 @@ func (s *Store) Commit(name string, next []byte) error {
 // Accepted reports whether the source's first run has been accepted.
 func (s *Store) Accepted(name string) bool { return s.accepted[name] }
 
-// Accept records that the named sources' first runs were accepted. Sending for them may start on the next pass.
+// FirstDone reports whether `beacon run --first` completed for the source.
+func (s *Store) FirstDone(name string) bool { return s.first[name] }
+
+// MarkFirst records that a --first summary completed for the sources. accept-first requires it.
+func (s *Store) MarkFirst(names []string) error {
+	if !s.writable {
+		return errors.New("cursor: the store is not open for writing")
+	}
+	for _, n := range names {
+		if n == "" {
+			return errors.New("cursor: a source name is empty")
+		}
+		s.first[n] = true
+	}
+	return writeAtomic(s.dir, firstFile, namesOf(s.first))
+}
+
+// Accept records that the named sources' first runs were accepted. Each must have a completed --first summary.
 func (s *Store) Accept(names []string) error {
 	if !s.writable {
 		return errors.New("cursor: the store is not open for writing")
@@ -114,6 +146,9 @@ func (s *Store) Accept(names []string) error {
 	for _, n := range names {
 		if n == "" {
 			return errors.New("cursor: a source name is empty")
+		}
+		if !s.first[n] {
+			return fmt.Errorf("cursor: %s has no completed beacon run --first", n)
 		}
 		s.accepted[n] = true
 	}
@@ -123,6 +158,15 @@ func (s *Store) Accept(names []string) error {
 	}
 	sortStrings(out)
 	return writeAtomic(s.dir, acceptedFile, out)
+}
+
+func namesOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	sortStrings(out)
+	return out
 }
 
 func sortStrings(s []string) {

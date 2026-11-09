@@ -37,16 +37,18 @@ type Options struct {
 
 // Source reads GitHub.
 type Source struct {
-	name     string
-	host     string
-	hostPort string
-	base     string
-	scope    scope
-	projects map[string]bool
-	identity string
-	token    func() (keychain.Secret, error)
-	http     *limited.Client
-	now      func() time.Time
+	name       string
+	host       string
+	hostPort   string
+	base       string
+	scope      scope
+	projects   map[string]bool
+	identity   string
+	token      func() (keychain.Secret, error)
+	http       *limited.Client
+	now        func() time.Time
+	serverDate time.Time
+	teams      map[string]bool
 }
 
 // New builds a source. It does not read the token.
@@ -134,7 +136,6 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
-	started := s.now().UTC()
 	first := len(cursor) == 0
 	var since time.Time
 	if !first {
@@ -144,6 +145,12 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		}
 		since = since.UTC()
 	}
+	// Read a window before the cursor. The next cursor is the server's time or the newest event, never the
+	// local clock, so a late index or a skewed clock is collected again. Keys make that harmless.
+	floor := time.Time{}
+	if !since.IsZero() {
+		floor = since.Add(-source.Lookback)
+	}
 	login, err := s.currentLogin(ctx, secret)
 	if err != nil {
 		return source.Collected{}, err
@@ -152,11 +159,15 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if s.identity != "" && !strings.EqualFold(s.identity, "github:user:"+login) {
 		return source.Collected{}, source.ErrIdentity
 	}
+	s.teams, err = s.userTeams(ctx, secret)
+	if err != nil {
+		return source.Collected{}, err
+	}
 	quals, err := s.qualifiers(ctx, secret)
 	if err != nil {
 		return source.Collected{}, err
 	}
-	hits, err := s.search(ctx, secret, s.queries(since, first, quals))
+	hits, err := s.search(ctx, secret, s.queries(floor, first, quals), floor)
 	if err != nil {
 		return source.Collected{}, err
 	}
@@ -165,7 +176,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		// Check suites change without bumping a pull request's updated time, so own open pull requests are read
 		// even when the updated search did not return them. A failure here does not discard the updated search:
 		// those items are still returned, and the cursor stays so the next pass tries again.
-		open, err := s.search(ctx, secret, s.queries(since, true, quals))
+		open, err := s.search(ctx, secret, s.queries(floor, true, quals), time.Time{})
 		if err != nil {
 			openErr = err
 		} else {
@@ -186,21 +197,42 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		if !s.scope.allowsRepo(hit.owner, hit.name) {
 			continue
 		}
-		got, err := s.pull(ctx, secret, hit, login, since, first, started)
+		got, err := s.pull(ctx, secret, hit, login, floor, first, s.serverNow())
 		if err != nil {
 			return source.Collected{Items: items}, err
 		}
 		items = append(items, got...)
 	}
-	for _, it := range items {
-		if err := source.Validate(it, Fields, StateFields); err != nil {
-			return source.Collected{}, err
-		}
-	}
 	if openErr != nil {
 		return source.Collected{Items: items}, openErr
 	}
-	return source.Collected{Items: items, Next: []byte(started.Format(time.RFC3339))}, nil
+	next, err := cursorFrom(s.serverDate, items)
+	if err != nil {
+		return source.Collected{Items: items}, err
+	}
+	return source.Collected{Items: items, Next: next}, nil
+}
+
+// serverNow is the latest Date header seen this pass, or the local clock only as a timestamp on items when the
+// server sent none. The cursor itself never uses the local clock.
+func (s *Source) serverNow() time.Time {
+	if !s.serverDate.IsZero() {
+		return s.serverDate
+	}
+	return s.now().UTC()
+}
+
+func cursorFrom(server time.Time, items []source.Item) ([]byte, error) {
+	t := server
+	for _, it := range items {
+		if it.OccurredAt.After(t) {
+			t = it.OccurredAt
+		}
+	}
+	if t.IsZero() {
+		return nil, errors.New("github: the server sent no Date and there is no event time")
+	}
+	return []byte(t.UTC().Format(time.RFC3339)), nil
 }
 
 type hit struct {
@@ -212,6 +244,28 @@ type hit struct {
 
 func (h hit) key() string {
 	return strings.ToLower(h.owner) + "/" + strings.ToLower(h.name) + "#" + fmt.Sprint(h.n)
+}
+
+func (s *Source) userTeams(ctx context.Context, secret keychain.Secret) (map[string]bool, error) {
+	out := map[string]bool{}
+	err := s.each(ctx, secret, s.base+"/user/teams?per_page=100", func(body []byte) error {
+		var page []struct {
+			Slug string `json:"slug"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return errors.New("github: teams could not be read")
+		}
+		for _, t := range page {
+			if t.Slug != "" {
+				out[strings.ToLower(t.Slug)] = true
+			}
+		}
+		return nil
+	})
+	if unavailable(err) {
+		return map[string]bool{}, nil
+	}
+	return out, err
 }
 
 func (s *Source) currentLogin(ctx context.Context, secret keychain.Secret) (string, error) {
@@ -269,8 +323,8 @@ func (s *Source) queries(since time.Time, first bool, quals []string) []string {
 	// (422). The search is repo-scoped; involvement is checked on each pull request before an item is yielded.
 	if first {
 		head.WriteString("is:open ")
-	} else {
-		fmt.Fprintf(&head, "updated:>=%s ", since.UTC().Format("2006-01-02"))
+	} else if !since.IsZero() {
+		fmt.Fprintf(&head, "updated:>=%s ", since.UTC().Format(time.RFC3339))
 	}
 	// One qualifier per query. GitHub's search treats an OR of repo: qualifiers as matching nothing.
 	prefix := head.String()
@@ -281,7 +335,7 @@ func (s *Source) queries(since time.Time, first bool, quals []string) []string {
 	return queries
 }
 
-func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []string) ([]hit, error) {
+func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []string, floor time.Time) ([]hit, error) {
 	seen := map[string]bool{}
 	var hits []hit
 	for _, q := range queries {
@@ -295,21 +349,26 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 				Items []struct {
 					Number        int    `json:"number"`
 					RepositoryURL string `json:"repository_url"`
+					UpdatedAt     string `json:"updated_at"`
 					User          ghUser `json:"user"`
 					PullRequest   *struct {
 						URL string `json:"url"`
 					} `json:"pull_request"`
 				} `json:"items"`
 				Incomplete bool `json:"incomplete_results"`
+				Total      int  `json:"total_count"`
 			}
 			if err := json.Unmarshal(body, &resp); err != nil {
 				return nil, errors.New("github: the search response could not be read")
 			}
-			if resp.Incomplete {
-				return nil, errors.New("github: the search was incomplete")
+			if resp.Incomplete || resp.Total > 1000 {
+				return nil, errors.New("github: the search is incomplete; the newest results would be cut off")
 			}
 			for _, item := range resp.Items {
 				if item.PullRequest == nil {
+					continue
+				}
+				if updated, err := parseTime(item.UpdatedAt); err == nil && !floor.IsZero() && updated.Before(floor) {
 					continue
 				}
 				owner, name, ok := repoFromURL(item.RepositoryURL)
@@ -348,7 +407,7 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 	pr.owner, pr.name = h.owner, h.name
 	// First run is open pull requests the person wrote or was asked to review, not every open pull request
 	// in the repository (DEC-23).
-	if first && !strings.EqualFold(pr.author(), login) && !reviewRequested(pr, login) {
+	if first && !strings.EqualFold(pr.author(), login) && !reviewRequested(pr, login, s.teams) {
 		return nil, nil
 	}
 	// A timeline or reviews failure is not "this pull request is gone". It fails the pass and the cursor stays,
@@ -381,13 +440,13 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 			return nil, err
 		}
 	}
-	if !first && !involved(pr, timeline, reviews, comments, login) {
+	if !first && !involved(pr, timeline, reviews, comments, login, s.teams) {
 		return nil, nil
 	}
 	return build(buildInput{
 		Name: s.name, PR: pr, Timeline: timeline, Reviews: reviews, Comments: comments,
 		Checks: checks, Fetched: fetched, Login: login, Since: since, First: first,
-		Observed: observed, Projects: s.projects,
+		Observed: observed, Projects: s.projects, Teams: s.teams,
 	})
 }
 
@@ -440,9 +499,18 @@ func (s *Source) checks(ctx context.Context, secret keychain.Secret, h hit, sha 
 		if err != nil {
 			return nil, false, err
 		}
-		if status == http.StatusNotFound || status == http.StatusForbidden {
-			// No check app, or the token cannot read checks. That must not stall every other event.
+		if status == http.StatusNotFound {
+			// No check app. That must not stall every other event.
 			return nil, false, nil
+		}
+		if status == http.StatusForbidden {
+			classified := classify403(body)
+			if unavailable(classified) {
+				// The token cannot read checks. Omitting them does not stall every other event. A bare 403 is not
+				// this: a secondary rate limit often arrives that way, and skipping it would move the cursor.
+				return nil, false, nil
+			}
+			return nil, false, classified
 		}
 		if status < 200 || status >= 300 {
 			return nil, false, &statusError{status}
@@ -482,10 +550,29 @@ func (s *Source) get(ctx context.Context, secret keychain.Secret, raw string) ([
 	if err != nil {
 		return nil, "", err
 	}
+	if status == http.StatusForbidden {
+		return nil, "", classify403(body)
+	}
 	if status < 200 || status >= 300 {
 		return nil, "", &statusError{status}
 	}
 	return body, next, nil
+}
+
+// errPermission is a 403 that names a permission failure. The object is skipped. A bare 403 is not this: it fails
+// the pass, because a secondary rate limit often arrives as a 403 with no Retry-After.
+var errPermission = errors.New("github: the token cannot read this resource")
+
+func classify403(body []byte) error {
+	low := strings.ToLower(string(body))
+	switch {
+	case strings.Contains(low, "rate limit"):
+		return source.ErrRateLimited
+	case strings.Contains(low, "not accessible"), strings.Contains(low, "must have"), strings.Contains(low, "permission"):
+		return errPermission
+	default:
+		return &statusError{http.StatusForbidden}
+	}
 }
 
 // statusError is an HTTP status from a source API. The text is the status only.
@@ -496,8 +583,11 @@ func (e *statusError) Error() string { return fmt.Sprintf("github: status %d", e
 // unavailable is a single object the token cannot read (gone, or not permitted). The pass continues so one such
 // object cannot freeze the cursor.
 func unavailable(err error) bool {
+	if errors.Is(err, errPermission) {
+		return true
+	}
 	var se *statusError
-	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusForbidden)
+	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
 func (s *Source) do(ctx context.Context, secret keychain.Secret, raw string) ([]byte, int, string, error) {
@@ -520,11 +610,23 @@ func (s *Source) do(ctx context.Context, secret keychain.Secret, raw string) ([]
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, resp.StatusCode, "", source.ErrUnauthorized
 	}
+	s.noteDate(resp.Header)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, resp.StatusCode, "", err
 	}
 	return body, resp.StatusCode, nextLink(resp.Header), nil
+}
+
+func (s *Source) noteDate(h http.Header) {
+	t, err := http.ParseTime(h.Get("Date"))
+	if err != nil {
+		return
+	}
+	t = t.UTC()
+	if t.After(s.serverDate) {
+		s.serverDate = t
+	}
 }
 
 func nextLink(h http.Header) string {

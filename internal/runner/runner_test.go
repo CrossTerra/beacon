@@ -34,7 +34,7 @@ type fakeSource struct {
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
-func (f *fakeSource) Fields() []string      { return []string{"title", "label"} }
+func (f *fakeSource) Fields() []string      { return []string{"title", "label", "body"} }
 func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
 func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
@@ -358,6 +358,64 @@ func TestUnacceptedAndSeed(t *testing.T) {
 type seedDrop map[string]bool
 
 func (s seedDrop) Drops(subject string) bool { return s[subject] }
+
+// A bad item and a projection error are dropped and logged by count. They do not freeze the source.
+func TestBadItemAndProjectionDoNotFreeze(t *testing.T) {
+	f := newFixture(t)
+	at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	good := source.Item{Source: "fx", Subject: "fx:obj:1", Key: "fx:obj:1:1", Type: "changed", OccurredAt: at,
+		Fields: map[string]string{"title": "ok", "label": "send"}}
+	bad := good
+	bad.Key = "fx:obj:2:1"
+	bad.Subject = "fx:obj:2"
+	bad.Fields = map[string]string{"title": "SECRET-ITEM-TEXT", "nope": "SECRET-FIELD"}
+	huge := good
+	huge.Key = "fx:obj:3:1"
+	huge.Subject = "fx:obj:3"
+	huge.Fields = map[string]string{"title": "ok", "label": "send", "body": strings.Repeat("S", 70*1024)}
+	f.src.items = []source.Item{good, bad, huge}
+	f.src.next = []byte("cursor-ok")
+	cur := &memCursor{}
+	rs, err := rules.Parse([]byte("rules:\n  - name: sends\n    match: {fields: {label: send}}\n    tier: send\n    fields: [title, body]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, done := f.runner(true, nil)
+	r.Rules = rs
+	r.Cursors = cur
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 1 || string(cur.m["fx"]) != "cursor-ok" {
+		t.Fatalf("cursor frozen: %d %q", cur.commits, cur.m["fx"])
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); !ok {
+		t.Fatal("the good item was not recorded")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:2:1"); ok {
+		t.Fatal("the invalid item was recorded")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:3:1"); ok {
+		t.Fatal("the unprojectable item was recorded")
+	}
+	log := f.log.String()
+	if strings.Contains(log, "SECRET") || strings.Contains(log, "fx:obj") {
+		t.Fatalf("log holds content: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"item_invalid"`) || !strings.Contains(log, `"reason":"item_invalid"`) || !strings.Contains(log, `"items":1`) {
+		t.Fatalf("invalid item not counted: %s", log)
+	}
+	if !strings.Contains(log, `"msg":"project_failed"`) || !strings.Contains(log, `"reason":"project_failed"`) {
+		t.Fatalf("projection error not counted: %s", log)
+	}
+	for _, p := range rep.Items {
+		if p.Item.Key == "fx:obj:3:1" && p.Err == nil {
+			t.Fatal("projection error was not recorded on the item")
+		}
+	}
+}
 
 // Logs carry reason codes, never error text.
 func TestCollectErrorTextNotLogged(t *testing.T) {

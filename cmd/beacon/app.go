@@ -55,7 +55,7 @@ type app struct {
 	// afterAppend is passed to the runner (tests stop the process there).
 	afterAppend func(key string)
 	// ghToken reads a GitHub token. Nil runs `gh auth token`. Tests set it so the token is never printed.
-	ghToken func(context.Context) (string, error)
+	ghToken func(context.Context, string) (string, error)
 }
 
 const usage = `usage: beacon <command> [flags]
@@ -332,6 +332,9 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		a.printReport(rep, true)
 		if *first {
 			a.printFirst(rep)
+			if err := a.recordFirst(e, rep); err != nil {
+				return fail(runner.Classify(err), failText(runner.Classify(err), e))
+			}
 		}
 		return nil
 	}

@@ -228,9 +228,6 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 			ObservedAt: &obs,
 			Version:    changeID,
 		}
-		if err := source.Validate(it, Fields, StateFields); err != nil {
-			return nil, err
-		}
 		out = append(out, it)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key < out[j].Key })

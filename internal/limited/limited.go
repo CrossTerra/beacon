@@ -140,7 +140,8 @@ func clone(req *http.Request, body []byte) (*http.Request, error) {
 }
 
 // rateWait reports how long a rate-limit response asks us to wait. A 403 is a rate limit only when it carries
-// Retry-After or a spent X-RateLimit-Remaining; other 403s are the caller's to handle.
+// Retry-After or a spent X-RateLimit-Remaining. A bare 403 is returned to the caller. The caller must not treat
+// that as "this object is gone": a secondary rate limit often arrives as a 403 with no Retry-After.
 func rateWait(resp *http.Response, now time.Time) (time.Duration, bool) {
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
