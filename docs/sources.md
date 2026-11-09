@@ -23,7 +23,9 @@ push or a check change. If there is no `Date` and no such event time, the cursor
 the committed cursor minus 15 minutes, so indexing lag and clock skew land in an overlap.
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
-`beacon accept-first`. See [commands](commands.md#beacon-run).
+`beacon accept-first`. See [commands](commands.md#beacon-run). `beacon cursor reset <source>` removes a committed
+cursor so the next collect reads open state again. Acceptance is kept. Keys already in the outbox are not sent
+again. See [commands](commands.md#beacon-cursor-reset).
 
 ## Seed
 

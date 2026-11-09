@@ -75,7 +75,8 @@ sources ──► collectors ──► candidate items (local only)
    allow.
 4. **Projection** keeps only the fields a rule names. A rule may allow full message bodies for a sender or a
    channel. Without that, an email leaves as its id, sender, subject, date and link.
-5. **The outbox** records each request before it is sent, and retries resend the same bytes.
+5. **The outbox** records each request before it is sent. A pending retry resends the same bytes. A refusal Signal
+   did not store can be re-projected and sent again; a body Signal accepted is not.
 
 ## Signal
 

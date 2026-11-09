@@ -74,9 +74,10 @@ Built as scoped, with these differences from the text above:
 - **First run.** `mode: dry-run` is the default and the person sets `mode: send`. The first-run window and summary
   acceptance of DEC-23 belong to the real sources.
 - **DEC-28, added after this plan.** Items carry an optional state snapshot (`state`, `observed_at`, `version`),
-  sources list their state fields, a rule names the state fields it sends (`state:`), and the projection writes a
-  top-level `state` with only those fields, `observed_at` and the version marker. Signal `main` accepts the field and
-  discards it until Signal plan 12.01 stores snapshots.
+  sources list their state fields, and a rule names the state fields it sends (`state:`). The projection writes a
+  top-level `state` with those fields nested under `fields`, and `observed_at` and `version` beside them. Signal
+  plan 12.01 stores the snapshot and refuses any other key in `state`. An earlier projection wrote the fields flat;
+  Signal refuses that.
 - **DEC-29 is not in Phase 1.** One authoritative event per act needs Signal phase 12 (executors, and matching by
   `metadata.native`). Until then Beacon records every own act a rule sends. It belongs to the phase that adds a
   source whose acts an executor can also record.

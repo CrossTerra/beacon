@@ -203,7 +203,8 @@ func stateItem() source.Item {
 	return it
 }
 
-// DEC-28: the snapshot holds only the state fields the rule lists, with observed_at and the version marker.
+// DEC-28: the snapshot holds only the state fields the rule lists, nested under state.fields, with observed_at
+// and the version marker beside them. Signal refuses any other key in state.
 func TestState(t *testing.T) {
 	r := rule("title")
 	r.State = []string{"state", "checks"}
@@ -211,19 +212,15 @@ func TestState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"state": "open", "observed_at": "2026-11-07T12:30:00.000Z", "version": "v42"}
-	if len(b.State) != len(want) {
-		t.Fatalf("state %v", b.State)
-	}
-	for k, v := range want {
-		if b.State[k] != v {
-			t.Fatalf("state %v", b.State)
-		}
+	if b.State == nil || len(b.State.Fields) != 1 || b.State.Fields["state"] != "open" ||
+		b.State.ObservedAt != "2026-11-07T12:30:00.000Z" || b.State.Version != "v42" {
+		t.Fatalf("state %+v", b.State)
 	}
 	if bytes.Contains(data, []byte("SECRET-HEAD")) || bytes.Contains(data, []byte("SECRET-MERGEABLE")) {
 		t.Fatalf("unlisted state field sent: %s", data)
 	}
-	if !bytes.Contains(data, []byte(`"state":{"observed_at":"2026-11-07T12:30:00.000Z","state":"open","version":"v42"}`)) {
+	want := `"state":{"fields":{"state":"open"},"observed_at":"2026-11-07T12:30:00.000Z","version":"v42"}`
+	if !bytes.Contains(data, []byte(want)) {
 		t.Fatalf("%s", data)
 	}
 }

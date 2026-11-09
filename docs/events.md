@@ -38,7 +38,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
   "priority": "high",
   "due_at": "2026-11-09T17:00:00.000Z",
   "metadata": {"actor": "github:user:dana", "fields": {"repository": "acme/app", "url": "https://…"}},
-  "state": {"status": "open", "observed_at": "2026-11-07T11:00:05.000Z", "version": "42"}
+  "state": {"fields": {"status": "open"}, "observed_at": "2026-11-07T11:00:05.000Z", "version": "42"}
 }
 ```
 
@@ -53,11 +53,12 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `priority` | The rule's priority, with `to`. |
 | `due_at` | The item's due time, with `to`. |
 | `closes` | On the person's own acts, and on items a `close_by_others` rule sends: the keys of open asks on the same subject, oldest first, at most 20. |
-| `state` | The state snapshot (DEC-28): the state fields the rule lists in `state` that the item has, with `observed_at` and `version`. Omitted when the rule lists none, the item has no snapshot, or none of the listed fields is present. |
+| `state` | The state snapshot (DEC-28), in the shape Signal stores: `fields` holds the state fields the rule lists that the item has, and `observed_at` and `version` sit beside `fields`. Omitted when the rule lists none, the item has no snapshot, or none of the listed fields is present. Any other key in `state` is refused. |
 
-`state` is a top-level field, as Signal's phase 12 proposal (P-1) defines it. Signal `main` accepts it and does not
-store it yet; it keeps the latest snapshot per subject from Signal plan 12.01. Signal's replay check covers the whole
-request, so a retry with the same snapshot replays as before.
+Signal plan 12.01 stores the snapshot and rejects a `state` object with any key other than `fields`, `observed_at`
+and `version`. The listed fields are nested under `state.fields`. Signal's replay check covers the whole request, so
+a retry of a key Signal already holds, with different bytes, is `409 idempotency_conflict`. A key Signal refused and
+did not store can be sent again with a corrected body.
 
 DEC-29 (one authoritative event per act, matched by `metadata.native`) needs Signal phase 12 and is not part of
 Phase 1 or Phase 2: Beacon records every own act it is sent.
@@ -73,11 +74,13 @@ A body over Signal's 64 KB request limit, or with a body over 64 KB, is not appe
 `outbox.jsonl` in the state directory. Each line is one JSON object. The first line for a key appends its body:
 
 ```json
-{"key":"github:pr:acme/app#7:42","state":"pending","at":"…","kind":"event","subject":"github:pr:acme/app#7","rule":"review-requests","body":"{\"subject\":…}","sha256":"…"}
+{"key":"github:pr:acme/app#7:42","state":"pending","at":"…","kind":"event","subject":"github:pr:acme/app#7","rule":"review-requests","body":"{\"subject\":…}","sha256":"…","decision":"{…}","decision_sha256":"…"}
 ```
 
-`body` is the exact request body as a JSON string; `sha256` is its digest, checked on every load. Each later line
-records Signal's answer and is the key's state from then on:
+`body` is the exact request body as a JSON string; `sha256` is its digest, checked on every load. `decision` is the
+item and the rule snapshot used to project it, also checked against `decision_sha256`. It stays on the machine and
+is not part of the request. `beacon outbox` does not print it. An append from before this was stored has no
+`decision`. Each later line records Signal's answer and is the key's state from then on:
 
 ```json
 {"key":"github:pr:acme/app#7:42","state":"sent","at":"…","event_id":"evt_…","status":201}
@@ -88,7 +91,7 @@ records Signal's answer and is the key's state from then on:
 | `pending` | Appended and synced; not yet answered. | Sent, with the stored bytes, by the next pass that holds the lease. |
 | `sent` | `201`: Signal wrote it. | Final. |
 | `replayed` | `200` with `replayed: true`: Signal already had these bytes under this key, for example after a crash between send and record. | Final. |
-| `rejected` | Signal refused it: `409 idempotency_conflict` (the key holds another request), or another final 4xx. `status`, `code` and `message` say why. | Final. Never sent again, never rewritten. |
+| `rejected` | Signal refused it: `409` (the key holds another request, or another conflict), or another final 4xx. `status`, `code` and `message` say why. | Final for `beacon run`. A `409` is never sent again. Any other refusal may be re-projected by `beacon outbox retry --rejected` when `decision` was stored. The refused body stays in the file. |
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
 `kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
@@ -101,13 +104,30 @@ body was never sent. The directory is synced when the outbox file is created, so
 | --- | --- |
 | `201` | `sent`. |
 | `200`, `replayed: true` | `replayed`. |
-| `409 idempotency_conflict` | `rejected`; reported by `run` and `outbox`. |
-| `409 conflict` on `/by/identity` | Retried: the identity moved while Signal wrote, and Signal asks for the same request again. |
+| `409 idempotency_conflict` | `rejected`; reported by `run` and `outbox`. Never retried. |
+| `409 conflict` on `/by/identity` | Retried, while the body is still pending: the identity moved while Signal wrote, and Signal asks for the same request again. A recorded `409` is not retried. |
 | `429` | Waits for `Retry-After` (at most two minutes), then retries. |
 | `5xx`, network error | Retries with backoff (1 s doubling to 30 s, five attempts). Then the body stays pending and the pass stops sending. |
 | The lease runs out | Every write, with its retries and waits, runs under a deadline at the end of the lease. A write still waiting then is stopped, its body stays pending, and the pass ends (`lease_expired`). |
 | `401` | The pass stops and `beacon run` exits non-zero; the body stays pending. |
-| Any other 4xx | `rejected`. |
+| Any other 4xx | `rejected`. `beacon run` does not send it again. `beacon outbox retry --rejected` may re-project it from the stored decision and send the new body. |
+
+### Retrying a refusal
+
+`beacon outbox retry --rejected` re-projects rejected events from the stored decision and sends the new bodies. It
+requires `mode: send` and the lease. It logs counts only.
+
+- An entry Signal accepted (`sent`, `replayed`) is not sent again.
+- A `409` is not touched. Signal already holds a request under that key, or refused a conflict a new body must not paper over.
+- A rejected event with no stored decision is counted and left as it is. It cannot be rebuilt from the refused body: that body has only the fields the rule listed, not the item.
+- The new body is appended and synced before it is sent. The refused body stays in the file. A pending retry, including one left pending because the lease ran out, is sent later as those exact bytes.
+- The field list is the one that decided the send, not the rules file as it is now, so a later rule cannot add fields. The projection code is the current one. `closes` is taken from the outbox as it is now, so a retry does not name an ask that is no longer open.
+
+Entries rejected before the decision was stored cannot be rebuilt. The GitHub cursor has already moved, so those
+changes are not collected again. `beacon cursor reset github` removes that source's committed cursor. The next send
+pass reads open state (DEC-23), not history. Acceptance is left as it is, so the pass records and may send. A key
+already in the outbox, including one of those refusals, is not decided again and is not sent. Open-state items whose
+keys are not already recorded are sent with the current projection.
 
 ## The lease
 

@@ -31,6 +31,8 @@ const (
 	DryRunNoSending Event = "dry_run"
 	LeaseExpired    Event = "lease_expired"
 	RunFailed       Event = "run_failed"
+	// Retry is the summary of beacon outbox retry. Its attributes are counts only.
+	Retry Event = "retry"
 )
 
 // Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths

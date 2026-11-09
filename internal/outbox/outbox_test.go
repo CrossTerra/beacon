@@ -168,3 +168,59 @@ func TestExpireOnlyLeaseClaims(t *testing.T) {
 		t.Fatalf("%+v", e)
 	}
 }
+
+func TestRequeueRefusedOnly(t *testing.T) {
+	dir := t.TempDir()
+	o, err := Open(dir, clock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := []byte(`{"item":{"source":"github","key":"k-refused"}}`)
+	body := []byte(`{"subject":"s","key":"k-refused"}`)
+	if err := o.AppendDecided(Event, "k-refused", "s", "rule-a", body, decision); err != nil {
+		t.Fatal(err)
+	}
+	_ = o.Append(Event, "k-sent", "s", "", []byte(`{"key":"k-sent"}`))
+	_ = o.Append(Event, "k-replayed", "s", "", []byte(`{"key":"k-replayed"}`))
+	_ = o.Append(Event, "k-409", "s", "", []byte(`{"key":"k-409"}`))
+	_ = o.Append(Event, "k-pending", "s", "", []byte(`{"key":"k-pending"}`))
+	_ = o.Append(Lease, "claim:x:1", "s", "", []byte(`{"key":"claim"}`))
+	_ = o.Mark("k-refused", Rejected, "", 400, "invalid", "bad shape")
+	_ = o.Mark("k-sent", Sent, "evt_1", 201, "", "")
+	_ = o.Mark("k-replayed", Replayed, "evt_2", 200, "", "")
+	_ = o.Mark("k-409", Rejected, "", 409, "idempotency_conflict", "held")
+	_ = o.Mark("claim:x:1", Rejected, "", 400, "invalid", "no")
+
+	next := []byte(`{"subject":"s","key":"k-refused","state":{"fields":{"status":"open"}}}`)
+	for _, key := range []string{"k-sent", "k-replayed", "k-409", "k-pending", "claim:x:1"} {
+		if err := o.Requeue(key, next); !errors.Is(err, ErrNotRetryable) {
+			t.Fatalf("requeue %s: %v", key, err)
+		}
+	}
+	if err := o.Requeue("k-refused", next); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := o.Get("k-refused")
+	if e.State != Pending || string(e.Body) != string(next) || string(e.Decision) != string(decision) {
+		t.Fatalf("after requeue: %+v", e)
+	}
+	if err := o.Requeue("k-refused", next); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("requeue of pending: %v", err)
+	}
+	o.Close()
+
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ = r.Get("k-refused")
+	if e.State != Pending || string(e.Body) != string(next) || string(e.Decision) != string(decision) {
+		t.Fatalf("reloaded: %+v", e)
+	}
+	if e, _ := r.Get("k-sent"); e.State != Sent || string(e.Body) != `{"key":"k-sent"}` {
+		t.Fatalf("sent was rewritten: %+v", e)
+	}
+	if e, _ := r.Get("k-409"); e.State != Rejected || e.Status != 409 {
+		t.Fatalf("409 was touched: %+v", e)
+	}
+}

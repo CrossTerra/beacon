@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/egress/egresstest"
 	"github.com/CrossTerra/beacon/internal/keychain"
@@ -373,7 +374,7 @@ func TestEventShapes(t *testing.T) {
 	if md := ask["metadata"].(map[string]any); md["actor"] != "fixture:user:dana" {
 		t.Errorf("ask metadata: %v", md)
 	}
-	if st := fmt.Sprint(ask["state"]); st != "map[observed_at:2026-11-07T09:01:30.000Z status:open version:1]" {
+	if st := fmt.Sprint(ask["state"]); st != "map[fields:map[status:open] observed_at:2026-11-07T09:01:30.000Z version:1]" {
 		t.Errorf("ask state (DEC-28): %s", st)
 	}
 	if get(want[2].key)["state"] != nil {
@@ -782,5 +783,122 @@ func TestInitInterrupted(t *testing.T) {
 	}
 	if _, err := store.Get("signal:signal.example.com:443"); err == nil {
 		t.Fatal("init stored a key after an interrupt")
+	}
+}
+
+// A 400 is re-projected and sent. A 409, a sent entry, and a rejected entry with no stored item are not.
+func TestRetryRejected(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "retryrej")
+	allowed := h.egressList(cfg)
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		if r.Key == want[1].key {
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"idempotency_conflict","message":"held"}}`}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"SECRET-REASON"}}`}
+	}
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	state := filepath.Join(dir, "state")
+	ob, err := outbox.Open(state, time.Now)
+	must(t, err)
+	oldKey := "fixture:old-retryrej:1"
+	must(t, ob.Append(outbox.Event, oldKey, "fixture:old", "r", []byte(`{"subject":"fixture:old","type":"fixture.x","key":"`+oldKey+`","occurred_at":"2026-11-07T09:00:00.000Z","open":{}}`)))
+	must(t, ob.Mark(oldKey, outbox.Rejected, "", 400, "invalid", "no item"))
+	ob.Close()
+
+	h.server.Script = nil
+	before := map[string]int{}
+	for _, w := range want {
+		before[w.key] = len(h.server.RequestsFor(w.key))
+	}
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	out, logs := h.stdout.String(), h.stderr.String()
+	if !strings.Contains(out, "Retry: sent 3, replayed 0, refused 0, conflict 1, missing 1, failed 0.") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
+		if strings.Contains(out, banned) || strings.Contains(logs, banned) {
+			t.Fatalf("retry output contains %q\nstdout:\n%s\nstderr:\n%s", banned, out, logs)
+		}
+	}
+	if !strings.Contains(logs, `"msg":"retry"`) || !strings.Contains(logs, `"missing":1`) || !strings.Contains(logs, `"conflict":1`) {
+		t.Fatalf("log:\n%s", logs)
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != before[want[1].key] {
+		t.Fatalf("409 was sent again: %d requests, was %d", n, before[want[1].key])
+	}
+	if n := len(h.server.RequestsFor(oldKey)); n != 0 {
+		t.Fatalf("entry with no item was sent %d times", n)
+	}
+	ev, ok := h.server.Event(want[0].key)
+	if !ok || !bytes.Contains(ev.Body, []byte(`"fields":{"status":"open"}`)) {
+		t.Fatalf("retried state snapshot: %s", ev.Body)
+	}
+	obRead, err := outbox.Read(state)
+	must(t, err)
+	if e, _ := obRead.Get(want[0].key); e.State != outbox.Sent || e.Status != 201 {
+		t.Fatalf("retried key: %+v", e)
+	}
+	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 {
+		t.Fatalf("409 was rewritten: %+v", e)
+	}
+	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {
+		t.Fatalf("missing item was touched: %+v", e)
+	}
+
+	sentEvents := len(eventRequests(h.server))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(eventRequests(h.server)); n != sentEvents {
+		t.Fatalf("second retry sent %d more events", n-sentEvents)
+	}
+	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0.") {
+		t.Fatalf("second retry:\n%s", h.stdout.String())
+	}
+}
+
+func TestRetryRefusesDryRun(t *testing.T) {
+	h := newHarness(t)
+	cfg, _ := writeSetup(t, t.TempDir(), h.server.URL, "dry-run", "dryretry")
+	code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg)
+	if code == 0 || !strings.Contains(h.stderr.String(), "mode is dry-run") || h.rec.Count() != 0 {
+		t.Fatalf("exit %d requests %d\n%s", code, h.rec.Count(), h.stderr.String())
+	}
+}
+
+func TestCursorReset(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "cursor")
+	st, err := cursor.Open(filepath.Join(dir, "state"))
+	must(t, err)
+	must(t, st.Commit("fixture", []byte("2026-11-07T12:00:00Z")))
+	must(t, st.MarkFirst([]string{"fixture"}))
+	must(t, st.Accept([]string{"fixture"}))
+	if code := h.run(h.app(nil), "cursor", "reset", "--config", cfg, "fixture"); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if h.rec != nil && h.rec.Count() != 0 {
+		t.Fatalf("reset contacted %d hosts", h.rec.Count())
+	}
+	again, err := cursor.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if _, ok := again.Get("fixture"); ok || !again.Accepted("fixture") {
+		t.Fatal("reset left the cursor or cleared acceptance")
+	}
+	if !strings.Contains(h.stdout.String(), "Cleared the cursor for fixture") || strings.Contains(h.stdout.String(), "2026-11-07") {
+		t.Fatalf("stdout:\n%s", h.stdout.String())
+	}
+	if code := h.run(h.app(nil), "cursor", "reset", "--config", cfg, "github"); code == 0 {
+		t.Fatal("reset of an unknown source succeeded")
 	}
 }

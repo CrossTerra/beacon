@@ -52,8 +52,16 @@ type Body struct {
 	DueAt      string         `json:"due_at,omitempty"`
 	Closes     []Ref          `json:"closes,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	// State is the object's state snapshot (DEC-28): the state fields the rule lists, observed_at and version.
-	State map[string]string `json:"state,omitempty"`
+	// State is the object's state snapshot (DEC-28), in the shape Signal stores.
+	State *Snapshot `json:"state,omitempty"`
+}
+
+// Snapshot is a state snapshot (DEC-28, Signal plan 12.01). The listed state fields are nested under Fields.
+// ObservedAt and Version stay beside Fields; any other key is refused by Signal.
+type Snapshot struct {
+	Fields     map[string]string `json:"fields"`
+	ObservedAt string            `json:"observed_at"`
+	Version    string            `json:"version"`
 }
 
 // Open makes sure the subject has a thread (DEC-17).
@@ -81,6 +89,44 @@ type Input struct {
 	OpenAsks []string
 	// Truncated omits the body and marks the event truncated. The marker is a fixed flag, not item content.
 	Truncated bool
+}
+
+// Decision is the item and the rule snapshot a send used, kept so a refused event can be projected again.
+// It stays on the machine. Only the body Project builds from it leaves.
+type Decision struct {
+	Item          source.Item `json:"item"`
+	Fields        []string    `json:"fields,omitempty"`
+	State         []string    `json:"state,omitempty"`
+	Ask           string      `json:"ask,omitempty"`
+	Priority      string      `json:"priority,omitempty"`
+	CloseByOthers bool        `json:"close_by_others,omitempty"`
+	Truncated     bool        `json:"truncated,omitempty"`
+}
+
+// Decide records what Project needs from a send that was already decided.
+func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
+	d := Decision{Item: it, Truncated: truncated}
+	if rule == nil {
+		return d
+	}
+	d.Fields = append([]string(nil), rule.Fields...)
+	d.State = append([]string(nil), rule.State...)
+	d.Ask = rule.Ask
+	d.Priority = rule.Priority
+	d.CloseByOthers = rule.CloseByOthers
+	return d
+}
+
+// Rule is the snapshot Project needs. The tier is send: the item was already decided.
+func (d Decision) Rule() *rules.Rule {
+	return &rules.Rule{
+		Tier:          rules.Send,
+		Fields:        append([]string(nil), d.Fields...),
+		State:         append([]string(nil), d.State...),
+		Ask:           d.Ask,
+		Priority:      d.Priority,
+		CloseByOthers: d.CloseByOthers,
+	}
 }
 
 // Project builds the request body and its bytes. It fails if the rule does not send or hold, or if the body would
@@ -138,17 +184,18 @@ func Project(in Input) (*Body, []byte, error) {
 	if len(meta) > 0 {
 		b.Metadata = meta
 	}
-	if len(it.State) > 0 && it.ObservedAt != nil {
-		state := map[string]string{}
+	if len(it.State) > 0 && it.ObservedAt != nil && it.Version != "" {
+		fields := map[string]string{}
 		for _, name := range r.State {
+			if name == source.StateObservedAt || name == source.StateVersion {
+				continue
+			}
 			if v, ok := it.State[name]; ok {
-				state[name] = v
+				fields[name] = v
 			}
 		}
-		if len(state) > 0 {
-			state[source.StateObservedAt] = Instant(*it.ObservedAt)
-			state[source.StateVersion] = it.Version
-			b.State = state
+		if len(fields) > 0 {
+			b.State = &Snapshot{Fields: fields, ObservedAt: Instant(*it.ObservedAt), Version: it.Version}
 		}
 	}
 	if it.Own {

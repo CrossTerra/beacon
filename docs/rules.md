@@ -96,9 +96,10 @@ Without `title`, Signal titles the event (and a new thread) with its type.
 
 ## State
 
-`state` names the source's state fields that go in the event's `state` snapshot (DEC-28), with `observed_at` and
-the source's version marker. Each source lists its state fields as it lists its fields. A state field not listed is
-not sent, and an item without a snapshot carries no `state`. The shape is in [`events.md`](events.md#the-request-body).
+`state` names the source's state fields that go in the event's `state.fields` (DEC-28). `observed_at` and the
+source's version marker sit beside `fields`, not inside it. Each source lists its state fields as it lists its
+fields. A state field not listed is not sent, and an item without a snapshot carries no `state`. The shape is in
+[`events.md`](events.md#the-request-body).
 
 ## `beacon rules check`
 

@@ -49,7 +49,33 @@ the item would be sent as now.
 
 Lists every outbox entry in order: when it was appended and last updated, its state, kind (`event` or `lease`),
 key, Signal event id (or the status and code that refused it) and rule. `--bodies` adds each body; `--json`
-prints one JSON object per entry, with the body.
+prints one JSON object per entry, with the body. Neither prints the decided item stored with an append.
+
+## `beacon outbox retry --rejected`
+
+Re-projects rejected events from the decided item stored with the append, and sends the new bodies. It requires
+`mode: send` and the lease. It does not send an entry Signal accepted, and it does not touch a `409`. An entry
+with no stored item is counted and left as it is. The log and the summary are counts only: sent, replayed,
+refused, conflict, missing, failed, pending. See [`events.md`](events.md#retrying-a-refusal).
+
+```bash
+beacon outbox retry --rejected
+```
+
+## `beacon cursor reset`
+
+```bash
+beacon cursor reset github
+```
+
+Removes the committed cursor for each named source, so the next collect reads open state, not history (DEC-23).
+It does not send, and it does not clear acceptance, so a source whose first run was accepted is recorded and may
+be sent by the next send pass. A source with no cursor is already reading open state. A key already in the outbox
+is not decided again and is not sent.
+
+This is the recovery for events rejected before the decided item was stored. Those bodies cannot be rebuilt.
+Resetting the GitHub cursor re-collects current open pull requests, not the refused keys. The refused keys stay
+rejected.
 
 ## `beacon egress`
 
@@ -115,7 +141,8 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `dry_run` | A dry run ended without sending. |
 | `lease_held`, `lease_not_held`, `lease_failed`, `lease_expired` | The lease; `lease_expired` is a pass stopped because the lease ran out. |
 | `send_result`, `send_stopped` | Each answer from Signal; a pass that stopped sending. |
-| `run_failed` | `beacon run` stopped with an error. |
+| `retry` | `beacon outbox retry --rejected` finished. Counts only: sent, replayed, refused, conflict, missing, failed, pending. |
+| `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
 `egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,

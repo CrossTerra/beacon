@@ -105,6 +105,23 @@ func (s *Store) Get(name string) ([]byte, bool) {
 	return b, true
 }
 
+// Reset removes the committed cursor for name, so the next collect reads open state (DEC-23). Acceptance is left
+// as it is. A source with no cursor is already reading open state; Reset reports that with false. A store from
+// Read refuses to write.
+func (s *Store) Reset(name string) (bool, error) {
+	if !s.writable {
+		return false, errors.New("cursor: the store is not open for writing")
+	}
+	if name == "" {
+		return false, errors.New("cursor: a source name is empty")
+	}
+	if _, ok := s.cursors[name]; !ok {
+		return false, nil
+	}
+	delete(s.cursors, name)
+	return true, writeAtomic(s.dir, cursorsFile, s.cursors)
+}
+
 // Commit stores next as the source's cursor. It syncs the file before returning, so a crash after Commit does not
 // lose the move. A store from Read refuses to write.
 func (s *Store) Commit(name string, next []byte) error {

@@ -10,7 +10,7 @@ same pull request.
 | --- | --- |
 | Events a rule sent: the projected fields and state fields only | Source credentials (OAuth refresh tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
-| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox, the cursors, the seed file, classifier input and output |
+| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (including the decided item stored with an append), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
@@ -30,8 +30,11 @@ same pull request.
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
 5. **The outbox is the record.** Every request body, lease claims included, is appended to the outbox and synced
-   to disk before it is sent. Retries resend those exact bytes, which is also what Signal requires of a retried
-   key. A body Signal refused is recorded and never rewritten.
+   to disk before it is sent. A pending retry resends those exact bytes, which is what Signal requires of a key it
+   already holds. A body Signal accepted (`sent`, `replayed`) is never resent and never rewritten. A `409` is never
+   retried. Any other refusal is recorded and not sent again by `beacon run`. `beacon outbox retry --rejected` may
+   re-project that refusal from the decided item stored with the append, append the new body, and send it. The
+   refused body stays in the file. The command logs counts only. The decided item does not leave the machine.
 6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
    hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
    refuses any other host before connecting. Proxy settings from the environment are ignored and redirects are not
@@ -61,9 +64,12 @@ same pull request.
 - **Asks are tracked locally.** Beacon knows which asks are open from its own outbox. If the person closes an ask in
   Signal directly, Beacon's next own act on that subject still names it in `closes`, Signal refuses the event with
   `409 conflict`, and the event is recorded as rejected instead of sent.
-- **Signal does not keep state snapshots yet.** Beacon sends the state fields a rule lists (DEC-28). Signal `main`
-  accepts them and discards them until its plan 12.01; they still leave the machine, so list state fields with the
-  same care as other fields.
+- **Signal stores state snapshots.** Beacon sends the state fields a rule lists, nested under `state.fields`, with
+  `observed_at` and `version` beside them (DEC-28). Signal keeps the latest snapshot per subject. List state fields
+  with the same care as other fields: they leave the machine, and Signal does not interpret them.
+- **A refusal from before the decided item was stored cannot be rebuilt.** The outbox kept the projected body, not
+  the item. `beacon cursor reset` on that source re-collects open state. Keys already in the outbox are not sent
+  again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
