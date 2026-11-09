@@ -24,8 +24,9 @@ the committed cursor minus 15 minutes, so indexing lag and clock skew land in an
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run). `beacon cursor reset <source>` removes a committed
-cursor so the next collect reads open state again. Acceptance is kept. Keys already in the outbox are not sent
-again. See [commands](commands.md#beacon-cursor-reset).
+cursor so the next collect reads open state again. Acceptance is kept. A `400` with no stored item is decided
+again by the next send pass; a `409`, and anything Signal accepted, is not. See
+[commands](commands.md#beacon-cursor-reset).
 
 ## Seed
 

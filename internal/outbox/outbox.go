@@ -264,6 +264,18 @@ func applyRetry(e *Entry, rec record) error {
 	if conflict(e) {
 		return fmt.Errorf("key %q: a conflict is not retried", rec.Key)
 	}
+	if rec.Decision != "" {
+		if len(e.Decision) != 0 || e.Status != 400 || conflict(e) {
+			return fmt.Errorf("key %q: a new attempt needs a 400 with no stored item", rec.Key)
+		}
+		e.Decision = []byte(rec.Decision)
+	}
+	if rec.Rule != "" {
+		e.Rule = rec.Rule
+	}
+	if rec.Subject != "" {
+		e.Subject = rec.Subject
+	}
 	e.Body = []byte(rec.Body)
 	e.Asks, e.Closes = inspect(e.Body)
 	e.State = Pending
@@ -275,6 +287,13 @@ func applyRetry(e *Entry, rec record) error {
 // conflict reports a 409, including idempotency_conflict. Those entries are final.
 func conflict(e *Entry) bool {
 	return e.Status == 409 || e.Code == "idempotency_conflict"
+}
+
+// Undecided reports whether this entry must not block a later decision. A 400 with no stored item is one Signal
+// never stored, so the same key may be decided again. Anything Signal accepted, a 409, and a refusal that still
+// has its item, count as decided.
+func (e Entry) Undecided() bool {
+	return e.Kind == Event && e.State == Rejected && e.Status == 400 && !conflict(&e) && len(e.Decision) == 0
 }
 
 func inspect(body []byte) (asks bool, closes []string) {
@@ -337,6 +356,30 @@ func (o *Outbox) append(kind Kind, key, subject, rule string, body, decision []b
 		dsum := sha256.Sum256(decision)
 		rec.DecisionSHA = hex.EncodeToString(dsum[:])
 	}
+	if err := o.write(rec); err != nil {
+		return err
+	}
+	return o.apply(rec)
+}
+
+// AppendAttempt records a new body for a 400 that has no stored item, and stores the decided item with it. The
+// refused lines stay in the file. It refuses anything Signal accepted, a 409, and a rejection that already has an item.
+func (o *Outbox) AppendAttempt(key, subject, rule string, body, decision []byte) error {
+	e, ok := o.entries[key]
+	if !ok || !e.Undecided() {
+		return ErrNotRetryable
+	}
+	if len(decision) == 0 || !json.Valid(decision) {
+		return errors.New("outbox: decision is not JSON")
+	}
+	if !json.Valid(body) {
+		return errors.New("outbox: body is not JSON")
+	}
+	sum := sha256.Sum256(body)
+	dsum := sha256.Sum256(decision)
+	rec := record{Key: key, State: Pending, At: o.now().UTC(), Kind: Event, Subject: subject, Rule: rule,
+		Body: string(body), SHA256: hex.EncodeToString(sum[:]),
+		Decision: string(decision), DecisionSHA: hex.EncodeToString(dsum[:]), Retry: true}
 	if err := o.write(rec); err != nil {
 		return err
 	}

@@ -55,7 +55,8 @@ prints one JSON object per entry, with the body. Neither prints the decided item
 
 Re-projects rejected events from the decided item stored with the append, and sends the new bodies. It requires
 `mode: send` and the lease. It does not send an entry Signal accepted, and it does not touch a `409`. An entry
-with no stored item is counted and left as it is. The log and the summary are counts only: sent, replayed,
+with no stored item is not sent by this command. A `400` of that kind is decided again when the key is collected.
+The log and the summary are counts only: sent, replayed,
 refused, conflict, missing, failed, pending. See [`events.md`](events.md#retrying-a-refusal).
 
 ```bash
@@ -69,13 +70,17 @@ beacon cursor reset github
 ```
 
 Removes the committed cursor for each named source, so the next collect reads open state, not history (DEC-23).
-It does not send, and it does not clear acceptance, so a source whose first run was accepted is recorded and may
-be sent by the next send pass. A source with no cursor is already reading open state. A key already in the outbox
-is not decided again and is not sent.
+It does not send, and it does not clear acceptance. A source with no cursor is already reading open state.
 
-This is the recovery for events rejected before the decided item was stored. Those bodies cannot be rebuilt.
-Resetting the GitHub cursor re-collects current open pull requests, not the refused keys. The refused keys stay
-rejected.
+This is the recovery for a `400` recorded before the decided item was stored. Signal never stored those events, so
+they do not block a later decision. Then:
+
+```bash
+beacon run --once
+```
+
+That pass re-collects open state and sends each such key once, with the current projection, keeping the refused
+lines in the outbox. A `409`, and anything Signal accepted, is not sent again.
 
 ## `beacon egress`
 

@@ -74,7 +74,8 @@ type Planned struct {
 	Rule string
 	// Body is the request body the item would be, or was, sent as: for send and hold items.
 	Body []byte
-	// Skipped says why an item was not decided again: it is already in the outbox or the hold queue.
+	// Skipped says why an item was not decided again: it is already in the outbox or the hold queue. A 400 with no
+	// stored item does not count.
 	Skipped string
 	// Unaccepted is true when the source's first run has not been accepted, so a send pass did not record the item.
 	Unaccepted bool
@@ -284,7 +285,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	p := Planned{Item: it}
 	if r.Outbox != nil {
-		if e, ok := r.Outbox.Get(it.Key); ok {
+		if e, ok := r.Outbox.Get(it.Key); ok && !e.Undecided() {
 			p.Tier, p.Rule, p.Body, p.Skipped = rules.Send, e.Rule, e.Body, "in the outbox, "+string(e.State)
 			return p, nil
 		}
@@ -343,7 +344,13 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	if err != nil {
 		return p, err
 	}
-	if err := r.Outbox.AppendDecided(outbox.Event, it.Key, it.Subject, p.Rule, body, decided); err != nil {
+	if _, exists := r.Outbox.Get(it.Key); exists {
+		// A 400 Signal never stored, with no item kept. The refused lines stay; this attempt stores the item.
+		err = r.Outbox.AppendAttempt(it.Key, it.Subject, p.Rule, body, decided)
+	} else {
+		err = r.Outbox.AppendDecided(outbox.Event, it.Key, it.Subject, p.Rule, body, decided)
+	}
+	if err != nil {
 		return p, err
 	}
 	if r.AfterAppend != nil {

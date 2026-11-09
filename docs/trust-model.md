@@ -32,9 +32,11 @@ same pull request.
 5. **The outbox is the record.** Every request body, lease claims included, is appended to the outbox and synced
    to disk before it is sent. A pending retry resends those exact bytes, which is what Signal requires of a key it
    already holds. A body Signal accepted (`sent`, `replayed`) is never resent and never rewritten. A `409` is never
-   retried. Any other refusal is recorded and not sent again by `beacon run`. `beacon outbox retry --rejected` may
-   re-project that refusal from the decided item stored with the append, append the new body, and send it. The
-   refused body stays in the file. The command logs counts only. The decided item does not leave the machine.
+   retried and never decided again. A `400` with no stored item is not a decision: `beacon run` may decide that key
+   again when a source yields it, append a new attempt, and send it. The refused lines stay in the file. Any other
+   refusal is not sent again by `beacon run`. `beacon outbox retry --rejected` may re-project a refusal from the
+   decided item stored with the append, append the new body, and send it. The command logs counts only. The decided
+   item does not leave the machine.
 6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
    hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
    refuses any other host before connecting. Proxy settings from the environment are ignored and redirects are not
@@ -67,9 +69,9 @@ same pull request.
 - **Signal stores state snapshots.** Beacon sends the state fields a rule lists, nested under `state.fields`, with
   `observed_at` and `version` beside them (DEC-28). Signal keeps the latest snapshot per subject. List state fields
   with the same care as other fields: they leave the machine, and Signal does not interpret them.
-- **A refusal from before the decided item was stored cannot be rebuilt.** The outbox kept the projected body, not
-  the item. `beacon cursor reset` on that source re-collects open state. Keys already in the outbox are not sent
-  again.
+- **A 400 from before the decided item was stored cannot be rebuilt from the outbox.** The refused body is not the
+  item. `beacon cursor reset github`, then `beacon run --once`, re-collects open state and decides those keys again.
+  A `409`, and anything Signal accepted, is not sent again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ

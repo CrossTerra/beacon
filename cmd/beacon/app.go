@@ -727,7 +727,7 @@ func (a *app) printRetry(rep *runner.RetryReport) {
 		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed)
 	fmt.Fprintf(w, "Pending: %d.\n", rep.Pending)
 	if rep.Missing > 0 {
-		fmt.Fprintf(w, "%d rejected events have no stored item and were not sent. They cannot be rebuilt. beacon cursor reset SOURCE re-collects open state; keys already in the outbox are not sent again.\n", rep.Missing)
+		fmt.Fprintf(w, "%d rejected events have no stored item and were not sent by this command. A 400 is decided again by beacon cursor reset SOURCE, then beacon run --once. A 409 is not.\n", rep.Missing)
 	}
 }
 
@@ -774,9 +774,9 @@ func (a *app) cmdCursor(args []string) error {
 			return err
 		}
 		if cleared {
-			fmt.Fprintf(a.stdout, "Cleared the cursor for %s. The next send pass reads open state. Keys already in the outbox are not sent again.\n", n)
+			fmt.Fprintf(a.stdout, "Cleared the cursor for %s. The next collect reads open state. beacon run --once decides it. A 400 with no stored item is sent again. A 409, and anything Signal accepted, is not.\n", n)
 		} else {
-			fmt.Fprintf(a.stdout, "%s has no cursor. The next collect already reads open state. Keys already in the outbox are not sent again.\n", n)
+			fmt.Fprintf(a.stdout, "%s has no cursor. The next collect already reads open state. beacon run --once decides it. A 400 with no stored item is sent again. A 409, and anything Signal accepted, is not.\n", n)
 		}
 	}
 	return nil

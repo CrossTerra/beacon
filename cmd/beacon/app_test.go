@@ -866,6 +866,74 @@ func TestRetryRejected(t *testing.T) {
 	}
 }
 
+// A 400 with no stored item does not block a later collect. Cursor reset, then one run, sends the corrected body once.
+func TestLegacyRejectionIsCollectedAgain(t *testing.T) {
+	h := newHarness(t)
+	n := "legacy"
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", n)
+	state := filepath.Join(dir, "state")
+	ob, err := outbox.Open(state, time.Now)
+	must(t, err)
+	flat := []byte(`{"subject":"fixture:pr:acme/app#1-` + n + `","type":"fixture.review_requested","key":"` + want[0].key + `","occurred_at":"2026-11-07T09:01:00.000Z","open":{"title":"Add retries"},"to":["@winton"],"priority":"high","state":{"observed_at":"2026-11-07T09:01:30.000Z","status":"open","version":"1"}}`)
+	must(t, ob.Append(outbox.Event, want[0].key, "fixture:pr:acme/app#1-"+n, "review-requests", flat))
+	must(t, ob.Mark(want[0].key, outbox.Rejected, "", 400, "invalid", "flat"))
+	must(t, ob.Append(outbox.Event, want[1].key, "fixture:pr:acme/app#1-"+n, "own-acts", []byte(`{"key":"`+want[1].key+`"}`)))
+	must(t, ob.Mark(want[1].key, outbox.Rejected, "", 409, "idempotency_conflict", "held"))
+	must(t, ob.AppendDecided(outbox.Event, want[2].key, "fixture:issue:3-"+n, "assigned", []byte(`{"key":"`+want[2].key+`"}`), []byte(`{"item":{"key":"kept"}}`)))
+	must(t, ob.Mark(want[2].key, outbox.Rejected, "", 400, "invalid", "had item"))
+	ob.Close()
+	st, err := cursor.Open(state)
+	must(t, err)
+	must(t, st.Commit("fixture", []byte("2026-11-08T00:00:00Z")))
+	must(t, st.MarkFirst([]string{"fixture"}))
+	must(t, st.Accept([]string{"fixture"}))
+
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "cursor", "reset", "--config", cfg, "fixture"); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	again, err := cursor.Read(state)
+	must(t, err)
+	if _, ok := again.Get("fixture"); ok || !again.Accepted("fixture") {
+		t.Fatal("reset left the cursor or cleared acceptance")
+	}
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	reqs := h.server.RequestsFor(want[0].key)
+	if len(reqs) != 1 || !bytes.Contains(reqs[0].Body, []byte(`"fields":{"status":"open"}`)) || bytes.Equal(reqs[0].Body, flat) {
+		t.Fatalf("sent %d times: %s", len(reqs), reqs)
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 0 {
+		t.Fatalf("409 was sent %d times", n)
+	}
+	if n := len(h.server.RequestsFor(want[2].key)); n != 0 {
+		t.Fatalf("400 with a stored item was sent %d times", n)
+	}
+	data, err := os.ReadFile(filepath.Join(state, outbox.FileName))
+	must(t, err)
+	if !strings.Contains(string(data), `\"status\":\"open\",\"version\":\"1\"`) {
+		t.Fatalf("refused body was not kept:\n%s", data)
+	}
+	obRead, err := outbox.Read(state)
+	must(t, err)
+	e, _ := obRead.Get(want[0].key)
+	if e.State != outbox.Sent || e.Status != 201 || len(e.Decision) == 0 || e.Undecided() {
+		t.Fatalf("after collect: %+v", e)
+	}
+	if !bytes.Contains(e.Body, []byte(`"fields":{"status":"open"}`)) {
+		t.Fatalf("stored attempt: %s", e.Body)
+	}
+	sent := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[0].key)); n != sent {
+		t.Fatalf("second run sent the key again: %d", n-sent)
+	}
+}
+
 func TestRetryRefusesDryRun(t *testing.T) {
 	h := newHarness(t)
 	cfg, _ := writeSetup(t, t.TempDir(), h.server.URL, "dry-run", "dryretry")

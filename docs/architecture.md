@@ -21,10 +21,11 @@ One pass of `beacon run`:
    with no cursor reads open state, not history (DEC-23). Items that do not validate (wrong source, a field outside
    the source's field list, a subject or key Signal would refuse) are counted and skipped. Items are sorted by
    `occurred_at`, then key.
-2. **Skip what is decided.** A key already in the outbox, including one Signal refused, or in the hold queue is not
-   decided again: one event per change of state (DEC-9). A subject a seed file marks `never` is dropped before the
-   rules file (DEC-24). `beacon outbox retry --rejected` is the only path that sends a refused key again, and only
-   when Signal did not store it and the decided item was kept.
+2. **Skip what is decided.** A key already in the outbox, or in the hold queue, is not decided again: one event per
+   change of state (DEC-9). A `400` with no stored item is not a decision: Signal never stored it, so the same key
+   is decided again and appended as a new attempt. A `409`, and anything Signal accepted, still blocks. A subject a
+   seed file marks `never` is dropped before the rules file (DEC-24). `beacon outbox retry --rejected` re-sends a
+   refusal that still has its decided item, and does not touch a `409`.
 3. **Decide.** The first rule that matches sets the tier. No match is `never` (DEC-3).
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
    builds the request body with the projection and appends it to the outbox, with the decided item, synced to disk,

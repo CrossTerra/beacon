@@ -91,7 +91,7 @@ is not part of the request. `beacon outbox` does not print it. An append from be
 | `pending` | Appended and synced; not yet answered. | Sent, with the stored bytes, by the next pass that holds the lease. |
 | `sent` | `201`: Signal wrote it. | Final. |
 | `replayed` | `200` with `replayed: true`: Signal already had these bytes under this key, for example after a crash between send and record. | Final. |
-| `rejected` | Signal refused it: `409` (the key holds another request, or another conflict), or another final 4xx. `status`, `code` and `message` say why. | Final for `beacon run`. A `409` is never sent again. Any other refusal may be re-projected by `beacon outbox retry --rejected` when `decision` was stored. The refused body stays in the file. |
+| `rejected` | Signal refused it: `409` (the key holds another request, or another conflict), or another final 4xx. `status`, `code` and `message` say why. | A `409` is final. A `400` with no stored item is not a decision: the next collect that yields the key decides it again and appends a new attempt. Any other refusal is final for `beacon run`, and may be re-projected by `beacon outbox retry --rejected` when `decision` was stored. The refused lines stay in the file. |
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
 `kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
@@ -110,6 +110,7 @@ body was never sent. The directory is synced when the outbox file is created, so
 | `5xx`, network error | Retries with backoff (1 s doubling to 30 s, five attempts). Then the body stays pending and the pass stops sending. |
 | The lease runs out | Every write, with its retries and waits, runs under a deadline at the end of the lease. A write still waiting then is stopped, its body stays pending, and the pass ends (`lease_expired`). |
 | `401` | The pass stops and `beacon run` exits non-zero; the body stays pending. |
+| `400` with no stored item | `rejected`, but not a decision. The next collect that yields the key decides it again. |
 | Any other 4xx | `rejected`. `beacon run` does not send it again. `beacon outbox retry --rejected` may re-project it from the stored decision and send the new body. |
 
 ### Retrying a refusal
@@ -119,15 +120,25 @@ requires `mode: send` and the lease. It logs counts only.
 
 - An entry Signal accepted (`sent`, `replayed`) is not sent again.
 - A `409` is not touched. Signal already holds a request under that key, or refused a conflict a new body must not paper over.
-- A rejected event with no stored decision is counted and left as it is. It cannot be rebuilt from the refused body: that body has only the fields the rule listed, not the item.
+- A rejected event with no stored decision is counted and not sent by this command. The refused body is not enough to rebuild the item.
 - The new body is appended and synced before it is sent. The refused body stays in the file. A pending retry, including one left pending because the lease ran out, is sent later as those exact bytes.
 - The field list is the one that decided the send, not the rules file as it is now, so a later rule cannot add fields. The projection code is the current one. `closes` is taken from the outbox as it is now, so a retry does not name an ask that is no longer open.
 
-Entries rejected before the decision was stored cannot be rebuilt. The GitHub cursor has already moved, so those
-changes are not collected again. `beacon cursor reset github` removes that source's committed cursor. The next send
-pass reads open state (DEC-23), not history. Acceptance is left as it is, so the pass records and may send. A key
-already in the outbox, including one of those refusals, is not decided again and is not sent. Open-state items whose
-keys are not already recorded are sent with the current projection.
+A `400` with no stored item does not count as decided. Signal never stored it, so it must not block a later
+decision. When a collect yields that key again, Beacon decides it, appends a new attempt with the decided item, and
+sends that body. The refused lines stay in the file. A `409`, and anything Signal accepted, still blocks.
+
+The 15 events refused before the item was stored are that case, and the GitHub cursor has already moved, so they
+are not collected again until the cursor is cleared. Recovery is:
+
+```bash
+beacon cursor reset github
+beacon run --once
+```
+
+`cursor reset` removes the committed cursor and does not send. The next send pass reads open state (DEC-23), not
+history. Acceptance is left as it is, so the pass records and may send. A `400` with no stored item is decided
+again and sent once, with the current projection. A `409`, and anything Signal accepted, is not sent again.
 
 ## The lease
 
