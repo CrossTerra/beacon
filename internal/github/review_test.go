@@ -577,7 +577,8 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 			}{SHA: "pushed"}},
 		Timeline: []timelineEvent{
 			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "reviewed", SubmittedAt: "2026-11-08T08:00:00Z"},
-			{Event: "committed", SHA: "pushed", Author: &ghUser{Date: "2026-11-08T09:00:00Z"}, Committer: &ghUser{Date: "2026-11-08T09:00:00Z"}},
+			{Event: "committed", SHA: "older", Author: &ghUser{Login: "winton", Date: "2026-11-01T00:00:00Z"}, Committer: &ghUser{Date: "2026-11-01T00:00:00Z"}},
+			{Event: "committed", SHA: "pushed", Author: &ghUser{Login: "winton", Date: "2026-11-08T09:00:00Z"}, Committer: &ghUser{Date: "2026-11-08T09:00:00Z"}},
 		},
 	}
 	items, err := build(in)
@@ -593,8 +594,13 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 	if push == nil {
 		t.Fatal("head push with a committer date before the window was dropped")
 	}
-	if !push.OccurredAt.Equal(observed) {
-		t.Fatalf("head push stamped %s, want the pass Date", push.OccurredAt)
+	if !push.OccurredAt.Equal(observed) || !push.Own || push.Actor != "github:user:winton" {
+		t.Fatalf("head push %+v", push)
+	}
+	for _, it := range items {
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:older") {
+			t.Fatal("a commit before the window was emitted")
+		}
 	}
 }
 

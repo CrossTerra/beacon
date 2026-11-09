@@ -608,30 +608,41 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		seen[sha] = true
 		return add(in.item(TypePushed, "push:"+sha, actor, at, "", "", false))
 	}
-	// The current head is the push. Stamp it with the pass Date. A committer date before the window must not drop it.
-	if head := in.PR.headSHA(); head != "" && lastSHA != "" && head != lastSHA {
-		if err := emit(head, "", in.Observed); err != nil {
-			return err
-		}
-	}
+	// The current head is the push, stamped with the pass Date. A committer date before the window must not drop
+	// it. The actor comes from the timeline event that names that sha, so an own push stays own.
+	head := in.PR.headSHA()
+	headActor := ""
 	for i, e := range in.Timeline {
 		if last >= 0 && i <= last {
 			continue
 		}
-		// Committer and force-push times order the commit. They do not filter it.
-		at, ok := pushTime(e)
-		if !ok {
-			at = in.Observed
-		}
+		sha, actor := "", ""
 		switch e.Event {
 		case "committed":
-			if err := emit(e.SHA, loginOf(e.Author), at); err != nil {
-				return err
-			}
+			sha, actor = e.SHA, loginOf(e.Author)
 		case "head_ref_force_pushed":
-			if err := emit(e.After, loginOf(e.Actor), at); err != nil {
-				return err
+			sha, actor = e.After, loginOf(e.Actor)
+		default:
+			continue
+		}
+		if sha != "" && sha == head {
+			if actor != "" {
+				headActor = actor
 			}
+			continue
+		}
+		// Other commits stay inside the window. A missing time is not the pass Date: that would emit history.
+		at, ok := pushTime(e)
+		if !ok || (!in.Since.IsZero() && at.Before(in.Since)) {
+			continue
+		}
+		if err := emit(sha, actor, at); err != nil {
+			return err
+		}
+	}
+	if head != "" && lastSHA != "" && head != lastSHA {
+		if err := emit(head, headActor, in.Observed); err != nil {
+			return err
 		}
 	}
 	return nil
