@@ -597,6 +597,37 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 	if !push.OccurredAt.Equal(observed) || !push.Own || push.Actor != "github:user:winton" {
 		t.Fatalf("head push %+v", push)
 	}
+	noID := in
+	noID.Timeline = []timelineEvent{{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", SubmittedAt: "2026-11-08T08:00:00Z"}}
+	noID.PR.Head = &struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	}{SHA: "no-commit-id"}
+	items, err = build(noID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, it := range items {
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:no-commit-id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("head push dropped when the review had no commit id")
+	}
+	noreply := in
+	noreply.Timeline = append([]timelineEvent(nil), in.Timeline...)
+	noreply.Timeline[2].Author = &ghUser{Email: "winton@users.noreply.github.com", Date: "2026-11-08T09:00:00Z"}
+	items, err = build(noreply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:pushed") && (!it.Own || it.Actor != "github:user:winton") {
+			t.Fatalf("noreply author not attributed: %+v", it)
+		}
+	}
 	for _, it := range items {
 		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:older") {
 			t.Fatal("a commit before the window was emitted")

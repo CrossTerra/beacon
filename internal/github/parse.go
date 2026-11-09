@@ -619,7 +619,11 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 		sha, actor := "", ""
 		switch e.Event {
 		case "committed":
-			sha, actor = e.SHA, loginOf(e.Author)
+			// Git author is a name and email, not a login. Only a GitHub login or the person's noreply address is an actor.
+			sha, actor = e.SHA, gitActor(e.Author, in.Login)
+			if actor == "" {
+				actor = gitActor(e.Committer, in.Login)
+			}
 		case "head_ref_force_pushed":
 			sha, actor = e.After, loginOf(e.Actor)
 		default:
@@ -640,12 +644,33 @@ func (in buildInput) addPushes(add func(source.Item, error) error) error {
 			return err
 		}
 	}
-	if head != "" && lastSHA != "" && head != lastSHA {
+	// A review with no commit_id still means the head may have moved. Empty lastSHA is not "same commit".
+	if head != "" && head != lastSHA {
 		if err := emit(head, headActor, in.Observed); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// gitActor returns a GitHub login from a timeline commit author. A raw email is not a login, except GitHub's
+// noreply form, which names the user.
+func gitActor(u *ghUser, login string) string {
+	if u == nil {
+		return ""
+	}
+	if u.Login != "" {
+		return u.Login
+	}
+	email := strings.ToLower(strings.TrimSpace(u.Email))
+	login = strings.ToLower(login)
+	if email == "" || login == "" {
+		return ""
+	}
+	if email == login+"@users.noreply.github.com" || strings.HasSuffix(email, "+"+login+"@users.noreply.github.com") {
+		return login
+	}
+	return ""
 }
 
 // pushTime orders a timeline commit. It is not a filter. A committer date is the rebase time. A force-push
