@@ -43,10 +43,11 @@ repository qualifier per query (an OR of `repo:` qualifiers matches nothing), th
 since the cursor. The search does not use a login qualifier: some tokens can read the repositories and still cannot
 search a user. A pull request the person is not involved in (author, assignee, reviewer, review requested,
 mentioned, or commenter) yields no items. Own open pull requests are also read for check suites, because a check
-conclusion does not change the pull request's `updated` time. A pull request or issue the token cannot read (404
-or 403) is skipped; it does not freeze the cursor.
-Check-suite conclusions on the person's own open pull requests, when they change. The token needs permission to
-read those repositories and their checks.
+conclusion does not change the pull request's `updated` time. If that extra search fails, items from the updated
+search are still returned and the cursor stays. A pull request or issue the token cannot read (404 or 403 on the
+object itself) is skipped. A failure reading its timeline, reviews, or changelog fails the pass and the cursor
+stays. Check suites and pull-request review comments the token cannot read are omitted rather than stalling every
+other event. The token needs permission to read the configured repositories.
 
 **First run.** Open pull requests in the configured repositories, kept when the person wrote them or is a
 requested reviewer. Not their history: no old comments. The current review requests and, on the person's own pull

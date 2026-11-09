@@ -141,9 +141,6 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 			continue
 		}
 		got, err := s.issueItems(ctx, secret, key, me, loc, since, first, started)
-		if unavailable(err) {
-			continue
-		}
 		if err != nil {
 			return source.Collected{Items: items}, err
 		}
@@ -244,6 +241,11 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, jql string)
 
 func (s *Source) issueItems(ctx context.Context, secret keychain.Secret, key, person string, loc *time.Location, since time.Time, first bool, observed time.Time) ([]source.Item, error) {
 	raw, err := s.get(ctx, secret, s.base+"/rest/api/3/issue/"+url.PathEscape(key)+"?fields=summary,status,assignee,priority,issuetype,duedate,resolution,project")
+	if unavailable(err) {
+		// The issue itself is gone or not readable. A changelog or comment failure is not this case: that
+		// returns the error, and the cursor stays.
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

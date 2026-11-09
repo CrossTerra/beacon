@@ -357,6 +357,37 @@ func TestScopeAndEgress(t *testing.T) {
 	}
 }
 
+func TestOpenSearchFailureKeepsUpdatedItems(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			io.WriteString(w, `{"login":"winton"}`)
+			return
+		}
+		if r.URL.Path == "/search/issues" && strings.Contains(r.URL.Query().Get("q"), "is:open") {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		switch {
+		case r.URL.Path == "/search/issues":
+			io.WriteString(w, `{"items":[{"number":9,"user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/9"):
+			io.WriteString(w, pr9)
+		case strings.HasSuffix(r.URL.Path, "/issues/9/timeline"):
+			io.WriteString(w, `[{"id":1,"event":"commented","user":{"login":"dana"},"body":"hi","created_at":"2026-11-02T00:00:00Z"}]`)
+		case strings.Contains(r.URL.Path, "check-suites"):
+			io.WriteString(w, `{"check_suites":[]}`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	got, err := s.Collect(context.Background(), []byte("2026-11-01T00:00:00Z"))
+	if err == nil || got.Next != nil || len(got.Items) == 0 {
+		t.Fatalf("err %v next %q items %d", err, got.Next, len(got.Items))
+	}
+}
+
 func TestIdentityCase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/user" {

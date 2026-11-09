@@ -160,22 +160,25 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
+	var openErr error
 	if !first {
 		// Check suites change without bumping a pull request's updated time, so own open pull requests are read
-		// even when the updated search did not return them.
+		// even when the updated search did not return them. A failure here does not discard the updated search:
+		// those items are still returned, and the cursor stays so the next pass tries again.
 		open, err := s.search(ctx, secret, s.queries(since, true, quals))
 		if err != nil {
-			return source.Collected{}, err
-		}
-		seen := map[string]bool{}
-		for _, h := range hits {
-			seen[h.key()] = true
-		}
-		for _, h := range open {
-			if !strings.EqualFold(h.author, login) || seen[h.key()] {
-				continue
+			openErr = err
+		} else {
+			seen := map[string]bool{}
+			for _, h := range hits {
+				seen[h.key()] = true
 			}
-			hits = append(hits, h)
+			for _, h := range open {
+				if !strings.EqualFold(h.author, login) || seen[h.key()] {
+					continue
+				}
+				hits = append(hits, h)
+			}
 		}
 	}
 	var items []source.Item
@@ -193,6 +196,9 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		if err := source.Validate(it, Fields, StateFields); err != nil {
 			return source.Collected{}, err
 		}
+	}
+	if openErr != nil {
+		return source.Collected{Items: items}, openErr
 	}
 	return source.Collected{Items: items, Next: []byte(started.Format(time.RFC3339))}, nil
 }
@@ -345,23 +351,24 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 	if first && !strings.EqualFold(pr.author(), login) && !reviewRequested(pr, login) {
 		return nil, nil
 	}
+	// A timeline or reviews failure is not "this pull request is gone". It fails the pass and the cursor stays,
+	// so the events are read again. Skipping them and committing would drop them.
 	timeline, err := s.timeline(ctx, secret, h)
-	if unavailable(err) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
 	reviews, err := s.reviews(ctx, secret, h)
-	if unavailable(err) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
 	var comments []reviewComment
 	if !first {
 		comments, err = s.reviewComments(ctx, secret, h, since)
+		if unavailable(err) {
+			// Line comments are also absent from a token that cannot read them. Issue comments still come from
+			// the timeline. Omitting them does not stall every other event.
+			comments, err = nil, nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -433,11 +440,12 @@ func (s *Source) checks(ctx context.Context, secret keychain.Secret, h hit, sha 
 		if err != nil {
 			return nil, false, err
 		}
-		if status == http.StatusNotFound {
-			return nil, true, nil
+		if status == http.StatusNotFound || status == http.StatusForbidden {
+			// No check app, or the token cannot read checks. That must not stall every other event.
+			return nil, false, nil
 		}
 		if status < 200 || status >= 300 {
-			return nil, false, fmt.Errorf("github: status %d", status)
+			return nil, false, &statusError{status}
 		}
 		var resp struct {
 			CheckSuites []checkSuite `json:"check_suites"`
