@@ -73,3 +73,24 @@ is recorded as replayed; a 409 stops the key; and a second instance sends nothin
 | `go.yaml.in/yaml/v3` | The rules file is YAML (DEC-5) and the standard library has no YAML parser. This is the YAML organisation's maintained copy of `gopkg.in/yaml.v3`. It reports duplicate keys and unknown fields, which the rules file needs. |
 
 Everything else is the standard library.
+
+## Local builds and the keychain
+
+`go build` signs the binary ad hoc, so each rebuild has a new code signature. The keychain treats every rebuild as a
+different program, and each read of a Beacon secret asks for the login password again; "Always Allow" does not
+survive the next build.
+
+For local use, sign with a stable identity instead:
+
+1. Once: `scripts/dev-signing-setup.sh` creates the self-signed identity "Beacon Local Signing" in the login
+   keychain and trusts it for code signing for your user. macOS asks for your login password twice: to let
+   `codesign` use the key, and to add the trust setting.
+2. Each build: `scripts/build-local.sh` builds with the same flags as `scripts/repro.sh`, signs with that identity
+   and the identifier `dev.beacon.cli`, and installs to `~/.local/bin/beacon`.
+3. The first read of each secret after switching asks once. Choose "Always Allow". Later rebuilds keep access,
+   because the keychain checks the identifier and the signing certificate, not the binary's hash.
+
+Do not work around the prompt by letting every application read the items (`security … -A`) or by reading them
+through `/usr/bin/security`: either lets any process running as you read Beacon's credentials without asking.
+Tests never touch the login keychain unless `BEACON_TEST_KEYCHAIN=1`. Release builds are signed with a Developer ID
+(Phase 7).
