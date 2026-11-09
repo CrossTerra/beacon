@@ -70,8 +70,9 @@ same pull request.
   `observed_at` and `version` beside them (DEC-28). Signal keeps the latest snapshot per subject. List state fields
   with the same care as other fields: they leave the machine, and Signal does not interpret them.
 - **A 400 from before the decided item was stored cannot be rebuilt from the outbox.** The refused body is not the
-  item. `beacon cursor reset github`, then `beacon run --once`, re-collects open state and decides those keys again.
-  A `409`, and anything Signal accepted, is not sent again.
+  item. `beacon cursor reset github`, then `beacon run --once`, re-collects open state and decides a key again if
+  that collect yields it. It does not re-read timeline history. A `409`, and anything Signal accepted, is not sent
+  again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ

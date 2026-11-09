@@ -79,8 +79,11 @@ they do not block a later decision. Then:
 beacon run --once
 ```
 
-That pass re-collects open state and sends each such key once, with the current projection, keeping the refused
-lines in the outbox. A `409`, and anything Signal accepted, is not sent again.
+That pass reads open state, not history (DEC-23). For GitHub that is open pull requests the person wrote or was
+asked to review, the current review requests, and checks on their own open pull requests. A `400` with no stored
+item is sent once if that collect yields the key, with the current projection. The refused lines stay in the
+outbox. Timeline history (a review already submitted, a comment, a push) is not read again. A `409`, and anything
+Signal accepted, is not sent again.
 
 ## `beacon egress`
 

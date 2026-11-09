@@ -137,8 +137,11 @@ beacon run --once
 ```
 
 `cursor reset` removes the committed cursor and does not send. The next send pass reads open state (DEC-23), not
-history. Acceptance is left as it is, so the pass records and may send. A `400` with no stored item is decided
-again and sent once, with the current projection. A `409`, and anything Signal accepted, is not sent again.
+history: open pull requests the person wrote or was asked to review, the current review requests, and checks on
+their own open pull requests. Acceptance is left as it is, so the pass records and may send. A `400` with no stored
+item is decided again and sent once, with the current projection, if that collect yields the key. The refused lines
+stay in the file. A review already submitted, a comment, or a push is not read again. A `409`, and anything Signal
+accepted, is not sent again.
 
 ## The lease
 
