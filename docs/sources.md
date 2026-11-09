@@ -42,7 +42,9 @@ owner's user or organization, and a result from any other repository is not fetc
 repository qualifier per query (an OR of `repo:` qualifiers matches nothing), then each pull request's timeline
 since the cursor. The search does not use a login qualifier: some tokens can read the repositories and still cannot
 search a user. A pull request the person is not involved in (author, assignee, reviewer, review requested,
-mentioned, or commenter) yields no items.
+mentioned, or commenter) yields no items. Own open pull requests are also read for check suites, because a check
+conclusion does not change the pull request's `updated` time. A pull request or issue the token cannot read (404
+or 403) is skipped; it does not freeze the cursor.
 Check-suite conclusions on the person's own open pull requests, when they change. The token needs permission to
 read those repositories and their checks.
 
@@ -103,10 +105,11 @@ person caused the change.
 **Addressed.** Assignment to the person; a comment or field change that mentions the person; a transition, by
 someone else, of an issue assigned to the person.
 
-**Subject.** `jira:<KEY>`. **Key.** `jira:<KEY>:<changelog id or comment id>`. When one changelog history holds
-more than one of these changes, the id is suffixed with the field (`jira:ENG-1:100:status`) so the two stay
-distinct. A comment id that collides with a changelog id in the same pass is suffixed `:comment`. Both forms are
-stable.
+**Subject.** `jira:<KEY>`. **Key.** `jira:<KEY>:<changelog id>` for a field change, and
+`jira:<KEY>:<comment id>:comment` for a comment. Comment ids and changelog ids are separate sequences and can
+overlap, including across passes, so a comment key always ends in `:comment`. When one changelog history holds
+more than one relevant field change, the id is suffixed with the field (`jira:ENG-1:100:status`) so the two stay
+distinct. A history with one field change uses the changelog id alone. Both forms are stable.
 
 **Fields.** `project`, `key`, `summary`, `url`, `issue_type`, `priority`, `body` (comment text), `from_status`,
 `to_status`.

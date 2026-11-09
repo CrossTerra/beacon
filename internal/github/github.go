@@ -148,7 +148,8 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	if err != nil {
 		return source.Collected{}, err
 	}
-	if s.identity != "" && s.identity != "github:user:"+login {
+	// Logins are case-insensitive. The configured spelling is what `by` sends; this only checks it is the same user.
+	if s.identity != "" && !strings.EqualFold(s.identity, "github:user:"+login) {
 		return source.Collected{}, source.ErrIdentity
 	}
 	quals, err := s.qualifiers(ctx, secret)
@@ -158,6 +159,24 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 	hits, err := s.search(ctx, secret, s.queries(since, first, quals))
 	if err != nil {
 		return source.Collected{}, err
+	}
+	if !first {
+		// Check suites change without bumping a pull request's updated time, so own open pull requests are read
+		// even when the updated search did not return them.
+		open, err := s.search(ctx, secret, s.queries(since, true, quals))
+		if err != nil {
+			return source.Collected{}, err
+		}
+		seen := map[string]bool{}
+		for _, h := range hits {
+			seen[h.key()] = true
+		}
+		for _, h := range open {
+			if !strings.EqualFold(h.author, login) || seen[h.key()] {
+				continue
+			}
+			hits = append(hits, h)
+		}
 	}
 	var items []source.Item
 	for _, hit := range hits {
@@ -179,9 +198,14 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 }
 
 type hit struct {
-	owner string
-	name  string
-	n     int
+	owner  string
+	name   string
+	n      int
+	author string
+}
+
+func (h hit) key() string {
+	return strings.ToLower(h.owner) + "/" + strings.ToLower(h.name) + "#" + fmt.Sprint(h.n)
 }
 
 func (s *Source) currentLogin(ctx context.Context, secret keychain.Secret) (string, error) {
@@ -265,6 +289,7 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 				Items []struct {
 					Number        int    `json:"number"`
 					RepositoryURL string `json:"repository_url"`
+					User          ghUser `json:"user"`
 					PullRequest   *struct {
 						URL string `json:"url"`
 					} `json:"pull_request"`
@@ -285,12 +310,12 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 				if !ok || !s.scope.allowsRepo(owner, name) {
 					continue
 				}
-				key := strings.ToLower(owner) + "/" + strings.ToLower(name) + "#" + fmt.Sprint(item.Number)
-				if seen[key] {
+				h := hit{owner: owner, name: name, n: item.Number, author: item.User.Login}
+				if seen[h.key()] {
 					continue
 				}
-				seen[key] = true
-				hits = append(hits, hit{owner: owner, name: name, n: item.Number})
+				seen[h.key()] = true
+				hits = append(hits, h)
 			}
 			page = next
 		}
@@ -304,6 +329,9 @@ func (s *Source) search(ctx context.Context, secret keychain.Secret, queries []s
 func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login string, since time.Time, first bool, observed time.Time) ([]source.Item, error) {
 	raw := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", s.base, url.PathEscape(h.owner), url.PathEscape(h.name), h.n)
 	body, _, err := s.get(ctx, secret, raw)
+	if unavailable(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -318,10 +346,16 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 		return nil, nil
 	}
 	timeline, err := s.timeline(ctx, secret, h)
+	if unavailable(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	reviews, err := s.reviews(ctx, secret, h)
+	if unavailable(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -440,13 +474,22 @@ func (s *Source) get(ctx context.Context, secret keychain.Secret, raw string) ([
 	if err != nil {
 		return nil, "", err
 	}
-	if status == http.StatusNotFound {
-		return nil, "", fmt.Errorf("github: status %d", status)
-	}
 	if status < 200 || status >= 300 {
-		return nil, "", fmt.Errorf("github: status %d", status)
+		return nil, "", &statusError{status}
 	}
 	return body, next, nil
+}
+
+// statusError is an HTTP status from a source API. The text is the status only.
+type statusError struct{ status int }
+
+func (e *statusError) Error() string { return fmt.Sprintf("github: status %d", e.status) }
+
+// unavailable is a single object the token cannot read (gone, or not permitted). The pass continues so one such
+// object cannot freeze the cursor.
+func unavailable(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusForbidden)
 }
 
 func (s *Source) do(ctx context.Context, secret keychain.Secret, raw string) ([]byte, int, string, error) {

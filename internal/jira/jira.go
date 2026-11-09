@@ -141,6 +141,9 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 			continue
 		}
 		got, err := s.issueItems(ctx, secret, key, me, loc, since, first, started)
+		if unavailable(err) {
+			continue
+		}
 		if err != nil {
 			return source.Collected{Items: items}, err
 		}
@@ -465,9 +468,19 @@ func (s *Source) call(ctx context.Context, secret keychain.Secret, method, raw s
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("jira: status %d", resp.StatusCode)
+		return nil, &statusError{resp.StatusCode}
 	}
 	return data, nil
+}
+
+type statusError struct{ status int }
+
+func (e *statusError) Error() string { return fmt.Sprintf("jira: status %d", e.status) }
+
+// unavailable is one issue the token cannot read. The pass continues so that issue cannot freeze the cursor.
+func unavailable(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusForbidden)
 }
 
 type flexID string

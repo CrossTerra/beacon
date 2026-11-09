@@ -80,7 +80,9 @@ func itemsFrom(name, person string, iss issue, histories []history, comments []c
 	if first {
 		return firstItems(name, person, iss, histories, observed, loc)
 	}
-	assignee := initialAssignee(histories)
+	// No assignee history means the issue was assigned at creation and never reassigned: the current assignee
+	// held it for every transition.
+	assignee := initialAssignee(histories, iss.account)
 	var pending []emit
 	for _, h := range histories {
 		var assigneeChange, statusChange, dueChange *change
@@ -169,11 +171,9 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 
 func finish(name, person string, iss issue, pending []emit, observed time.Time, loc *time.Location) ([]source.Item, error) {
 	counts := map[string]int{}
-	changelog := map[string]bool{}
 	for _, e := range pending {
 		if e.field != "" {
 			counts[e.id]++
-			changelog[e.id] = true
 		}
 	}
 	obs := observed.UTC()
@@ -185,7 +185,9 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 		if e.field != "" && counts[e.id] > 1 {
 			changeID = e.id + ":" + e.field
 		}
-		if e.field == "" && changelog[e.id] {
+		// Comment ids and changelog ids are separate sequences and can overlap, including across passes.
+		// A comment key always carries :comment so it cannot be the key of a changelog item.
+		if e.typ == TypeCommented {
 			changeID = e.id + ":comment"
 		}
 		if changeID == "" || seen[changeID] {
@@ -250,7 +252,7 @@ func stateOf(iss issue) map[string]string {
 	return st
 }
 
-func initialAssignee(histories []history) string {
+func initialAssignee(histories []history, current string) string {
 	for _, h := range histories {
 		for _, it := range h.items {
 			if it.field == "assignee" {
@@ -258,7 +260,7 @@ func initialAssignee(histories []history) string {
 			}
 		}
 	}
-	return ""
+	return current
 }
 
 func mentionAdded(from, to, person string) bool {

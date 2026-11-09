@@ -88,7 +88,7 @@ func TestCollectEveryItem(t *testing.T) {
 		t.Fatalf("cursor %s", got.Next)
 	}
 	joined := strings.Join(queries, "\n")
-	if len(queries) != 2 || !strings.Contains(joined, "repo:acme/app") || !strings.Contains(joined, "org:acme") || strings.Contains(joined, "other/secret") || !strings.Contains(joined, "updated:>=2026-11-01") {
+	if !strings.Contains(joined, "repo:acme/app") || !strings.Contains(joined, "org:acme") || !strings.Contains(joined, "is:open") || strings.Contains(joined, "other/secret") || !strings.Contains(joined, "updated:>=2026-11-01") {
 		t.Fatalf("query %q", queries)
 	}
 	byKey := map[string]source.Item{}
@@ -280,12 +280,12 @@ func TestPaginationAndRateLimit(t *testing.T) {
 		slept = d
 		return nil
 	}
-	_, err := s.Collect(context.Background(), []byte("2026-11-01T00:00:00Z"))
-	if err == nil {
-		t.Fatal("expected the missing pull to fail the pass")
+	got, err := s.Collect(context.Background(), []byte("2026-11-01T00:00:00Z"))
+	if err != nil || got.Next == nil {
+		t.Fatal(err)
 	}
 	if slept != time.Second || pages < 3 {
-		t.Fatalf("slept %s pages %d err %v", slept, pages, err)
+		t.Fatalf("slept %s pages %d", slept, pages)
 	}
 	if errors.Is(err, source.ErrRateLimited) {
 		t.Fatal("a one-second wait should have been slept, not ended")
@@ -354,6 +354,66 @@ func TestScopeAndEgress(t *testing.T) {
 	blocked.SetHTTP(limitedClient(egress.Guard([]string{"api.github.com:443"}, srv.Client().Transport)))
 	if _, err := blocked.Collect(context.Background(), nil); err == nil || hit {
 		t.Fatalf("guard err %v hit %v", err, hit)
+	}
+}
+
+func TestIdentityCase(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			io.WriteString(w, `{"login":"winton"}`)
+			return
+		}
+		io.WriteString(w, `{"items":[]}`)
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	s.identity = "github:user:Winton"
+	got, err := s.Collect(context.Background(), nil)
+	if err != nil || got.Next == nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkippedPullDoesNotFreezeCursor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/user":
+			io.WriteString(w, `{"login":"winton"}`)
+		case r.URL.Path == "/search/issues":
+			io.WriteString(w, `{"items":[
+				{"number":1,"user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}},
+				{"number":2,"user":{"login":"winton"},"repository_url":"https://api.github.com/repos/acme/app","pull_request":{"url":"x"}}
+			]}`)
+		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
+			http.NotFound(w, r)
+		case strings.HasSuffix(r.URL.Path, "/pulls/2"):
+			io.WriteString(w, pr9)
+		case strings.Contains(r.URL.Path, "check-suites"):
+			io.WriteString(w, `{"check_suites":[]}`)
+		default:
+			io.WriteString(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	got, err := s.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Next == nil {
+		t.Fatal("cursor withheld")
+	}
+	found := false
+	for _, it := range got.Items {
+		if strings.Contains(it.Key, "#9:") || strings.Contains(it.Subject, "#9") {
+			found = true
+		}
+		if strings.Contains(it.Key, "#1:") {
+			t.Fatal("missing pull yielded an item")
+		}
+	}
+	if !found {
+		t.Fatal("the readable pull was dropped")
 	}
 }
 

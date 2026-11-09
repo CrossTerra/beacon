@@ -77,8 +77,8 @@ func TestCollectEveryItem(t *testing.T) {
 		"jira:ENG-1:505":          TypeDueChanged,
 		"jira:ENG-1:508:assignee": TypeUnassigned,
 		"jira:ENG-1:508:status":   TypeTransitioned,
-		"jira:ENG-1:601":          TypeCommented,
-		"jira:ENG-1:602":          TypeCommented,
+		"jira:ENG-1:601:comment":  TypeCommented,
+		"jira:ENG-1:602:comment":  TypeCommented,
 	}
 	if len(byKey) != len(want) {
 		var keys []string
@@ -107,7 +107,7 @@ func TestCollectEveryItem(t *testing.T) {
 	if !byKey["jira:ENG-1:504"].Addressed || byKey["jira:ENG-1:504"].Type != TypeMentioned {
 		t.Fatal("mention")
 	}
-	comment := byKey["jira:ENG-1:601"]
+	comment := byKey["jira:ENG-1:601:comment"]
 	if !comment.Addressed || comment.Type != TypeCommented || !strings.Contains(comment.Fields["body"], "please look") {
 		t.Fatalf("comment %+v", comment)
 	}
@@ -248,6 +248,22 @@ func TestLongRateLimit(t *testing.T) {
 	_, err := s.Collect(context.Background(), nil)
 	if !errors.Is(err, source.ErrRateLimited) || slept {
 		t.Fatalf("%v slept %v", err, slept)
+	}
+}
+
+func TestAssignedAtCreation(t *testing.T) {
+	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	iss := issue{key: "ENG-1", project: "ENG", account: "acc-winton", assignee: "Winton", status: "In Progress"}
+	histories := []history{{
+		id: "700", author: "acc-dana", created: at,
+		items: []change{{field: "status", fromString: "To Do", toString: "In Progress"}},
+	}}
+	items, err := itemsFrom("jira", "acc-winton", iss, histories, nil, at.Add(-time.Hour), false, at, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || !items[0].Addressed || items[0].Type != TypeTransitioned {
+		t.Fatalf("%+v", items)
 	}
 }
 
