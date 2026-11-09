@@ -628,6 +628,18 @@ func TestPushEmittedWhenCommitterDateBeforeWindow(t *testing.T) {
 			t.Fatalf("noreply author not attributed: %+v", it)
 		}
 	}
+	ghe := noreply
+	ghe.Timeline = append([]timelineEvent(nil), noreply.Timeline...)
+	ghe.Timeline[2].Author = &ghUser{Email: "7+winton@users.noreply.ghe.example.com"}
+	items, err = build(ghe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:pushed") && (!it.Own || it.Actor != "github:user:winton") {
+			t.Fatalf("enterprise noreply author not attributed: %+v", it)
+		}
+	}
 	for _, it := range items {
 		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:older") {
 			t.Fatal("a commit before the window was emitted")

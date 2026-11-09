@@ -664,13 +664,24 @@ func gitActor(u *ghUser, login string) string {
 	}
 	email := strings.ToLower(strings.TrimSpace(u.Email))
 	login = strings.ToLower(login)
-	if email == "" || login == "" {
+	if email == "" || login == "" || !noreplyFor(email, login) {
 		return ""
 	}
-	if email == login+"@users.noreply.github.com" || strings.HasSuffix(email, "+"+login+"@users.noreply.github.com") {
-		return login
+	return login
+}
+
+// noreplyFor reports whether email is GitHub's private address for login, on github.com or a GitHub Enterprise host
+// (users.noreply.<host>).
+func noreplyFor(email, login string) bool {
+	local, host, ok := strings.Cut(email, "@")
+	if !ok || !strings.HasPrefix(host, "users.noreply.") || len(host) == len("users.noreply.") {
+		return false
 	}
-	return ""
+	if local == login {
+		return true
+	}
+	id, name, ok := strings.Cut(local, "+")
+	return ok && id != "" && name == login && !strings.Contains(id, "+")
 }
 
 // pushTime orders a timeline commit. It is not a filter. A committer date is the rebase time. A force-push
