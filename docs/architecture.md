@@ -17,21 +17,25 @@ source.Collect ──► rules.Decide ──► never: dropped.jsonl (key and ru
 
 One pass of `beacon run`:
 
-1. **Collect.** Each enabled source yields items. Items that do not validate (wrong source, a field outside the
-   source's field list, a subject or key Signal would refuse) are counted and skipped. Items are sorted by
+1. **Collect.** Each enabled source yields items since its committed cursor, and an opaque next cursor. A source
+   with no cursor reads open state, not history (DEC-23). Items that do not validate (wrong source, a field outside
+   the source's field list, a subject or key Signal would refuse) are counted and skipped. Items are sorted by
    `occurred_at`, then key.
 2. **Skip what is decided.** A key already in the outbox or the hold queue is not decided again: one event per
-   change of state (DEC-9).
+   change of state (DEC-9). A subject a seed file marks `never` is dropped before the rules file (DEC-24).
 3. **Decide.** The first rule that matches sets the tier. No match is `never` (DEC-3).
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
    builds the request body with the projection and appends it to the outbox, synced to disk, before anything is
-   sent (DEC-8).
-5. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored,
+   sent (DEC-8). A source whose first run has not been accepted is reported and not recorded.
+5. **Commit.** The source's cursor is stored only after every item of the pass has been recorded, and only on a
+   send pass. A crash before that collects the same items again; keys make that harmless.
+6. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored,
    each under a deadline at the end of the lease. If Signal is unavailable, or the lease runs out, the pass stops
    and the rest stay pending, because a later body may close an ask an earlier one opens.
 
-A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes and contacts nothing. It reads the
-outbox and the hold queue, so it shows what a send pass would do next.
+A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing. It may contact source APIs
+to collect; it does not contact Signal. It reads the outbox, the hold queue and the cursor, so it shows what a send
+pass would do next.
 
 ## Packages
 
@@ -39,6 +43,10 @@ outbox and the hold queue, so it shows what a send pass would do next.
 | --- | --- |
 | `cmd/beacon` | The CLI. Builds everything from the config; the only place that wires the keychain and the transport. |
 | `internal/source` | The `Item` shape, the `Source` interface, and the fixture source. |
+| `internal/github`, `internal/jira` | The GitHub and Jira sources. See [`sources.md`](sources.md). |
+| `internal/cursor` | Committed cursors, and which sources have had their first run accepted. |
+| `internal/seed` | The seed file (DEC-24). |
+| `internal/limited` | Rate-limit backoff for source HTTP. |
 | `internal/config` | Reads and validates the config file. Holds no secrets. |
 | `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, and an in-memory store for tests. |
 | `internal/rules` | Parses the rules file, decides tiers, and checks for rules that can never match. |
@@ -62,6 +70,9 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `held.jsonl` | Held items, in full | No |
 | `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
 | `instance` | This instance's random id, used in lease claims | Inside lease claims |
+| `cursors.json` | Each source's committed cursor, opaque | No |
+| `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
+| `seed` | Imported seed lines (DEC-24) | No |
 
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue
@@ -72,6 +83,7 @@ queue files, skip a torn last line (it may be a record a sending process is appe
 ## Adding a source
 
 A source implements `source.Source`: a name, a fixed field list, a fixed state field list (DEC-28), the hosts it
-contacts, and `Collect`. Its hosts
-appear in `beacon egress` and in the transport guard without other changes. A source keeps its own credentials in
-the keychain through `internal/keychain`, and its own cursor.
+contacts, and `Collect`. `Collect` takes the committed cursor and returns the next one; the runner stores it after
+deciding. Its hosts appear in `beacon egress` and in the transport guard without other changes. A source keeps its
+credentials in the keychain through `internal/keychain`, and reads them per pass. GitHub and Jira are
+[`sources.md`](sources.md).

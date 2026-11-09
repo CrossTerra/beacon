@@ -8,9 +8,9 @@ Beacon is the trust boundary between your accounts and a shared store. Your sour
 machine. Nothing leaves it unless a rule you wrote allows it, and every byte that does leave is kept in a local
 log you can read.
 
-**Status:** Phase 1, the trust core, is built: config, keychain, rules, projection, outbox, Signal client, lease and
-the commands below, with a fixture source. There are no real sources yet; GitHub and Jira come in Phase 2. The plan
-is in [`plans/`](plans/README.md), and the trust model is in [`docs/trust-model.md`](docs/trust-model.md).
+**Status:** Phase 2 is built: the trust core, and GitHub and Jira. A dry run can collect from those accounts; sending
+stays off until the first run is accepted. The plan is in [`plans/`](plans/README.md), and the trust model is in
+[`docs/trust-model.md`](docs/trust-model.md).
 
 ## Try it
 
@@ -26,7 +26,8 @@ go build -trimpath -o beacon ./cmd/beacon
 
 | Read | For |
 | --- | --- |
-| [`docs/configuration.md`](docs/configuration.md) | The config file, the Signal key, the fixture source |
+| [`docs/configuration.md`](docs/configuration.md) | The config file, the Signal key, sources |
+| [`docs/sources.md`](docs/sources.md) | GitHub and Jira: what is read, and what an item carries |
 | [`docs/rules.md`](docs/rules.md) | The rules file |
 | [`docs/events.md`](docs/events.md) | Items, request bodies, the outbox, the lease |
 | [`docs/commands.md`](docs/commands.md) | The CLI and the log |

@@ -78,9 +78,9 @@ func (f *Fixture) StateFields() []string { return append([]string(nil), f.stateF
 // Hosts implements Source. A fixture contacts nothing.
 func (f *Fixture) Hosts() []string { return nil }
 
-// Collect implements Source.
-func (f *Fixture) Collect(context.Context) ([]Item, error) {
+// Collect implements Source. A fixture has no cursor.
+func (f *Fixture) Collect(context.Context, []byte) (Collected, error) {
 	out := make([]Item, len(f.items))
 	copy(out, f.items)
-	return out, nil
+	return Collected{Items: out}, nil
 }

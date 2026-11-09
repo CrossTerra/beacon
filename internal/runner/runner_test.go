@@ -27,16 +27,19 @@ import (
 )
 
 type fakeSource struct {
-	items []source.Item
-	err   error
+	items  []source.Item
+	err    error
+	next   []byte
+	cursor []byte
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
 func (f *fakeSource) Fields() []string      { return []string{"title", "label"} }
 func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
-func (f *fakeSource) Collect(context.Context) ([]source.Item, error) {
-	return f.items, f.err
+func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
+	f.cursor = append([]byte(nil), cursor...)
+	return source.Collected{Items: f.items, Next: f.next}, f.err
 }
 
 func items() []source.Item {
@@ -259,6 +262,102 @@ func TestLeaseErrorsFailThePass(t *testing.T) {
 		})
 	}
 }
+
+type memCursor struct {
+	m       map[string][]byte
+	commits int
+}
+
+func (m *memCursor) Get(name string) ([]byte, bool) {
+	b, ok := m.m[name]
+	return append([]byte(nil), b...), ok
+}
+
+func (m *memCursor) Commit(name string, next []byte) error {
+	if m.m == nil {
+		m.m = map[string][]byte{}
+	}
+	m.m[name] = append([]byte(nil), next...)
+	m.commits++
+	return nil
+}
+
+// The cursor moves only after a send pass has decided every item, and not on a dry run or a rate limit.
+func TestCursorCommitsAfterDecide(t *testing.T) {
+	f := newFixture(t)
+	f.src.next = []byte("cursor-1")
+	cur := &memCursor{}
+	r, done := f.runner(true, nil)
+	r.Cursors = cur
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 1 || string(cur.m["fx"]) != "cursor-1" {
+		t.Fatalf("%d %q", cur.commits, cur.m["fx"])
+	}
+	f.src.next = []byte("cursor-2")
+	r2, done2 := f.runner(false, nil)
+	r2.Cursors = cur
+	defer done2()
+	if _, err := r2.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if string(cur.m["fx"]) != "cursor-1" {
+		t.Fatal("a dry run moved the cursor")
+	}
+
+	done()
+	f.src.err = source.ErrRateLimited
+	f.src.next = []byte("nope")
+	r3, done3 := f.runner(true, nil)
+	r3.Cursors = &memCursor{}
+	defer done3()
+	if _, err := r3.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if r3.Cursors.(*memCursor).commits != 0 {
+		t.Fatal("a rate limit moved the cursor")
+	}
+}
+
+func TestUnacceptedAndSeed(t *testing.T) {
+	f := newFixture(t)
+	f.src.next = []byte("c")
+	cur := &memCursor{}
+	r, done := f.runner(true, nil)
+	r.Cursors = cur
+	r.Unaccepted = map[string]bool{"fx": true}
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 0 || !rep.Items[0].Unaccepted {
+		t.Fatal("an unaccepted source was recorded or not marked")
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); ok {
+		t.Fatal("an unaccepted item was appended")
+	}
+
+	f = newFixture(t)
+	r, done = f.runner(true, nil)
+	r.Seed = seedDrop{"fx:obj:1": true}
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Outbox.Get("fx:obj:1:1"); ok {
+		t.Fatal("a seeded never was sent")
+	}
+	if rule, ok := r.Queue.DroppedBy("fx:obj:1:1"); !ok || rule != "seed" {
+		t.Fatalf("dropped by %q", rule)
+	}
+}
+
+type seedDrop map[string]bool
+
+func (s seedDrop) Drops(subject string) bool { return s[subject] }
 
 // Logs carry reason codes, never error text.
 func TestCollectErrorTextNotLogged(t *testing.T) {

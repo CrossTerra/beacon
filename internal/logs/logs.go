@@ -51,6 +51,10 @@ const (
 	ReasonKeychain     Reason = "keychain"
 	ReasonCanceled     Reason = "canceled"
 	ReasonInternal     Reason = "internal"
+	ReasonRateLimit    Reason = "rate_limited"
+	ReasonSourceAuth   Reason = "source_unauthorized"
+	ReasonScope        Reason = "scope_denied"
+	ReasonIdentity     Reason = "identity_mismatch"
 )
 
 // Attr is a log attribute built by one of the helpers below.

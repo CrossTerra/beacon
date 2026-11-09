@@ -68,10 +68,29 @@ type Lease struct {
 	Period Duration `yaml:"period,omitempty"`
 }
 
-// Source enables one source.
+// Source enables one source. A credential is never a field here: `beacon source add` stores it in the keychain.
 type Source struct {
 	Kind string `yaml:"kind"`
+	// Name is the source name items and rules use. It defaults to Kind.
+	Name string `yaml:"name,omitempty"`
+	// Path is a fixture file.
 	Path string `yaml:"path,omitempty"`
+	// Host is a GitHub API host, host or host:port. Empty means api.github.com.
+	Host string `yaml:"host,omitempty"`
+	// Repos are GitHub repositories, owner/name or owner/*.
+	Repos []string `yaml:"repos,omitempty"`
+	// Projects are Jira project keys. On a GitHub source they limit issue-key references (DEC-17).
+	Projects []string `yaml:"projects,omitempty"`
+	// Site is a Jira Cloud site label. The host is <site>.atlassian.net.
+	Site string `yaml:"site,omitempty"`
+}
+
+// SourceName is the name items and rules use.
+func (s Source) SourceName() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return s.Kind
 }
 
 // Duration is a time.Duration written as "5m".
@@ -94,7 +113,14 @@ func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 // MarshalYAML implements yaml.Marshaler.
 func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
 
-var handlePattern = regexp.MustCompile(`^(@[a-z0-9][a-z0-9_.-]*|act_[A-Za-z0-9_-]+)$`)
+var (
+	handlePattern   = regexp.MustCompile(`^(@[a-z0-9][a-z0-9_.-]*|act_[A-Za-z0-9_-]+)$`)
+	repoPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+	repoWildPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/\*$`)
+	projectPattern  = regexp.MustCompile(`^[A-Z][A-Z0-9]+$`)
+	sitePattern     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	hostPattern     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$`)
+)
 
 // Load reads and validates the config file at path.
 func Load(path string) (*Config, error) {
@@ -164,17 +190,78 @@ func (c *Config) validate() error {
 	if c.PollInterval() <= 0 || c.PollInterval() > c.LeasePeriod()/2 {
 		errs = append(errs, errors.New("poll_interval must be positive and at most half of lease.period, so the lease is renewed in time"))
 	}
+	names := map[string]int{}
 	for i, s := range c.Sources {
+		name := s.SourceName()
+		if !source.ValidName(name) {
+			errs = append(errs, fmt.Errorf("sources[%d]: name %q is invalid", i, name))
+		} else if prev, ok := names[name]; ok {
+			errs = append(errs, fmt.Errorf("sources[%d]: name %q is already used by sources[%d]", i, name, prev))
+		} else {
+			names[name] = i
+		}
 		switch s.Kind {
 		case "fixture":
 			if s.Path == "" {
 				errs = append(errs, fmt.Errorf("sources[%d]: a fixture needs path", i))
 			}
+			if s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" {
+				errs = append(errs, fmt.Errorf("sources[%d]: a fixture takes only kind, name and path", i))
+			}
+		case "github":
+			errs = append(errs, s.validateGitHub(i)...)
+		case "jira":
+			errs = append(errs, s.validateJira(i)...)
 		default:
 			errs = append(errs, fmt.Errorf("sources[%d]: unknown kind %q", i, s.Kind))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s Source) validateGitHub(i int) []error {
+	var errs []error
+	at := fmt.Sprintf("sources[%d]", i)
+	if s.Path != "" || s.Site != "" {
+		errs = append(errs, fmt.Errorf("%s: a github source takes no path or site", at))
+	}
+	if len(s.Repos) == 0 {
+		errs = append(errs, fmt.Errorf("%s: a github source needs repos", at))
+	}
+	for _, r := range s.Repos {
+		if !repoPattern.MatchString(r) && !repoWildPattern.MatchString(r) {
+			errs = append(errs, fmt.Errorf("%s: repo %q is not owner/name or owner/*", at, r))
+		}
+	}
+	if s.Host != "" && !hostPattern.MatchString(s.Host) {
+		errs = append(errs, fmt.Errorf("%s: host %q is not a host", at, s.Host))
+	}
+	for _, p := range s.Projects {
+		if !projectPattern.MatchString(p) {
+			errs = append(errs, fmt.Errorf("%s: project %q is not a Jira project key", at, p))
+		}
+	}
+	return errs
+}
+
+func (s Source) validateJira(i int) []error {
+	var errs []error
+	at := fmt.Sprintf("sources[%d]", i)
+	if s.Path != "" || s.Host != "" || len(s.Repos) > 0 {
+		errs = append(errs, fmt.Errorf("%s: a jira source takes no path, host or repos", at))
+	}
+	if !sitePattern.MatchString(s.Site) {
+		errs = append(errs, fmt.Errorf("%s: site %q is not a site label", at, s.Site))
+	}
+	if len(s.Projects) == 0 {
+		errs = append(errs, fmt.Errorf("%s: a jira source needs projects", at))
+	}
+	for _, p := range s.Projects {
+		if !projectPattern.MatchString(p) {
+			errs = append(errs, fmt.Errorf("%s: project %q is not a Jira project key", at, p))
+		}
+	}
+	return errs
 }
 
 // SignalURL parses a Signal base URL. It must be https, or http to a loopback address.

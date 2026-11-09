@@ -60,7 +60,7 @@ store it yet; it keeps the latest snapshot per subject from Signal plan 12.01. S
 request, so a retry with the same snapshot replays as before.
 
 DEC-29 (one authoritative event per act, matched by `metadata.native`) needs Signal phase 12 and is not part of
-Phase 1: Beacon records every own act it is sent.
+Phase 1 or Phase 2: Beacon records every own act it is sent.
 
 Open asks are read from the outbox: bodies on the subject with `to` that are pending, sent or replayed, minus
 those any such body closes. Beacon writes every ask without `by`, so its integration actor is the asker; an own

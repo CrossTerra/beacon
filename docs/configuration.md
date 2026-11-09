@@ -36,7 +36,7 @@ sources:
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25). Default `5m`. |
 | `poll_interval` | How often `beacon run` makes a pass. Default `1m`. |
-| `sources` | Enabled sources. Phase 1 has one kind, `fixture`. |
+| `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`. See [Sources](#sources). |
 
 ## The Signal key
 
@@ -46,6 +46,27 @@ needs no `read` scope in Phase 1.
 
 `beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the login
 keychain. `beacon run` reads it from there when it sends. A dry run does not read it.
+
+## Sources
+
+`beacon source add` writes the source into this file and stores the credential in the keychain. It rewrites the
+file, so a comment in it is not kept. Details of what each source reads are in [`sources.md`](sources.md).
+
+```yaml
+sources:
+  - kind: github
+    repos: ["acme/app", "acme/*"]   # owner/name or owner/*
+    projects: ["ENG"]               # optional; Jira keys in titles and branches
+    host: api.github.com            # optional; an enterprise host uses /api/v3
+  - kind: jira
+    site: acme                      # acme.atlassian.net; a label, not a hostname
+    projects: ["ENG", "OPS"]
+```
+
+`name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
+name: `github:user:<login>` and `jira:account:<account id>`.
+
+A GitHub `projects` list, plus every Jira source's projects, limits which issue keys become `jira:<KEY>` references.
 
 ## Fixture source
 

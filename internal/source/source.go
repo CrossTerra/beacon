@@ -3,6 +3,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -47,7 +48,27 @@ const (
 	StateVersion    = "version"
 )
 
-// Source yields items. It holds its own credentials and cursor.
+// Collected is one collect. Next is the cursor to store after every item of this pass is decided. A nil Next
+// leaves the committed cursor where it is.
+type Collected struct {
+	Items []Item
+	Next  []byte
+}
+
+// A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.
+var (
+	// ErrRateLimited means the API's rate limit ended the pass. The caller resumes from the committed cursor.
+	ErrRateLimited = errors.New("source: the API rate limit ends this pass; the cursor is not moved")
+	// ErrUnauthorized means the source refused the token.
+	ErrUnauthorized = errors.New("source: the token was refused")
+	// ErrScope means a request would have left the configured repositories, projects or host. It is not sent.
+	ErrScope = errors.New("source: the request is outside the configured repositories, projects or host")
+	// ErrIdentity means person.identities for this source does not match the token's user.
+	ErrIdentity = errors.New("source: person.identities does not match the token's user")
+)
+
+// Source yields items. It holds its own credentials. The runner holds its cursor and commits it only after deciding
+// every item of a pass.
 type Source interface {
 	// Name is the source name items carry.
 	Name() string
@@ -55,10 +76,11 @@ type Source interface {
 	Fields() []string
 	// StateFields is the source's fixed list of state fields (DEC-28).
 	StateFields() []string
-	// Hosts are the hosts the source contacts, as host or host:port. Every one is listed by `beacon egress`.
+	// Hosts are the hosts the source contacts, as host:port. Every one is listed by `beacon egress`.
 	Hosts() []string
-	// Collect returns the items available now.
-	Collect(ctx context.Context) ([]Item, error)
+	// Collect returns the items available since cursor. A nil cursor means the source has no committed cursor, and
+	// it reads open state, not history (DEC-23). The same cursor yields the same keys.
+	Collect(ctx context.Context, cursor []byte) (Collected, error)
 }
 
 var (

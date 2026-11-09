@@ -1,6 +1,7 @@
 # Phase 2 — GitHub and Jira
 
-Status: pending.
+Status: complete. What was built is described in [`docs/sources.md`](../docs/sources.md),
+[`docs/commands.md`](../docs/commands.md) and [`docs/configuration.md`](../docs/configuration.md).
 
 ## Goal
 

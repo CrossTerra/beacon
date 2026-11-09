@@ -1,0 +1,127 @@
+# Starter rules for GitHub and Jira. Copy this file, replace YOUR_LOGIN with your GitHub login, and
+# point the config's rules key at it. Check it with: beacon rules check
+#
+# First match wins. An item no rule matches is never sent. Bodies are not listed: comment and review
+# text stays on the machine unless you add body to a rule.
+#
+# person.identities should name you as the token's user, or own acts are recorded as Beacon's:
+#   github: github:user:<login>
+#   jira: jira:account:<account id>
+#
+# A Jira rule below records the event and does not ask. Add ask: me to ask yourself.
+
+rules:
+  # The person's own acts close their open asks (DEC-19, DEC-20). First, so an own comment is not
+  # also an ask to themselves. Split by source so each rule names only that source's fields.
+  - name: github-own-acts
+    match: {source: github, own: true}
+    tier: send
+    fields: [title, url, repo, number, actor, references]
+    state: [state, checks, review_decision]
+
+  - name: jira-own-acts
+    match: {source: jira, own: true}
+    tier: send
+    fields: [summary, url, key, project, actor, references]
+    state: [status, assignee, due]
+
+  # A review request that names the person.
+  - name: github-review-requests
+    match:
+      source: github
+      type: review_requested
+      addressed: true
+    tier: send
+    ask: me
+    priority: high
+    fields: [title, url, repo, number, author, actor, references]
+    state: [state, draft, head_sha, review_decision, mergeable, checks, requested_reviewers]
+
+  # A comment that mentions the person.
+  - name: github-comments-addressed
+    match:
+      source: github
+      type: commented
+      addressed: true
+    tier: send
+    ask: me
+    priority: high
+    fields: [title, url, repo, number, author, actor, references]
+    state: [state, checks, review_decision]
+
+  - name: jira-comments-addressed
+    match:
+      source: jira
+      type: commented
+      addressed: true
+    tier: send
+    ask: me
+    priority: high
+    fields: [summary, url, key, project, actor, references]
+    state: [status, assignee]
+
+  # Someone else's review of a pull request the person wrote.
+  - name: github-reviews-on-own
+    match:
+      source: github
+      type: reviewed
+      fields:
+        author: YOUR_LOGIN
+    tier: send
+    fields: [title, url, repo, number, author, review_state, actor, references]
+    state: [state, draft, head_sha, review_decision, mergeable, checks]
+
+  # A merge of a pull request the person wrote, by someone else. Their own merge is an own act.
+  - name: github-merges-on-own
+    match:
+      source: github
+      type: merged
+      fields:
+        author: YOUR_LOGIN
+    tier: send
+    fields: [title, url, repo, number, author, actor, references]
+    state: [state, head_sha, checks]
+
+  # A check-suite conclusion on the person's own open pull request.
+  - name: github-checks-on-own
+    match:
+      source: github
+      type: checks_changed
+      fields:
+        author: YOUR_LOGIN
+    tier: send
+    fields: [title, url, repo, number, author, references]
+    state: [state, head_sha, checks, review_decision, mergeable]
+
+  # Assigned to the person.
+  - name: jira-assigned
+    match:
+      source: jira
+      type: assigned
+      addressed: true
+    tier: send
+    fields: [summary, url, key, project, issue_type, priority, actor]
+    state: [status, assignee, resolution, due, priority]
+
+  # A mention added to a field, not a comment. A comment that mentions the person is jira-comments-addressed.
+  - name: jira-mentions
+    match:
+      source: jira
+      type: mentioned
+    tier: send
+    fields: [summary, url, key, project, actor]
+    state: [status, assignee, due]
+
+  # A transition, by someone else, of an issue assigned to the person.
+  - name: jira-transitions
+    match:
+      source: jira
+      type: transitioned
+      addressed: true
+    tier: send
+    fields: [summary, url, key, project, from_status, to_status, actor]
+    state: [status, assignee, resolution, due, priority]
+
+  - name: everything-else
+    match: {}
+    tier: never

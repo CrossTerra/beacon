@@ -56,7 +56,7 @@ func TestRejected(t *testing.T) {
 		"signal identity":  {"github:user:winton", "signal:actor:x"},
 		"bad handle":       {`"@winton"`, `"winton"`},
 		"bad mode":         {"mode: dry-run", "mode: live"},
-		"unknown source":   {"kind: fixture", "kind: github"},
+		"unknown source":   {"kind: fixture", "kind: slack"},
 		"lease too short":  {"mode: dry-run", "mode: dry-run\nlease:\n  period: 30s"},
 		"poll too slow":    {"mode: dry-run", "mode: dry-run\npoll_interval: 4m"},
 		"secret in config": {"mode: dry-run", "mode: dry-run\ntoken: sig_x"},
@@ -71,6 +71,33 @@ func TestRejected(t *testing.T) {
 				t.Fatalf("parsed:\n%s", y)
 			}
 		})
+	}
+}
+
+func TestGitHubAndJiraConfig(t *testing.T) {
+	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", `sources:
+  - kind: github
+    repos: ["acme/app", "acme/*"]
+    projects: ["ENG"]
+  - kind: jira
+    site: acme
+    projects: ["ENG"]
+`, 1)
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Sources[0].SourceName() != "github" || c.Sources[1].SourceName() != "jira" {
+		t.Fatalf("%+v", c.Sources)
+	}
+	for _, bad := range []string{
+		strings.Replace(y, "acme/app", "../secret", 1),
+		strings.Replace(y, "site: acme", "site: evil.example", 1),
+		strings.Replace(y, "projects: [\"ENG\"]", "projects: [\"eng\"]", 1),
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("parsed:\n%s", bad)
+		}
 	}
 }
 
