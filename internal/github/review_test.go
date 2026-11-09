@@ -523,7 +523,7 @@ func TestSearchSplitsByRepository(t *testing.T) {
 }
 
 func TestUserSplitListsPrivateRepos(t *testing.T) {
-	var sawUserRepos, sawPublicOnly bool
+	var sawUserRepos, sawPublicOnly, sawOther bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
 		switch {
@@ -534,14 +534,20 @@ func TestUserSplitListsPrivateRepos(t *testing.T) {
 		case r.URL.Path == "/users/winton":
 			io.WriteString(w, `{"login":"winton","type":"User"}`)
 		case r.URL.Path == "/user/repos":
+			if !strings.Contains(r.URL.RawQuery, "affiliation=owner") {
+				t.Errorf("user repos listed collaborators: %s", r.URL.RawQuery)
+			}
 			sawUserRepos = true
-			io.WriteString(w, `[{"name":"app"}]`)
+			io.WriteString(w, `[{"name":"app","owner":{"login":"winton"}},{"name":"elsewhere","owner":{"login":"other"}}]`)
 		case r.URL.Path == "/users/winton/repos":
 			sawPublicOnly = true
 			io.WriteString(w, `[]`)
 		case r.URL.Path == "/search/issues" && strings.Contains(r.URL.Query().Get("q"), "user:winton"):
 			io.WriteString(w, `{"total_count":1001,"items":[]}`)
 		case r.URL.Path == "/search/issues":
+			if strings.Contains(r.URL.Query().Get("q"), "repo:winton/elsewhere") {
+				sawOther = true
+			}
 			io.WriteString(w, `{"total_count":1,"items":[{"number":1,"updated_at":"2026-11-08T12:00:00Z","user":{"login":"winton"},"repository_url":"https://api.github.com/repos/winton/app","pull_request":{"url":"x"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/pulls/1"):
 			io.WriteString(w, strings.ReplaceAll(pr9, "acme/app", "winton/app"))
@@ -554,7 +560,7 @@ func TestUserSplitListsPrivateRepos(t *testing.T) {
 	defer srv.Close()
 	s := newTest(t, srv, []string{"winton/*"}, nil)
 	got, err := s.Collect(context.Background(), []byte("2026-11-08T00:00:00Z"))
-	if err != nil || got.Next == nil || !sawUserRepos || sawPublicOnly {
+	if err != nil || got.Next == nil || !sawUserRepos || sawPublicOnly || sawOther {
 		t.Fatalf("private repos missed: err %v next %s user %v public %v", err, got.Next, sawUserRepos, sawPublicOnly)
 	}
 }

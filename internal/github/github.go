@@ -464,20 +464,28 @@ func (s *Source) listRepos(ctx context.Context, secret keychain.Secret, owner, k
 	case kind == "org":
 		path = s.base + "/orgs/" + url.PathEscape(owner) + "/repos?per_page=100&type=all"
 	case strings.EqualFold(owner, s.login):
-		path = s.base + "/user/repos?per_page=100&visibility=all"
+		// affiliation=owner excludes collaborator and org-member repos. Their names are not this login's.
+		path = s.base + "/user/repos?per_page=100&visibility=all&affiliation=owner"
 	}
 	var names []string
 	err := s.each(ctx, secret, path, func(body []byte) error {
 		var page []struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Owner struct {
+				Login string `json:"login"`
+			} `json:"owner"`
 		}
 		if err := json.Unmarshal(body, &page); err != nil {
 			return errors.New("github: repositories could not be read")
 		}
 		for _, r := range page {
-			if r.Name != "" {
-				names = append(names, r.Name)
+			if r.Name == "" {
+				continue
 			}
+			if r.Owner.Login != "" && !strings.EqualFold(r.Owner.Login, owner) {
+				continue
+			}
+			names = append(names, r.Name)
 		}
 		return nil
 	})
