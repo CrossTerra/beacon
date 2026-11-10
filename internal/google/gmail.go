@@ -182,9 +182,10 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	threads := map[string]*gmailThread{}
 	var refs []ref
 	gap, cut := false, false
+	var openCut bool
 	next := gmailCursor{HistoryID: profile.HistoryID, At: cur.At}
 	if len(cursor) == 0 {
-		refs, err = g.open(ctx, threads)
+		refs, openCut, err = g.open(ctx, threads)
 	} else {
 		var got string
 		refs, got, err = g.history(ctx, cur.HistoryID)
@@ -193,7 +194,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			// every inbox and sent message since the last pass, so earlier messages and the person's own acts in
 			// the gap are not lost. Keys make the overlap harmless. The gap is reported.
 			gap = true
-			refs, err = g.open(ctx, threads)
+			refs, openCut, err = g.open(ctx, threads)
 			if err == nil {
 				var more []ref
 				more, cut, err = g.since(ctx, threads, cur.At)
@@ -254,7 +255,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	if err != nil {
 		return source.Collected{Items: items}, err
 	}
-	return source.Collected{Items: items, Next: data, Gap: gap, GapCut: cut}, nil
+	return source.Collected{Items: items, Next: data, Gap: gap, Cut: cut || openCut}, nil
 }
 
 // gmailCursor is the history id to read from, and when the pass that stored it ran. The time bounds what a pass
@@ -281,7 +282,7 @@ func parseGmailCursor(b []byte) (gmailCursor, error) {
 	return c, nil
 }
 
-// gapPages is how many pages of 100 messages per label a gap read lists.
+// gapPages is how many pages of 100 a gap read lists per label, and an open-state read per list.
 const gapPages = 50
 
 // since lists inbox and sent messages, newest first, back to 15 minutes before at (14 days when at is unknown). It
@@ -440,13 +441,15 @@ func (g *Gmail) history(ctx context.Context, start string) ([]ref, string, error
 }
 
 // open reads open state: the latest message of each inbox thread from the last 14 days, and starred messages from
-// the last 14 days. Both lists are newest first, so paging stops at the first older entry.
-func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread) ([]ref, error) {
+// the last 14 days. Both lists are newest first, so paging stops at the first older entry. cut reports that a list
+// had more than gapPages pages inside the window and the rest was not read; the pass still succeeds and says so.
+func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread) ([]ref, bool, error) {
 	cutoff := g.now().Add(-gmailLookback)
 	var refs []ref
+	cut := true
 	token := ""
 inbox:
-	for pages := 0; pages < 20; pages++ {
+	for pages := 0; pages < gapPages; pages++ {
 		q := url.Values{"labelIds": {"INBOX"}, "maxResults": {"100"}}
 		if token != "" {
 			q.Set("pageToken", token)
@@ -458,7 +461,7 @@ inbox:
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := g.getJSON(ctx, "threads", q, &page); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, th := range page.Threads {
 			t, err := g.thread(ctx, threads, th.ID)
@@ -466,11 +469,12 @@ inbox:
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			// The list is ordered by a thread's newest message of any kind, drafts included. Paging stops only when
 			// that is older than the window; a thread whose newest real message is older is skipped.
 			if t.newest().Before(cutoff) {
+				cut = false
 				break inbox
 			}
 			live := t.live()
@@ -484,12 +488,15 @@ inbox:
 			refs = append(refs, ref{thread: t.ID, message: last.ID})
 		}
 		if page.NextPageToken == "" {
+			cut = false
 			break
 		}
 		token = page.NextPageToken
 	}
+	starCut := true
 	token = ""
-	for pages := 0; pages < 20; pages++ {
+stars:
+	for pages := 0; pages < gapPages; pages++ {
 		q := url.Values{"labelIds": {"STARRED"}, "maxResults": {"100"}}
 		if token != "" {
 			q.Set("pageToken", token)
@@ -502,7 +509,7 @@ inbox:
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := g.getJSON(ctx, "messages", q, &page); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, m := range page.Messages {
 			t, err := g.thread(ctx, threads, m.ThreadID)
@@ -510,23 +517,25 @@ inbox:
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			msg := t.find(m.ID)
 			if msg == nil {
 				continue
 			}
 			if msg.at().Before(cutoff) {
-				return refs, nil
+				starCut = false
+				break stars
 			}
 			refs = append(refs, ref{thread: t.ID, message: m.ID, starred: true})
 		}
 		if page.NextPageToken == "" {
+			starCut = false
 			break
 		}
 		token = page.NextPageToken
 	}
-	return refs, nil
+	return refs, cut || starCut, nil
 }
 
 // newest is the time of the thread's newest message of any kind.

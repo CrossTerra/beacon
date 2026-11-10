@@ -40,6 +40,8 @@ const (
 	Withheld Event = "withheld"
 	// HistoryGap is a source that could not read every change since its cursor, and re-read what it could.
 	HistoryGap Event = "history_gap"
+	// ReadCut is a source whose read stopped at its limit, so older items in its window were not read.
+	ReadCut Event = "read_cut"
 	// RestrictionsUnread is a send pass that could not read Signal's restricted prefixes.
 	RestrictionsUnread Event = "restrictions_unread"
 )

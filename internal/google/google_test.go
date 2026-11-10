@@ -855,8 +855,8 @@ func TestGmailGapReadIsCut(t *testing.T) {
 	}
 	g, _ := NewGmail(opts(t, srv))
 	got, err := g.Collect(context.Background(), []byte(`{"history_id":"5","at":"2026-11-08T09:00:00Z"}`))
-	if err != nil || !got.Gap || !got.GapCut || pages != gapPages {
-		t.Fatalf("err %v gap %v cut %v pages %d", err, got.Gap, got.GapCut, pages)
+	if err != nil || !got.Gap || !got.Cut || pages != gapPages {
+		t.Fatalf("err %v gap %v cut %v pages %d", err, got.Gap, got.Cut, pages)
 	}
 	if history(t, got.Next) != "300" {
 		t.Fatal("a cut gap must still move past the expired history id, or every pass stops at the same place")
@@ -884,5 +884,72 @@ func TestCalendarFullReadSkipsAnUnreadableEvent(t *testing.T) {
 	}
 	if strings.Contains(string(got.Next), `"ev1"`) {
 		t.Fatal("an unreadable event is kept and read again on every full re-read")
+	}
+}
+
+func TestGmailFirstRunCutIsReported(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Routes["/gmail/v1/users/me/threads"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"threads":[{"id":"t2"}],"nextPageToken":"more"}`)
+	}
+	g, _ := NewGmail(opts(t, srv))
+	got, err := g.Collect(context.Background(), nil)
+	if err != nil || !got.Cut || got.Gap {
+		t.Fatalf("err %v cut %v gap %v", err, got.Cut, got.Gap)
+	}
+	srv = googletest.New(t)
+	g, _ = NewGmail(opts(t, srv))
+	if got, err := g.Collect(context.Background(), nil); err != nil || got.Cut {
+		t.Fatalf("a read that ends in the window is not cut: %v %v", err, got.Cut)
+	}
+}
+
+// Notes are attached while the meeting runs, which is the event's last update. The pass after it ends still finds
+// them, though the event was not updated since.
+func TestDriveNotesForAMeetingThatEndsLater(t *testing.T) {
+	srv := googletest.New(t)
+	now := testNow
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		timeMin, _ := time.Parse(time.RFC3339, q.Get("timeMin"))
+		timeMax, _ := time.Parse(time.RFC3339, q.Get("timeMax"))
+		updatedMin, _ := time.Parse(time.RFC3339, q.Get("updatedMin"))
+		start, end, updated := time.Date(2026, 11, 8, 15, 0, 0, 0, time.UTC), time.Date(2026, 11, 8, 16, 0, 0, 0, time.UTC), time.Date(2026, 11, 8, 15, 30, 0, 0, time.UTC)
+		// Google's filters: the end after timeMin, the start before timeMax, updated at or after updatedMin.
+		if !end.After(timeMin) || !start.Before(timeMax) || (!updatedMin.IsZero() && updated.Before(updatedMin)) {
+			io.WriteString(w, `{"items":[]}`)
+			return
+		}
+		io.WriteString(w, `{"timeZone":"UTC","items":[{"id":"evD","status":"confirmed","summary":"Later today","start":{"dateTime":"2026-11-08T15:00:00Z"},"end":{"dateTime":"2026-11-08T16:00:00Z"},"updated":"2026-11-08T15:30:00Z",
+  "organizer":{"self":true},"attachments":[{"fileId":"n4","title":"Later today - Notes by Gemini","mimeType":"application/vnd.google-apps.document"}]}]}`)
+	}
+	srv.Routes["/drive/v3/files/n4"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"id":"n4","name":"Later today - Notes by Gemini","mimeType":"application/vnd.google-apps.document","webViewLink":"https://docs.google.com/document/d/n4/edit","createdTime":"2026-11-08T15:30:00Z"}`)
+	}
+	o := opts(t, srv)
+	o.Now = func() time.Time { return now }
+	o.Auth.now = o.Now
+	d, _ := NewDrive(o)
+	collect := func(at time.Time, cursor string) []source.Item {
+		now = at
+		got, err := d.Collect(context.Background(), []byte(cursor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.Items
+	}
+	// 15:40: the notes are attached and the meeting is still running.
+	for _, it := range collect(time.Date(2026, 11, 8, 15, 40, 0, 0, time.UTC), "2026-11-08T15:39:00Z") {
+		if it.Type == TypeNotesCreated {
+			t.Fatal("notes for a meeting that has not ended")
+		}
+	}
+	// 16:01: the meeting ended. It was not updated since 15:30.
+	found := false
+	for _, it := range collect(time.Date(2026, 11, 8, 16, 1, 0, 0, time.UTC), "2026-11-08T16:00:00Z") {
+		found = found || it.Key == "drive:notes:n4"
+	}
+	if !found {
+		t.Fatal("notes lost: the meeting ended after its last update")
 	}
 }

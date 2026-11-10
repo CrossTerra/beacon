@@ -70,8 +70,9 @@ type Collected struct {
 	// Gap is true when the source could not read every change since the cursor (Gmail's history expired) and
 	// re-read what it could. The runner reports it.
 	Gap bool
-	// GapCut is true when that re-read stopped at its limit, so older changes in the gap were not read.
-	GapCut bool
+	// Cut is true when a read stopped at its limit (an open-state read, or a gap re-read), so older items in its
+	// window were not read. The cursor still moves; the runner reports it.
+	Cut bool
 }
 
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.

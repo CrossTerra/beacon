@@ -35,7 +35,7 @@ has its send items held, and `run` prints `source <name>: N items held, not sent
 Signal …` and which prefix to ask Signal's admin to restrict. If the restrictions cannot be read, those items are
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
 lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
-`run` says so and what was re-read. See [`sources.md`](sources.md#google).
+`run` says so and what was re-read, and when a read stopped at its limit, it says that too. See [`sources.md`](sources.md#google).
 
 It exits non-zero when the pass cannot go on: Signal refused the key (401) or the lease claim, another process holds
 the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,
@@ -241,6 +241,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
+| `read_cut` | A source's read stopped at its limit (Gmail's first run); older items in its window were not read. The source only. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
 

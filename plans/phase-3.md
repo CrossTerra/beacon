@@ -111,8 +111,8 @@ Drive against `about`, Calendar against the attendee or organizer marked `self`.
   `startModifiedTime`. Items: `mentioned` (a comment or reply by someone else that
   mentions the person), `assigned` (a comment or reply by someone else that assigns it to the person; wins over
   `mentioned`), `commented` and `resolved` (the person's own comment, reply or resolve; own).
-- **Meeting notes.** Events on the primary calendar that ended in the last 7 days, updated since the window, that
-  the person organised or accepted, with a Google Doc attachment titled `Notes by Gemini`. One `notes_created` item
+- **Meeting notes.** Events on the primary calendar that ended since the window, or ended in the last 7 days and
+  were updated since it (notes are attached while a meeting runs), that the person organised or accepted, with a Google Doc attachment titled `Notes by Gemini`. One `notes_created` item
   per notes file, with a link. Its content is read (`files.export`, plain text, first 32 KiB) only when a rule
   lists `body`.
 - **First run.** Unresolved comments from the last 7 days that mention or are assigned to the person, and notes

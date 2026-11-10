@@ -281,7 +281,7 @@ messages in a thread and the person's own mail in the gap are not lost. It lists
 `gmail.metadata` cannot search, so there is no `q=after:`. Keys make the overlap harmless. `beacon run` reports the
 gap and the log has `history_gap`: a change in the gap to mail no longer in the inbox (archived or deleted), or a
 star on mail older than 14 days, is not recovered. The re-read lists at most 5000 messages per label; past that it
-stops, `run` says so and the log has `cut` 1. The pass still moves to the new history id: failing it would stop every
+stops, `run` says so, and the log has `cut` 1. The pass still moves to the new history id: failing it would stop every
 later pass at the same place. The history id has no lookback, so a thread the history names is skipped only when
 it is gone (`404`, deleted since). Any other failure reading it, a `403` included, fails the pass and the cursor
 stays. A body is optional: a message that will not give up its body (`404`, or a permission `403`) is sent without
@@ -290,7 +290,8 @@ it; a rate limit or a refused grant there still fails the pass.
 **First run.** The latest message of each inbox thread with a message in the last 14 days, and starred messages from
 the last 14 days. Both lists are newest first, and paging stops at the first older entry. The inbox list is ordered by a thread's
 newest message of any kind, so paging stops at a thread whose newest message, drafts included, is older; a thread
-with a recent draft and older mail is skipped and paging goes on. The cursor is the profile's
+with a recent draft and older mail is skipped and paging goes on. Each list reads at most 5000 entries. Past that
+it stops, `beacon run` says so, and the log has `read_cut`: older mail in the 14 days is not read unless it changes. The cursor is the profile's
 history id, read before listing, so nothing that arrives during the pass is missed.
 
 **Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, and
@@ -391,12 +392,14 @@ A mention on a file the person has neither opened in 14 days nor seen modified i
 Drive does not return a commenter's address, so `author` is a display name and another person's item has no actor.
 A file or comment list that cannot be read (`404`, or a permission `403`) is skipped.
 
-**Meeting notes.** Events on the primary calendar that ended in the last 7 days and were updated since the window
-began, that the person organised or accepted, with a Google Doc attachment whose title contains
+**Meeting notes.** Events on the primary calendar that ended since the window began, or ended in the last 7 days
+and were updated since the window began, that the person organised or accepted, with a Google Doc attachment whose title contains
 `Notes by Gemini` (English titles only). One `notes_created` item per notes file, titled Meeting notes created,
 with a link. The file is read with `files.get` for its name, link and creation time. Its text is read
 (`files.export` as plain text, the first 32 KiB) only when a rule lists `body`. "Attended" is "organised or
-accepted": Google does not say who joined.
+accepted": Google does not say who joined. Notes are usually attached while the meeting runs, which is the event's
+last update, so a pass reads the meetings that ended since the last one without an `updatedMin`, and a meeting with
+notes is found the pass after it ends.
 
 **First run.** The last 7 days: unresolved comments by others that mention or are assigned to the person, and
 meeting notes. No own acts.

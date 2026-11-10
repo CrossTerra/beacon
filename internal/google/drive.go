@@ -400,20 +400,40 @@ func (d *Drive) commentItems(f driveFile, c driveComment, me string, floor time.
 // notes finds meeting notes: events on the primary calendar that ended in the last 7 days, changed since floor, that
 // the person organised or accepted, with a Google Doc attachment titled Notes by Gemini.
 func (d *Drive) notes(ctx context.Context, now, floor time.Time, first bool, me string, obs time.Time) ([]source.Item, error) {
-	q := url.Values{
-		"singleEvents": {"true"},
-		"timeMin":      {now.Add(-notesWindow).Format(time.RFC3339)},
-		"timeMax":      {now.Format(time.RFC3339)},
-		"maxResults":   {"250"},
-		"fields":       {"items(id,status,summary,start,end,updated,organizer(self),attendees(self,responseStatus),attachments(fileId,title,mimeType)),nextPageToken,timeZone"},
+	fields := "items(id,status,summary,start,end,updated,organizer(self),attendees(self,responseStatus),attachments(fileId,title,mimeType)),nextPageToken,timeZone"
+	list := func(timeMin time.Time, updatedMin time.Time) ([]calEvent, *time.Location, error) {
+		q := url.Values{
+			"singleEvents": {"true"},
+			"timeMin":      {timeMin.Format(time.RFC3339)},
+			"timeMax":      {now.Format(time.RFC3339)},
+			"maxResults":   {"250"},
+			"fields":       {fields},
+		}
+		if !updatedMin.IsZero() {
+			q.Set("updatedMin", updatedMin.Format(time.RFC3339))
+		}
+		return listEvents(ctx, &d.common, q)
 	}
-	if !first {
-		q.Set("updatedMin", floor.Format(time.RFC3339))
-	}
-	events, tz, err := listEvents(ctx, &d.common, q)
-	if isStatus(err, http.StatusGone) && !first {
-		q.Del("updatedMin")
-		events, tz, err = listEvents(ctx, &d.common, q)
+	// Notes are usually attached while the meeting runs, which is the event's last update; the meeting has not
+	// ended then. So a pass reads the meetings that ended since the window began (timeMin filters on the end), with
+	// no updatedMin, and also those updated since then, for notes attached after the end. A first run reads every
+	// meeting in the last 7 days.
+	var events []calEvent
+	var tz *time.Location
+	var err error
+	if first {
+		events, tz, err = list(now.Add(-notesWindow), time.Time{})
+	} else {
+		events, tz, err = list(floor, time.Time{})
+		if err == nil {
+			var later []calEvent
+			later, _, err = list(now.Add(-notesWindow), floor)
+			if isStatus(err, http.StatusGone) {
+				// updatedMin is too old: read the whole week. Keys keep the notes already recorded quiet.
+				later, _, err = list(now.Add(-notesWindow), time.Time{})
+			}
+			events = append(events, later...)
+		}
 	}
 	if err != nil {
 		return nil, err

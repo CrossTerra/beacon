@@ -75,10 +75,12 @@ type Runner struct {
 	gaps         []Gap
 }
 
-// Gap is a source whose change history expired. Cut is true when its re-read stopped at its limit.
+// Gap is a source that could not read its whole window: its change history expired (Expired), or a read stopped at
+// its limit (Cut), or both.
 type Gap struct {
-	Source string
-	Cut    bool
+	Source  string
+	Expired bool
+	Cut     bool
 }
 
 // RestrictionReader reads the restricted subject prefixes from Signal.
@@ -161,7 +163,7 @@ type Report struct {
 	WithheldPending int
 	// RestrictionsReason is why the restricted prefixes could not be read, when they could not.
 	RestrictionsReason logs.Reason
-	// Gaps are sources that could not read every change since their cursor and re-read what they could.
+	// Gaps are sources that could not read their whole window: an expired history, or a read cut at its limit.
 	Gaps []Gap
 }
 
@@ -235,13 +237,17 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid+got.Dropped), logs.Why(logs.ReasonItem))
 		}
 		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept))
-		if got.Gap {
+		if got.Gap || got.Cut {
 			cut := 0
-			if got.GapCut {
+			if got.Cut {
 				cut = 1
 			}
-			r.Log.Log(logs.HistoryGap, logs.Source(s.Name()), logs.Count("cut", cut))
-			r.gaps = append(r.gaps, Gap{Source: s.Name(), Cut: got.GapCut})
+			if got.Gap {
+				r.Log.Log(logs.HistoryGap, logs.Source(s.Name()), logs.Count("cut", cut))
+			} else {
+				r.Log.Log(logs.ReadCut, logs.Source(s.Name()))
+			}
+			r.gaps = append(r.gaps, Gap{Source: s.Name(), Expired: got.Gap, Cut: got.Cut})
 		}
 		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
 	}
