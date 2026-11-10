@@ -374,6 +374,9 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 				log.Log(logs.RunStopped)
 				return nil
 			}
+			// The default mode is dry-run, and that is what the agent runs. Rotation applies here too: a dry-run
+			// report includes bodies.
+			a.rotateServiceLogs(e.cfg.StatePath())
 			rep, err := r.Run(work)
 			if err != nil {
 				return fail(runner.Classify(err), failText(runner.Classify(err), e))

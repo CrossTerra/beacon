@@ -242,6 +242,36 @@ func TestServiceStatusParsing(t *testing.T) {
 	}
 }
 
+func TestStatusAndLogsIgnoreBrokenRules(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "broken")
+	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state")
+	if err := service.WritePass(state, service.Pass{
+		At: time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC), Outcome: "ok", Lease: service.LeaseOther,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, service.StderrName), []byte("{\"msg\":\"run_finished\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fl := &fakeLaunch{printOut: "state = running\npid = 7\n"}
+	a := serviceApp(t, h, t.TempDir(), fl, true)
+	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "last_pass: 2026-11-10T15:04:05Z\n") || !strings.Contains(h.stdout.String(), "holder: another instance\n") {
+		t.Fatalf("status hid the pass:\n%s", h.stdout.String())
+	}
+	a = serviceApp(t, h, t.TempDir(), fl, true)
+	if code := a.main(context.Background(), []string{"service", "logs", "--config", cfg}); code != 0 || h.stdout.String() != "{\"msg\":\"run_finished\"}\n" {
+		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+}
+
 func TestServiceLogs(t *testing.T) {
 	h := newHarness(t)
 	dir := t.TempDir()

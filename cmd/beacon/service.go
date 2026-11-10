@@ -321,8 +321,9 @@ func (a *app) cmdServiceStatus(ctx context.Context, args []string) error {
 	}
 	var pass service.Pass
 	passErr := os.ErrNotExist
-	if e, err := a.load(*cfgPath); err == nil {
-		pass, passErr = service.ReadPass(e.cfg.StatePath())
+	// Status only needs the state directory. A rules or source error must not hide a pass that was recorded.
+	if cfg, err := a.loadConfig(*cfgPath); err == nil {
+		pass, passErr = service.ReadPass(cfg.StatePath())
 	}
 	fmt.Fprint(a.stdout, service.FormatStatus(job, pass, passErr))
 	return nil
@@ -334,7 +335,7 @@ func (a *app) cmdServiceLogs(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	e, err := a.load(*cfgPath)
+	cfg, err := a.loadConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
@@ -342,7 +343,7 @@ func (a *app) cmdServiceLogs(args []string) error {
 	if *useStdout {
 		name = service.StdoutName
 	}
-	f, err := os.Open(filepath.Join(e.cfg.StatePath(), name))
+	f, err := os.Open(filepath.Join(cfg.StatePath(), name))
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintln(a.stdout, "no service log yet")
 		return nil
