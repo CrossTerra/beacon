@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/config"
+	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/github"
 	"github.com/CrossTerra/beacon/internal/jira"
@@ -31,6 +32,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/queue"
 	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/runner"
+	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
@@ -65,6 +67,8 @@ Commands:
   run           collect, apply rules and projection; print what would be sent (dry run), or send
   explain KEY   show the matching rule, the classifier's answer and the exact body for one item
   outbox        list what was sent, with keys, times and Signal event ids
+  outbox retry  re-project rejected events Signal did not store, and send them (--rejected)
+  cursor reset  clear a source cursor so the next collect reads open state
   egress        print every host Beacon may contact under the current config
   rules check   validate the rules file and report rules that can never match
   source add    store a source token in the keychain and enable the source
@@ -93,7 +97,13 @@ func (a *app) main(ctx context.Context, args []string) int {
 	case "explain":
 		err = a.cmdExplain(ctx, rest)
 	case "outbox":
+		if len(rest) > 0 && rest[0] == "retry" {
+			err = a.cmdOutboxRetry(ctx, rest[1:])
+			break
+		}
 		err = a.cmdOutbox(rest)
+	case "cursor":
+		err = a.cmdCursor(rest)
 	case "egress":
 		err = a.cmdEgress(rest)
 	case "rules":
@@ -619,6 +629,9 @@ func (a *app) cmdOutbox(args []string) error {
 		if e.State == outbox.Rejected {
 			ev = fmt.Sprintf("%d %s", e.Status, e.Code)
 		}
+		if e.State == outbox.Superseded {
+			ev = e.Code
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", e.AppendedAt.Format(time.RFC3339), e.UpdatedAt.Format(time.RFC3339),
 			e.State, e.Kind, e.Key, dash(ev), dash(e.Rule))
 		if *bodies {
@@ -633,6 +646,148 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// --- outbox retry
+
+func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
+	fs, cfgPath := a.flags("outbox retry")
+	rejected := fs.Bool("rejected", false, "re-project rejected events Signal did not store, and send them")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*rejected {
+		return fmt.Errorf("usage: beacon outbox retry --rejected [--config PATH]")
+	}
+	log := logs.New(a.stderr)
+	fail := func(reason logs.Reason, text string) error {
+		log.Log(logs.RunFailed, logs.Why(reason))
+		return runFailure{text: text}
+	}
+	e, err := a.load(*cfgPath)
+	if err != nil {
+		return fail(logs.ReasonConfig, "the config, the rules file or a source could not be loaded; beacon rules check shows why")
+	}
+	if e.cfg.Mode != config.Send {
+		return fail(logs.ReasonConfig, "mode is dry-run; set mode: send before retrying rejected events")
+	}
+	ob, err := outbox.Open(e.cfg.StatePath(), a.now)
+	if err != nil {
+		return fail(runner.Classify(err), failText(runner.Classify(err), e))
+	}
+	defer ob.Close()
+	store, err := a.keychain()
+	if err != nil {
+		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
+	}
+	secret, err := store.Get(e.cfg.KeychainAccount())
+	if err != nil {
+		return fail(logs.ReasonKeychain, failText(logs.ReasonKeychain, e))
+	}
+	instance, err := lease.Instance(e.cfg.StatePath())
+	if err != nil {
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
+	}
+	u, _ := config.SignalURL(e.cfg.Signal.URL)
+	client := signal.New(u, a.transport(egress.Addresses(e.egress())), secret)
+	if a.configureClient != nil {
+		a.configureClient(client)
+	}
+	sf, err := seed.ReadDir(e.cfg.StatePath())
+	if err != nil {
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
+	}
+	r := &runner.Runner{
+		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf,
+		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
+			Period: e.cfg.LeasePeriod(), Now: a.now},
+	}
+	rep, err := r.RetryRejected(ctx)
+	a.printRetry(rep)
+	if err != nil {
+		reason := runner.Classify(err)
+		var refused *lease.RefusedError
+		if errors.As(err, &refused) {
+			return fail(reason, refused.Error()+"; check that Beacon's key has write scope and the lease subject is allowed")
+		}
+		return fail(reason, failText(reason, e))
+	}
+	return nil
+}
+
+// printRetry writes counts only. It does not print keys, bodies or error text.
+func (a *app) printRetry(rep *runner.RetryReport) {
+	if rep == nil {
+		return
+	}
+	w := a.stdout
+	if rep.Lease != nil {
+		switch {
+		case rep.Lease.Held:
+			fmt.Fprintf(w, "Lease: held until %s.\n", rep.Lease.Until.UTC().Format(time.RFC3339))
+		case rep.LeaseReason == "":
+			fmt.Fprintln(w, "Lease: held by another instance; nothing was sent.")
+		case rep.LeaseReason != logs.ReasonLeaseExpired:
+			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
+		}
+	}
+	fmt.Fprintf(w, "Retry: sent %d, replayed %d, refused %d, conflict %d, missing %d, failed %d, hold %d, never %d.\n",
+		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed, rep.Held, rep.Never)
+	fmt.Fprintf(w, "Pending: %d.\n", rep.Pending)
+	if rep.Missing > 0 {
+		fmt.Fprintf(w, "%d rejected events have no stored item and were not sent by this command. beacon cursor reset SOURCE, then beacon run --once, re-collects open state and sends a 400 if that collect yields the key. It does not re-read history. A 409 is not sent.\n", rep.Missing)
+	}
+}
+
+// --- cursor reset
+
+func (a *app) cmdCursor(args []string) error {
+	if len(args) == 0 || args[0] != "reset" {
+		fmt.Fprint(a.stderr, "usage: beacon cursor reset [--config PATH] SOURCE...\n")
+		return exitError{code: 2}
+	}
+	fs, cfgPath := a.flags("cursor reset")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() == 0 {
+		fmt.Fprint(a.stderr, "usage: beacon cursor reset [--config PATH] SOURCE...\n")
+		return exitError{code: 2}
+	}
+	e, err := a.load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	known := map[string]bool{}
+	for _, s := range e.sources {
+		known[s.Name()] = true
+	}
+	for _, n := range fs.Args() {
+		if !known[n] {
+			return fmt.Errorf("no source is named %q", n)
+		}
+	}
+	ob, err := outbox.Open(e.cfg.StatePath(), a.now)
+	if err != nil {
+		return err
+	}
+	defer ob.Close()
+	st, err := cursor.Open(e.cfg.StatePath())
+	if err != nil {
+		return err
+	}
+	for _, n := range fs.Args() {
+		cleared, err := st.Reset(n)
+		if err != nil {
+			return err
+		}
+		if cleared {
+			fmt.Fprintf(a.stdout, "Cleared the cursor for %s. The next collect reads open state, not history. beacon run --once sends a 400 with no stored item if that collect yields the key. A 409, and anything Signal accepted, is not.\n", n)
+		} else {
+			fmt.Fprintf(a.stdout, "%s has no cursor. The next collect already reads open state, not history. beacon run --once sends a 400 with no stored item if that collect yields the key. A 409, and anything Signal accepted, is not.\n", n)
+		}
+	}
+	return nil
 }
 
 // --- egress

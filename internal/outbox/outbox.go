@@ -1,8 +1,9 @@
 // Package outbox is the local, append-only record of every request body Beacon sends (DEC-8).
 //
 // The file is JSON lines. A body is appended, and synced to disk, before it is sent. Each later change of state is a
-// new line for the same key; the latest line is the key's state. A body is never rewritten: a retry sends the stored
-// bytes.
+// new line for the same key; the latest line is the key's state. A pending retry sends the stored bytes. A body Signal
+// accepted is never rewritten. A body Signal refused with 409 is never retried. Any other refusal may be re-projected
+// and appended again, only by an explicit retry, and only when the decided item was stored with the append.
 package outbox
 
 import (
@@ -33,10 +34,19 @@ const (
 	Sent State = "sent"
 	// Replayed was already in Signal from an earlier send of the same bytes (200, replayed).
 	Replayed State = "replayed"
-	// Rejected was refused by Signal. It is reported and never sent again.
+	// Rejected was refused by Signal. beacon run does not send it again. A 409 stays final. Any other refusal may be
+	// re-projected by an explicit retry when the decided item was stored, and only if the current rules still send it.
 	Rejected State = "rejected"
+	// Superseded is a refusal the current rules no longer send. It is not sent. Code is hold or never.
+	Superseded State = "superseded"
 	// Expired is a lease claim whose period ended before Signal answered it. It is never sent again.
 	Expired State = "expired"
+)
+
+// Tiers recorded on a superseded refusal. They are fixed codes, not item content.
+const (
+	TierHold  = "hold"
+	TierNever = "never"
 )
 
 // Kind says what a body is for.
@@ -59,10 +69,15 @@ type record struct {
 	Rule    string    `json:"rule,omitempty"`
 	Body    string    `json:"body,omitempty"`
 	SHA256  string    `json:"sha256,omitempty"`
-	EventID string    `json:"event_id,omitempty"`
-	Status  int       `json:"status,omitempty"`
-	Code    string    `json:"code,omitempty"`
-	Message string    `json:"message,omitempty"`
+	// Decision is the decided item and rule snapshot, as JSON. It stays on the machine and is never sent.
+	Decision    string `json:"decision,omitempty"`
+	DecisionSHA string `json:"decision_sha256,omitempty"`
+	// Retry is a new body for a rejected event Signal did not store. It is not a second append.
+	Retry   bool   `json:"retry,omitempty"`
+	EventID string `json:"event_id,omitempty"`
+	Status  int    `json:"status,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // Entry is a key's current state.
@@ -72,7 +87,10 @@ type Entry struct {
 	Subject string
 	Rule    string
 	// Body is the exact bytes sent, or to be sent.
-	Body       []byte
+	Body []byte
+	// Decision is the decided item and rule snapshot, when one was stored with the append. It is not part of the
+	// request and is not shown by the outbox listing.
+	Decision   []byte
 	State      State
 	EventID    string
 	Status     int
@@ -100,6 +118,9 @@ var ErrExists = errors.New("outbox: key already appended")
 
 // ErrLocked is returned when another process holds the outbox.
 var ErrLocked = errors.New("outbox: another beacon process holds the outbox")
+
+// ErrNotRetryable is returned when a key cannot be requeued: it is not a rejected event, or Signal answered 409.
+var ErrNotRetryable = errors.New("outbox: that entry is not retried")
 
 // Open opens the outbox in dir for writing, creating it if needed, and takes an exclusive lock on it. A line torn
 // by a crash while it was written is cut off: it was never synced, so its body was never sent.
@@ -194,18 +215,43 @@ func (o *Outbox) load(r io.Reader) (int64, error) {
 func (o *Outbox) apply(rec record) error {
 	e, ok := o.entries[rec.Key]
 	if rec.State == Pending && rec.Body != "" {
-		if ok {
-			return fmt.Errorf("key %q appended twice", rec.Key)
-		}
 		sum := sha256.Sum256([]byte(rec.Body))
 		if hex.EncodeToString(sum[:]) != rec.SHA256 {
 			return fmt.Errorf("key %q: body does not match its sha256", rec.Key)
 		}
+		if rec.Decision != "" {
+			dsum := sha256.Sum256([]byte(rec.Decision))
+			if hex.EncodeToString(dsum[:]) != rec.DecisionSHA {
+				return fmt.Errorf("key %q: decision does not match its sha256", rec.Key)
+			}
+		}
+		if ok {
+			if !rec.Retry {
+				return fmt.Errorf("key %q appended twice", rec.Key)
+			}
+			return applyRetry(e, rec)
+		}
+		if rec.Retry {
+			return fmt.Errorf("key %q retries before it was appended", rec.Key)
+		}
 		e = &Entry{Key: rec.Key, Kind: rec.Kind, Subject: rec.Subject, Rule: rec.Rule, Body: []byte(rec.Body),
-			State: Pending, AppendedAt: rec.At, UpdatedAt: rec.At}
+			Decision: []byte(rec.Decision), State: Pending, AppendedAt: rec.At, UpdatedAt: rec.At}
 		e.Asks, e.Closes = inspect(e.Body)
 		o.entries[rec.Key] = e
 		o.order = append(o.order, rec.Key)
+		return nil
+	}
+	if rec.State == Superseded {
+		if !ok {
+			return fmt.Errorf("key %q superseded before it was appended", rec.Key)
+		}
+		if e.Kind != Event || e.State != Rejected || conflict(e) {
+			return fmt.Errorf("key %q: cannot supersede %s", rec.Key, e.State)
+		}
+		if rec.Code != TierHold && rec.Code != TierNever {
+			return fmt.Errorf("key %q: superseded tier %q", rec.Key, rec.Code)
+		}
+		e.State, e.Code, e.UpdatedAt = Superseded, rec.Code, rec.At
 		return nil
 	}
 	if !ok {
@@ -225,6 +271,50 @@ func (o *Outbox) apply(rec record) error {
 	}
 	e.State, e.EventID, e.Status, e.Code, e.Message, e.UpdatedAt = rec.State, rec.EventID, rec.Status, rec.Code, rec.Message, rec.At
 	return nil
+}
+
+// applyRetry replaces the body of a rejected event Signal did not store and sets it pending. The original append
+// line, including its decision, stays. A 409 is not retried: Signal already holds another request under that key.
+func applyRetry(e *Entry, rec record) error {
+	if e.Kind != Event {
+		return fmt.Errorf("key %q: only an event is retried", rec.Key)
+	}
+	if e.State != Rejected {
+		return fmt.Errorf("key %q: retry after %s", rec.Key, e.State)
+	}
+	if conflict(e) {
+		return fmt.Errorf("key %q: a conflict is not retried", rec.Key)
+	}
+	if rec.Decision != "" {
+		if len(e.Decision) != 0 || e.Status != 400 || conflict(e) {
+			return fmt.Errorf("key %q: a new attempt needs a 400 with no stored item", rec.Key)
+		}
+		e.Decision = []byte(rec.Decision)
+	}
+	if rec.Rule != "" {
+		e.Rule = rec.Rule
+	}
+	if rec.Subject != "" {
+		e.Subject = rec.Subject
+	}
+	e.Body = []byte(rec.Body)
+	e.Asks, e.Closes = inspect(e.Body)
+	e.State = Pending
+	e.EventID, e.Status, e.Code, e.Message = "", 0, "", ""
+	e.UpdatedAt = rec.At
+	return nil
+}
+
+// conflict reports a 409, including idempotency_conflict. Those entries are final.
+func conflict(e *Entry) bool {
+	return e.Status == 409 || e.Code == "idempotency_conflict"
+}
+
+// Undecided reports whether this entry must not block a later decision. A 400 with no stored item is one Signal
+// never stored, so the same key may be decided again. Anything Signal accepted, a 409, and a refusal that still
+// has its item, count as decided.
+func (e Entry) Undecided() bool {
+	return e.Kind == Event && e.State == Rejected && e.Status == 400 && !conflict(&e) && len(e.Decision) == 0
 }
 
 func inspect(body []byte) (asks bool, closes []string) {
@@ -260,6 +350,19 @@ func (o *Outbox) write(rec record) error {
 
 // Append records body as pending under key and syncs it to disk. Only then may it be sent.
 func (o *Outbox) Append(kind Kind, key, subject, rule string, body []byte) error {
+	return o.append(kind, key, subject, rule, body, nil)
+}
+
+// AppendDecided records body and the decided item it was projected from. The decision stays on the machine so a
+// later refusal that Signal did not store can be projected again. It is not sent.
+func (o *Outbox) AppendDecided(kind Kind, key, subject, rule string, body, decision []byte) error {
+	if len(decision) == 0 || !json.Valid(decision) {
+		return errors.New("outbox: decision is not JSON")
+	}
+	return o.append(kind, key, subject, rule, body, decision)
+}
+
+func (o *Outbox) append(kind Kind, key, subject, rule string, body, decision []byte) error {
 	if _, ok := o.entries[key]; ok {
 		return ErrExists
 	}
@@ -269,6 +372,71 @@ func (o *Outbox) Append(kind Kind, key, subject, rule string, body []byte) error
 	sum := sha256.Sum256(body)
 	rec := record{Key: key, State: Pending, At: o.now().UTC(), Kind: kind, Subject: subject, Rule: rule,
 		Body: string(body), SHA256: hex.EncodeToString(sum[:])}
+	if len(decision) > 0 {
+		rec.Decision = string(decision)
+		dsum := sha256.Sum256(decision)
+		rec.DecisionSHA = hex.EncodeToString(dsum[:])
+	}
+	if err := o.write(rec); err != nil {
+		return err
+	}
+	return o.apply(rec)
+}
+
+// AppendAttempt records a new body for a 400 that has no stored item, and stores the decided item with it. The
+// refused lines stay in the file. It refuses anything Signal accepted, a 409, and a rejection that already has an item.
+func (o *Outbox) AppendAttempt(key, subject, rule string, body, decision []byte) error {
+	e, ok := o.entries[key]
+	if !ok || !e.Undecided() {
+		return ErrNotRetryable
+	}
+	if len(decision) == 0 || !json.Valid(decision) {
+		return errors.New("outbox: decision is not JSON")
+	}
+	if !json.Valid(body) {
+		return errors.New("outbox: body is not JSON")
+	}
+	sum := sha256.Sum256(body)
+	dsum := sha256.Sum256(decision)
+	rec := record{Key: key, State: Pending, At: o.now().UTC(), Kind: Event, Subject: subject, Rule: rule,
+		Body: string(body), SHA256: hex.EncodeToString(sum[:]),
+		Decision: string(decision), DecisionSHA: hex.EncodeToString(dsum[:]), Retry: true}
+	if err := o.write(rec); err != nil {
+		return err
+	}
+	return o.apply(rec)
+}
+
+// Supersede records that the current rules no longer send a rejected event. It does not send. The refused lines stay.
+// tier is hold or never.
+func (o *Outbox) Supersede(key, tier string) error {
+	e, ok := o.entries[key]
+	if !ok || e.Kind != Event || e.State != Rejected || conflict(e) || len(e.Decision) == 0 {
+		return ErrNotRetryable
+	}
+	if tier != TierHold && tier != TierNever {
+		return errors.New("outbox: a superseded entry is hold or never")
+	}
+	rec := record{Key: key, State: Superseded, At: o.now().UTC(), Code: tier}
+	if err := o.write(rec); err != nil {
+		return err
+	}
+	return o.apply(rec)
+}
+
+// Requeue appends a new body for a rejected event Signal did not store and sets the key pending. It refuses an
+// entry Signal accepted, a pending entry, a lease claim, a 409, and a refusal with no stored item. The original
+// refused body stays in the file.
+func (o *Outbox) Requeue(key string, body []byte) error {
+	e, ok := o.entries[key]
+	if !ok || e.Kind != Event || e.State != Rejected || conflict(e) || len(e.Decision) == 0 {
+		return ErrNotRetryable
+	}
+	if !json.Valid(body) {
+		return errors.New("outbox: body is not JSON")
+	}
+	sum := sha256.Sum256(body)
+	rec := record{Key: key, State: Pending, At: o.now().UTC(), Body: string(body), SHA256: hex.EncodeToString(sum[:]), Retry: true}
 	if err := o.write(rec); err != nil {
 		return err
 	}
@@ -372,12 +540,12 @@ func (o *Outbox) PendingEvents() []Entry {
 }
 
 // OpenAsks returns the keys of event bodies on subject that ask someone and that no other body closes, oldest
-// first. Rejected bodies count for neither.
+// first. Rejected and superseded bodies count for neither: they were not sent.
 func (o *Outbox) OpenAsks(subject string) []string {
 	closed := map[string]bool{}
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.State == Rejected {
+		if e.State == Rejected || e.State == Superseded {
 			continue
 		}
 		for _, c := range e.Closes {
@@ -387,7 +555,7 @@ func (o *Outbox) OpenAsks(subject string) []string {
 	var out []string
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.Kind == Event && e.Subject == subject && e.Asks && e.State != Rejected && !closed[k] {
+		if e.Kind == Event && e.Subject == subject && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
 			out = append(out, k)
 		}
 	}

@@ -52,8 +52,16 @@ type Body struct {
 	DueAt      string         `json:"due_at,omitempty"`
 	Closes     []Ref          `json:"closes,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	// State is the object's state snapshot (DEC-28): the state fields the rule lists, observed_at and version.
-	State map[string]string `json:"state,omitempty"`
+	// State is the object's state snapshot (DEC-28), in the shape Signal stores.
+	State *Snapshot `json:"state,omitempty"`
+}
+
+// Snapshot is a state snapshot (DEC-28, Signal plan 12.01). The listed state fields are nested under Fields.
+// ObservedAt and Version stay beside Fields; any other key is refused by Signal.
+type Snapshot struct {
+	Fields     map[string]string `json:"fields"`
+	ObservedAt string            `json:"observed_at"`
+	Version    string            `json:"version"`
 }
 
 // Open makes sure the subject has a thread (DEC-17).
@@ -81,6 +89,104 @@ type Input struct {
 	OpenAsks []string
 	// Truncated omits the body and marks the event truncated. The marker is a fixed flag, not item content.
 	Truncated bool
+}
+
+// Decision is what a later pass needs to decide the item again and project it. It keeps the ids, times, and the
+// fields the rule listed. It does not keep an unlisted field, including a body. It stays on the machine.
+type Decision struct {
+	Item          source.Item `json:"item"`
+	Fields        []string    `json:"fields,omitempty"`
+	State         []string    `json:"state,omitempty"`
+	Ask           string      `json:"ask,omitempty"`
+	Priority      string      `json:"priority,omitempty"`
+	CloseByOthers bool        `json:"close_by_others,omitempty"`
+	Truncated     bool        `json:"truncated,omitempty"`
+}
+
+// Decide records the ids, times, and listed fields a send used. An unlisted field is not copied.
+func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
+	d := Decision{
+		Truncated: truncated,
+		Item: source.Item{
+			Source: it.Source, Subject: it.Subject, Key: it.Key, Type: it.Type,
+			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
+		},
+	}
+	if rule == nil {
+		return d
+	}
+	d.Fields = append([]string(nil), rule.Fields...)
+	d.State = append([]string(nil), rule.State...)
+	d.Ask = rule.Ask
+	d.Priority = rule.Priority
+	d.CloseByOthers = rule.CloseByOthers
+	fields := map[string]string{}
+	for _, name := range rule.Fields {
+		switch name {
+		case rules.FieldActor:
+			d.Item.Actor = it.Actor
+		case rules.FieldReferences:
+			if len(it.References) > 0 {
+				d.Item.References = append([]string(nil), it.References...)
+			}
+		default:
+			if v, ok := it.Fields[name]; ok {
+				fields[name] = v
+			}
+		}
+	}
+	if len(fields) > 0 {
+		d.Item.Fields = fields
+	}
+	state := map[string]string{}
+	for _, name := range rule.State {
+		if name == source.StateObservedAt || name == source.StateVersion {
+			continue
+		}
+		if v, ok := it.State[name]; ok {
+			state[name] = v
+		}
+	}
+	if len(state) > 0 {
+		d.Item.State = state
+		d.Item.ObservedAt = it.ObservedAt
+		d.Item.Version = it.Version
+	}
+	return d
+}
+
+// Narrow is a send rule whose fields, state, ask, and close are listed by both this decision and the current rule.
+// Nil when the current rule does not send: a retry must not widen what leaves.
+func (d Decision) Narrow(current *rules.Rule) *rules.Rule {
+	if current == nil || current.Tier != rules.Send {
+		return nil
+	}
+	r := &rules.Rule{
+		Name:   current.Name,
+		Tier:   rules.Send,
+		Fields: intersect(d.Fields, current.Fields),
+		State:  intersect(d.State, current.State),
+	}
+	if d.Ask == "me" && current.Ask == "me" {
+		r.Ask = "me"
+		r.Priority = current.Priority
+	}
+	r.CloseByOthers = d.CloseByOthers && current.CloseByOthers
+	return r
+}
+
+func intersect(stored, current []string) []string {
+	have := map[string]bool{}
+	for _, name := range current {
+		have[name] = true
+	}
+	var out []string
+	for _, name := range stored {
+		if have[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Project builds the request body and its bytes. It fails if the rule does not send or hold, or if the body would
@@ -138,17 +244,18 @@ func Project(in Input) (*Body, []byte, error) {
 	if len(meta) > 0 {
 		b.Metadata = meta
 	}
-	if len(it.State) > 0 && it.ObservedAt != nil {
-		state := map[string]string{}
+	if len(it.State) > 0 && it.ObservedAt != nil && it.Version != "" {
+		fields := map[string]string{}
 		for _, name := range r.State {
+			if name == source.StateObservedAt || name == source.StateVersion {
+				continue
+			}
 			if v, ok := it.State[name]; ok {
-				state[name] = v
+				fields[name] = v
 			}
 		}
-		if len(state) > 0 {
-			state[source.StateObservedAt] = Instant(*it.ObservedAt)
-			state[source.StateVersion] = it.Version
-			b.State = state
+		if len(fields) > 0 {
+			b.State = &Snapshot{Fields: fields, ObservedAt: Instant(*it.ObservedAt), Version: it.Version}
 		}
 	}
 	if it.Own {

@@ -152,6 +152,30 @@ func TestE2E(t *testing.T) {
 		}
 	})
 
+	t.Run("a state snapshot is accepted and stored", func(t *testing.T) {
+		ob, err := outbox.Read(state)
+		must(t, err)
+		e, ok := ob.Get(want[0].key)
+		if !ok || e.State != outbox.Sent || e.Status != 201 || !strings.HasPrefix(e.EventID, "evt_") {
+			t.Fatalf("state snapshot was not accepted: %+v", e)
+		}
+		if !bytes.Contains(e.Body, []byte(`"fields":{"status":"open"}`)) || bytes.Contains(e.Body, []byte("UNLISTED-SECRET-HEAD")) {
+			t.Fatalf("sent body: %s", e.Body)
+		}
+		ev := sig.event(e.EventID)
+		fields, _ := ev.State["fields"].(map[string]any)
+		if fields["status"] != "open" || ev.State["version"] != "1" || ev.State["status"] != nil {
+			t.Fatalf("event state: %+v", ev.State)
+		}
+		snap := sig.snapshot(pr1)
+		if snap.Fields["status"] != "open" || snap.Version != "1" || snap.EventID != e.EventID {
+			t.Fatalf("stored snapshot: %+v", snap)
+		}
+		if _, listed := snap.Fields["head"]; listed {
+			t.Fatalf("unlisted state field stored: %+v", snap.Fields)
+		}
+	})
+
 	t.Run("a crash between append and send produces one event", func(t *testing.T) {
 		n := nonce + "c"
 		cfg, want := setup(dir, n, state)
@@ -318,6 +342,36 @@ func (s *signalReader) eventByKey(key string) bool {
 		}
 	}
 	return false
+}
+
+type eventView struct {
+	ID    string         `json:"id"`
+	State map[string]any `json:"state"`
+}
+
+type snapshotView struct {
+	EventID    string            `json:"event_id"`
+	ObservedAt string            `json:"observed_at"`
+	Version    string            `json:"version"`
+	Fields     map[string]string `json:"fields"`
+}
+
+func (s *signalReader) event(id string) eventView {
+	var ev eventView
+	if code := s.get("/api/events/"+id, &ev); code != 200 {
+		s.t.Fatalf("event %s: %d", id, code)
+	}
+	return ev
+}
+
+func (s *signalReader) snapshot(subject string) snapshotView {
+	var page struct {
+		State *snapshotView `json:"state"`
+	}
+	if code := s.get("/api/state?subject="+url.QueryEscape(subject), &page); code != 200 || page.State == nil {
+		s.t.Fatalf("state %s: %d %+v", subject, code, page.State)
+	}
+	return *page.State
 }
 
 func (s *signalReader) post(key, body string) int {

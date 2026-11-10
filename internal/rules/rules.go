@@ -378,6 +378,65 @@ func (f *File) Decide(it source.Item) Decision {
 	return Decision{Tier: Never}
 }
 
+// GapsAbove reports whether a rule before matched could still match, and names a field or actor the item does not
+// have. A condition the item does have that already fails proves the rule cannot apply, so it does not block a
+// later send. A nil matched means every rule is above the default.
+func (f *File) GapsAbove(it source.Item, matched *Rule) bool {
+	for _, r := range f.Rules {
+		if r == matched {
+			return false
+		}
+		if r.Match.needsMissing(it) {
+			return true
+		}
+	}
+	return false
+}
+
+// needsMissing reports whether this match could still apply, and names an actor or a field the item does not have.
+// An empty actor is missing. A known miss (source, type, own, addressed, a stored actor, or a stored field) proves
+// the rule cannot apply.
+func (m *Match) needsMissing(it source.Item) bool {
+	if m.ruledOut(it) {
+		return false
+	}
+	if m.Actor != nil && it.Actor == "" {
+		return true
+	}
+	for name := range m.Fields {
+		if _, ok := it.Fields[name]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ruledOut reports whether a condition the item does have already fails. A missing field or actor is not a miss:
+// it has not been proved.
+func (m *Match) ruledOut(it source.Item) bool {
+	if m.Source != nil && !m.Source.Matches(it.Source) {
+		return true
+	}
+	if m.Type != nil && !m.Type.Matches(it.Type) {
+		return true
+	}
+	if m.Own != nil && *m.Own != it.Own {
+		return true
+	}
+	if m.Addressed != nil && *m.Addressed != it.Addressed {
+		return true
+	}
+	if m.Actor != nil && it.Actor != "" && !m.Actor.Matches(it.Actor) {
+		return true
+	}
+	for name, mt := range m.Fields {
+		if v, ok := it.Fields[name]; ok && !mt.Matches(v) {
+			return true
+		}
+	}
+	return false
+}
+
 // Matches reports whether every condition holds for the item. A field condition on a field the item lacks fails.
 func (m *Match) Matches(it source.Item) bool {
 	if m.Source != nil && !m.Source.Matches(it.Source) {

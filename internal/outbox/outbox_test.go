@@ -168,3 +168,128 @@ func TestExpireOnlyLeaseClaims(t *testing.T) {
 		t.Fatalf("%+v", e)
 	}
 }
+
+func TestRequeueRefusedOnly(t *testing.T) {
+	dir := t.TempDir()
+	o, err := Open(dir, clock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := []byte(`{"item":{"source":"github","key":"k-refused"}}`)
+	body := []byte(`{"subject":"s","key":"k-refused"}`)
+	if err := o.AppendDecided(Event, "k-refused", "s", "rule-a", body, decision); err != nil {
+		t.Fatal(err)
+	}
+	_ = o.Append(Event, "k-sent", "s", "", []byte(`{"key":"k-sent"}`))
+	_ = o.Append(Event, "k-replayed", "s", "", []byte(`{"key":"k-replayed"}`))
+	_ = o.Append(Event, "k-409", "s", "", []byte(`{"key":"k-409"}`))
+	_ = o.Append(Event, "k-pending", "s", "", []byte(`{"key":"k-pending"}`))
+	_ = o.Append(Lease, "claim:x:1", "s", "", []byte(`{"key":"claim"}`))
+	_ = o.Mark("k-refused", Rejected, "", 400, "invalid", "bad shape")
+	_ = o.Mark("k-sent", Sent, "evt_1", 201, "", "")
+	_ = o.Mark("k-replayed", Replayed, "evt_2", 200, "", "")
+	_ = o.Mark("k-409", Rejected, "", 409, "idempotency_conflict", "held")
+	_ = o.Mark("claim:x:1", Rejected, "", 400, "invalid", "no")
+
+	next := []byte(`{"subject":"s","key":"k-refused","state":{"fields":{"status":"open"}}}`)
+	for _, key := range []string{"k-sent", "k-replayed", "k-409", "k-pending", "claim:x:1"} {
+		if err := o.Requeue(key, next); !errors.Is(err, ErrNotRetryable) {
+			t.Fatalf("requeue %s: %v", key, err)
+		}
+	}
+	if err := o.Append(Event, "k-bare", "s", "", []byte(`{"key":"k-bare"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Mark("k-bare", Rejected, "", 400, "invalid", "no item"); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Requeue("k-bare", next); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("requeue without an item: %v", err)
+	}
+	if err := o.Requeue("k-refused", next); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := o.Get("k-refused")
+	if e.State != Pending || string(e.Body) != string(next) || string(e.Decision) != string(decision) {
+		t.Fatalf("after requeue: %+v", e)
+	}
+	if err := o.Requeue("k-refused", next); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("requeue of pending: %v", err)
+	}
+	o.Close()
+
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ = r.Get("k-refused")
+	if e.State != Pending || string(e.Body) != string(next) || string(e.Decision) != string(decision) {
+		t.Fatalf("reloaded: %+v", e)
+	}
+	if e, _ := r.Get("k-sent"); e.State != Sent || string(e.Body) != `{"key":"k-sent"}` {
+		t.Fatalf("sent was rewritten: %+v", e)
+	}
+	if e, _ := r.Get("k-409"); e.State != Rejected || e.Status != 409 {
+		t.Fatalf("409 was touched: %+v", e)
+	}
+}
+
+func TestAppendAttemptKeepsTheRefusal(t *testing.T) {
+	dir := t.TempDir()
+	o, err := Open(dir, clock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"key":"k400","state":{"status":"open","observed_at":"2026-11-07T12:00:00.000Z","version":"1"}}`)
+	if err := o.Append(Event, "k400", "s", "old-rule", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Mark("k400", Rejected, "", 400, "invalid", "flat"); err != nil {
+		t.Fatal(err)
+	}
+	_ = o.Append(Event, "k409", "s", "", []byte(`{"key":"k409"}`))
+	_ = o.Mark("k409", Rejected, "", 409, "idempotency_conflict", "held")
+	kept := []byte(`{"item":{"key":"k-kept"}}`)
+	_ = o.AppendDecided(Event, "k-kept", "s", "r", []byte(`{"key":"k-kept"}`), kept)
+	_ = o.Mark("k-kept", Rejected, "", 400, "invalid", "had item")
+	if e, _ := o.Get("k400"); !e.Undecided() {
+		t.Fatal("a 400 with no item counts as decided")
+	}
+	if e, _ := o.Get("k409"); e.Undecided() {
+		t.Fatal("a 409 does not count as decided")
+	}
+	if e, _ := o.Get("k-kept"); e.Undecided() {
+		t.Fatal("a 400 with a stored item does not count as decided")
+	}
+	next := []byte(`{"key":"k400","state":{"fields":{"status":"open"},"observed_at":"2026-11-07T12:00:00.000Z","version":"1"}}`)
+	decision := []byte(`{"item":{"key":"k400","source":"github"}}`)
+	if err := o.AppendAttempt("k409", "s", "r", next, decision); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("409 attempt: %v", err)
+	}
+	if err := o.AppendAttempt("k-kept", "s", "r", next, decision); !errors.Is(err, ErrNotRetryable) {
+		t.Fatalf("stored-item attempt: %v", err)
+	}
+	if err := o.AppendAttempt("k400", "subj", "new-rule", next, decision); err != nil {
+		t.Fatal(err)
+	}
+	e, _ := o.Get("k400")
+	if e.State != Pending || e.Rule != "new-rule" || string(e.Body) != string(next) || string(e.Decision) != string(decision) {
+		t.Fatalf("attempt: %+v", e)
+	}
+	o.Close()
+	data, err := os.ReadFile(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `\"status\":\"open\",\"observed_at\"`) {
+		t.Fatalf("refused body was not kept:\n%s", data)
+	}
+	r, err := Read(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, _ = r.Get("k400")
+	if e.State != Pending || string(e.Decision) != string(decision) || e.Undecided() {
+		t.Fatalf("reloaded attempt: %+v", e)
+	}
+}

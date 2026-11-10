@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -73,7 +74,8 @@ type Planned struct {
 	Rule string
 	// Body is the request body the item would be, or was, sent as: for send and hold items.
 	Body []byte
-	// Skipped says why an item was not decided again: it is already in the outbox or the hold queue.
+	// Skipped says why an item was not decided again: it is already in the outbox or the hold queue. A 400 with no
+	// stored item does not count.
 	Skipped string
 	// Unaccepted is true when the source's first run has not been accepted, so a send pass did not record the item.
 	Unaccepted bool
@@ -202,11 +204,14 @@ func (a *asks) open(subject string) []string {
 	if a.ob != nil {
 		base = a.ob.OpenAsks(subject)
 	}
+	seen := map[string]bool{}
 	var out []string
 	for _, k := range append(base, a.added[subject]...) {
-		if !a.closed[k] {
-			out = append(out, k)
+		if a.closed[k] || seen[k] {
+			continue
 		}
+		seen[k] = true
+		out = append(out, k)
 	}
 	return out
 }
@@ -283,7 +288,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	p := Planned{Item: it}
 	if r.Outbox != nil {
-		if e, ok := r.Outbox.Get(it.Key); ok {
+		if e, ok := r.Outbox.Get(it.Key); ok && !e.Undecided() {
 			p.Tier, p.Rule, p.Body, p.Skipped = rules.Send, e.Rule, e.Body, "in the outbox, "+string(e.State)
 			return p, nil
 		}
@@ -313,7 +318,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		return r.finishNever(p)
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
-		_, body, err := r.project(it, d.Rule, view)
+		_, body, _, err := r.project(it, d.Rule, view)
 		p.Body = body
 		if err != nil {
 			p.Err = err
@@ -323,7 +328,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		}
 		return p, nil
 	}
-	b, body, err := r.project(it, d.Rule, view)
+	b, body, truncated, err := r.project(it, d.Rule, view)
 	if err != nil {
 		// A body or request over Signal's limit is not dropped. Hold it so the person can still see it.
 		p.Err = err
@@ -338,7 +343,17 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		view.record(it.Subject, it.Key, b)
 		return p, nil
 	}
-	if err := r.Outbox.Append(outbox.Event, it.Key, it.Subject, p.Rule, body); err != nil {
+	decided, err := json.Marshal(project.Decide(it, d.Rule, truncated))
+	if err != nil {
+		return p, err
+	}
+	if _, exists := r.Outbox.Get(it.Key); exists {
+		// A 400 Signal never stored, with no item kept. The refused lines stay; this attempt stores the item.
+		err = r.Outbox.AppendAttempt(it.Key, it.Subject, p.Rule, body, decided)
+	} else {
+		err = r.Outbox.AppendDecided(outbox.Event, it.Key, it.Subject, p.Rule, body, decided)
+	}
+	if err != nil {
 		return p, err
 	}
 	if r.AfterAppend != nil {
@@ -349,11 +364,11 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 
 // project builds the body. If the body or the request is over Signal's limit, it tries again without the body and
 // marks the event truncated. The marker is a fixed flag, not item content.
-func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project.Body, []byte, error) {
+func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project.Body, []byte, bool, error) {
 	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.open(it.Subject)}
 	b, body, err := project.Project(in)
 	if err == nil {
-		return b, body, nil
+		return b, body, false, nil
 	}
 	stripped := it
 	if it.Fields != nil {
@@ -366,7 +381,8 @@ func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project
 	}
 	in.Item = stripped
 	in.Truncated = true
-	return project.Project(in)
+	b, body, err = project.Project(in)
+	return b, body, true, err
 }
 
 // record reports whether this pass writes the item. A dry run writes nothing. A source whose first run has not been

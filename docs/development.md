@@ -25,7 +25,7 @@ from the linker and does not affect the tests.
 | --- | --- |
 | `internal/rules` | Every match type, first match wins, default `never`, unknown and blank keys rejected, every YAML spelling of `own` and `addressed`, one document only, `state` lists, unreachable rules, the own-act identity warning. |
 | `internal/project` | Every subset of fields: an unlisted field never appears in the bytes. `by`, `to`, `closes`, `priority`, `due_at`, the state snapshot. |
-| `internal/outbox` | Append, mark, reload; torn last line; tampered body; the lock; expired lease claims. |
+| `internal/outbox` | Append, mark, reload; torn last line; tampered body; the lock; expired lease claims; a refused event requeued, and a sent, replayed, pending, lease, or 409 entry not. |
 | `internal/queue` | Hold and drop; a torn last line is cut, under the outbox lock, so the next append stays readable; read-only opens change nothing and refuse writes; opening for writing needs the outbox lock on the same directory. |
 | `internal/signal` | 201, replay, 409, 422, 401, 429 with `Retry-After`, 5xx backoff with the same bytes, the egress guard, redirects not followed, a deadline ending a wait. |
 | `internal/egress` | The host list; the guard; the production transport ignores proxy settings in the environment. |
@@ -33,7 +33,7 @@ from the linker and does not affect the tests.
 | `internal/runner` | A pass on its own: dry run writes nothing, send, the dropped record does not grow, a key dropped earlier by the same rule is reported as skipped, the lease bounds a send, lease errors fail the pass, error text never reaches the log, error classes, the cursor moving only after a send pass decides every item, a rate limit and an unaccepted first run not moving it, a bad item and a projection error dropped by count without freezing the cursor, a seed `never` dropping before the rules file. |
 | `internal/github`, `internal/jira` | Every item type against `httptest` fixtures: own acts, mentions, pagination, rate-limit backoff, a cursor that does not move on a rate limit, keys stable across a pass, no request outside the configured repositories, projects and hosts, a 15-minute lookback and a server `Date` cursor, pushes not filtered by commit time, a bare 403 failing the pass, team review requests, a restart that does not send twice. The starter rules against the GitHub fixtures. |
 | `internal/cursor`, `internal/seed`, `internal/limited` | Cursor commit, a completed first run, and acceptance; seed parse; rate-limit wait and early end. |
-| `cmd/beacon` | The commands against a fake Signal, through the egress-recording transport wrapped around the production transport: tiers, nothing held or dropped on the wire, `beacon egress` covers every host seen, a crash between append and send, a crash after send, a retry after a rules change, 409, a second instance, logs, exit codes on refusal, bodies printed only on request, error text kept off standard error, a dry run and explain leaving the state directory byte-for-byte unchanged, an interrupt during `init` writing nothing, `source add` not printing or writing a token, a piped Jira token kept, `--from-gh --host` passing the host, `accept-first` requiring a completed `--first`, egress listing GitHub and Jira hosts. |
+| `cmd/beacon` | The commands against a fake Signal, through the egress-recording transport wrapped around the production transport: tiers, nothing held or dropped on the wire, `beacon egress` covers every host seen, a crash between append and send, a crash after send, a retry after a rules change, 409, a second instance, logs, exit codes on refusal, bodies printed only on request, error text kept off standard error, a dry run and explain leaving the state directory byte-for-byte unchanged, an interrupt during `init` writing nothing, `source add` not printing or writing a token, a piped Jira token kept, `--from-gh --host` passing the host, `accept-first` requiring a completed `--first`, egress listing GitHub and Jira hosts, `outbox retry --rejected` re-projecting a 400 and not touching a 409, a sent entry, or an entry with no stored item, `cursor reset` clearing a cursor without sending, and a legacy `400` with no stored item sent once after cursor reset and `beacon run --once`. |
 | `examples` | The starter rules file checks clean against the GitHub and Jira field lists. |
 
 The crash tests run the test binary as a helper process that stops itself with `os.Exit` at the exact point: after
@@ -64,8 +64,8 @@ actor with `write`, `read` and `relay` limited to `fixture:*`. It writes the URL
 git). `TestE2E` is skipped without them, and CI does not run it.
 
 It checks, against real Signal: a dry run contacts nothing; a send pass writes the expected events into the
-expected threads, with the ask to the person, `by` on the own act, and each ask closed by the right event, and Signal
-accepts the event that carries a state snapshot; held and
+expected threads, with the ask to the person, `by` on the own act, and each ask closed by the right event; an event
+that carries a state snapshot is accepted (`201`) and stored with the listed fields under `state.fields`; held and
 dropped items have no event and no thread; a crash between append and send produces one event; a crash after send
 is recorded as replayed; a 409 stops the key; and a second instance sends nothing while the lease is held.
 

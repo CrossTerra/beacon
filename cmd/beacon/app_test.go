@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/egress/egresstest"
 	"github.com/CrossTerra/beacon/internal/keychain"
@@ -373,7 +374,7 @@ func TestEventShapes(t *testing.T) {
 	if md := ask["metadata"].(map[string]any); md["actor"] != "fixture:user:dana" {
 		t.Errorf("ask metadata: %v", md)
 	}
-	if st := fmt.Sprint(ask["state"]); st != "map[observed_at:2026-11-07T09:01:30.000Z status:open version:1]" {
+	if st := fmt.Sprint(ask["state"]); st != "map[fields:map[status:open] observed_at:2026-11-07T09:01:30.000Z version:1]" {
 		t.Errorf("ask state (DEC-28): %s", st)
 	}
 	if get(want[2].key)["state"] != nil {
@@ -782,5 +783,423 @@ func TestInitInterrupted(t *testing.T) {
 	}
 	if _, err := store.Get("signal:signal.example.com:443"); err == nil {
 		t.Fatal("init stored a key after an interrupt")
+	}
+}
+
+// A 400 is re-projected and sent. A 409, a sent entry, and a rejected entry with no stored item are not.
+func TestRetryRejected(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "retryrej")
+	// The noise rule matches on label, which the send rules do not list. A retry must be able to prove it does not
+	// match, so this test removes it. The gap is covered by TestRetrySupersedesWhenHigherRuleNeedsMissingField.
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(strings.Replace(testRules, `  - name: noise
+    match: {fields: {label: noise}}
+    tier: never
+`, "", 1)), 0o600))
+	allowed := h.egressList(cfg)
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		if r.Key == want[1].key {
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"idempotency_conflict","message":"held"}}`}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"SECRET-REASON"}}`}
+	}
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	state := filepath.Join(dir, "state")
+	ob, err := outbox.Open(state, time.Now)
+	must(t, err)
+	oldKey := "fixture:old-retryrej:1"
+	must(t, ob.Append(outbox.Event, oldKey, "fixture:old", "r", []byte(`{"subject":"fixture:old","type":"fixture.x","key":"`+oldKey+`","occurred_at":"2026-11-07T09:00:00.000Z","open":{}}`)))
+	must(t, ob.Mark(oldKey, outbox.Rejected, "", 400, "invalid", "no item"))
+	ob.Close()
+
+	h.server.Script = nil
+	before := map[string]int{}
+	for _, w := range want {
+		before[w.key] = len(h.server.RequestsFor(w.key))
+	}
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	out, logs := h.stdout.String(), h.stderr.String()
+	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1.") {
+		t.Fatalf("stdout:\n%s", out)
+	}
+	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
+		if strings.Contains(out, banned) || strings.Contains(logs, banned) {
+			t.Fatalf("retry output contains %q\nstdout:\n%s\nstderr:\n%s", banned, out, logs)
+		}
+	}
+	if !strings.Contains(logs, `"msg":"retry"`) || !strings.Contains(logs, `"missing":1`) || !strings.Contains(logs, `"conflict":1`) {
+		t.Fatalf("log:\n%s", logs)
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != before[want[1].key] {
+		t.Fatalf("409 was sent again: %d requests, was %d", n, before[want[1].key])
+	}
+	if n := len(h.server.RequestsFor(oldKey)); n != 0 {
+		t.Fatalf("entry with no item was sent %d times", n)
+	}
+	ev, ok := h.server.Event(want[0].key)
+	if !ok || !bytes.Contains(ev.Body, []byte(`"fields":{"status":"open"}`)) {
+		t.Fatalf("retried state snapshot: %s", ev.Body)
+	}
+	obRead, err := outbox.Read(state)
+	must(t, err)
+	if e, _ := obRead.Get(want[0].key); e.State != outbox.Sent || e.Status != 201 {
+		t.Fatalf("retried key: %+v", e)
+	}
+	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 {
+		t.Fatalf("409 was rewritten: %+v", e)
+	}
+	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {
+		t.Fatalf("missing item was touched: %+v", e)
+	}
+	if e, _ := obRead.Get(want[2].key); e.State != outbox.Sent {
+		t.Fatalf("a higher rule ruled out by type blocked the send: %+v", e)
+	}
+	if e, _ := obRead.Get(want[3].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
+		t.Fatalf("a match on an unlisted field was sent: %+v", e)
+	}
+
+	sentEvents := len(eventRequests(h.server))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(eventRequests(h.server)); n != sentEvents {
+		t.Fatalf("second retry sent %d more events", n-sentEvents)
+	}
+	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 0.") {
+		t.Fatalf("second retry:\n%s", h.stdout.String())
+	}
+}
+
+// A 400 with no stored item does not block a later collect. Cursor reset, then one run, sends the corrected body once.
+func TestLegacyRejectionIsCollectedAgain(t *testing.T) {
+	h := newHarness(t)
+	n := "legacy"
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", n)
+	state := filepath.Join(dir, "state")
+	ob, err := outbox.Open(state, time.Now)
+	must(t, err)
+	flat := []byte(`{"subject":"fixture:pr:acme/app#1-` + n + `","type":"fixture.review_requested","key":"` + want[0].key + `","occurred_at":"2026-11-07T09:01:00.000Z","open":{"title":"Add retries"},"to":["@winton"],"priority":"high","state":{"observed_at":"2026-11-07T09:01:30.000Z","status":"open","version":"1"}}`)
+	must(t, ob.Append(outbox.Event, want[0].key, "fixture:pr:acme/app#1-"+n, "review-requests", flat))
+	must(t, ob.Mark(want[0].key, outbox.Rejected, "", 400, "invalid", "flat"))
+	must(t, ob.Append(outbox.Event, want[1].key, "fixture:pr:acme/app#1-"+n, "own-acts", []byte(`{"key":"`+want[1].key+`"}`)))
+	must(t, ob.Mark(want[1].key, outbox.Rejected, "", 409, "idempotency_conflict", "held"))
+	must(t, ob.AppendDecided(outbox.Event, want[2].key, "fixture:issue:3-"+n, "assigned", []byte(`{"key":"`+want[2].key+`"}`), []byte(`{"item":{"key":"kept"}}`)))
+	must(t, ob.Mark(want[2].key, outbox.Rejected, "", 400, "invalid", "had item"))
+	ob.Close()
+	st, err := cursor.Open(state)
+	must(t, err)
+	must(t, st.Commit("fixture", []byte("2026-11-08T00:00:00Z")))
+	must(t, st.MarkFirst([]string{"fixture"}))
+	must(t, st.Accept([]string{"fixture"}))
+
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "cursor", "reset", "--config", cfg, "fixture"); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	again, err := cursor.Read(state)
+	must(t, err)
+	if _, ok := again.Get("fixture"); ok || !again.Accepted("fixture") {
+		t.Fatal("reset left the cursor or cleared acceptance")
+	}
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	reqs := h.server.RequestsFor(want[0].key)
+	if len(reqs) != 1 || !bytes.Contains(reqs[0].Body, []byte(`"fields":{"status":"open"}`)) || bytes.Equal(reqs[0].Body, flat) {
+		t.Fatalf("sent %d times: %s", len(reqs), reqs)
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 0 {
+		t.Fatalf("409 was sent %d times", n)
+	}
+	if n := len(h.server.RequestsFor(want[2].key)); n != 0 {
+		t.Fatalf("400 with a stored item was sent %d times", n)
+	}
+	data, err := os.ReadFile(filepath.Join(state, outbox.FileName))
+	must(t, err)
+	if !strings.Contains(string(data), `\"status\":\"open\",\"version\":\"1\"`) {
+		t.Fatalf("refused body was not kept:\n%s", data)
+	}
+	obRead, err := outbox.Read(state)
+	must(t, err)
+	e, _ := obRead.Get(want[0].key)
+	if e.State != outbox.Sent || e.Status != 201 || len(e.Decision) == 0 || e.Undecided() {
+		t.Fatalf("after collect: %+v", e)
+	}
+	if !bytes.Contains(e.Body, []byte(`"fields":{"status":"open"}`)) {
+		t.Fatalf("stored attempt: %s", e.Body)
+	}
+	sent := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[0].key)); n != sent {
+		t.Fatalf("second run sent the key again: %d", n-sent)
+	}
+}
+
+// The current rules decide a retry. A removed field is not sent. Hold and never supersede the refusal and send nothing.
+func TestRetryObeysCurrentRules(t *testing.T) {
+	refuse := func(h *harness, cfg string) {
+		t.Helper()
+		h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+			if strings.HasPrefix(r.Key, "claim:") {
+				return signaltest.Reply{}
+			}
+			return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+		}
+		if code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg); code != 0 {
+			t.Fatal(h.stderr.String())
+		}
+		h.server.Script = nil
+	}
+	t.Run("removed field", func(t *testing.T) {
+		h := newHarness(t)
+		dir := t.TempDir()
+		cfg, want := writeSetup(t, dir, h.server.URL, "send", "narrow")
+		refuse(h, cfg)
+		// No rule above this one. Title stays; repository was listed before and is not listed now.
+		narrowed := `rules:
+  - name: review-requests
+    match:
+      source: fixture
+      type: review_requested
+      addressed: true
+      fields: {repository: {glob: "acme/*"}}
+    tier: send
+    fields: [title]
+`
+		must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(narrowed), 0o600))
+		before := len(h.server.RequestsFor(want[0].key))
+		if code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+			t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+		}
+		reqs := h.server.RequestsFor(want[0].key)
+		if len(reqs) != before+1 {
+			t.Fatalf("sent %d times", len(reqs)-before)
+		}
+		body := reqs[len(reqs)-1].Body
+		if !bytes.Contains(body, []byte(`"title":"Add retries"`)) || bytes.Contains(body, []byte(`"repository"`)) || bytes.Contains(body, []byte("UNLISTED-SECRET")) {
+			t.Fatalf("narrowed body: %s", body)
+		}
+	})
+	for _, c := range []struct {
+		name, rules, tier string
+	}{
+		{"hold", "rules:\n  - name: later\n    match: {}\n    tier: hold\n", outbox.TierHold},
+		{"never", "rules:\n  - name: later\n    match: {}\n    tier: never\n", outbox.TierNever},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			dir := t.TempDir()
+			cfg, want := writeSetup(t, dir, h.server.URL, "send", c.name)
+			refuse(h, cfg)
+			must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(c.rules), 0o600))
+			n := len(eventRequests(h.server))
+			if code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+				t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+			}
+			if got := len(eventRequests(h.server)); got != n {
+				t.Fatalf("superseded retry sent %d events", got-n)
+			}
+			ob, err := outbox.Read(filepath.Join(dir, "state"))
+			must(t, err)
+			if e, _ := ob.Get(want[0].key); e.State != outbox.Superseded || e.Code != c.tier {
+				t.Fatalf("%s: %+v", c.name, e)
+			}
+			if strings.Contains(h.stderr.String(), want[0].key) || strings.Contains(h.stderr.String(), "UNLISTED-SECRET") {
+				t.Fatalf("logs:\n%s", h.stderr.String())
+			}
+		})
+	}
+}
+
+// A never rule above the send rule that matches on a field the stored item lacks must not be skipped.
+func TestRetrySupersedesWhenHigherRuleNeedsMissingField(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "gap")
+	first := `rules:
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(first), 0o600))
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	later := `rules:
+  - name: drop-title
+    match: {fields: {title: {exact: "Add retries"}}}
+    tier: never
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(later), 0o600))
+	n := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	if got := len(h.server.RequestsFor(want[0].key)); got != n {
+		t.Fatalf("retry sent %d more requests", got-n)
+	}
+	ob, err := outbox.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if e, _ := ob.Get(want[0].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
+		t.Fatalf("%+v", e)
+	}
+	if strings.Contains(h.stderr.String(), want[0].key) || strings.Contains(h.stderr.String(), "Add retries") {
+		t.Fatalf("logs:\n%s", h.stderr.String())
+	}
+}
+
+// A higher rule already disproved by source does not block, even if it also names a field the item lacks.
+func TestRetrySendsWhenHigherRuleIsRuledOut(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "ruled")
+	first := `rules:
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(first), 0o600))
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	later := `rules:
+  - name: drop-github-title
+    match: {source: github, fields: {title: {exact: "Add retries"}}}
+    tier: never
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(later), 0o600))
+	n := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	reqs := h.server.RequestsFor(want[0].key)
+	if len(reqs) != n+1 || !bytes.Contains(reqs[len(reqs)-1].Body, []byte(`"url"`)) {
+		t.Fatalf("ruled-out higher rule blocked the send: %d %s", len(reqs)-n, reqs)
+	}
+	ob, err := outbox.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if e, _ := ob.Get(want[0].key); e.State != outbox.Sent {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// An ask requeued earlier in the same retry is closed by a later own act.
+func TestRetryClosesAskOpenedEarlier(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "closes")
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(strings.Replace(testRules, `  - name: noise
+    match: {fields: {label: noise}}
+    tier: never
+`, "", 1)), 0o600))
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	var own []byte
+	for _, r := range h.server.RequestsFor(want[1].key) {
+		own = r.Body
+	}
+	if !bytes.Contains(own, []byte(`"closes":[{"key":"`+want[0].key+`"}]`)) {
+		t.Fatalf("own act did not close the ask opened earlier in the pass: %s", own)
+	}
+}
+
+// An unlisted body is not written to the outbox, including the stored decision.
+func TestOutboxOmitsUnlistedBody(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "omit")
+	if code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "state", outbox.FileName))
+	must(t, err)
+	if strings.Contains(string(data), "UNLISTED-SECRET") {
+		t.Fatalf("unlisted body was written to the outbox:\n%s", data)
+	}
+}
+
+func TestRetryRefusesDryRun(t *testing.T) {
+	h := newHarness(t)
+	cfg, _ := writeSetup(t, t.TempDir(), h.server.URL, "dry-run", "dryretry")
+	code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg)
+	if code == 0 || !strings.Contains(h.stderr.String(), "mode is dry-run") || h.rec.Count() != 0 {
+		t.Fatalf("exit %d requests %d\n%s", code, h.rec.Count(), h.stderr.String())
+	}
+}
+
+func TestCursorReset(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "cursor")
+	st, err := cursor.Open(filepath.Join(dir, "state"))
+	must(t, err)
+	must(t, st.Commit("fixture", []byte("2026-11-07T12:00:00Z")))
+	must(t, st.MarkFirst([]string{"fixture"}))
+	must(t, st.Accept([]string{"fixture"}))
+	if code := h.run(h.app(nil), "cursor", "reset", "--config", cfg, "fixture"); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if h.rec != nil && h.rec.Count() != 0 {
+		t.Fatalf("reset contacted %d hosts", h.rec.Count())
+	}
+	again, err := cursor.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if _, ok := again.Get("fixture"); ok || !again.Accepted("fixture") {
+		t.Fatal("reset left the cursor or cleared acceptance")
+	}
+	if !strings.Contains(h.stdout.String(), "Cleared the cursor for fixture") || strings.Contains(h.stdout.String(), "2026-11-07") {
+		t.Fatalf("stdout:\n%s", h.stdout.String())
+	}
+	if code := h.run(h.app(nil), "cursor", "reset", "--config", cfg, "github"); code == 0 {
+		t.Fatal("reset of an unknown source succeeded")
 	}
 }
