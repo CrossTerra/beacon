@@ -79,7 +79,8 @@ Drive against `about`, Calendar against the attendee or organizer marked `self`.
   of its summary, start, end, location and status, and the person's response. A change of state is a change of
   that fingerprint, so another attendee's response, which bumps `updated`, is not an event.
 - **Each pass:** events on the primary calendar updated since 15 minutes before the cursor, expanded to single
-  instances, that end after now and start within 30 days, with deleted events.
+  instances, that end after now and start within 30 days, with deleted events; and, without the window, known
+  events that moved into the past or beyond 30 days.
 - **First run (DEC-23).** Events in the next 7 days. The rest of the 30-day window is fingerprinted, not emitted.
 - **Items (DEC-18):** `created`, `changed`, `cancelled`, `response_needed` (the person's response is
   `needsAction` on someone else's event), `responded` (the person's own response changed; own, so it closes the

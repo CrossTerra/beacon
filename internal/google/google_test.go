@@ -217,6 +217,9 @@ func TestGmailFirstRun(t *testing.T) {
 	if srv.Called("/gmail/v1/users/me/history") {
 		t.Fatal("a first run read history")
 	}
+	if !srv.Called("/gmail/v1/users/me/threads/t2") || !srv.Called("/gmail/v1/users/me/threads/t1") {
+		t.Fatal("a recent draft on an old thread stopped the inbox walk")
+	}
 	if q := srv.Query("/gmail/v1/users/me/threads"); q.Get("labelIds") != "INBOX" || q.Get("q") != "" {
 		t.Fatalf("inbox query %v", q)
 	}
@@ -619,5 +622,70 @@ func TestScopes(t *testing.T) {
 		if !strings.Contains(s, "readonly") {
 			t.Fatalf("%s is not read-only", s)
 		}
+	}
+}
+
+func TestGmailThreadFailures(t *testing.T) {
+	// A thread deleted since the history named it is skipped, and the cursor moves.
+	srv := googletest.New(t)
+	srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	g, _ := NewGmail(opts(t, srv))
+	got, err := g.Collect(context.Background(), []byte("100"))
+	if err != nil || string(got.Next) != "350" {
+		t.Fatalf("%v %q", err, got.Next)
+	}
+	for _, it := range got.Items {
+		if strings.HasPrefix(it.Key, "gmail:t2:") {
+			t.Fatal("a deleted thread yielded an item")
+		}
+	}
+	// Any 403 fails the pass: the history cursor has no lookback, so a skipped thread would never be read again.
+	srv = googletest.New(t)
+	srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"code":403,"errors":[{"reason":"forbidden"}]}}`)
+	}
+	g, _ = NewGmail(opts(t, srv))
+	if got, err := g.Collect(context.Background(), []byte("100")); err == nil || got.Next != nil {
+		t.Fatalf("a 403 on a thread did not fail the pass: %v %q", err, got.Next)
+	}
+}
+
+func TestCalendarMovedOutOfTheWindow(t *testing.T) {
+	srv := googletest.New(t)
+	c, _ := NewCalendar(opts(t, srv))
+	first, err := c.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("singleEvents") == "true" {
+			// The windowed list no longer holds ev3 (moved past 30 days) or ev2 (moved into the past).
+			io.WriteString(w, `{"timeZone":"UTC","items":[]}`)
+			return
+		}
+		if q.Get("timeMin") != "" || q.Get("timeMax") != "" || q.Get("updatedMin") != "2026-11-08T11:45:00Z" {
+			t.Errorf("moved-out query %v", q)
+		}
+		io.WriteString(w, `{"timeZone":"UTC","items":[
+  {"id":"ev3","status":"confirmed","etag":"\"3203\"","summary":"Quarterly","start":{"dateTime":"2026-12-20T09:00:00Z"},"end":{"dateTime":"2026-12-20T10:00:00Z"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-08T12:30:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]},
+  {"id":"ev2","status":"cancelled","etag":"\"3202\"","updated":"2026-11-08T12:31:00Z","organizer":{"email":"winton@example.com","self":true}},
+  {"id":"series1","status":"confirmed","etag":"\"3299\"","summary":"Standup","start":{"dateTime":"2026-11-09T09:00:00Z"},"end":{"dateTime":"2026-11-09T09:15:00Z"},
+   "created":"2026-01-01T00:00:00Z","updated":"2026-11-08T12:32:00Z","organizer":{"email":"dana@example.com"}}
+]}`)
+	}
+	got, err := c.Collect(context.Background(), first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	want := []string{"calendar:ev2:cancelled:3202 cancelled", "calendar:ev3:changed:3203 changed"}
+	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v", keys(m))
+	}
+	if m["calendar:ev3:changed:3203"].EventTitle != "Rescheduled" {
+		t.Fatalf("%+v", m["calendar:ev3:changed:3203"])
 	}
 }

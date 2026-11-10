@@ -186,7 +186,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	seen := map[string]bool{}
 	for _, r := range refs {
 		t, err := g.thread(ctx, threads, r.thread)
-		if unavailable(err) {
+		if gone(err) {
 			continue
 		}
 		if err != nil {
@@ -199,7 +199,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		seen[it.Key] = true
 		if bodies && it.Type != TypeStarred {
 			body, err := g.body(ctx, r.message)
-			if err != nil && !unavailable(err) {
+			if err != nil && !gone(err) {
 				return source.Collected{Items: items}, err
 			}
 			if body != "" {
@@ -331,11 +331,16 @@ inbox:
 		}
 		for _, th := range page.Threads {
 			t, err := g.thread(ctx, threads, th.ID)
-			if unavailable(err) {
+			if gone(err) {
 				continue
 			}
 			if err != nil {
 				return nil, err
+			}
+			// The list is ordered by a thread's newest message of any kind, drafts included. Paging stops only when
+			// that is older than the window; a thread whose newest real message is older is skipped.
+			if t.newest().Before(cutoff) {
+				break inbox
 			}
 			live := t.live()
 			if len(live) == 0 {
@@ -343,7 +348,7 @@ inbox:
 			}
 			last := live[len(live)-1]
 			if last.at().Before(cutoff) {
-				break inbox
+				continue
 			}
 			refs = append(refs, ref{thread: t.ID, message: last.ID})
 		}
@@ -370,7 +375,7 @@ inbox:
 		}
 		for _, m := range page.Messages {
 			t, err := g.thread(ctx, threads, m.ThreadID)
-			if unavailable(err) {
+			if gone(err) {
 				continue
 			}
 			if err != nil {
@@ -392,6 +397,22 @@ inbox:
 	}
 	return refs, nil
 }
+
+// newest is the time of the thread's newest message of any kind.
+func (t *gmailThread) newest() time.Time {
+	var n time.Time
+	for i := range t.Messages {
+		if at := t.Messages[i].at(); at.After(n) {
+			n = at
+		}
+	}
+	return n
+}
+
+// gone is a thread or message deleted since the history named it. It has nothing left to report, so the pass goes
+// on. Any other failure, a 403 included, fails the pass: the history cursor has no lookback, so a skipped message
+// would never be read again.
+func gone(err error) bool { return isStatus(err, http.StatusNotFound) }
 
 func (t *gmailThread) find(id string) *gmailMessage {
 	for i := range t.Messages {

@@ -59,6 +59,7 @@ func New(t testing.TB) *Server {
 		"/gmail/v1/users/me/threads/t2":         text(ThreadT2),
 		"/gmail/v1/users/me/threads/t3":         text(ThreadT3),
 		"/gmail/v1/users/me/threads/t4":         text(ThreadT4),
+		"/gmail/v1/users/me/threads/t8":         text(ThreadT8),
 		"/gmail/v1/users/me/threads/t9":         text(ThreadT9),
 		"/gmail/v1/users/me/messages/m1":        text(FullM1),
 		"/gmail/v1/users/me/messages/m2":        text(`{"id":"m2","payload":{"mimeType":"text/plain","body":{"data":"T24gaXQu"}}}`),
@@ -223,7 +224,15 @@ const (
     {"name":"From","value":"old@example.com"},{"name":"To","value":"winton@example.com"},{"name":"Subject","value":"Old"}]}}
 ]}`
 
-	InboxThreads = `{"threads":[{"id":"t4"},{"id":"t2"},{"id":"t1"},{"id":"t9"}]}`
+	// t8 sorts near the top for its recent draft; its last real message is old.
+	ThreadT8 = `{"id":"t8","messages":[
+  {"id":"m8","threadId":"t8","labelIds":["INBOX"],"internalDate":"1790845200000","payload":{"headers":[
+    {"name":"From","value":"old@example.com"},{"name":"To","value":"winton@example.com"},{"name":"Subject","value":"Old thread"}]}},
+  {"id":"m8d","threadId":"t8","labelIds":["DRAFT"],"internalDate":"1794138300000","payload":{"headers":[
+    {"name":"From","value":"winton@example.com"},{"name":"Subject","value":"Re: Old thread"}]}}
+]}`
+
+	InboxThreads = `{"threads":[{"id":"t4"},{"id":"t8"},{"id":"t2"},{"id":"t1"},{"id":"t9"}]}`
 	Starred      = `{"messages":[{"id":"m1","threadId":"t1"}]}`
 
 	// FullM1's text/plain part is "Can you review the budget by Friday?".

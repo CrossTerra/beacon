@@ -224,9 +224,10 @@ until a minute before it expires. A refused refresh (revoked, expired, or a chan
 | `drive.readonly` | Drive | `comments.list` needs it; `drive.metadata.readonly` cannot read comments. It can read every file the person can, but Beacon asks only for file names and links, comment metadata, and meeting notes text when a rule lists `body`. |
 
 A source whose scope was not granted fails with `source_unauthorized`. A `403` for a missing scope
-(`insufficientPermissions`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`) is the same. A `403` that one object cannot be read
-(`forbidden`, `insufficientFilePermissions`), or a `404`, on a request for one object (a mail thread, a file's
-comments, a notes file) skips that object. Any other `403`, or one on a list, fails the pass.
+(`insufficientPermissions`, `ACCESS_TOKEN_SCOPE_INSUFFICIENT`) is the same. On Drive, a `403` that one object cannot be read
+(`forbidden`, `insufficientFilePermissions`), or a `404`, on a request for one object (a file's comments, a notes
+file) skips that object. On Gmail only a `404` skips a thread (see [Gmail](#gmail)). Any other `403`, or one on a
+list, fails the pass.
 
 **Hosts.** `oauth2.googleapis.com` (every Google source), `gmail.googleapis.com` (Gmail), `www.googleapis.com`
 (Calendar and Drive). Listed by `beacon egress`. `www.googleapis.com` serves other APIs too, so each source also
@@ -251,10 +252,14 @@ nor notes text.
 
 **Cursor.** The mailbox's history id. Each pass reads `users.history.list` from it (`messageAdded`, `labelAdded`),
 and the next cursor is the history id that response reports. An expired history id (`404`) reads open state again;
-keys make the overlap harmless.
+keys make the overlap harmless. The history id has no lookback, so a thread the history names is skipped only when
+it is gone (`404`, deleted since). Any other failure reading it, a `403` included, fails the pass and the cursor
+stays.
 
 **First run.** The latest message of each inbox thread with a message in the last 14 days, and starred messages from
-the last 14 days. Both lists are newest first, and paging stops at the first older entry. The cursor is the profile's
+the last 14 days. Both lists are newest first, and paging stops at the first older entry. The inbox list is ordered by a thread's
+newest message of any kind, so paging stops at a thread whose newest message, drafts included, is older; a thread
+with a recent draft and older mail is skipped and paging goes on. The cursor is the profile's
 history id, read before listing, so nothing that arrives during the pass is missed.
 
 **Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, or
@@ -286,8 +291,12 @@ message's sender).
 ### Calendar
 
 **Each pass.** Events on the primary calendar, expanded to single instances, that end after now and start within 30
-days, updated since 15 minutes before the cursor, with deleted events. If Google refuses that `updatedMin` as too old
-(`410`), the whole window is read; the fingerprints keep unchanged events quiet.
+days, updated since 15 minutes before the cursor, with deleted events. An event Beacon knows that moved into the
+past or beyond 30 days is not in that list, so the pass also reads events updated since then with no time window and
+not expanded (a moved instance of a recurring event is its own event there), and compares the ones Beacon knows.
+That move is `changed` (or `cancelled`), not a silence. If Google refuses that `updatedMin` as too old (`410`), the
+whole window is read; the fingerprints keep unchanged events quiet, and a move out of the window in that gap is not
+seen.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
 its summary, location, start, end and status, a hash of its start and end, the person's response, and whether it is

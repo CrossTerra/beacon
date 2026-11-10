@@ -225,12 +225,22 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 		floor = since.Add(-source.Lookback)
 	}
 	events, tz, err := c.list(ctx, now, floor)
-	if isStatus(err, http.StatusGone) && !floor.IsZero() {
+	gone := isStatus(err, http.StatusGone) && !floor.IsZero()
+	if gone {
 		// updatedMin is too old for the API. Read the whole window; the fingerprints keep unchanged events quiet.
 		events, tz, err = c.list(ctx, now, time.Time{})
 	}
 	if err != nil {
 		return source.Collected{}, err
+	}
+	if !first && !gone {
+		// An event Beacon knows that moved into the past or beyond the window is not in that list. It is read
+		// without the window, so the move is a change and not a silence.
+		moved, err := c.movedOut(ctx, floor, events, cur.Events)
+		if err != nil {
+			return source.Collected{}, err
+		}
+		events = append(events, moved...)
 	}
 	obs := c.observed()
 	var items []source.Item
@@ -357,6 +367,42 @@ func (c *Calendar) list(ctx context.Context, now, updatedMin time.Time) ([]calEv
 		q.Set("showDeleted", "true")
 	}
 	return listEvents(ctx, &c.common, q)
+}
+
+// movedOut reads events updated since floor with no time window, not expanded, and keeps those Beacon knows that the
+// windowed list did not return. A moved instance of a recurring event is its own event here, under its instance id.
+func (c *Calendar) movedOut(ctx context.Context, floor time.Time, inWindow []calEvent, known map[string]calSeen) ([]calEvent, error) {
+	if len(known) == 0 {
+		return nil, nil
+	}
+	fields := "items(id,status,etag,summary,location,start,end,created,updated,htmlLink,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
+	if c.bodies {
+		fields += ",description"
+	}
+	fields += "),nextPageToken,timeZone"
+	q := url.Values{
+		"singleEvents": {"false"},
+		"showDeleted":  {"true"},
+		"updatedMin":   {floor.Format(time.RFC3339)},
+		"maxResults":   {"250"},
+		"fields":       {fields},
+	}
+	all, _, err := listEvents(ctx, &c.common, q)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, e := range inWindow {
+		seen[e.ID] = true
+	}
+	var out []calEvent
+	for _, e := range all {
+		if _, ok := known[e.ID]; ok && !seen[e.ID] {
+			seen[e.ID] = true
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 // listEvents pages through the primary calendar's events.
