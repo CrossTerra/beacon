@@ -127,7 +127,8 @@ same pull request.
 - **Slack is read by search and by watermark.** Search indexes with a delay, which the 15-minute lookback covers;
   mentions are searched over 7 days, which also finds one an edit added. A quiet followed thread or group direct
   message is read every 15 minutes, so a message there can arrive that late; a deletion is checked every 15 minutes,
-  20 a pass, so it can take longer when many asks are open. An edit that adds a mention in a message Beacon read only by history or replies, not search, is not seen.
+  20 a pass, so it can take longer when many asks are open. An edit that adds a mention in a message Beacon read
+  only by history or replies, not search, is not seen.
 - **An installed app's OAuth secret is not secret to Google.** Google treats a Desktop app's client secret as
   public; what protects the grant is the person's consent, PKCE and the refresh token, which stays in the keychain.
 - **Other people are attributed in metadata, not `by`.** Signal accepts `by` only for identities an actor already
