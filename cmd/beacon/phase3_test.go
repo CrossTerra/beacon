@@ -16,6 +16,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/egress/egresstest"
 	"github.com/CrossTerra/beacon/internal/google/googletest"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
 )
@@ -498,6 +499,15 @@ func TestPersonalPrefixesMustBeRestricted(t *testing.T) {
 	if len(personalEvents(sig)) == 0 {
 		t.Fatal("calendar, which is restricted, sent nothing")
 	}
+	// service status reads the same reasons from the pass record.
+	pass, err := service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := service.FormatStatus(service.Job{}, pass, nil, "none")
+	if !strings.Contains(status, "withheld: gmail gmail:* prefix_unrestricted\n") || !strings.Contains(status, "withheld: drive drive:* prefix_unrestricted\n") || strings.Contains(status, "calendar") {
+		t.Fatalf("status:\n%s", status)
+	}
 	held, err := os.ReadFile(filepath.Join(dir, "state", "held.jsonl"))
 	if err != nil || !strings.Contains(string(held), "gmail:t1:starred:m1") || !strings.Contains(string(held), "drive:f1:comment:c2") {
 		t.Fatalf("not held:\n%s", held)
@@ -522,6 +532,9 @@ func TestUnreadableRestrictionsSendNothingPersonal(t *testing.T) {
 	}
 	if k := personalEvents(sig); len(k) != 0 {
 		t.Fatalf("sent %v without proof the prefixes are restricted", k)
+	}
+	if pass, err := service.ReadPass(filepath.Join(dir, "state")); err != nil || len(pass.Withheld) != 3 || pass.Withheld[0].Reason != service.WithheldUnknown {
+		t.Fatalf("pass %+v %v", pass, err)
 	}
 	st, err := cursor.Read(filepath.Join(dir, "state"))
 	if err != nil {

@@ -37,7 +37,7 @@ sources:
 | `state` | The state directory: outbox, hold queue, dropped record, instance id. |
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25). Default `5m`. |
-| `poll_interval` | How often `beacon run` makes a pass. Default `1m`. |
+| `poll_interval` | How often `beacon run` makes a pass. Default `1m`. The launchd agent runs this loop. |
 | `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`. See [Sources](#sources). |
 
 ## The Signal key

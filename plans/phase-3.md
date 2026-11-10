@@ -57,8 +57,8 @@ reads the owner of a restricted prefix. A config with a Google source needs `per
 **Enforced, not assumed.** A send pass with a Google source reads `GET /api/restrictions` (Beacon's key needs
 `read`) and sends a personal subject only when the longest restricted stem over it is its own (`gmail:*`). Not
 restricted: the source's send items are held, and `run` says which prefix to restrict. Unreadable: they are not
-recorded and the cursor stays. Pending bodies and `outbox retry --rejected` wait the same way. The pass report carries
-this (`Withheld`) for `beacon service status` to show once the service (#10) lands.
+recorded and the cursor stays. Pending bodies and `outbox retry --rejected` wait the same way. The pass record carries
+it, and `beacon service status` prints a `withheld:` line per source.
 `person.identities` for each Google source is `email:<address>` (DEC-27); Gmail checks it against the profile,
 Drive against `about`, Calendar against the attendee or organizer marked `self`.
 

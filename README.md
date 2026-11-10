@@ -25,6 +25,10 @@ go build -trimpath -o beacon ./cmd/beacon
 ./beacon outbox                # what was sent
 ```
 
+To run it continuously on macOS, build with [`scripts/build-local.sh`](scripts/build-local.sh) so the binary keeps a
+stable code signature, then `beacon service install`. That is a per-user launchd agent, not root. See
+[`docs/commands.md`](docs/commands.md).
+
 | Read | For |
 | --- | --- |
 | [`docs/configuration.md`](docs/configuration.md) | The config file, the Signal key, sources |

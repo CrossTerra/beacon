@@ -42,9 +42,10 @@ One pass of `beacon run`:
    and the rest stay pending, because a later body may close an ask an earlier one opens.
 
 A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing except `beacon run --first`,
-which records in `first.json` which sources completed that summary. It does not write cursors, the outbox, or the
-queue. It may contact source APIs to collect; it does not contact Signal. It reads the outbox, the hold queue and
-the cursor, so it shows what a send pass would do next.
+which records in `first.json` which sources completed that summary. It does not write cursors, the outbox, the
+queue, or `pass.json`. It may contact source APIs to collect; it does not contact Signal. It reads the outbox, the
+hold queue and the cursor, so it shows what a send pass would do next. Without `--once` or `--first`, the pass
+repeats every `poll_interval`, and it still writes nothing.
 
 ## Packages
 
@@ -68,6 +69,7 @@ the cursor, so it shows what a send pass would do next.
 | `internal/runner` | One pass: collect, decide, record, send. The only code that hands item content to the client. |
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
+| `internal/service` | The per-user launchd agent: the plist, the last-pass record, log rotation. It does not read a credential and it does not send. |
 
 Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
 `internal/egress/egresstest` (a transport that fails the test on any host not on the egress list), and
@@ -85,6 +87,9 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `first.json` | Sources whose `beacon run --first` completed. `accept-first` requires it | No |
 | `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
 | `seed` | Imported seed lines (DEC-24) | No |
+| `pass.json` | The last pass: time, outcome, whether this instance held the lease, and this instance's id when it did. A failed start records the reason here even when it did not send, and the failure streak that sets the backoff. Personal sources the pass withheld, with the prefix and a fixed reason. No item content. A successful dry run does not write it | No |
+| `service.leaf` | The SHA-256 of the signing certificate recorded by `beacon service install`. `beacon run` refuses a binary whose leaf does not match | No |
+| `service.stdout.log`, `service.stderr.log` | What the launchd agent prints. Standard error is the JSON log. Rotated by size, one generation kept | No |
 
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue

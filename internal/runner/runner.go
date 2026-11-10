@@ -46,6 +46,11 @@ type Runner struct {
 	// the process at that point.
 	AfterAppend func(key string)
 
+	// Stop, when set, is checked before each event send. A true result ends the pass without an error after the
+	// in-flight send, and leaves the rest pending. It does not cancel the write already in progress: the caller
+	// keeps that context alive. A lease renewal already inside Ensure finishes; no further event send starts after it.
+	Stop func() bool
+
 	// Cursors holds committed cursors. Nil means the sources have no cursor and none is stored. A cursor is stored
 	// only after every item of that source's pass has been decided, and only when sending (DEC-23).
 	Cursors Cursors
@@ -611,7 +616,12 @@ func transient(err error) bool {
 	return errors.Is(err, signal.ErrUnavailable) || errors.Is(err, context.DeadlineExceeded)
 }
 
+func (r *Runner) stopped() bool { return r.Stop != nil && r.Stop() }
+
 func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
+	if r.stopped() {
+		return nil
+	}
 	st, err := r.Lease.Ensure(ctx)
 	rep.Lease = &st
 	if err != nil {
@@ -630,6 +640,9 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 	}
 	r.Log.Log(logs.LeaseHeld, logs.Period(st.Period), logs.Until(st.Until))
 	for _, e := range r.Outbox.PendingEvents() {
+		if r.stopped() {
+			return nil
+		}
 		if r.withholds(e.Subject) != "" {
 			// Appended while its stem was restricted, and it is not now (or cannot be shown to be). It stays pending.
 			rep.WithheldPending++
