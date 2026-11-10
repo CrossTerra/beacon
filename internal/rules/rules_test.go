@@ -314,3 +314,25 @@ func TestOwnActWithoutIdentityWarns(t *testing.T) {
 		t.Fatalf("%v", warnings)
 	}
 }
+
+func TestLists(t *testing.T) {
+	f, err := Parse([]byte(`rules:
+  - name: gmail-never
+    match: {source: gmail}
+    tier: never
+  - name: drive-body
+    match: {source: drive, type: assigned}
+    tier: hold
+    fields: [title, body]
+  - name: any
+    match: {}
+    tier: send
+    fields: [title]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Lists("drive", "body") || f.Lists("gmail", "body") || f.Lists("calendar", "body") || !f.Lists("calendar", "title") {
+		t.Fatal("Lists")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/egress"
@@ -58,6 +59,43 @@ type Runner struct {
 	Unaccepted map[string]bool
 	// Seed drops subjects a seed file marks never, before the rules file (DEC-24). Nil means no seed.
 	Seed Seeder
+
+	// Personal maps an enabled source to its stem, for the withheld report. The check itself uses source.PersonalStems,
+	// which does not depend on the config: a pending body stays personal after its source is removed.
+	Personal map[string]string
+	// Restrictions reads Signal's restricted prefixes. A send pass with Personal set needs it.
+	Restrictions RestrictionReader
+
+	// restricted is this pass's restricted prefixes; restrictErr is why they could not be read.
+	restricted   []string
+	restrictErr  error
+	restrictRead bool
+	deferred     map[string]bool
+	gaps         []Gap
+}
+
+// Gap is a source that could not read its whole window: its change history expired (Expired), or a read stopped at
+// its limit (Cut), or both.
+type Gap struct {
+	Source  string
+	Expired bool
+	Cut     bool
+}
+
+// RestrictionReader reads the restricted subject prefixes from Signal.
+type RestrictionReader interface {
+	Restrictions(ctx context.Context) ([]string, error)
+}
+
+// Withheld is a personal source whose send items this pass did not send, and why. Reason is
+// prefix_unrestricted (Signal answered, and the stem is not restricted: send items are held) or
+// restrictions_unknown (the restrictions could not be read: send items are not recorded, and the cursor stays).
+type Withheld struct {
+	Source string
+	// Prefix is the restriction that is missing, "gmail:*".
+	Prefix string
+	Reason logs.Reason
+	Items  int
 }
 
 // Cursors is the committed cursor of each source.
@@ -84,6 +122,9 @@ type Planned struct {
 	Skipped string
 	// Unaccepted is true when the source's first run has not been accepted, so a send pass did not record the item.
 	Unaccepted bool
+	// Withheld says why a send item of a personal source was not sent: prefix_unrestricted (it was held instead)
+	// or restrictions_unknown (it was not recorded).
+	Withheld logs.Reason
 	// Err is a projection error; such an item is neither appended nor sent.
 	Err error
 }
@@ -115,6 +156,14 @@ type Report struct {
 	Pending int
 	// Failed are sources that could not be collected. Their cursors were not moved.
 	Failed []SourceFailure
+	// Withheld are personal sources whose send items were not sent because their stem is not restricted in Signal.
+	Withheld []Withheld
+	// WithheldPending is how many pending bodies on personal subjects were not sent for the same reason.
+	WithheldPending int
+	// RestrictionsReason is why the restricted prefixes could not be read, when they could not.
+	RestrictionsReason logs.Reason
+	// Gaps are sources that could not read their whole window: an expired history, or a read cut at its limit.
+	Gaps []Gap
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -152,6 +201,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 	var items []source.Item
 	var passes []passSource
 	var failed []SourceFailure
+	r.gaps = nil
 	for _, s := range r.Sources {
 		var cursor []byte
 		if r.Cursors != nil {
@@ -186,6 +236,18 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid+got.Dropped), logs.Why(logs.ReasonItem))
 		}
 		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept))
+		if got.Gap || got.Cut {
+			cut := 0
+			if got.Cut {
+				cut = 1
+			}
+			if got.Gap {
+				r.Log.Log(logs.HistoryGap, logs.Source(s.Name()), logs.Count("cut", cut))
+			} else {
+				r.Log.Log(logs.ReadCut, logs.Source(s.Name()))
+			}
+			r.gaps = append(r.gaps, Gap{Source: s.Name(), Expired: got.Gap, Cut: got.Cut})
+		}
 		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -244,8 +306,15 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
 
 	items, passes, failed := r.collect(ctx)
-	rep.Failed = failed
+	rep.Failed, rep.Gaps = failed, r.gaps
+	if err := r.readRestrictions(ctx, r.Send); err != nil {
+		return rep, err
+	}
+	if r.restrictErr != nil {
+		rep.RestrictionsReason = Classify(r.restrictErr)
+	}
 	projected := map[string]int{}
+	withheld := map[string]*Withheld{}
 	for _, it := range items {
 		p, err := r.decide(it, view)
 		if err != nil {
@@ -254,7 +323,20 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		if p.Err != nil {
 			projected[it.Source]++
 		}
+		if p.Withheld != "" {
+			w := withheld[it.Source]
+			if w == nil {
+				w = &Withheld{Source: it.Source, Prefix: r.Personal[it.Source] + "*", Reason: p.Withheld}
+				withheld[it.Source] = w
+			}
+			w.Items++
+		}
 		rep.Items = append(rep.Items, p)
+	}
+	for _, name := range sortedKeys(withheld) {
+		w := withheld[name]
+		rep.Withheld = append(rep.Withheld, *w)
+		r.Log.Log(logs.Withheld, logs.Source(name), logs.Count("items", w.Items), logs.Why(w.Reason))
 	}
 	// A projection error is dropped and logged by count. It must not freeze the source, and the error text is
 	// not logged: it can name a field.
@@ -269,7 +351,8 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	// The cursor moves only after every item of the pass is decided. A crash before this collects the same items
 	// again; keys make that harmless.
 	for _, p := range passes {
-		if !p.commit {
+		// A source whose send items could not be recorded keeps its cursor, so they are collected again.
+		if !p.commit || r.deferred[p.name] {
 			continue
 		}
 		if err := r.Cursors.Commit(p.name, p.next); err != nil {
@@ -314,6 +397,22 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	}
 	if r.Unaccepted[it.Source] {
 		p.Unaccepted = true
+	}
+	if d.Tier == rules.Send && r.record(it) {
+		switch p.Withheld = r.withholds(it.Subject); p.Withheld {
+		case logs.ReasonUnrestricted:
+			// Signal would show it to every reader. Hold it locally instead.
+			p.Tier = rules.Hold
+			_, body, _, err := r.project(it, d.Rule, view)
+			p.Body, p.Err = body, err
+			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
+		case logs.ReasonRestrictionsUnknown:
+			// Not recorded, and the cursor stays: a later pass that can read the restrictions decides it again.
+			r.deferred[it.Source] = true
+			_, body, _, err := r.project(it, d.Rule, view)
+			p.Body, p.Err = body, err
+			return p, nil
+		}
 	}
 	switch d.Tier {
 	case rules.Never:
@@ -409,6 +508,88 @@ func (r *Runner) finishNever(p Planned) (Planned, error) {
 	return p, r.Queue.Drop(queue.Dropped{Key: p.Item.Key, Rule: p.Rule, DroppedAt: r.Now().UTC()})
 }
 
+// readRestrictions reads Signal's restricted prefixes for a send pass that might send a personal subject. A failure
+// is kept, not returned: personal sends wait and everything else goes on. Only an interrupt ends the pass.
+func (r *Runner) readRestrictions(ctx context.Context, sending bool) error {
+	r.restricted, r.restrictErr, r.restrictRead, r.deferred = nil, nil, false, map[string]bool{}
+	if !sending || !r.needsRestrictions() {
+		return nil
+	}
+	r.restrictRead = true
+	if r.Restrictions == nil {
+		r.restrictErr = errors.New("runner: no restriction reader")
+		return nil
+	}
+	r.restricted, r.restrictErr = r.Restrictions.Restrictions(ctx)
+	if r.restrictErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		r.Log.Log(logs.RestrictionsUnread, logs.Why(Classify(r.restrictErr)))
+	}
+	return nil
+}
+
+// needsRestrictions reports whether this pass might send a personal subject: a personal source is enabled, or the
+// outbox still holds a pending or rejected event under a personal stem. The stem list is fixed, so removing the
+// source does not skip the check.
+func (r *Runner) needsRestrictions() bool {
+	if len(r.Personal) > 0 {
+		return true
+	}
+	if r.Outbox == nil {
+		return false
+	}
+	for _, e := range r.Outbox.Entries() {
+		if e.Kind == outbox.Event && (e.State == outbox.Pending || e.State == outbox.Rejected) && source.PersonalStem(e.Subject) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// withholds says why a body on subject may not be sent now: the subject is personal and Signal does not, or cannot
+// be shown to, keep it private. Signal reads a subject's owner after the longest restricted stem it is under, so that
+// stem must be exactly the personal stem. The stems are fixed (source.PersonalStems), not the enabled sources.
+func (r *Runner) withholds(subject string) logs.Reason {
+	stem := source.PersonalStem(subject)
+	if stem == "" {
+		return ""
+	}
+	if !r.restrictRead || r.restrictErr != nil {
+		return logs.ReasonRestrictionsUnknown
+	}
+	if RestrictingStem(r.restricted, subject) != stem {
+		return logs.ReasonUnrestricted
+	}
+	return ""
+}
+
+// RestrictingStem is the longest restricted stem a subject is under, without its "*", or "" when none is. It is
+// Signal's rule (restrictingStem in Signal's domain/visibility.ts).
+func RestrictingStem(prefixes []string, subject string) string {
+	found := ""
+	for _, p := range prefixes {
+		if !strings.HasSuffix(p, ":*") {
+			continue
+		}
+		stem := strings.TrimSuffix(p, "*")
+		if strings.HasPrefix(subject, stem) && len(stem) > len(found) {
+			found = stem
+		}
+	}
+	return found
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Classify maps an error to a fixed reason code, for logs and for what `beacon run` prints.
 func Classify(err error) logs.Reason {
 	var denied *egress.DeniedError
@@ -440,6 +621,8 @@ func Classify(err error) logs.Reason {
 		return logs.ReasonScope
 	case errors.Is(err, source.ErrIdentity):
 		return logs.ReasonIdentity
+	case errors.Is(err, signal.ErrNoRead):
+		return logs.ReasonNoRead
 	case errors.As(err, &pathErr):
 		return logs.ReasonState
 	}
@@ -456,6 +639,14 @@ func (r *Runner) stopped() bool { return r.Stop != nil && r.Stop() }
 func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 	if r.stopped() {
 		return nil
+	}
+	// Again, immediately before anything pending leaves. A restriction lifted while this pass was collecting is
+	// honoured; one that cannot be re-read keeps personal bodies pending.
+	if err := r.readRestrictions(ctx, true); err != nil {
+		return err
+	}
+	if r.restrictErr != nil {
+		rep.RestrictionsReason = Classify(r.restrictErr)
 	}
 	st, err := r.Lease.Ensure(ctx)
 	rep.Lease = &st
@@ -477,6 +668,11 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 	for _, e := range r.Outbox.PendingEvents() {
 		if r.stopped() {
 			return nil
+		}
+		if r.withholds(e.Subject) != "" {
+			// Appended while its stem was restricted, and it is not now (or cannot be shown to be). It stays pending.
+			rep.WithheldPending++
+			continue
 		}
 		if !r.Now().Before(st.Until) {
 			r.Log.Log(logs.LeaseExpired, logs.Period(st.Period))

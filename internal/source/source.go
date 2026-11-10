@@ -21,7 +21,7 @@ type Item struct {
 	// Type is the kind of change, without the source prefix ("review_requested").
 	Type string `json:"type"`
 	// EventTitle is a short description of this change, used as the event title. It is not a source field and not
-	// the object's title. GitHub and Jira set it. Empty means the projection uses the title field for the event
+	// the object's title. Every service source sets it. Empty means the projection uses the title field for the event
 	// title as well, which is how a fixture that omits it behaves.
 	EventTitle string    `json:"event_title,omitempty"`
 	OccurredAt time.Time `json:"occurred_at"`
@@ -60,6 +60,23 @@ const (
 	StateVersion    = "version"
 )
 
+// PersonalStems are subject prefixes Signal keeps private only when that prefix is restricted (DEC-10). They are
+// fixed, not taken from the enabled sources: a body already in the outbox is still personal after its source is
+// removed from the config. slack:dm: is here before the Slack source exists, so a direct-message body cannot leave
+// unchecked.
+var PersonalStems = []string{"gmail:", "calendar:", "drive:", "slack:dm:"}
+
+// PersonalStem is the longest personal stem subject starts with, or "" when it is not personal.
+func PersonalStem(subject string) string {
+	found := ""
+	for _, stem := range PersonalStems {
+		if strings.HasPrefix(subject, stem) && len(stem) > len(found) {
+			found = stem
+		}
+	}
+	return found
+}
+
 // Collected is one collect. Next is the cursor to store after every item of this pass is decided. A nil Next
 // leaves the committed cursor where it is. Dropped is items the source refused and did not return; the runner
 // logs the count and does not fail the pass.
@@ -67,6 +84,12 @@ type Collected struct {
 	Items   []Item
 	Next    []byte
 	Dropped int
+	// Gap is true when the source could not read every change since the cursor (Gmail's history expired) and
+	// re-read what it could. The runner reports it.
+	Gap bool
+	// Cut is true when a read stopped at its limit (an open-state read, or a gap re-read), so older items in its
+	// window were not read. The cursor still moves; the runner reports it.
+	Cut bool
 }
 
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.

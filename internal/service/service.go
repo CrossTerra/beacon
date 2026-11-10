@@ -201,7 +201,23 @@ type Pass struct {
 	Holder  string    `json:"holder,omitempty"`
 	// Failures is the streak of failed starts. It sets the backoff. A clean pass leaves it zero.
 	Failures int `json:"failures,omitempty"`
+	// Withheld are personal sources whose send items the pass did not send, because Signal does not restrict their
+	// subject prefix or the restrictions could not be read.
+	Withheld []Withheld `json:"withheld,omitempty"`
 }
+
+// Withheld is one personal source a pass did not send for. Every field is a name or a fixed code, never content.
+type Withheld struct {
+	Source string `json:"source"`
+	Prefix string `json:"prefix"`
+	Reason string `json:"reason"`
+}
+
+// Reasons a pass withholds a personal source.
+const (
+	WithheldUnrestricted = "prefix_unrestricted"
+	WithheldUnknown      = "restrictions_unknown"
+)
 
 // Lease values recorded on a pass.
 const (
@@ -213,6 +229,8 @@ const (
 var (
 	outcomePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
 	holderPattern  = regexp.MustCompile(`^[0-9a-f]{16}$`)
+	sourcePattern  = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	prefixPattern  = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,62}:\*$`)
 )
 
 // ErrPass means the pass record is missing a required field or is not in the fixed set. Its text is fixed: it does
@@ -270,6 +288,14 @@ func validate(p Pass) error {
 	}
 	if p.Lease == LeaseHeld && p.Holder == "" {
 		return ErrPass
+	}
+	if len(p.Withheld) > 16 {
+		return ErrPass
+	}
+	for _, w := range p.Withheld {
+		if !sourcePattern.MatchString(w.Source) || !prefixPattern.MatchString(w.Prefix) || (w.Reason != WithheldUnrestricted && w.Reason != WithheldUnknown) {
+			return ErrPass
+		}
 	}
 	if p.Lease != LeaseHeld && p.Holder != "" {
 		return ErrPass
@@ -589,6 +615,14 @@ func FormatStatus(job Job, pass Pass, passErr error, identity string) string {
 	default:
 		identity = "unreadable"
 	}
-	return fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\nlast_pass: %s\noutcome: %s\nlease: %s\nholder: %s\nidentity: %s\n",
+	out := fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\nlast_pass: %s\noutcome: %s\nlease: %s\nholder: %s\nidentity: %s\n",
 		loaded, running, pid, last, outcome, lease, holder, identity)
+	if passErr == nil {
+		// One line per personal source the last pass did not send for, and why: ask Signal's admin to restrict the
+		// prefix, or give Beacon's key the read scope.
+		for _, w := range pass.Withheld {
+			out += fmt.Sprintf("withheld: %s %s %s\n", w.Source, w.Prefix, w.Reason)
+		}
+	}
+	return out
 }

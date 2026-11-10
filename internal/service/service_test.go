@@ -273,3 +273,32 @@ func bytesRepeat(b byte, n int) []byte {
 	}
 	return out
 }
+
+func TestPassWithheld(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC)
+	p := Pass{At: at, Outcome: "ok", Withheld: []Withheld{
+		{Source: "gmail", Prefix: "gmail:*", Reason: WithheldUnrestricted},
+		{Source: "drive", Prefix: "drive:*", Reason: WithheldUnknown},
+	}}
+	if err := WritePass(dir, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadPass(dir)
+	if err != nil || len(got.Withheld) != 2 {
+		t.Fatalf("%v %+v", err, got)
+	}
+	out := FormatStatus(Job{}, got, nil, "none")
+	if !strings.Contains(out, "withheld: gmail gmail:* prefix_unrestricted\n") || !strings.Contains(out, "withheld: drive drive:* restrictions_unknown\n") {
+		t.Fatalf("%s", out)
+	}
+	for _, bad := range []Withheld{
+		{Source: "gmail", Prefix: "gmail:*", Reason: "Budget review"},
+		{Source: "gmail", Prefix: "gmail:winton thread", Reason: WithheldUnknown},
+		{Source: "Gmail!", Prefix: "gmail:*", Reason: WithheldUnknown},
+	} {
+		if err := WritePass(dir, Pass{At: at, Outcome: "ok", Withheld: []Withheld{bad}}); err == nil {
+			t.Errorf("wrote %+v", bad)
+		}
+	}
+}

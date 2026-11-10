@@ -378,6 +378,25 @@ func (f *File) Decide(it source.Item) Decision {
 	return Decision{Tier: Never}
 }
 
+// Lists reports whether a send or hold rule that can match the source names field in its fields. A source uses it
+// to skip reading what no rule could send.
+func (f *File) Lists(sourceName, field string) bool {
+	for _, r := range f.Rules {
+		if r.Tier != Send && r.Tier != Hold {
+			continue
+		}
+		if r.Match.Source != nil && !r.Match.Source.Matches(sourceName) {
+			continue
+		}
+		for _, name := range r.Fields {
+			if name == field {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // GapsAbove reports whether a rule before matched could still match, and names a field or actor the item does not
 // have. A condition the item does have that already fails proves the rule cannot apply, so it does not block a
 // later send. A nil matched means every rule is above the default.

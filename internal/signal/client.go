@@ -1,5 +1,5 @@
-// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events and does nothing
-// else: it reads no log, thread or actor.
+// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events and reads the
+// restricted subject prefixes with GET /api/restrictions. It reads no log, thread or actor.
 package signal
 
 import (
@@ -47,6 +47,9 @@ var ErrUnauthorized = errors.New("signal: the key was refused (401)")
 
 // ErrUnavailable means the write did not get a final answer within the attempts allowed. The body stays pending.
 var ErrUnavailable = errors.New("signal: no final answer; the body stays pending")
+
+// ErrNoRead means the key may not read the restricted prefixes (403): it has no read scope.
+var ErrNoRead = errors.New("signal: the key cannot read the restricted prefixes (403); it needs the read scope")
 
 // Client writes events.
 type Client struct {
@@ -220,4 +223,53 @@ func (c *Client) retryAfter(h string) time.Duration {
 		d = time.Until(t)
 	}
 	return max(time.Second, min(d, c.MaxRetryAfter))
+}
+
+// Restrictions returns the restricted subject prefixes (`gmail:*`), from GET /api/restrictions. It makes one attempt:
+// a failure is ErrUnauthorized, ErrNoRead or ErrUnavailable, and the caller sends nothing personal until a later
+// pass reads them.
+func (c *Client) Restrictions(ctx context.Context) ([]string, error) {
+	u := c.base.JoinPath("/api/restrictions")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	c.secret.Authorize(req.Header)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var denied *egress.DeniedError
+		if errors.As(err, &denied) {
+			return nil, err
+		}
+		return nil, ErrUnavailable
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, ErrUnauthorized
+	case resp.StatusCode == http.StatusForbidden:
+		return nil, ErrNoRead
+	case resp.StatusCode != http.StatusOK:
+		return nil, ErrUnavailable
+	}
+	var parsed struct {
+		Data []struct {
+			Prefix string `json:"prefix"`
+		} `json:"data"`
+		NextCursor *string `json:"next_cursor"`
+	}
+	// A list Beacon cannot read whole is not proof of anything: fail closed.
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed.Data == nil || (parsed.NextCursor != nil && *parsed.NextCursor != "") {
+		return nil, ErrUnavailable
+	}
+	out := make([]string, 0, len(parsed.Data))
+	for _, d := range parsed.Data {
+		out = append(out, d.Prefix)
+	}
+	return out, nil
 }

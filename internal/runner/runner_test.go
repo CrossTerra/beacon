@@ -592,3 +592,134 @@ func (w *blockWriter) Write(ctx context.Context, _ []byte) (signal.Result, error
 	}
 	return signal.Result{Outcome: signal.Written, Status: 201, EventID: "evt_x"}, nil
 }
+
+type listedRestrictions []string
+
+func (l listedRestrictions) Restrictions(context.Context) ([]string, error) { return l, nil }
+
+// flipRestrictions answers the first read one way and every later read another, so a test can lift a restriction
+// between decide and send.
+type flipRestrictions struct {
+	n      int
+	first  []string
+	second []string
+}
+
+func (f *flipRestrictions) Restrictions(context.Context) ([]string, error) {
+	f.n++
+	if f.n == 1 {
+		return f.first, nil
+	}
+	return f.second, nil
+}
+
+func personalBody() []byte {
+	return []byte(`{"subject":"gmail:winton:thread:t1","type":"gmail.starred","key":"gmail:t1:starred:m1","occurred_at":"2026-11-08T10:00:00.000Z","open":{}}`)
+}
+
+func sentPersonal(reqs []signaltest.Request) bool {
+	for _, req := range reqs {
+		if bytes.Contains(req.Body, []byte("gmail:winton")) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPendingPersonalWithoutTheSource(t *testing.T) {
+	f := newFixture(t)
+	r, done := f.runner(true, nil)
+	defer done()
+	if err := r.Outbox.Append(outbox.Event, "gmail:t1:starred:m1", "gmail:winton:thread:t1", "gmail-starred", personalBody()); err != nil {
+		t.Fatal(err)
+	}
+	r.Personal = nil
+	r.Restrictions = listedRestrictions{}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentPersonal(f.server.Requests()) {
+		t.Fatal("a pending gmail body was sent after its source was removed")
+	}
+	if rep.WithheldPending != 1 {
+		t.Fatalf("withheld pending %d", rep.WithheldPending)
+	}
+	e, ok := r.Outbox.Get("gmail:t1:starred:m1")
+	if !ok || e.State != outbox.Pending {
+		t.Fatalf("state %v %v", ok, e.State)
+	}
+}
+
+func TestLiftedRestrictionBeforeSend(t *testing.T) {
+	f := newFixture(t)
+	r, done := f.runner(true, nil)
+	defer done()
+	if err := r.Outbox.Append(outbox.Event, "gmail:t1:starred:m1", "gmail:winton:thread:t1", "gmail-starred", personalBody()); err != nil {
+		t.Fatal(err)
+	}
+	flip := &flipRestrictions{first: []string{"gmail:*"}}
+	r.Restrictions = flip
+	r.Personal = map[string]string{"gmail": "gmail:"}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flip.n < 2 {
+		t.Fatalf("restrictions read %d times; the send must re-read", flip.n)
+	}
+	if sentPersonal(f.server.Requests()) || rep.WithheldPending != 1 {
+		t.Fatalf("sent, or withheld pending %d", rep.WithheldPending)
+	}
+}
+
+func TestRetryWithholdsRemovedSource(t *testing.T) {
+	f := newFixture(t)
+	r, done := f.runner(true, nil)
+	defer done()
+	if err := r.Outbox.Append(outbox.Event, "gmail:t1:m1", "gmail:winton:thread:t1", "r", personalBody()); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Outbox.Mark("gmail:t1:m1", outbox.Rejected, "", 400, "invalid", "no"); err != nil {
+		t.Fatal(err)
+	}
+	r.Personal = nil
+	r.Restrictions = listedRestrictions{}
+	rep, err := r.RetryRejected(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sentPersonal(f.server.Requests()) || rep.Withheld != 1 {
+		t.Fatalf("sent, withheld %d", rep.Withheld)
+	}
+}
+
+func TestRestrictingStem(t *testing.T) {
+	for _, tc := range []struct {
+		prefixes []string
+		subject  string
+		want     string
+	}{
+		{[]string{"gmail:*"}, "gmail:winton:thread:1", "gmail:"},
+		{[]string{"gmail:*", "gmail:winton:*"}, "gmail:winton:thread:1", "gmail:winton:"},
+		{[]string{"calendar:*"}, "gmail:winton:thread:1", ""},
+		{[]string{"gmail"}, "gmail:winton:thread:1", ""},
+		{nil, "drive:winton:f1", ""},
+	} {
+		if got := RestrictingStem(tc.prefixes, tc.subject); got != tc.want {
+			t.Errorf("%v %s: %q, want %q", tc.prefixes, tc.subject, got, tc.want)
+		}
+	}
+	r := &Runner{Personal: map[string]string{"gmail": "gmail:"}, restrictRead: true, restricted: []string{"gmail:*", "gmail:winton:*"}}
+	if r.withholds("gmail:winton:thread:1") != logs.ReasonUnrestricted {
+		t.Fatal("a longer stem moves the owner; the subject is not the person's")
+	}
+	r.restricted = []string{"gmail:*"}
+	if r.withholds("gmail:winton:thread:1") != "" || r.withholds("github:pr:a/b#1") != "" {
+		t.Fatal("withholds")
+	}
+	r.restrictRead = false
+	if r.withholds("gmail:winton:thread:1") != logs.ReasonRestrictionsUnknown {
+		t.Fatal("unread restrictions must withhold")
+	}
+}

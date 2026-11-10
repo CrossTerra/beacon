@@ -369,3 +369,27 @@ func TestEventTitleSurvivesDecision(t *testing.T) {
 		t.Fatalf("retry: %s", data)
 	}
 }
+
+func TestSubjectIsTheThreadTitle(t *testing.T) {
+	at := time.Date(2026, 11, 7, 11, 0, 0, 0, time.UTC)
+	mail := source.Item{
+		Source: "gmail", Subject: "gmail:winton:thread:t1", Key: "gmail:t1:m1", Type: "received", OccurredAt: at,
+		EventTitle: "New message", Fields: map[string]string{"subject": "Budget review", "from": "dana@example.com", "body": "SECRET-MAIL"},
+	}
+	b, data, err := Project(Input{Item: mail, Rule: rule("subject", "from"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "New message" || b.Open.Title != "Budget review" || bytes.Contains(data, []byte("SECRET-MAIL")) {
+		t.Fatalf("%s", data)
+	}
+	b, _, err = Project(Input{Item: mail, Rule: rule("from"), Person: person})
+	if err != nil || b.Open.Title != "" {
+		t.Fatalf("an unlisted subject titled the thread: %+v", b.Open)
+	}
+	mail.Fields["summary"] = "Summary wins"
+	b, _, _ = Project(Input{Item: mail, Rule: rule("subject", "summary"), Person: person})
+	if b.Open.Title != "Summary wins" {
+		t.Fatalf("summary before subject: %q", b.Open.Title)
+	}
+}

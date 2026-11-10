@@ -199,3 +199,34 @@ func TestDeadlineEndsRetryAfter(t *testing.T) {
 		t.Fatalf("err %v after %v", err, time.Since(start))
 	}
 }
+
+func TestRestrictions(t *testing.T) {
+	s := signaltest.New(token)
+	defer s.Close()
+	c, _ := client(t, s)
+	got, err := c.Restrictions(context.Background())
+	if err != nil || len(got) != 0 || got == nil {
+		t.Fatalf("%v %v", got, err)
+	}
+	s.Restrict("gmail:*", "drive:*")
+	got, err = c.Restrictions(context.Background())
+	if err != nil || len(got) != 2 || got[0] != "gmail:*" {
+		t.Fatalf("%v %v", got, err)
+	}
+	s.NoRead = true
+	if _, err := c.Restrictions(context.Background()); !errors.Is(err, signal.ErrNoRead) {
+		t.Fatal(err)
+	}
+	for _, reply := range []string{`{"data":[{"prefix":"gmail:*"}],"next_cursor":"more"}`, `{}`, `not json`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(reply)) }))
+		u, _ := url.Parse(srv.URL)
+		store := keychain.NewMemory()
+		store.Put("acct", token)
+		secret, _ := store.Get("acct")
+		c := signal.New(u, http.DefaultTransport, secret)
+		if _, err := c.Restrictions(context.Background()); !errors.Is(err, signal.ErrUnavailable) {
+			t.Errorf("%s: %v", reply, err)
+		}
+		srv.Close()
+	}
+}

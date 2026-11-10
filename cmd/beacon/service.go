@@ -431,6 +431,11 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 			p.Lease = service.LeaseNotTaken
 		}
 	}
+	if rep != nil {
+		for _, w := range rep.Withheld {
+			p.Withheld = append(p.Withheld, service.Withheld{Source: w.Source, Prefix: w.Prefix, Reason: string(w.Reason)})
+		}
+	}
 	if service.Failed(outcome) {
 		prev, err := service.ReadPass(dir)
 		p.Failures = service.NextFailures(prev, err == nil)

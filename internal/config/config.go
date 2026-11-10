@@ -83,6 +83,21 @@ type Source struct {
 	Projects []string `yaml:"projects,omitempty"`
 	// Site is a Jira Cloud site label. The host is <site>.atlassian.net.
 	Site string `yaml:"site,omitempty"`
+	// Account is the Google account a Gmail, Calendar or Drive source reads, its primary address. Its grant is in the
+	// keychain as google:<account>:client and google:<account>:refresh.
+	Account string `yaml:"account,omitempty"`
+}
+
+// GoogleKinds are the source kinds that share the Google grant.
+var GoogleKinds = []string{"gmail", "calendar", "drive"}
+
+// IsGoogle reports whether a source uses the Google grant.
+func (s Source) IsGoogle() bool {
+	switch s.Kind {
+	case "gmail", "calendar", "drive":
+		return true
+	}
+	return false
 }
 
 // SourceName is the name items and rules use.
@@ -119,6 +134,7 @@ var (
 	repoWildPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/\*$`)
 	projectPattern  = regexp.MustCompile(`^[A-Z][A-Z0-9]+$`)
 	sitePattern     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	accountPattern  = regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$`)
 	hostPattern     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$`)
 )
 
@@ -205,13 +221,23 @@ func (c *Config) validate() error {
 			if s.Path == "" {
 				errs = append(errs, fmt.Errorf("sources[%d]: a fixture needs path", i))
 			}
-			if s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" {
+			if s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" || s.Account != "" {
 				errs = append(errs, fmt.Errorf("sources[%d]: a fixture takes only kind, name and path", i))
 			}
 		case "github":
 			errs = append(errs, s.validateGitHub(i)...)
 		case "jira":
 			errs = append(errs, s.validateJira(i)...)
+		case "gmail", "calendar", "drive":
+			if s.Path != "" || s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" {
+				errs = append(errs, fmt.Errorf("sources[%d]: a %s source takes only kind, name and account; beacon source add google stores its grant", i, s.Kind))
+			}
+			if !accountPattern.MatchString(s.Account) {
+				errs = append(errs, fmt.Errorf("sources[%d]: a %s source needs account, the Google account's address in lowercase", i, s.Kind))
+			}
+			if !strings.HasPrefix(c.Person.Handle, "@") {
+				errs = append(errs, fmt.Errorf("sources[%d]: a %s source needs person.handle as @handle: personal subjects carry it (DEC-10)", i, s.Kind))
+			}
 		default:
 			errs = append(errs, fmt.Errorf("sources[%d]: unknown kind %q", i, s.Kind))
 		}
@@ -222,8 +248,8 @@ func (c *Config) validate() error {
 func (s Source) validateGitHub(i int) []error {
 	var errs []error
 	at := fmt.Sprintf("sources[%d]", i)
-	if s.Path != "" || s.Site != "" {
-		errs = append(errs, fmt.Errorf("%s: a github source takes no path or site", at))
+	if s.Path != "" || s.Site != "" || s.Account != "" {
+		errs = append(errs, fmt.Errorf("%s: a github source takes no path, site or account", at))
 	}
 	if len(s.Repos) == 0 {
 		errs = append(errs, fmt.Errorf("%s: a github source needs repos", at))
@@ -247,8 +273,8 @@ func (s Source) validateGitHub(i int) []error {
 func (s Source) validateJira(i int) []error {
 	var errs []error
 	at := fmt.Sprintf("sources[%d]", i)
-	if s.Path != "" || s.Host != "" || len(s.Repos) > 0 {
-		errs = append(errs, fmt.Errorf("%s: a jira source takes no path, host or repos", at))
+	if s.Path != "" || s.Host != "" || len(s.Repos) > 0 || s.Account != "" {
+		errs = append(errs, fmt.Errorf("%s: a jira source takes no path, host, repos or account", at))
 	}
 	if !sitePattern.MatchString(s.Site) {
 		errs = append(errs, fmt.Errorf("%s: site %q is not a site label", at, s.Site))

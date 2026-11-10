@@ -10,13 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/CrossTerra/beacon/internal/config"
 	"github.com/CrossTerra/beacon/internal/cursor"
+	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/github"
+	"github.com/CrossTerra/beacon/internal/google"
 	"github.com/CrossTerra/beacon/internal/jira"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/limited"
 	"github.com/CrossTerra/beacon/internal/runner"
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/source"
@@ -31,9 +35,48 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 	}
 	var out []source.Source
 	names := map[string]bool{}
+	// One grant per Google account, shared by that account's sources.
+	auths := map[string]*google.Auth{}
 	for _, s := range cfg.Sources {
 		var src source.Source
+		if s.IsGoogle() && auths[s.Account] == nil {
+			auth, err := google.NewAuth(google.AuthOptions{
+				TokenURL: a.google.tokenURL,
+				Client:   a.secretFunc(keychain.GoogleClientAccount(s.Account)),
+				Refresh:  a.secretFunc(keychain.GoogleRefreshAccount(s.Account)),
+				Now:      a.now,
+			})
+			if err != nil {
+				return nil, err
+			}
+			auths[s.Account] = auth
+		}
+		gopts := google.Options{
+			Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"), Account: s.Account,
+			Identity: cfg.Person.Identities[s.SourceName()], Auth: auths[s.Account], Now: a.now,
+		}
 		switch s.Kind {
+		case "gmail":
+			gopts.Base = a.google.gmailBase
+			g, err := google.NewGmail(gopts)
+			if err != nil {
+				return nil, err
+			}
+			src = g
+		case "calendar":
+			gopts.Base = a.google.apiBase
+			c, err := google.NewCalendar(gopts)
+			if err != nil {
+				return nil, err
+			}
+			src = c
+		case "drive":
+			gopts.Base = a.google.apiBase
+			d, err := google.NewDrive(gopts)
+			if err != nil {
+				return nil, err
+			}
+			src = d
 		case "fixture":
 			f, err := source.LoadFixture(cfg.Resolve(s.Path))
 			if err != nil {
@@ -85,6 +128,24 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 	return out, nil
 }
 
+// live reports whether a source reads a real service. Its first run reads open state and is a dry run until
+// beacon accept-first (DEC-23). Only the fixture is not.
+func live(s source.Source) bool {
+	_, fixture := s.(*source.Fixture)
+	return !fixture
+}
+
+// personal maps each personal source to its subject stem. A send waits until Signal restricts that stem.
+func personal(sources []source.Source) map[string]string {
+	out := map[string]string{}
+	for _, s := range sources {
+		if p, ok := s.(interface{ PersonalStem() string }); ok {
+			out[s.Name()] = p.PersonalStem()
+		}
+	}
+	return out
+}
+
 func (a *app) secretFunc(account string) func() (keychain.Secret, error) {
 	return func() (keychain.Secret, error) {
 		if a.keychain == nil {
@@ -113,11 +174,8 @@ func (a *app) prepare(e *env, r *runner.Runner, send bool) error {
 	r.Cursors = st
 	r.Unaccepted = map[string]bool{}
 	for _, s := range e.sources {
-		switch s.(type) {
-		case *github.Source, *jira.Source:
-			if !st.Accepted(s.Name()) {
-				r.Unaccepted[s.Name()] = true
-			}
+		if live(s) && !st.Accepted(s.Name()) {
+			r.Unaccepted[s.Name()] = true
 		}
 	}
 	sf, err := seed.ReadDir(e.cfg.StatePath())
@@ -130,16 +188,135 @@ func (a *app) prepare(e *env, r *runner.Runner, send bool) error {
 
 func (a *app) cmdSource(ctx context.Context, args []string) error {
 	if len(args) < 2 || args[0] != "add" {
-		return fmt.Errorf("usage: beacon source add github|jira [flags]")
+		return fmt.Errorf("usage: beacon source add github|jira|google [flags]")
 	}
 	switch args[1] {
 	case "github":
 		return a.addGitHub(ctx, args[2:])
 	case "jira":
 		return a.addJira(ctx, args[2:])
+	case "google":
+		return a.addGoogle(ctx, args[2:])
 	default:
-		return fmt.Errorf("usage: beacon source add github|jira [flags]")
+		return fmt.Errorf("usage: beacon source add github|jira|google [flags]")
 	}
+}
+
+// addGoogle stores the person's OAuth client, runs the installed-app flow, stores the refresh token, and enables
+// the chosen Google sources. Every scope is read-only.
+func (a *app) addGoogle(ctx context.Context, args []string) error {
+	fs, cfgPath := a.flags("source add google")
+	account := fs.String("account", "", "the Google account to read, its primary address (required)")
+	clientFile := fs.String("client-file", "", "OAuth client JSON of a Desktop app from your Google Cloud project; stored in the keychain (default: the client already stored)")
+	gmail := fs.Bool("gmail", false, "enable Gmail")
+	calendar := fs.Bool("calendar", false, "enable Calendar")
+	drive := fs.Bool("drive", false, "enable Drive comments and meeting notes")
+	bodies := fs.Bool("bodies", false, "grant gmail.readonly instead of gmail.metadata, so a rule that lists body can send a mail body")
+	open := fs.Bool("open", false, "open the consent URL in the default browser")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]")
+	}
+	email := strings.ToLower(strings.TrimSpace(*account))
+	if email == "" {
+		return errors.New("pass --account with the Google account's address")
+	}
+	cfg, err := a.loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	chosen := map[string]bool{"gmail": *gmail, "calendar": *calendar, "drive": *drive}
+	if !*gmail && !*calendar && !*drive {
+		chosen = map[string]bool{"gmail": true, "calendar": true, "drive": true}
+	}
+	for _, k := range config.GoogleKinds {
+		if chosen[k] {
+			cfg.Sources = upsert(cfg.Sources, config.Source{Kind: k, Account: email})
+		}
+	}
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+	// One grant serves every Google source in the config that reads this account, so it asks for all their scopes.
+	var kinds, names []string
+	for _, s := range cfg.Sources {
+		if s.IsGoogle() && s.Account == email {
+			kinds = append(kinds, s.Kind)
+			names = append(names, s.SourceName())
+		}
+	}
+	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	var client keychain.Secret
+	if *clientFile != "" {
+		data, err := os.ReadFile(*clientFile)
+		if err != nil {
+			return err
+		}
+		client, err = keychain.OAuthClient(data)
+		if err != nil {
+			return err
+		}
+		if err := store.Set(keychain.GoogleClientAccount(email), client); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.stdout, "Stored the OAuth client in the keychain as %s/%s\n", keychain.Service, keychain.GoogleClientAccount(email))
+	} else {
+		client, err = store.Get(keychain.GoogleClientAccount(email))
+		if errors.Is(err, keychain.ErrNotFound) {
+			return errors.New("no Google OAuth client is stored for that account; pass --client-file with the JSON of a Desktop app client")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	srcs, err := a.buildSources(cfg)
+	if err != nil {
+		return err
+	}
+	u, _ := config.SignalURL(cfg.Signal.URL)
+	transport := a.transport
+	if transport == nil {
+		transport = egress.Transport
+	}
+	flow := google.Flow{
+		AuthURL: a.google.authURL, TokenURL: a.google.tokenURL,
+		HTTP:   limited.HTTPClient(transport(egress.Addresses(egress.List(u, srcs)))),
+		Scopes: google.Scopes(kinds, *bodies),
+		Out:    a.stderr, LoginHint: email,
+	}
+	if *open {
+		flow.Open = a.google.open
+		if flow.Open == nil {
+			flow.Open = openBrowser
+		}
+	}
+	tok, err := flow.Run(ctx, client)
+	if err != nil {
+		return err
+	}
+	if err := store.Set(keychain.GoogleRefreshAccount(email), tok.Refresh); err != nil {
+		return err
+	}
+	if err := writeConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "Stored the Google refresh token in the keychain as %s/%s\nGranted read-only: %s\nEnabled sources %s\n",
+		keychain.Service, keychain.GoogleRefreshAccount(email), strings.Join(tok.Scopes, " "), strings.Join(names, ", "))
+	return nil
+}
+
+// openBrowser opens a URL with the system's opener. The browser, not Beacon, contacts the consent page.
+func openBrowser(u string) error {
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	return exec.Command(name, u).Start()
 }
 
 type repeatFlag []string
@@ -383,8 +560,7 @@ func (a *app) cmdAcceptFirst(args []string) error {
 	names := fs.Args()
 	if len(names) == 0 {
 		for _, s := range e.sources {
-			switch s.(type) {
-			case *github.Source, *jira.Source:
+			if live(s) {
 				names = append(names, s.Name())
 			}
 		}
@@ -424,11 +600,8 @@ func (a *app) recordFirst(e *env, rep *runner.Report) error {
 	}
 	var names []string
 	for _, s := range e.sources {
-		switch s.(type) {
-		case *github.Source, *jira.Source:
-			if !failed[s.Name()] {
-				names = append(names, s.Name())
-			}
+		if live(s) && !failed[s.Name()] {
+			names = append(names, s.Name())
 		}
 	}
 	if len(names) == 0 {

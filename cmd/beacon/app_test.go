@@ -827,7 +827,7 @@ func TestRetryRejected(t *testing.T) {
 		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
 	}
 	out, logs := h.stdout.String(), h.stderr.String()
-	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1.") {
+	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1, withheld 0.") {
 		t.Fatalf("stdout:\n%s", out)
 	}
 	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
@@ -873,7 +873,7 @@ func TestRetryRejected(t *testing.T) {
 	if n := len(eventRequests(h.server)); n != sentEvents {
 		t.Fatalf("second retry sent %d more events", n-sentEvents)
 	}
-	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 0.") {
+	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 0, withheld 0.") {
 		t.Fatalf("second retry:\n%s", h.stdout.String())
 	}
 }

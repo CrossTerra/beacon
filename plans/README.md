@@ -53,7 +53,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | Jira | assigned or unassigned; status transition; comment by someone else; mention; due date changed; the person's own transition or comment | changelog id or comment id |
 | Gmail | new message in a thread (from someone else, or sent by the person); starred | message id |
 | Calendar | created, changed or cancelled; the person's response needed; the person's response changed | event `updated` and `etag` |
-| Drive | comment or reply that mentions the person or is assigned to them; meeting notes created for a meeting the person attended | comment id, file id |
+| Drive | comment or reply that mentions the person or is assigned to them; the person's own comment, reply or resolve; meeting notes created for a meeting the person attended | comment id, reply id, file id |
 | Slack | direct message; mention; reply in a thread the person posted in; the person's own message in a followed conversation | message `ts` |
 | Agent sessions | started, finished, failed, waiting for input | session id plus state |
 
@@ -63,7 +63,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | --- | --- | --- | --- |
 | 1 | Trust core: config, keychain, rules engine, projection, outbox, Signal client, `explain`, `egress`, dry run | complete | — |
 | 2 | [First sources: GitHub and Jira](phase-2.md) | complete | 1 |
-| 3 | Google: Gmail, Calendar, Drive (comments and mentions) | pending | 1 |
+| 3 | [Google: Gmail, Calendar, Drive (comments and meeting notes)](phase-3.md) | built; live dry run pending | 1 |
 | 4 | Slack: direct messages, mentions, threads the person is in | pending | 1 |
 | 5 | Review: the hold queue and rule proposals, in the terminal first | pending | 2 |
 | 6 | Local classifier | pending | 5 |

@@ -1,14 +1,19 @@
-# Starter rules for GitHub and Jira. Copy this file, replace YOUR_LOGIN with your GitHub login, and
-# point the config's rules key at it. Check it with: beacon rules check
+# Starter rules for GitHub, Jira, Gmail, Calendar and Drive. Copy this file, replace YOUR_LOGIN with
+# your GitHub login, and point the config's rules key at it. Check it with: beacon rules check
 #
-# First match wins. An item no rule matches is never sent. Bodies are not listed: comment and review
-# text stays on the machine unless you add body to a rule. `title` and `summary` are the object's
-# title, used as the thread title. The event title describes the change (Opened, Reviewed: approved,
-# Assigned to a name) and is not one of these fields.
+# First match wins. An item no rule matches is never sent. Bodies are not listed: comment, review and
+# mail text, event descriptions and meeting notes stay on the machine unless you add body to a rule,
+# and Google sources do not even read them until a rule lists body. `title`, `summary` and `subject`
+# are the object's title, used as the thread title. The event title describes the change (Opened,
+# Reviewed: approved, Assigned to a name, New message, Response needed) and is not one of these fields.
 #
 # person.identities should name you as the token's user, or own acts are recorded as Beacon's:
 #   github: github:user:<login>
 #   jira: jira:account:<account id>
+#   gmail, calendar, drive: email:<your address>
+#
+# Gmail, Calendar and Drive subjects are personal (gmail:<handle>:thread:…). Before mode: send, ask
+# Signal's admin to restrict gmail:*, calendar:* and drive:*, or every reader can read them.
 #
 # A Jira rule below records the event and does not ask. Add ask: me to ask yourself.
 
@@ -123,6 +128,116 @@ rules:
     tier: send
     fields: [summary, url, key, project, from_status, to_status, actor]
     state: [status, assignee, resolution, due, priority]
+
+  # --- Google
+
+  # Your own mail (the SENT label, never a From header), calendar responses and events your account
+  # created, and your comments and resolves close your open asks on that thread. Your sent mail leaves
+  # as its link and ids only: no subject, no addresses.
+  - name: gmail-own-acts
+    match: {source: gmail, own: true}
+    tier: send
+    fields: [link]
+
+  - name: calendar-own-acts
+    match: {source: calendar, own: true}
+    tier: send
+    fields: [summary, start, end, link, response]
+    state: [status, start, end, response]
+
+  - name: drive-own-acts
+    match: {source: drive, own: true}
+    tier: send
+    fields: [title, link, file_type]
+    state: [resolved, assignee]
+
+  # Mail you starred: a to-do you set yourself.
+  - name: gmail-starred
+    match: {source: gmail, type: starred}
+    tier: send
+    ask: me
+    priority: medium
+    fields: [subject, from, date, link]
+    state: [unread, starred, last_from]
+
+  # Promotions, social, updates and forums are never sent.
+  - name: gmail-bulk
+    match:
+      source: gmail
+      fields:
+        labels: {regex: ".*CATEGORY_(PROMOTIONS|SOCIAL|UPDATES|FORUMS).*"}
+    tier: never
+
+  # Other mail with you in To. Held: review what it would send before you change it to send.
+  - name: gmail-addressed
+    match:
+      source: gmail
+      type: received
+      addressed: true
+    tier: hold
+    ask: me
+    fields: [subject, from, date, link, actor]
+    state: [unread, starred, last_from]
+
+  # An invitation from someone else that you have not answered. due_at is the start.
+  - name: calendar-response-needed
+    match:
+      source: calendar
+      type: response_needed
+    tier: send
+    ask: me
+    priority: medium
+    fields: [summary, start, end, organizer, attendees, link, actor]
+    state: [status, start, end, response]
+
+  # An event on your calendar was created by someone else, changed or cancelled. Calendar does not say
+  # who changed an event, so a change to an event you organise is here too, not an own act.
+  - name: calendar-changes
+    match:
+      source: calendar
+      type: {regex: "created|changed|cancelled"}
+    tier: send
+    fields: [summary, start, end, organizer, response, link, actor]
+    state: [status, start, end, response]
+
+  # The first run's events in the next 7 days.
+  - name: calendar-upcoming
+    match:
+      source: calendar
+      type: upcoming
+    tier: send
+    fields: [summary, start, end, organizer, response, link]
+    state: [status, start, end, response]
+
+  # A comment or reply assigned to you.
+  - name: drive-assigned
+    match:
+      source: drive
+      type: assigned
+    tier: send
+    ask: me
+    priority: high
+    fields: [title, link, file_type, author]
+    state: [resolved, assignee]
+
+  # A comment or reply that mentions you.
+  - name: drive-mentioned
+    match:
+      source: drive
+      type: mentioned
+    tier: send
+    ask: me
+    priority: medium
+    fields: [title, link, file_type, author]
+    state: [resolved, assignee]
+
+  # Notes by Gemini for a meeting you organised or accepted: a link, not the notes.
+  - name: drive-meeting-notes
+    match:
+      source: drive
+      type: notes_created
+    tier: send
+    fields: [title, link, meeting, meeting_start]
 
   - name: everything-else
     match: {}
