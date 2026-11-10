@@ -21,7 +21,7 @@ type Item struct {
 	// Type is the kind of change, without the source prefix ("review_requested").
 	Type string `json:"type"`
 	// EventTitle is a short description of this change, used as the event title. It is not a source field and not
-	// the object's title. GitHub and Jira set it. Empty means the projection uses the title field for the event
+	// the object's title. Every service source sets it. Empty means the projection uses the title field for the event
 	// title as well, which is how a fixture that omits it behaves.
 	EventTitle string    `json:"event_title,omitempty"`
 	OccurredAt time.Time `json:"occurred_at"`

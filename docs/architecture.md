@@ -51,11 +51,12 @@ the cursor, so it shows what a send pass would do next.
 | `cmd/beacon` | The CLI. Builds everything from the config; the only place that wires the keychain and the transport. |
 | `internal/source` | The `Item` shape, the `Source` interface, and the fixture source. |
 | `internal/github`, `internal/jira` | The GitHub and Jira sources. See [`sources.md`](sources.md). |
+| `internal/google` | The Gmail, Calendar and Drive sources, the OAuth grant they share, and the installed-app flow `beacon source add google` runs. |
 | `internal/cursor` | Committed cursors, which sources have completed `beacon run --first`, and which of those have been accepted. |
 | `internal/seed` | The seed file (DEC-24). |
 | `internal/limited` | Rate-limit backoff for source HTTP. |
 | `internal/config` | Reads and validates the config file. Holds no secrets. |
-| `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, and an in-memory store for tests. |
+| `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, and an in-memory store for tests. It also builds OAuth token requests and reads token responses, so a token's bytes stay in it. |
 | `internal/rules` | Parses the rules file, decides tiers, and checks for rules that can never match. |
 | `internal/project` | Builds the request body from an item and its rule. |
 | `internal/outbox` | The append-only record of every body, and each key's state. |
@@ -66,8 +67,9 @@ the cursor, so it shows what a send pass would do next.
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
 
-Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules) and
-`internal/egress/egresstest` (a transport that fails the test on any host not on the egress list).
+Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
+`internal/egress/egresstest` (a transport that fails the test on any host not on the egress list), and
+`internal/google/googletest` (a fake Google: the token endpoint and recorded Gmail, Calendar and Drive responses).
 
 ## The state directory
 
@@ -93,5 +95,6 @@ queue files, skip a torn last line (it may be a record a sending process is appe
 A source implements `source.Source`: a name, a fixed field list, a fixed state field list (DEC-28), the hosts it
 contacts, and `Collect`. `Collect` takes the committed cursor and returns the next one; the runner stores it after
 deciding. Its hosts appear in `beacon egress` and in the transport guard without other changes. A source keeps its
-credentials in the keychain through `internal/keychain`, and reads them per pass. GitHub and Jira are
-[`sources.md`](sources.md).
+credentials in the keychain through `internal/keychain`, and reads them per pass. A source that can skip reading
+bodies implements `SetBodies`; the app tells it whether any rule could send one. Every source but the fixture reads
+open state on its first run and waits for `beacon accept-first`. The sources are [`sources.md`](sources.md).

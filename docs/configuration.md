@@ -14,6 +14,8 @@ person:
   identities:                        # your own identity in each source, keyed by source name
     github: github:user:winton
     gmail: email:winton@example.com  # email:, never mailto:
+    calendar: email:winton@example.com
+    drive: email:winton@example.com
 rules: rules.yaml                    # relative paths are relative to this file
 state: state
 mode: dry-run                        # dry-run or send
@@ -29,14 +31,14 @@ sources:
 | --- | --- |
 | `signal.url` | The Signal base URL, with no path. `http` is allowed only to `localhost` or a loopback address. |
 | `signal.keychain_account` | The keychain account holding the Signal key, under the service `beacon`. |
-| `person.handle` | The person Beacon serves. Asks name it in `to` (DEC-27). |
+| `person.handle` | The person Beacon serves. Asks name it in `to` (DEC-27). With a Google source it must be an `@handle`: personal subjects carry it without the `@` (DEC-10). |
 | `person.identities` | The person's own identity per source. An own act carries `by` with this identity (DEC-27). Signal must have it attached to the person's actor, and Beacon's key must have a `relay` prefix that covers it. |
 | `rules` | The rules file. Its grammar is in [`rules.md`](rules.md). |
 | `state` | The state directory: outbox, hold queue, dropped record, instance id. |
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25). Default `5m`. |
 | `poll_interval` | How often `beacon run` makes a pass. Default `1m`. |
-| `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`. See [Sources](#sources). |
+| `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`. See [Sources](#sources). |
 
 ## The Signal key
 
@@ -61,10 +63,18 @@ sources:
   - kind: jira
     site: acme                      # acme.atlassian.net; a label, not a hostname
     projects: ["ENG", "OPS"]
+  - kind: gmail                     # gmail, calendar and drive share the Google grant
+  - kind: calendar
+  - kind: drive
 ```
 
 `name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
-name: `github:user:<login>` and `jira:account:<account id>`.
+name: `github:user:<login>`, `jira:account:<account id>`, and `email:<address>` for `gmail`, `calendar` and
+`drive`.
+
+A Google source takes only `kind` and `name`. `beacon source add google` writes them and stores the grant, which
+every Google source in the file shares: the person's OAuth client and the refresh token, in the keychain as
+`google:client` and `google:refresh`. The hosts and the API are fixed.
 
 A GitHub `projects` list, plus every Jira source's projects, limits which issue keys become `jira:<KEY>` references.
 
@@ -98,7 +108,7 @@ A fixture is a JSON file of recorded items, used by tests and to try rules:
 ```
 
 `fields` is the source's fixed field list and `state_fields` its state field list (DEC-28); an item with any other
-field or state field is refused. An item may set `event_title`, which is not a source field. GitHub and Jira set
+field or state field is refused. An item may set `event_title`, which is not a source field. Every service source sets
 it to describe the change; a fixture that omits it keeps using `fields.title` as the event title.
 `observed_at` and `version` are reserved and cannot be state fields. An item with
 `state` needs `observed_at` and `version`, and `version` must be the last part of its key. The file holds one JSON

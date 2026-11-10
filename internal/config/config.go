@@ -85,6 +85,18 @@ type Source struct {
 	Site string `yaml:"site,omitempty"`
 }
 
+// GoogleKinds are the source kinds that share the Google grant.
+var GoogleKinds = []string{"gmail", "calendar", "drive"}
+
+// IsGoogle reports whether a source uses the Google grant.
+func (s Source) IsGoogle() bool {
+	switch s.Kind {
+	case "gmail", "calendar", "drive":
+		return true
+	}
+	return false
+}
+
 // SourceName is the name items and rules use.
 func (s Source) SourceName() string {
 	if s.Name != "" {
@@ -212,6 +224,13 @@ func (c *Config) validate() error {
 			errs = append(errs, s.validateGitHub(i)...)
 		case "jira":
 			errs = append(errs, s.validateJira(i)...)
+		case "gmail", "calendar", "drive":
+			if s.Path != "" || s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" {
+				errs = append(errs, fmt.Errorf("sources[%d]: a %s source takes only kind and name; beacon source add google stores its grant", i, s.Kind))
+			}
+			if !strings.HasPrefix(c.Person.Handle, "@") {
+				errs = append(errs, fmt.Errorf("sources[%d]: a %s source needs person.handle as @handle: personal subjects carry it (DEC-10)", i, s.Kind))
+			}
 		default:
 			errs = append(errs, fmt.Errorf("sources[%d]: unknown kind %q", i, s.Kind))
 		}

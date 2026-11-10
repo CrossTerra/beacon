@@ -21,8 +21,6 @@ import (
 	"github.com/CrossTerra/beacon/internal/config"
 	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/egress"
-	"github.com/CrossTerra/beacon/internal/github"
-	"github.com/CrossTerra/beacon/internal/jira"
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/lease"
 	"github.com/CrossTerra/beacon/internal/limited"
@@ -58,6 +56,13 @@ type app struct {
 	afterAppend func(key string)
 	// ghToken reads a GitHub token. Nil runs `gh auth token`. Tests set it so the token is never printed.
 	ghToken func(context.Context, string) (string, error)
+	// google replaces Google's endpoints and the browser opener. Empty uses Google's. Tests set it.
+	google googleEndpoints
+}
+
+type googleEndpoints struct {
+	tokenURL, authURL, gmailBase, apiBase string
+	open                                  func(string) error
 }
 
 const usage = `usage: beacon <command> [flags]
@@ -71,7 +76,7 @@ Commands:
   cursor reset  clear a source cursor so the next collect reads open state
   egress        print every host Beacon may contact under the current config
   rules check   validate the rules file and report rules that can never match
-  source add    store a source token in the keychain and enable the source
+  source add    store a source credential in the keychain and enable the source (github, jira, google)
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
   version       print the version, commit and build flags
@@ -185,17 +190,20 @@ func (a *app) load(p string) (*env, error) {
 		u, _ := config.SignalURL(cfg.Signal.URL)
 		client := limited.HTTPClient(a.transport(egress.Addresses(egress.List(u, e.sources))))
 		for _, s := range e.sources {
-			switch s := s.(type) {
-			case *github.Source:
-				s.SetHTTP(client)
-			case *jira.Source:
-				s.SetHTTP(client)
+			if h, ok := s.(interface{ SetHTTP(*http.Client) }); ok {
+				h.SetHTTP(client)
 			}
 		}
 	}
 	e.rules, err = rules.Load(cfg.RulesPath())
 	if err != nil {
 		return nil, err
+	}
+	// A source that can skip reading bodies is told whether any rule could send one.
+	for _, s := range e.sources {
+		if b, ok := s.(interface{ SetBodies(bool) }); ok {
+			b.SetBodies(e.rules.Lists(s.Name(), project.FieldBody))
+		}
 	}
 	return e, nil
 }

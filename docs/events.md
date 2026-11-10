@@ -10,7 +10,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `subject` | The source's stable id for the object (DEC-10): 1 to 200 printable ASCII characters. |
 | `key` | `<source>:<native id>:<version>` (DEC-9). The same change always has the same key. |
 | `type` | The change, lowercase words joined by `_` and `.` (`review_requested`). |
-| `event_title` | A short description of this change, used as the event's `title`. Not a source field, and not the object's title. GitHub and Jira set it. Empty means the event title is the `title` field when a rule lists it. |
+| `event_title` | A short description of this change, used as the event's `title`. Not a source field, and not the object's title. Every service source sets it. Empty means the event title is the `title` field when a rule lists it. |
 | `occurred_at` | When it happened at the source. |
 | `actor` | The identity of who caused it (`github:user:dana`). |
 | `own` | The person caused it (DEC-19). |
@@ -47,8 +47,8 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | --- | --- |
 | `subject`, `key`, `occurred_at` | Always, from the item. `occurred_at` is UTC with milliseconds. |
 | `type` | Always: `<source>.<item type>`. |
-| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, or the `summary` field when the rule lists `summary` and did not list `title`. It is not a description of this change. |
-| `title` | For GitHub and Jira, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment or review text. For any other source, the `title` field when the rule lists it. |
+| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, else the `summary` field when the rule lists `summary`, else the `subject` field (a mail thread's subject) when the rule lists `subject`. It is not a description of this change. |
+| `title` | For GitHub, Jira, Gmail, Calendar and Drive, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment, review or mail text. For a fixture without one, the `title` field when the rule lists it. |
 | `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
@@ -63,7 +63,7 @@ a retry of a key Signal already holds, with different bytes, is `409 idempotency
 did not store can be sent again with a corrected body.
 
 DEC-29 (one authoritative event per act, matched by `metadata.native`) needs Signal phase 12 and is not part of
-Phase 1 or Phase 2: Beacon records every own act it is sent.
+Phases 1 to 3: Beacon records every own act it is sent.
 
 Open asks are read from the outbox: bodies on the subject with `to` that are pending, sent or replayed, minus
 those any such body closes. Beacon writes every ask without `by`, so its integration actor is the asker; an own

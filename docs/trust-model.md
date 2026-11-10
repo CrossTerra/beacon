@@ -8,9 +8,9 @@ same pull request.
 
 | Leaves the machine | Never leaves the machine |
 | --- | --- |
-| Events a rule sent: the projected fields and state fields, plus a GitHub or Jira event title that describes the change | Source credentials (OAuth refresh tokens, API tokens) |
+| Events a rule sent: the projected fields and state fields, plus an event title that describes the change | Source credentials (OAuth clients, refresh and access tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
-| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
+| Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
@@ -25,12 +25,14 @@ same pull request.
    A rule lists the fields it sends. Message bodies, attachments and file contents leave only when a rule lists
    them. Attachments and file contents are out of scope for the first release. A state snapshot carries only the
    state fields a rule lists (DEC-28). Who caused a change leaves only when a rule lists `actor`; your own identity
-   leaves as `by` on your own acts (DEC-27). A GitHub or Jira event's title is a description of that change, not a
-   source field and not the object's title. It leaves with the event so a thread's events do not all read as the
-   pull request or issue title. It is built only from the change the source already recorded (who was requested, the
+   leaves as `by` on your own acts (DEC-27). An event's title is a description of that change, not a source field
+   and not the object's title. It leaves with the event so a thread's events do not all read as the pull request,
+   issue, mail or file title. It is built only from the change the source already recorded (who was requested, the
    review state, a short commit sha, the check conclusion, the assignee's display name, the status names, the due
-   date) and it never includes comment or review text. The object's title leaves only when a rule lists `title` or
-   `summary`, as the thread title.
+   date; for Google, the item type and the person's calendar response) and it never includes comment, review or
+   mail text, a mail subject, an event summary or a file name. The object's title leaves only when a rule lists
+   `title`, `summary` or `subject`, as the thread title. A Google source does not even read a mail body, an event
+   description, comment text or meeting notes unless a rule that can match it lists `body`.
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
@@ -46,13 +48,19 @@ same pull request.
    superseded as never and not sent. A condition the item does have that already fails that rule does not block
    the send. The command logs counts only. The stored
    decision keeps listed fields and the event title. An unlisted field, including a body, is not written and does not leave.
-6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
-   hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
-   refuses any other host before connecting. Proxy settings from the environment are ignored and redirects are not
-   followed. There is no telemetry, no update check and no crash reporting.
+6. **Fixed egress.** Beacon connects only to the source APIs (and Google's token endpoint), the configured Signal
+   host and, if configured, a hosted classifier. `beacon egress` prints the list, and every HTTP request goes through
+   a transport that refuses any other host before connecting. Proxy settings from the environment are ignored and
+   redirects are not followed. Each Google source also refuses any URL outside the API paths it uses, because
+   `www.googleapis.com` serves other APIs too. `beacon source add google` listens on `127.0.0.1` for one OAuth
+   redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
+   and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
    never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. The
-   Signal URL must be `https`, except to a loopback address.
+   Signal URL must be `https`, except to a loopback address. Google access is read-only scopes on the person's own
+   OAuth client (DEC-2). The client and the refresh token are in the keychain; the keychain package builds the token
+   requests, reads the authorisation code from the redirect (checking `state`, with a PKCE verifier) and reads the
+   token responses, so no other code holds a token's bytes. An access token is kept in memory, not on disk.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
@@ -68,7 +76,15 @@ same pull request.
 - **Signal has no per-event visibility yet.** Until it does, any key that can read the store can read every event
   Beacon sends, including full bodies a rule allowed. Rules that send bodies from personal sources (direct mail,
   direct messages, private files) should wait for visibility, or be limited to content the whole organization may
-  read.
+  read. Gmail, Calendar and Drive subjects carry the person's handle (`gmail:<handle>:…`) so that Signal can restrict
+  them to their owner; that holds only after Signal's admin restricts `gmail:*`, `calendar:*` and `drive:*`. Before
+  then, those events are readable by every reader key.
+- **Google read scopes are broad.** `drive.readonly` can read every file the person can, and `gmail.metadata` every
+  message's headers. Beacon asks for names, links, headers and comment metadata, and reads bodies only when a rule
+  lists `body`, but the grant itself is not narrower. Revoke it at
+  [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+- **An installed app's OAuth secret is not secret to Google.** Google treats a Desktop app's client secret as
+  public; what protects the grant is the person's consent, PKCE and the refresh token, which stays in the keychain.
 - **Other people are attributed in metadata, not `by`.** Signal accepts `by` only for identities an actor already
   holds, so Beacon records other people in `metadata.actor` (DEC-27). Signal treats it as plain data: it does not
   link it to an actor or let a search by actor find it.

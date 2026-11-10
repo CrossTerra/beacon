@@ -81,7 +81,8 @@ beacon run --once
 ```
 
 That pass reads open state, not history (DEC-23). For GitHub that is open pull requests the person wrote or was
-asked to review, the current review requests, and checks on their own open pull requests. A `400` with no stored
+asked to review, the current review requests, and checks on their own open pull requests. For Gmail it is inbox
+threads and starred mail from the last 14 days, for Calendar the next 7 days, for Drive the last 7 days. A `400` with no stored
 item is sent once if that collect yields the key, with the current projection. The refused lines stay in the
 outbox. Timeline history (a review already submitted, a comment, a push) is not read again. A `409`, and anything
 Signal accepted, is not sent again.
@@ -104,12 +105,23 @@ not written to the config.
 ```bash
 beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh] [--yes]
 beacon source add jira --site SITE --project KEY [--project KEY]
+beacon source add google [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
 ```
 
 `--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
 asks for confirmation; `--yes` is that confirmation when input is not a terminal. Jira reads the account email, then
 the API token with echo off. On a pipe both lines are read by one reader, so the token is not lost. The keychain
 account is `source:<name>` under the service `beacon`. `--name` overrides the default, which is the kind.
+
+`google` enables Gmail, Calendar and Drive, or only those named with `--gmail`, `--calendar` and `--drive`, and
+authorises read-only access to the person's own OAuth client. `--client-file` is the JSON of a *Desktop app* client
+from the person's Google Cloud project; its id and secret are stored as `google:client`. Without it, the stored
+client is used. The command prints the consent URL (`--open` also opens it in the default browser), waits up to five
+minutes on `127.0.0.1` for the redirect, exchanges the code with PKCE, and stores the refresh token as
+`google:refresh`. The grant asks for the scopes of every Google source in the config; `--bodies` asks for
+`gmail.readonly` instead of `gmail.metadata`. It prints the scopes granted, never a token. The token exchange goes
+through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, opens the consent page. See
+[`sources.md`](sources.md#google).
 
 ## `beacon seed FILE`
 
@@ -125,7 +137,7 @@ line is recorded and does not force a send.
 beacon accept-first [source...]
 ```
 
-Records that the named sources' first runs were accepted. With no names, every GitHub and Jira source. Each named
+Records that the named sources' first runs were accepted. With no names, every source but a fixture. Each named
 source must have a completed `beacon run --first` for that source; accepting without that summary is an error. A
 collect that failed is not a completed summary. The next send pass may send their open-state items and then commit
 a cursor. It does not send by itself.

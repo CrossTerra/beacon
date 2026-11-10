@@ -41,6 +41,13 @@ func (s Secret) Authorize(h http.Header) {
 // SourceAccount is the keychain account for one source's credential, under Service.
 func SourceAccount(name string) string { return "source:" + name }
 
+// The keychain accounts of the Google grant the Gmail, Calendar and Drive sources share, under Service: the
+// person's OAuth client (id and secret) and the refresh token.
+const (
+	GoogleClientAccount  = "google:client"
+	GoogleRefreshAccount = "google:refresh"
+)
+
 // FromString stores s as a secret. The caller must not log s. This is how `gh auth token` is imported.
 func FromString(s string) (Secret, error) {
 	s = strings.TrimSpace(s)
