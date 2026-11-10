@@ -791,6 +791,12 @@ func TestRetryRejected(t *testing.T) {
 	h := newHarness(t)
 	dir := t.TempDir()
 	cfg, want := writeSetup(t, dir, h.server.URL, "send", "retryrej")
+	// The noise rule matches on label, which the send rules do not list. A retry must be able to prove it does not
+	// match, so this test removes it. The gap is covered by TestRetrySupersedesWhenHigherRuleNeedsMissingField.
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(strings.Replace(testRules, `  - name: noise
+    match: {fields: {label: noise}}
+    tier: never
+`, "", 1)), 0o600))
 	allowed := h.egressList(cfg)
 	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
 		if strings.HasPrefix(r.Key, "claim:") {
@@ -821,7 +827,7 @@ func TestRetryRejected(t *testing.T) {
 		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
 	}
 	out, logs := h.stdout.String(), h.stderr.String()
-	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1.") {
+	if !strings.Contains(out, "Retry: sent 1, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 2.") {
 		t.Fatalf("stdout:\n%s", out)
 	}
 	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
@@ -852,6 +858,9 @@ func TestRetryRejected(t *testing.T) {
 	}
 	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {
 		t.Fatalf("missing item was touched: %+v", e)
+	}
+	if e, _ := obRead.Get(want[2].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
+		t.Fatalf("a higher rule needs repository, which this item did not store: %+v", e)
 	}
 	if e, _ := obRead.Get(want[3].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
 		t.Fatalf("a match on an unlisted field was sent: %+v", e)
@@ -957,8 +966,18 @@ func TestRetryObeysCurrentRules(t *testing.T) {
 		dir := t.TempDir()
 		cfg, want := writeSetup(t, dir, h.server.URL, "send", "narrow")
 		refuse(h, cfg)
-		rules := strings.Replace(testRules, "fields: [title, url, repository, actor]", "fields: [title, body]", 1)
-		must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(rules), 0o600))
+		// No rule above this one. Title stays; repository was listed before and is not listed now.
+		narrowed := `rules:
+  - name: review-requests
+    match:
+      source: fixture
+      type: review_requested
+      addressed: true
+      fields: {repository: {glob: "acme/*"}}
+    tier: send
+    fields: [title]
+`
+		must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(narrowed), 0o600))
 		before := len(h.server.RequestsFor(want[0].key))
 		if code := h.run(h.app(h.egressList(cfg)), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
 			t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
@@ -1003,11 +1022,65 @@ func TestRetryObeysCurrentRules(t *testing.T) {
 	}
 }
 
+// A never rule above the send rule that matches on a field the stored item lacks must not be skipped.
+func TestRetrySupersedesWhenHigherRuleNeedsMissingField(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "gap")
+	first := `rules:
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(first), 0o600))
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	later := `rules:
+  - name: drop-title
+    match: {fields: {title: {exact: "Add retries"}}}
+    tier: never
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(later), 0o600))
+	n := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	if got := len(h.server.RequestsFor(want[0].key)); got != n {
+		t.Fatalf("retry sent %d more requests", got-n)
+	}
+	ob, err := outbox.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if e, _ := ob.Get(want[0].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
+		t.Fatalf("%+v", e)
+	}
+	if strings.Contains(h.stderr.String(), want[0].key) || strings.Contains(h.stderr.String(), "Add retries") {
+		t.Fatalf("logs:\n%s", h.stderr.String())
+	}
+}
+
 // An ask requeued earlier in the same retry is closed by a later own act.
 func TestRetryClosesAskOpenedEarlier(t *testing.T) {
 	h := newHarness(t)
 	dir := t.TempDir()
 	cfg, want := writeSetup(t, dir, h.server.URL, "send", "closes")
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(strings.Replace(testRules, `  - name: noise
+    match: {fields: {label: noise}}
+    tier: never
+`, "", 1)), 0o600))
 	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
 		if strings.HasPrefix(r.Key, "claim:") {
 			return signaltest.Reply{}

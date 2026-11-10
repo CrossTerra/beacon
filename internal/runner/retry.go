@@ -141,6 +141,11 @@ func (r *Runner) reproject(raw []byte, view *asks) (*project.Body, []byte, rules
 		return nil, nil, rules.Never, nil
 	}
 	decided := r.Rules.Decide(d.Item)
+	// A rule above the match that needs a field or actor the stored item lacks cannot be proved. Do not send
+	// past it: a send rule below must not win because the higher hold or never could not see the field.
+	if r.Rules.GapsAbove(d.Item, decided.Rule) {
+		return nil, nil, rules.Never, nil
+	}
 	if decided.Tier != rules.Send {
 		if decided.Tier == rules.Hold {
 			return nil, nil, rules.Hold, nil

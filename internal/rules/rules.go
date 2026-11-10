@@ -378,6 +378,34 @@ func (f *File) Decide(it source.Item) Decision {
 	return Decision{Tier: Never}
 }
 
+// GapsAbove reports whether a rule before matched matches on a field or actor the item does not have. The match
+// cannot be proved, so a later rule must not send. A nil matched means every rule is above the default.
+func (f *File) GapsAbove(it source.Item, matched *Rule) bool {
+	for _, r := range f.Rules {
+		if r == matched {
+			return false
+		}
+		if r.Match.needsMissing(it) {
+			return true
+		}
+	}
+	return false
+}
+
+// needsMissing reports whether this match names an actor or a field the item does not have. An empty actor is
+// missing: it was not stored, or the source had none, and either way the condition cannot be proved.
+func (m *Match) needsMissing(it source.Item) bool {
+	if m.Actor != nil && it.Actor == "" {
+		return true
+	}
+	for name := range m.Fields {
+		if _, ok := it.Fields[name]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Matches reports whether every condition holds for the item. A field condition on a field the item lacks fails.
 func (m *Match) Matches(it source.Item) bool {
 	if m.Source != nil && !m.Source.Matches(it.Source) {
