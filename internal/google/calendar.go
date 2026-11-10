@@ -414,6 +414,12 @@ func (c *Calendar) missing(ctx context.Context, now time.Time, inWindow []calEve
 			out = append(out, calEvent{ID: id, Status: "cancelled", ETag: "gone"})
 			continue
 		}
+		if errors.Is(err, errPermission) {
+			// The grant can no longer read this one event. It is forgotten rather than retried on every full
+			// re-read, so it cannot stall the source; if it comes back, it is new to Beacon.
+			delete(known, id)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

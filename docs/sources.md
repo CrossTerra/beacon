@@ -280,7 +280,9 @@ first run), and every inbox and sent message since 15 minutes before the stored 
 messages in a thread and the person's own mail in the gap are not lost. It lists by label, newest first:
 `gmail.metadata` cannot search, so there is no `q=after:`. Keys make the overlap harmless. `beacon run` reports the
 gap and the log has `history_gap`: a change in the gap to mail no longer in the inbox (archived or deleted), or a
-star on mail older than 14 days, is not recovered. The history id has no lookback, so a thread the history names is skipped only when
+star on mail older than 14 days, is not recovered. The re-read lists at most 5000 messages per label; past that it
+stops, `run` says so and the log has `cut` 1. The pass still moves to the new history id: failing it would stop every
+later pass at the same place. The history id has no lookback, so a thread the history names is skipped only when
 it is gone (`404`, deleted since). Any other failure reading it, a `403` included, fails the pass and the cursor
 stays. A body is optional: a message that will not give up its body (`404`, or a permission `403`) is sent without
 it; a rate limit or a refused grant there still fails the pass.
@@ -329,7 +331,8 @@ That move is `changed` (or `cancelled`), not a silence. Every list includes dele
 as a cancel. If Google refuses that `updatedMin` as too old (`410`), the whole window is read again; the
 fingerprints keep unchanged events quiet. Then an event the cursor places in the window that the re-read did not
 return is read by id: gone (`404`, `410`) or cancelled is `cancelled` (key version `gone` when Google returns
-nothing), and moved is `changed`.
+nothing), and moved is `changed`. One the grant can no longer read (a permission `403`) is dropped from the cursor
+rather than read again on every full re-read.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
 its summary, location, start, end and status, a hash of its start and end, the person's response, and whether it is

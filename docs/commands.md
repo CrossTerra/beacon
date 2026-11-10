@@ -175,7 +175,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `retry` | `beacon outbox retry --rejected` finished. Counts only: sent, replayed, refused, conflict, missing, failed, hold, never, withheld, pending. |
 | `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
-| `history_gap` | A source's change history expired; it re-read what it could. The source only. |
+| `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,

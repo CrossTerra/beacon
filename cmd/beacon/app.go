@@ -450,8 +450,11 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	for _, f := range rep.Failed {
 		fmt.Fprintf(w, "source %s: not collected (%s)\n", f.Name, f.Reason)
 	}
-	for _, name := range rep.Gaps {
-		fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", name)
+	for _, g := range rep.Gaps {
+		fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", g.Source)
+		if g.Cut {
+			fmt.Fprintf(w, "source %s: that re-read stopped at 5000 messages per label; older inbox or sent mail in the gap was not read.\n", g.Source)
+		}
 	}
 	for _, p := range rep.Items {
 		rule := p.Rule

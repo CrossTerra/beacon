@@ -181,7 +181,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	}
 	threads := map[string]*gmailThread{}
 	var refs []ref
-	gap := false
+	gap, cut := false, false
 	next := gmailCursor{HistoryID: profile.HistoryID, At: cur.At}
 	if len(cursor) == 0 {
 		refs, err = g.open(ctx, threads)
@@ -196,7 +196,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			refs, err = g.open(ctx, threads)
 			if err == nil {
 				var more []ref
-				more, err = g.since(ctx, threads, cur.At)
+				more, cut, err = g.since(ctx, threads, cur.At)
 				refs = append(refs, more...)
 			}
 		} else if got != "" {
@@ -254,7 +254,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	if err != nil {
 		return source.Collected{Items: items}, err
 	}
-	return source.Collected{Items: items, Next: data, Gap: gap}, nil
+	return source.Collected{Items: items, Next: data, Gap: gap, GapCut: cut}, nil
 }
 
 // gmailCursor is the history id to read from, and when the pass that stored it ran. The time bounds what a pass
@@ -281,18 +281,25 @@ func parseGmailCursor(b []byte) (gmailCursor, error) {
 	return c, nil
 }
 
+// gapPages is how many pages of 100 messages per label a gap read lists.
+const gapPages = 50
+
 // since lists inbox and sent messages, newest first, back to 15 minutes before at (14 days when at is unknown). It
-// uses labels, not a search: gmail.metadata cannot search.
-func (g *Gmail) since(ctx context.Context, threads map[string]*gmailThread, at string) ([]ref, error) {
+// uses labels, not a search: gmail.metadata cannot search. cut reports that a label had more than gapPages pages in
+// the gap and the rest was not listed. The pass still succeeds: failing it would leave the expired history id in the
+// cursor and stop at the same place on every pass.
+func (g *Gmail) since(ctx context.Context, threads map[string]*gmailThread, at string) ([]ref, bool, error) {
 	cutoff := g.now().Add(-gmailLookback)
 	if t, err := parseTime(at); err == nil && t.Add(-source.Lookback).After(cutoff) {
 		cutoff = t.Add(-source.Lookback)
 	}
 	var refs []ref
+	cut := false
 	for _, label := range []string{"INBOX", "SENT"} {
 		token := ""
+		done := false
 	pages:
-		for pages := 0; pages < 20; pages++ {
+		for pages := 0; pages < gapPages; pages++ {
 			q := url.Values{"labelIds": {label}, "maxResults": {"100"}}
 			if token != "" {
 				q.Set("pageToken", token)
@@ -305,7 +312,7 @@ func (g *Gmail) since(ctx context.Context, threads map[string]*gmailThread, at s
 				NextPageToken string `json:"nextPageToken"`
 			}
 			if err := g.getJSON(ctx, "messages", q, &page); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			for _, m := range page.Messages {
 				t, err := g.thread(ctx, threads, m.ThreadID)
@@ -313,24 +320,27 @@ func (g *Gmail) since(ctx context.Context, threads map[string]*gmailThread, at s
 					continue
 				}
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				msg := t.find(m.ID)
 				if msg == nil {
 					continue
 				}
 				if msg.at().Before(cutoff) {
+					done = true
 					break pages
 				}
 				refs = append(refs, ref{thread: t.ID, message: m.ID})
 			}
 			if page.NextPageToken == "" {
+				done = true
 				break
 			}
 			token = page.NextPageToken
 		}
+		cut = cut || !done
 	}
-	return refs, nil
+	return refs, cut, nil
 }
 
 func (g *Gmail) url(path string, q url.Values) string {

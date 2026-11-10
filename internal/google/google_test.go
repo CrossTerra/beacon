@@ -839,3 +839,50 @@ func TestGmailBodyForbiddenKeepsTheItem(t *testing.T) {
 		t.Fatalf("a rate limit on a body: %v", err)
 	}
 }
+
+func TestGmailGapReadIsCut(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Routes["/gmail/v1/users/me/history"] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	pages := 0
+	srv.Routes["/gmail/v1/users/me/messages"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("labelIds") == "INBOX" {
+			pages++
+			// Every page is recent and there is always another.
+			io.WriteString(w, `{"messages":[{"id":"m3","threadId":"t2"}],"nextPageToken":"more"}`)
+			return
+		}
+		io.WriteString(w, googletest.SentMessages)
+	}
+	g, _ := NewGmail(opts(t, srv))
+	got, err := g.Collect(context.Background(), []byte(`{"history_id":"5","at":"2026-11-08T09:00:00Z"}`))
+	if err != nil || !got.Gap || !got.GapCut || pages != gapPages {
+		t.Fatalf("err %v gap %v cut %v pages %d", err, got.Gap, got.GapCut, pages)
+	}
+	if history(t, got.Next) != "300" {
+		t.Fatal("a cut gap must still move past the expired history id, or every pass stops at the same place")
+	}
+}
+
+func TestCalendarFullReadSkipsAnUnreadableEvent(t *testing.T) {
+	srv := googletest.New(t)
+	c, _ := NewCalendar(opts(t, srv))
+	first, _ := c.Collect(context.Background(), nil)
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("updatedMin") != "" {
+			w.WriteHeader(http.StatusGone)
+			return
+		}
+		io.WriteString(w, strings.Replace(googletest.EventsFirst, `"id":"ev1"`, `"id":"evX1"`, 1))
+	}
+	srv.Routes["/calendar/v3/calendars/primary/events/ev1"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"code":403,"errors":[{"reason":"forbidden"}]}}`)
+	}
+	got, err := c.Collect(context.Background(), first.Next)
+	if err != nil {
+		t.Fatalf("one unreadable event stalled the source: %v", err)
+	}
+	if strings.Contains(string(got.Next), `"ev1"`) {
+		t.Fatal("an unreadable event is kept and read again on every full re-read")
+	}
+}

@@ -67,7 +67,13 @@ type Runner struct {
 	restrictErr  error
 	restrictRead bool
 	deferred     map[string]bool
-	gaps         []string
+	gaps         []Gap
+}
+
+// Gap is a source whose change history expired. Cut is true when its re-read stopped at its limit.
+type Gap struct {
+	Source string
+	Cut    bool
 }
 
 // RestrictionReader reads the restricted subject prefixes from Signal.
@@ -151,7 +157,7 @@ type Report struct {
 	// RestrictionsReason is why the restricted prefixes could not be read, when they could not.
 	RestrictionsReason logs.Reason
 	// Gaps are sources that could not read every change since their cursor and re-read what they could.
-	Gaps []string
+	Gaps []Gap
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -225,8 +231,12 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		}
 		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept))
 		if got.Gap {
-			r.Log.Log(logs.HistoryGap, logs.Source(s.Name()))
-			r.gaps = append(r.gaps, s.Name())
+			cut := 0
+			if got.GapCut {
+				cut = 1
+			}
+			r.Log.Log(logs.HistoryGap, logs.Source(s.Name()), logs.Count("cut", cut))
+			r.gaps = append(r.gaps, Gap{Source: s.Name(), Cut: got.GapCut})
 		}
 		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
 	}
