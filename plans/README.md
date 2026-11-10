@@ -68,6 +68,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | 5 | Review: the hold queue and rule proposals, in the terminal first | pending | 2 |
 | 6 | Local classifier | pending | 5 |
 | 7 | Release engineering: reproducible builds, signing, notarization, SBOM, install docs | pending | 2 |
+| 7a | [Per-user launchd agent](phase-7a.md) | complete | 2 |
 | 8 | macOS menu-bar shell | pending | 5, 7 |
 | 9 | Local agent sessions as a source (DEC-26) | pending | 1 |
 

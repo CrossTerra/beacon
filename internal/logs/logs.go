@@ -31,6 +31,8 @@ const (
 	DryRunNoSending Event = "dry_run"
 	LeaseExpired    Event = "lease_expired"
 	RunFailed       Event = "run_failed"
+	// RunStopped is a poll loop that exited after SIGTERM. It is not a failure.
+	RunStopped Event = "run_stopped"
 	// Retry is the summary of beacon outbox retry. Its attributes are counts only.
 	Retry Event = "retry"
 )
@@ -57,8 +59,10 @@ const (
 	ReasonSourceAuth   Reason = "source_unauthorized"
 	ReasonScope        Reason = "scope_denied"
 	ReasonIdentity     Reason = "identity_mismatch"
-	ReasonItem         Reason = "item_invalid"
-	ReasonProject      Reason = "project_failed"
+	// ReasonSigning is a binary whose certificate is not the one install recorded.
+	ReasonSigning Reason = "signing_mismatch"
+	ReasonItem    Reason = "item_invalid"
+	ReasonProject Reason = "project_failed"
 )
 
 // Attr is a log attribute built by one of the helpers below.
