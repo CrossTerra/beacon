@@ -16,6 +16,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/egress/egresstest"
 	"github.com/CrossTerra/beacon/internal/google/googletest"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
@@ -558,6 +559,55 @@ func TestUnreadableRestrictionsSendNothingPersonal(t *testing.T) {
 	st, _ = cursor.Read(filepath.Join(dir, "state"))
 	if _, ok := st.Get("gmail"); !ok {
 		t.Fatal("gmail cursor did not move")
+	}
+}
+
+func TestRemovedSourceWithholdsPending(t *testing.T) {
+	sig, dir, _, run := googleSendSetup(t)
+	sig.Restrict("gmail:*", "calendar:*", "drive:*")
+	sig.Script = func(_ int, req signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(req.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 503, Body: `{"error":{"code":"unavailable","message":"down"}}`}
+	}
+	run("run", "--once")
+	if len(personalEvents(sig)) != 0 {
+		t.Fatal("sent while Signal was down")
+	}
+	cfg := filepath.Join(dir, "config.yaml")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	without := strings.Replace(string(data), "  - kind: gmail\n    account: winton@example.com\n", "", 1)
+	if without == string(data) {
+		t.Fatalf("gmail source not in config:\n%s", data)
+	}
+	must(t, os.WriteFile(cfg, []byte(without), 0o600))
+	sig.Script = nil
+	sig.Restrict("calendar:*", "drive:*")
+	report := run("run", "--once")
+	for _, k := range personalEvents(sig) {
+		if strings.HasPrefix(k, "gmail:") {
+			t.Fatalf("%s was sent after gmail was removed and gmail:* is not restricted", k)
+		}
+	}
+	if !strings.Contains(report, "Pending bodies on personal subjects not sent:") {
+		t.Fatalf("report:\n%s", report)
+	}
+	ob, err := outbox.Read(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := 0
+	for _, e := range ob.Entries() {
+		if e.State == outbox.Pending && strings.HasPrefix(e.Subject, "gmail:") {
+			held++
+		}
+	}
+	if held == 0 {
+		t.Fatal("the pending gmail bodies are gone")
 	}
 }
 

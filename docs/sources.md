@@ -245,10 +245,13 @@ Each path also takes only the query keys Beacon sends there, so `alt=media` (a f
 Signal reads the owner of a restricted prefix there. A config with a Google source needs `person.handle` as an
 `@handle`.
 
-**Nothing personal is sent unless Signal keeps it private.** A send pass with a Google source first reads Signal's
-restricted prefixes (`GET /api/restrictions`, which needs the `read` scope on Beacon's key). A subject is private
-only when the longest restricted stem it is under is its source's own (`gmail:*` for `gmail:winton:…`): Signal
-reads the owner right after that stem. Then:
+**Nothing personal is sent unless Signal keeps it private.** The personal stems are fixed (`gmail:`, `calendar:`,
+`drive:`, `slack:dm:`), not taken from the enabled sources, so removing Gmail does not let a pending or rejected
+`gmail:` body leave. A send pass reads Signal's restricted prefixes (`GET /api/restrictions`, which needs the `read`
+scope on Beacon's key) when a personal source is enabled or the outbox holds a pending or rejected event under one
+of those stems, and again immediately before pending bodies are sent. A subject is private only when the longest
+restricted stem it is under is its own (`gmail:*` for `gmail:winton:…`): Signal reads the owner right after that
+stem. Then:
 
 - When Signal answers and the stem is not restricted (or a longer stem such as `gmail:winton:*` would move the
   owner), the source's `send` items are held in the local queue instead, `beacon run` says which prefix to restrict,
@@ -256,8 +259,9 @@ reads the owner right after that stem. Then:
 - When the restrictions cannot be read (no `read` scope, `401`, Signal unreachable), the source's `send` items are
   reported and not recorded, and its cursor stays, so a later pass that can read them decides those items again.
   The log has `restrictions_unread` and `withheld` with `restrictions_unknown`.
-- A body already pending on a personal subject is not sent while its stem is not shown to be restricted; it stays
-  pending. `beacon outbox retry --rejected` skips such an entry the same way and counts it as `withheld`.
+- A body already pending on a personal subject is not sent while its stem is not shown to be restricted, including
+  after that source is removed from the config; it stays pending. `beacon outbox retry --rejected` skips such an
+  entry the same way and counts it as `withheld`.
 
 A dry run does not contact Signal and does not check.
 
@@ -314,8 +318,7 @@ own: starring is a note to oneself, not an answer, and must not close an ask.
 
 **Fields.** `from` (the address), `to` (addresses, comma-separated), `subject` (the thread's subject, its first
 message's), `date` (RFC 3339, UTC), `labels` (label names, sorted, comma-separated; system labels by id, such as
-`INBOX` and `CATEGORY_PROMOTIONS`), `link` (`https://mail.google.com/mail/?authuser=<address>#all/<thread id>`,
-which opens the right account when several are signed in), `body`
+`INBOX` and `CATEGORY_PROMOTIONS`), `link` (`https://mail.google.com/mail/u/0/#all/<thread id>`), `body`
 (the `text/plain` part, only with `gmail.readonly` and a rule that lists `body`). `subject` is the thread title when
 a rule lists it and lists neither `title` nor `summary`.
 

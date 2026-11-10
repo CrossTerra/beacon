@@ -60,9 +60,8 @@ type Runner struct {
 	// Seed drops subjects a seed file marks never, before the rules file (DEC-24). Nil means no seed.
 	Seed Seeder
 
-	// Personal maps a source name to the stem its subjects carry the person after ("gmail:"). Signal keeps such a
-	// subject private only when that stem is restricted (`gmail:*`). A send pass reads the restrictions first, and
-	// sends nothing under a stem it cannot show is restricted.
+	// Personal maps an enabled source to its stem, for the withheld report. The check itself uses source.PersonalStems,
+	// which does not depend on the config: a pending body stays personal after its source is removed.
 	Personal map[string]string
 	// Restrictions reads Signal's restricted prefixes. A send pass with Personal set needs it.
 	Restrictions RestrictionReader
@@ -509,11 +508,11 @@ func (r *Runner) finishNever(p Planned) (Planned, error) {
 	return p, r.Queue.Drop(queue.Dropped{Key: p.Item.Key, Rule: p.Rule, DroppedAt: r.Now().UTC()})
 }
 
-// readRestrictions reads Signal's restricted prefixes for a send pass with personal sources. A failure is kept, not
-// returned: personal sends wait and everything else goes on. Only an interrupt ends the pass.
+// readRestrictions reads Signal's restricted prefixes for a send pass that might send a personal subject. A failure
+// is kept, not returned: personal sends wait and everything else goes on. Only an interrupt ends the pass.
 func (r *Runner) readRestrictions(ctx context.Context, sending bool) error {
 	r.restricted, r.restrictErr, r.restrictRead, r.deferred = nil, nil, false, map[string]bool{}
-	if !sending || len(r.Personal) == 0 {
+	if !sending || !r.needsRestrictions() {
 		return nil
 	}
 	r.restrictRead = true
@@ -531,16 +530,29 @@ func (r *Runner) readRestrictions(ctx context.Context, sending bool) error {
 	return nil
 }
 
-// withholds says why a body on subject may not be sent now: its source is personal and Signal does not, or cannot
-// be shown to, keep it private. Signal reads a subject's owner after the longest restricted stem it is under, so that
-// stem must be exactly the source's.
-func (r *Runner) withholds(subject string) logs.Reason {
-	stem := ""
-	for _, s := range r.Personal {
-		if strings.HasPrefix(subject, s) && len(s) > len(stem) {
-			stem = s
+// needsRestrictions reports whether this pass might send a personal subject: a personal source is enabled, or the
+// outbox still holds a pending or rejected event under a personal stem. The stem list is fixed, so removing the
+// source does not skip the check.
+func (r *Runner) needsRestrictions() bool {
+	if len(r.Personal) > 0 {
+		return true
+	}
+	if r.Outbox == nil {
+		return false
+	}
+	for _, e := range r.Outbox.Entries() {
+		if e.Kind == outbox.Event && (e.State == outbox.Pending || e.State == outbox.Rejected) && source.PersonalStem(e.Subject) != "" {
+			return true
 		}
 	}
+	return false
+}
+
+// withholds says why a body on subject may not be sent now: the subject is personal and Signal does not, or cannot
+// be shown to, keep it private. Signal reads a subject's owner after the longest restricted stem it is under, so that
+// stem must be exactly the personal stem. The stems are fixed (source.PersonalStems), not the enabled sources.
+func (r *Runner) withholds(subject string) logs.Reason {
+	stem := source.PersonalStem(subject)
 	if stem == "" {
 		return ""
 	}
@@ -627,6 +639,14 @@ func (r *Runner) stopped() bool { return r.Stop != nil && r.Stop() }
 func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 	if r.stopped() {
 		return nil
+	}
+	// Again, immediately before anything pending leaves. A restriction lifted while this pass was collecting is
+	// honoured; one that cannot be re-read keeps personal bodies pending.
+	if err := r.readRestrictions(ctx, true); err != nil {
+		return err
+	}
+	if r.restrictErr != nil {
+		rep.RestrictionsReason = Classify(r.restrictErr)
 	}
 	st, err := r.Lease.Ensure(ctx)
 	rep.Lease = &st

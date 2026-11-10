@@ -54,11 +54,13 @@ invitations and comment mentions.
 The person in a subject is the Signal handle without `@` (`gmail:winton:thread:…`), which is where Signal phase 11
 reads the owner of a restricted prefix. A config with a Google source needs `person.handle` in `@handle` form.
 
-**Enforced, not assumed.** A send pass with a Google source reads `GET /api/restrictions` (Beacon's key needs
-`read`) and sends a personal subject only when the longest restricted stem over it is its own (`gmail:*`). Not
-restricted: the source's send items are held, and `run` says which prefix to restrict. Unreadable: they are not
-recorded and the cursor stays. Pending bodies and `outbox retry --rejected` wait the same way. The pass record carries
-it, and `beacon service status` prints a `withheld:` line per source.
+**Enforced, not assumed.** The personal stems (`gmail:`, `calendar:`, `drive:`, `slack:dm:`) are fixed, not taken
+from the enabled sources. A send pass reads `GET /api/restrictions` (Beacon's key needs `read`) when a personal
+source is enabled or the outbox holds a pending or rejected event under one of those stems, and again immediately
+before pending bodies are sent. It sends a personal subject only when the longest restricted stem over it is its own
+(`gmail:*`). Not restricted: the source's send items are held, and `run` says which prefix to restrict. Unreadable:
+they are not recorded and the cursor stays. Pending and rejected bodies wait the same way after the source is
+removed. The pass record carries it, and `beacon service status` prints a `withheld:` line per source.
 `person.identities` for each Google source is `email:<address>` (DEC-27); Gmail checks it against the profile,
 Drive against `about`, Calendar against the attendee or organizer marked `self`.
 

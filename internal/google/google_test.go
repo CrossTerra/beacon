@@ -141,7 +141,7 @@ func TestGmailEveryItem(t *testing.T) {
 	wantFields := map[string]string{
 		"from": "dana@example.com", "to": "winton@example.com, ops@example.com", "subject": "Budget review",
 		"date": "2026-11-08T10:00:00Z", "labels": "INBOX, Projects, STARRED, UNREAD",
-		"link": "https://mail.google.com/mail/?authuser=winton%40example.com#all/t1",
+		"link": "https://mail.google.com/mail/u/0/#all/t1",
 	}
 	for k, v := range wantFields {
 		if recv.Fields[k] != v {

@@ -624,7 +624,7 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 		"subject": oneLine(live[0].header("Subject")),
 		"date":    at.Format(time.RFC3339),
 		"labels":  labelNames(m.LabelIDs, labels),
-		"link":    "https://mail.google.com/mail/?" + url.Values{"authuser": {me}}.Encode() + "#all/" + t.ID,
+		"link":    "https://mail.google.com/mail/u/0/#all/" + t.ID,
 	}
 	state := g.threadState(live, labels)
 	keyID := t.ID + ":" + m.ID

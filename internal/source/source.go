@@ -60,6 +60,23 @@ const (
 	StateVersion    = "version"
 )
 
+// PersonalStems are subject prefixes Signal keeps private only when that prefix is restricted (DEC-10). They are
+// fixed, not taken from the enabled sources: a body already in the outbox is still personal after its source is
+// removed from the config. slack:dm: is here before the Slack source exists, so a direct-message body cannot leave
+// unchecked.
+var PersonalStems = []string{"gmail:", "calendar:", "drive:", "slack:dm:"}
+
+// PersonalStem is the longest personal stem subject starts with, or "" when it is not personal.
+func PersonalStem(subject string) string {
+	found := ""
+	for _, stem := range PersonalStems {
+		if strings.HasPrefix(subject, stem) && len(stem) > len(found) {
+			found = stem
+		}
+	}
+	return found
+}
+
 // Collected is one collect. Next is the cursor to store after every item of this pass is decided. A nil Next
 // leaves the committed cursor where it is. Dropped is items the source refused and did not return; the runner
 // logs the count and does not fail the pass.

@@ -70,12 +70,15 @@ same pull request.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
-9. **Personal subjects stay personal.** Gmail, Calendar and Drive subjects carry the person's handle
-   (`gmail:<handle>:…`, DEC-10). A send pass reads Signal's restricted prefixes first, and sends an event on such a
-   subject only when the longest restricted stem it is under is its own (`gmail:*`), which is what makes Signal keep
-   it to its owner. Otherwise the source's send items are held locally; if the restrictions cannot be read, they are
-   not recorded and the cursor stays. A pending body, or a refusal `beacon outbox retry --rejected` would resend, on
-   such a subject waits the same way. Your own acts are recorded from the source's own record only: a Gmail message is
+9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
+   person's handle (`gmail:<handle>:…`, DEC-10). Those stems are fixed, not taken from the enabled sources, so a body
+   already in the outbox stays personal after its source is removed. A send pass reads Signal's restricted prefixes
+   when a personal source is enabled or the outbox holds a pending or rejected event under one of those stems, and
+   again immediately before pending bodies are sent, so a restriction lifted during the pass is honoured. It sends
+   such a subject only when the longest restricted stem it is under is its own (`gmail:*`), which is what makes Signal
+   keep it to its owner. Otherwise the source's send items are held locally; if the restrictions cannot be read, they
+   are not recorded and the cursor stays. A pending body, or a refusal `beacon outbox retry --rejected` would resend,
+   waits the same way, including after the source is gone. Your own acts are recorded from the source's own record only: a Gmail message is
    yours only with the `SENT` label, never because its From header names you, and a calendar change is yours only when
    it is your response or an event your account created.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
