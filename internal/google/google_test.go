@@ -953,3 +953,20 @@ func TestDriveNotesForAMeetingThatEndsLater(t *testing.T) {
 		t.Fatal("notes lost: the meeting ended after its last update")
 	}
 }
+
+func TestDriveNotesWindowSurvivesASkewedCursor(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("timeMin") >= q.Get("timeMax") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		io.WriteString(w, googletest.NotesEvents)
+	}
+	d, _ := NewDrive(opts(t, srv))
+	// The stored cursor is the server's Date, 40 minutes ahead of the local clock.
+	if _, err := d.Collect(context.Background(), []byte("2026-11-08T12:40:00Z")); err != nil {
+		t.Fatalf("a cursor ahead of the local clock broke the notes query: %v", err)
+	}
+}

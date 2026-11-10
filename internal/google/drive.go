@@ -424,7 +424,13 @@ func (d *Drive) notes(ctx context.Context, now, floor time.Time, first bool, me 
 	if first {
 		events, tz, err = list(now.Add(-notesWindow), time.Time{})
 	} else {
-		events, tz, err = list(floor, time.Time{})
+		// floor comes from the server's Date, which may run ahead of the local clock; timeMin must stay before
+		// timeMax. An earlier timeMin only reads more, and keys keep notes already recorded quiet.
+		since := floor
+		if limit := now.Add(-source.Lookback); since.After(limit) {
+			since = limit
+		}
+		events, tz, err = list(since, time.Time{})
 		if err == nil {
 			var later []calEvent
 			later, _, err = list(now.Add(-notesWindow), floor)
