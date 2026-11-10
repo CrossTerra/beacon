@@ -221,18 +221,30 @@ func (a *app) checkIdentity(ctx context.Context, path string) (service.Identity,
 }
 
 // waitUnloaded polls until launchd no longer has the job. The agent may take ExitTimeOut to finish the in-flight
-// send after SIGTERM, so the wait is that long, not a few seconds.
+// send after SIGTERM, so the wait is that long, not a few seconds. The last check is after the last sleep: a job
+// that exits during that second is not still loaded.
 func (a *app) waitUnloaded(ctx context.Context, lc launcher, target string) error {
 	for i := 0; i < service.ExitTimeOut; i++ {
-		out, err := lc.Print(ctx, target)
-		if err != nil || !service.ParsePrint(out).Loaded {
-			return nil
+		if unloaded, err := a.jobUnloaded(ctx, lc, target); unloaded || err != nil {
+			return err
 		}
 		if err := a.sleepFor(ctx, time.Second); err != nil {
 			return err
 		}
 	}
+	unloaded, err := a.jobUnloaded(ctx, lc, target)
+	if unloaded || err != nil {
+		return err
+	}
 	return errors.New("the previous agent is still loaded; beacon service uninstall stops it")
+}
+
+func (a *app) jobUnloaded(ctx context.Context, lc launcher, target string) (bool, error) {
+	out, err := lc.Print(ctx, target)
+	if err != nil || !service.ParsePrint(out).Loaded {
+		return true, nil
+	}
+	return false, nil
 }
 
 func resolveBinary(path string) (string, error) {
