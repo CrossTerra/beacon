@@ -827,7 +827,7 @@ func TestRetryRejected(t *testing.T) {
 		t.Fatalf("retry: %s\n%s", h.stdout.String(), h.stderr.String())
 	}
 	out, logs := h.stdout.String(), h.stderr.String()
-	if !strings.Contains(out, "Retry: sent 1, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 2.") {
+	if !strings.Contains(out, "Retry: sent 2, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 1.") {
 		t.Fatalf("stdout:\n%s", out)
 	}
 	for _, banned := range append([]string{token, oldKey, "SECRET-REASON", "UNLISTED-SECRET", `"subject"`, "Add retries"}, want[0].key, want[1].key) {
@@ -859,8 +859,8 @@ func TestRetryRejected(t *testing.T) {
 	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {
 		t.Fatalf("missing item was touched: %+v", e)
 	}
-	if e, _ := obRead.Get(want[2].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
-		t.Fatalf("a higher rule needs repository, which this item did not store: %+v", e)
+	if e, _ := obRead.Get(want[2].key); e.State != outbox.Sent {
+		t.Fatalf("a higher rule ruled out by type blocked the send: %+v", e)
 	}
 	if e, _ := obRead.Get(want[3].key); e.State != outbox.Superseded || e.Code != outbox.TierNever {
 		t.Fatalf("a match on an unlisted field was sent: %+v", e)
@@ -1069,6 +1069,54 @@ func TestRetrySupersedesWhenHigherRuleNeedsMissingField(t *testing.T) {
 	}
 	if strings.Contains(h.stderr.String(), want[0].key) || strings.Contains(h.stderr.String(), "Add retries") {
 		t.Fatalf("logs:\n%s", h.stderr.String())
+	}
+}
+
+// A higher rule already disproved by source does not block, even if it also names a field the item lacks.
+func TestRetrySendsWhenHigherRuleIsRuledOut(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "send", "ruled")
+	first := `rules:
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(first), 0o600))
+	h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(r.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"flat"}}`}
+	}
+	allowed := h.egressList(cfg)
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	h.server.Script = nil
+	later := `rules:
+  - name: drop-github-title
+    match: {source: github, fields: {title: {exact: "Add retries"}}}
+    tier: never
+  - name: send-url
+    match: {source: fixture, type: review_requested}
+    tier: send
+    fields: [url]
+`
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte(later), 0o600))
+	n := len(h.server.RequestsFor(want[0].key))
+	if code := h.run(h.app(allowed), "outbox", "retry", "--rejected", "--config", cfg); code != 0 {
+		t.Fatalf("%s\n%s", h.stdout.String(), h.stderr.String())
+	}
+	reqs := h.server.RequestsFor(want[0].key)
+	if len(reqs) != n+1 || !bytes.Contains(reqs[len(reqs)-1].Body, []byte(`"url"`)) {
+		t.Fatalf("ruled-out higher rule blocked the send: %d %s", len(reqs)-n, reqs)
+	}
+	ob, err := outbox.Read(filepath.Join(dir, "state"))
+	must(t, err)
+	if e, _ := ob.Get(want[0].key); e.State != outbox.Sent {
+		t.Fatalf("%+v", e)
 	}
 }
 

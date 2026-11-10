@@ -122,7 +122,7 @@ requires `mode: send` and the lease. It logs counts only.
 - An entry Signal accepted (`sent`, `replayed`) is not sent again.
 - A `409` is not touched. Signal already holds a request under that key, or refused a conflict a new body must not paper over.
 - A rejected event with no stored item is counted and not sent by this command. The refused body is not enough to rebuild the item.
-- The current rules decide. `send` projects again, and a field leaves only when both the stored decision and the current rule list it. `hold` or `never`, including a seed `never`, records the entry `superseded` and does not send. A rule above the one that matched that needs a field or actor the stored item does not have cannot be proved, so the entry is `superseded` as `never` and not sent.
+- The current rules decide. `send` projects again, and a field leaves only when both the stored decision and the current rule list it. `hold` or `never`, including a seed `never`, records the entry `superseded` and does not send. A rule above the one that matched that could still apply, and that needs a field or actor the stored item does not have, cannot be proved, so the entry is `superseded` as `never` and not sent. A condition the item does have that already fails that rule does not block the send.
 - The new body is appended and synced before it is sent. The refused body stays in the file. A pending retry, including one left pending because the lease ran out, is sent later as those exact bytes.
 - `closes` includes an ask the outbox still has open, including one an earlier retry in this pass sent. A refusal is not an open ask.
 

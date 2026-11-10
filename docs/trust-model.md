@@ -36,9 +36,10 @@ same pull request.
    again when a source yields it, append a new attempt, and send it. The refused lines stay in the file. Any other
    refusal is not sent again by `beacon run`. `beacon outbox retry --rejected` runs the current rules on the stored
    item. It sends only when they still send, and only fields both the stored decision and the current rule list. If
-   they hold or drop it, the entry is recorded superseded and not sent. A rule above that match that needs a field
-   or actor the stored item does not have cannot be proved, so the entry is superseded as never and not sent. The
-   command logs counts only. The stored
+   they hold or drop it, the entry is recorded superseded and not sent. A rule above that match that could still
+   apply, and that needs a field or actor the stored item does not have, cannot be proved, so the entry is
+   superseded as never and not sent. A condition the item does have that already fails that rule does not block
+   the send. The command logs counts only. The stored
    decision keeps listed fields only; an unlisted field, including a body, is not written and does not leave.
 6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
    hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
