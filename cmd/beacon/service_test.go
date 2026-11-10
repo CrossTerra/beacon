@@ -517,6 +517,66 @@ func TestPersistentFailureBacksOff(t *testing.T) {
 	}
 }
 
+func TestRulesFailureRecordsPass(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "rules")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, append(data, []byte("poll_interval: 50ms\nlease:\n  period: 1m\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var slept []time.Duration
+	a := h.app(nil)
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+	if code := a.main(context.Background(), []string{"run", "--config", cfg}); code == 0 {
+		t.Fatal("expected non-zero")
+	}
+	if len(slept) != 1 || slept[0] != 50*time.Millisecond {
+		t.Fatalf("slept %v, stderr %s", slept, h.stderr.String())
+	}
+	pass, err := service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil || pass.Outcome != "config" || pass.Failures != 1 {
+		t.Fatalf("%+v %v", pass, err)
+	}
+	slept = nil
+	a = h.app(nil)
+	a.sleep = func(context.Context, time.Duration) error {
+		slept = append(slept, time.Second)
+		return nil
+	}
+	if code := a.main(context.Background(), []string{"run", "--first", "--config", cfg}); code == 0 || len(slept) != 0 {
+		t.Fatalf("--first waited: exit %d slept %v\n%s", code, slept, h.stderr.String())
+	}
+}
+
+func TestBackoffSIGINTIsNotACleanStop(t *testing.T) {
+	h := newHarness(t)
+	h.store.Put("test", "sig_wrong")
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "sigint")
+	interrupt, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a := h.app(h.egressList(cfg))
+	a.interrupt = interrupt
+	a.sleep = func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if code := a.main(context.Background(), []string{"run", "--config", cfg}); code == 0 || !strings.Contains(h.stderr.String(), "Signal refused the key") {
+		t.Fatalf("exit %d\n%s", code, h.stderr.String())
+	}
+}
+
 func TestBackoffStopsOnSIGTERM(t *testing.T) {
 	h := newHarness(t)
 	h.store.Put("test", "sig_wrong")
@@ -631,7 +691,7 @@ func TestForceWaitsUntilUnloaded(t *testing.T) {
 		t.Fatal("bootstrapped before print")
 	}
 
-	fl = &fakeLaunch{loadedFor: 100}
+	fl = &fakeLaunch{loadedFor: service.ExitTimeOut + 1}
 	a = serviceApp(t, h, agents, fl, true)
 	a.sleep = func(context.Context, time.Duration) error { return nil }
 	if code := a.main(context.Background(), []string{"service", "install", "--force", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "still loaded") || strings.Contains(fl.joined(), "bootstrap ") {

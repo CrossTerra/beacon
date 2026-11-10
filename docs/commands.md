@@ -38,8 +38,10 @@ which can name item keys or rule patterns. An unreachable Signal is not an error
 pass.
 
 Without `--once` or `--first`, that non-zero exit waits first. The wait is one `poll_interval`, then double that, up
-to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon service status` shows it. launchd's
-10-second throttle is on top of that wait, not instead of it. SIGTERM during the wait exits 0. `--once` does not wait.
+to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon service status` shows it. A rules or
+source error still has a config, so that record uses the state directory and the configured interval. launchd's
+10-second throttle is on top of that wait, not instead of it. SIGTERM during the wait exits 0. SIGINT does not: the
+failure is still reported. `--once` and `--first` do not wait.
 
 `--once` makes one pass and exits. `--first` does too. Without either, `run` makes a pass every `poll_interval`
 until interrupted, in dry-run and in send mode. A dry-run loop still writes nothing. The log goes to standard error.
@@ -176,9 +178,9 @@ in the plist is absolute and symlink-resolved, and it is the path that was check
 that certificate's leaf in the state directory. A later `beacon run` refuses a binary whose leaf does not match, and
 does not contact Signal. `status` prints `identity: mismatch` when that is so, and does not print the hash.
 
-`install` refuses to replace an existing plist without `--force`. `--force` stops the running job, waits until
-launchd reports it unloaded, writes the new plist, and bootstraps it. If that wait does not finish, the old plist
-is left in place. If bootstrap fails, the new plist is removed so the next login does not start a half-installed
+`install` refuses to replace an existing plist without `--force`. `--force` stops the running job and waits until
+launchd reports it unloaded, up to the 180 seconds the agent is given to finish a send, then writes the new plist
+and bootstraps it. If that wait does not finish, the old plist is left in place. If bootstrap fails, the new plist is removed so the next login does not start a half-installed
 agent. `uninstall` stops the job and removes the plist. It does not delete the state directory.
 
 `status` prints whether the job is loaded and running, and the last pass from `pass.json` in the state directory:

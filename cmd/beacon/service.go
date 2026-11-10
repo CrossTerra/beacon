@@ -220,14 +220,15 @@ func (a *app) checkIdentity(ctx context.Context, path string) (service.Identity,
 	return id, nil
 }
 
-// waitUnloaded polls until launchd no longer has the job, or gives up. Bootstrap before that can overlap the old process.
+// waitUnloaded polls until launchd no longer has the job. The agent may take ExitTimeOut to finish the in-flight
+// send after SIGTERM, so the wait is that long, not a few seconds.
 func (a *app) waitUnloaded(ctx context.Context, lc launcher, target string) error {
-	for i := 0; i < 50; i++ {
+	for i := 0; i < service.ExitTimeOut; i++ {
 		out, err := lc.Print(ctx, target)
 		if err != nil || !service.ParsePrint(out).Loaded {
 			return nil
 		}
-		if err := a.sleepFor(ctx, 100*time.Millisecond); err != nil {
+		if err := a.sleepFor(ctx, time.Second); err != nil {
 			return err
 		}
 	}
@@ -427,7 +428,8 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 
 // failLoop records a persistent failure and, unless this is a one-shot run, waits before the non-zero exit. The
 // wait is one poll interval, doubling up to 30 minutes, so launchd cannot restart the agent every throttle interval.
-// SIGTERM during the wait is a clean exit. alreadyRecorded means the caller wrote pass.json, including the streak.
+// Only SIGTERM during the wait is a clean exit. SIGINT still returns the failure. alreadyRecorded means the caller
+// wrote pass.json, including the streak.
 func (a *app) failLoop(once bool, dir string, poll time.Duration, interrupt context.Context, log *logs.Logger, reason logs.Reason, text string, alreadyRecorded bool) error {
 	log.Log(logs.RunFailed, logs.Why(reason))
 	if dir != "" && !alreadyRecorded {
@@ -440,13 +442,16 @@ func (a *app) failLoop(once bool, dir string, poll time.Duration, interrupt cont
 	return runFailure{text: text}
 }
 
-// backoff waits. It reports whether the wait was interrupted, which is a clean stop.
+// backoff waits. It reports whether SIGTERM stopped the wait. Any other interruption is not a clean stop.
 func (a *app) backoff(interrupt context.Context, poll time.Duration, dir string) bool {
 	n := 1
 	if prev, err := service.ReadPass(dir); err == nil && prev.Failures > 0 {
 		n = prev.Failures
 	}
-	return a.sleepFor(interrupt, service.Backoff(poll, n)) != nil
+	if a.sleepFor(interrupt, service.Backoff(poll, n)) == nil {
+		return false
+	}
+	return a.termFired()
 }
 
 func (a *app) sleepFor(interrupt context.Context, d time.Duration) error {

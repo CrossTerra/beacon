@@ -329,17 +329,26 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	// and waits before the non-zero exit, so launchd does not restart a persistent failure every throttle interval.
 	var stateDir string
 	poll := config.DefaultPollInterval
+	// --once and --first are one-shot. Only the poll loop waits before a non-zero exit.
 	fail := func(reason logs.Reason, text string) error {
-		return a.failLoop(*once, stateDir, poll, interrupt, log, reason, text, false)
+		return a.failLoop(*once || *first, stateDir, poll, interrupt, log, reason, text, false)
+	}
+	// A rules or source error fails load, but the config is already readable. Take the state directory and rotate
+	// before that failure, so status can show the reason and the service log stays capped.
+	if cfg, err := a.loadConfig(*cfgPath); err == nil {
+		stateDir = cfg.StatePath()
+		poll = cfg.PollInterval()
+		a.rotateServiceLogs(stateDir)
 	}
 	e, err := a.load(*cfgPath)
 	if err != nil {
 		return fail(logs.ReasonConfig, "the config, the rules file or a source could not be loaded; beacon rules check shows why")
 	}
-	stateDir = e.cfg.StatePath()
-	poll = e.cfg.PollInterval()
-	// Before the checks that can fail the start. A restart loop must not append to the service log without a cap.
-	a.rotateServiceLogs(stateDir)
+	if stateDir == "" {
+		stateDir = e.cfg.StatePath()
+		poll = e.cfg.PollInterval()
+		a.rotateServiceLogs(stateDir)
+	}
 	if err := a.refusePinned(ctx, stateDir); err != nil {
 		return fail(logs.ReasonSigning, "refusing to run a binary whose signing identity does not match the one recorded by beacon service install")
 	}
