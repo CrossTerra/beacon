@@ -7,6 +7,8 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
@@ -31,6 +33,12 @@ const (
 	StderrName = "service.stderr.log"
 	// PassName is the last send pass, in the state directory.
 	PassName = "pass.json"
+	// LeafName is the certificate leaf hash recorded at install, in the state directory.
+	LeafName = "service.leaf"
+
+	// BackoffCap is the longest a poll loop waits before a non-zero exit. launchd would otherwise restart a
+	// persistent failure every throttle interval.
+	BackoffCap = 30 * time.Minute
 
 	// ThrottleInterval is how long launchd waits before restarting a job that exited too quickly. It is launchd's
 	// own default, written into the plist so the bound is visible.
@@ -191,6 +199,8 @@ type Pass struct {
 	Outcome string    `json:"outcome"`
 	Lease   string    `json:"lease,omitempty"`
 	Holder  string    `json:"holder,omitempty"`
+	// Failures is the streak of failed starts. It sets the backoff. A clean pass leaves it zero.
+	Failures int `json:"failures,omitempty"`
 }
 
 // Lease values recorded on a pass.
@@ -264,7 +274,63 @@ func validate(p Pass) error {
 	if p.Lease != LeaseHeld && p.Holder != "" {
 		return ErrPass
 	}
+	if p.Failures < 0 {
+		return ErrPass
+	}
 	return nil
+}
+
+// Failed reports whether outcome is a recorded failure, not a clean pass or a stop.
+func Failed(outcome string) bool {
+	return outcome != "" && outcome != "ok" && outcome != "stopped" && outcomePattern.MatchString(outcome)
+}
+
+// NextFailures is the streak after one more failure. A clean previous pass starts it at 1.
+func NextFailures(prev Pass, ok bool) int {
+	if !ok || !Failed(prev.Outcome) {
+		return 1
+	}
+	n := prev.Failures
+	if n < 1 {
+		n = 1
+	}
+	if n >= 1000 {
+		return 1000
+	}
+	return n + 1
+}
+
+// Backoff is how long to wait before a non-zero exit: one poll interval, doubling, capped at BackoffCap.
+func Backoff(poll time.Duration, failures int) time.Duration {
+	if poll <= 0 {
+		poll = time.Minute
+	}
+	if failures < 1 {
+		failures = 1
+	}
+	d := poll
+	for i := 1; i < failures && d < BackoffCap; i++ {
+		if d > BackoffCap/2 {
+			return BackoffCap
+		}
+		d *= 2
+	}
+	if d > BackoffCap {
+		return BackoffCap
+	}
+	return d
+}
+
+// ReportBodies reports whether a pass prints item bodies. The launchd agent does not, unless asked: a dry run's
+// bodies would otherwise land in the service log.
+func ReportBodies(requested, serviceStdout, dry bool) bool {
+	if requested {
+		return true
+	}
+	if serviceStdout {
+		return false
+	}
+	return dry
 }
 
 func writeAtomic(dir, name string, data []byte) error {
@@ -341,6 +407,9 @@ type Identity struct {
 	Identifier string
 	Authority  string
 	AdHoc      bool
+	// Leaf is the SHA-256 of the signing certificate, hex. It is what install pins. A rebuild with the same
+	// certificate keeps it; a different signer does not.
+	Leaf string
 }
 
 // Stable reports whether the identity is a certificate, not an ad-hoc signature. An ad-hoc signature changes every
@@ -379,10 +448,95 @@ func CodesignIdentity(ctx context.Context, path string) (Identity, error) {
 		return Identity{}, ErrNotStable
 	}
 	id := ParseIdentity(string(out))
-	if !id.Stable() {
+	leaf, err := leafHash(ctx, path)
+	if err != nil {
+		return Identity{}, ErrNotStable
+	}
+	id.Leaf = leaf
+	if !id.Stable() || !LeafOK(id.Leaf) {
 		return Identity{}, ErrNotStable
 	}
 	return id, nil
+}
+
+// HashLeaf is the SHA-256 of a leaf certificate, hex. Install records it; run and status compare it.
+func HashLeaf(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// LeafOK reports whether s is a leaf hash this package would write.
+func LeafOK(s string) bool { return leafPattern.MatchString(s) }
+
+var leafPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func leafHash(ctx context.Context, path string) (string, error) {
+	dir, err := os.MkdirTemp("", "beacon-codesign")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(dir)
+	prefix := filepath.Join(dir, "cert")
+	if err := exec.CommandContext(ctx, "codesign", "-d", "--extract-certificates="+prefix, path).Run(); err != nil {
+		return "", ErrNotStable
+	}
+	der, err := os.ReadFile(prefix + "0")
+	if err != nil || len(der) == 0 {
+		return "", ErrNotStable
+	}
+	return HashLeaf(der), nil
+}
+
+// WriteLeaf records the leaf hash, mode 0600.
+func WriteLeaf(dir, leaf string) error {
+	if !LeafOK(leaf) {
+		return errors.New("service: signing identity is unreadable")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return writeAtomic(dir, LeafName, []byte(leaf+"\n"))
+}
+
+// ReadLeaf reads the recorded leaf hash. A missing file is os.ErrNotExist. Anything else that is not a hash is a
+// fixed error and does not include the file.
+func ReadLeaf(dir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, LeafName))
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(data))
+	if !LeafOK(s) {
+		return "", ErrIdentity
+	}
+	return s, nil
+}
+
+// ErrIdentity means the recorded signing identity is not a leaf hash. Its text does not include the file.
+var ErrIdentity = errors.New("service: signing identity is unreadable")
+
+// BinaryFromPlist returns the executable named by a plist this package wrote, or "" if it cannot.
+func BinaryFromPlist(data []byte) string {
+	const key = "<key>ProgramArguments</key>"
+	i := bytes.Index(data, []byte(key))
+	if i < 0 {
+		return ""
+	}
+	rest := data[i+len(key):]
+	start := bytes.Index(rest, []byte("<string>"))
+	if start < 0 {
+		return ""
+	}
+	rest = rest[start+len("<string>"):]
+	end := bytes.Index(rest, []byte("</string>"))
+	if end < 0 {
+		return ""
+	}
+	s := strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(string(rest[:end]))
+	if !filepath.IsAbs(s) || strings.ContainsAny(s, "\r\n") {
+		return ""
+	}
+	return s
 }
 
 // EnsureLog creates path if needed, mode 0600, without truncating an existing file.
@@ -402,7 +556,7 @@ func EnsureLog(path string) error {
 }
 
 // FormatStatus is the fixed status text. Fields are already validated; this does not read a file.
-func FormatStatus(job Job, pass Pass, passErr error) string {
+func FormatStatus(job Job, pass Pass, passErr error, identity string) string {
 	loaded, running, pid := "no", "no", "none"
 	if job.Loaded {
 		loaded = "yes"
@@ -430,6 +584,11 @@ func FormatStatus(job Job, pass Pass, passErr error) string {
 	case passErr != nil && !errors.Is(passErr, os.ErrNotExist):
 		last, outcome = "unreadable", "unreadable"
 	}
-	return fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\nlast_pass: %s\noutcome: %s\nlease: %s\nholder: %s\n",
-		loaded, running, pid, last, outcome, lease, holder)
+	switch identity {
+	case "ok", "mismatch", "none", "unreadable":
+	default:
+		identity = "unreadable"
+	}
+	return fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\nlast_pass: %s\noutcome: %s\nlease: %s\nholder: %s\nidentity: %s\n",
+		loaded, running, pid, last, outcome, lease, holder, identity)
 }

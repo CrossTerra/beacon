@@ -89,3 +89,6 @@ Built as scoped. Differences from the text above:
   waiting after that can be killed; the outbox recovers it.
 - `Umask` is 077. The plist sets `ProcessType` to `Background`.
 - Status does not name another instance's id. Beacon does not read Signal's log, and a 409 does not carry it.
+- A persistent failure waits one poll interval, doubling up to 30 minutes, before the non-zero exit, and records the
+  reason in `pass.json`. The service log does not include bodies unless `--bodies` is set. Install pins the
+  certificate leaf hash; a mismatch is refused and shown by `status`. `--force` waits until the old job is unloaded.

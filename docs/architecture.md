@@ -83,7 +83,8 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `first.json` | Sources whose `beacon run --first` completed. `accept-first` requires it | No |
 | `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
 | `seed` | Imported seed lines (DEC-24) | No |
-| `pass.json` | The last send pass: time, outcome, whether this instance held the lease, and this instance's id when it did. No item content. A dry run does not write it | No |
+| `pass.json` | The last pass: time, outcome, whether this instance held the lease, and this instance's id when it did. A failed start records the reason here even when it did not send, and the failure streak that sets the backoff. No item content. A successful dry run does not write it | No |
+| `service.leaf` | The SHA-256 of the signing certificate recorded by `beacon service install`. `beacon run` refuses a binary whose leaf does not match | No |
 | `service.stdout.log`, `service.stderr.log` | What the launchd agent prints. Standard error is the JSON log. Rotated by size, one generation kept | No |
 
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds

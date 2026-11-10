@@ -71,6 +71,8 @@ type app struct {
 	agentsDir func() (string, error)
 	launchctl launcher
 	identify  func(context.Context, string) (service.Identity, error)
+	// sleep waits. Nil sleeps on the clock. Tests record the duration and return.
+	sleep func(context.Context, time.Duration) error
 }
 
 const usage = `usage: beacon <command> [flags]
@@ -313,20 +315,33 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	dry := fs.Bool("dry-run", false, "print what would be sent, and send nothing (the default until the config says mode: send)")
 	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
-	bodies := fs.Bool("bodies", false, "in send mode, print the body of each item decided in the pass (a dry run always does)")
+	bodies := fs.Bool("bodies", false, "print each decided item's body (a terminal dry run does; the launchd agent does not, unless this is set)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	log := logs.New(a.stderr)
+	interrupt := ctx
+	if a.interrupt != nil {
+		interrupt = a.interrupt
+	}
 	// From here on, an error's text never reaches standard error: it can name keys, paths and rule patterns. The
-	// person sees a fixed message for its reason, and the commands that show details.
+	// person sees a fixed message for its reason, and the commands that show details. A poll loop records the reason
+	// and waits before the non-zero exit, so launchd does not restart a persistent failure every throttle interval.
+	var stateDir string
+	poll := config.DefaultPollInterval
 	fail := func(reason logs.Reason, text string) error {
-		log.Log(logs.RunFailed, logs.Why(reason))
-		return runFailure{text: text}
+		return a.failLoop(*once, stateDir, poll, interrupt, log, reason, text, false)
 	}
 	e, err := a.load(*cfgPath)
 	if err != nil {
 		return fail(logs.ReasonConfig, "the config, the rules file or a source could not be loaded; beacon rules check shows why")
+	}
+	stateDir = e.cfg.StatePath()
+	poll = e.cfg.PollInterval()
+	// Before the checks that can fail the start. A restart loop must not append to the service log without a cap.
+	a.rotateServiceLogs(stateDir)
+	if err := a.refusePinned(ctx, stateDir); err != nil {
+		return fail(logs.ReasonSigning, "refusing to run a binary whose signing identity does not match the one recorded by beacon service install")
 	}
 	var problems int
 	for _, p := range e.rules.Check(e.checkSources()) {
@@ -345,10 +360,6 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 	// SIGTERM finishes the write already in progress and does not start another. SIGINT still cancels work.
 	r.Stop = a.termFired
-	interrupt := ctx
-	if a.interrupt != nil {
-		interrupt = a.interrupt
-	}
 	work, cancelWork := context.WithCancel(context.Background())
 	defer cancelWork()
 	go func() {
@@ -374,14 +385,12 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 				log.Log(logs.RunStopped)
 				return nil
 			}
-			// The default mode is dry-run, and that is what the agent runs. Rotation applies here too: a dry-run
-			// report includes bodies.
-			a.rotateServiceLogs(e.cfg.StatePath())
+			a.rotateServiceLogs(stateDir)
 			rep, err := r.Run(work)
 			if err != nil {
 				return fail(runner.Classify(err), failText(runner.Classify(err), e))
 			}
-			a.printReport(rep, true)
+			a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), true))
 			if *first {
 				a.printFirst(rep)
 				if err := a.recordFirst(e, rep); err != nil {
@@ -436,19 +445,21 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 			log.Log(logs.RunStopped)
 			return nil
 		}
-		a.rotateServiceLogs(e.cfg.StatePath())
+		a.rotateServiceLogs(stateDir)
 		rep, err := r.Run(work)
 		if rep != nil {
-			a.printReport(rep, *bodies)
+			a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), false))
 		}
-		a.recordPass(e.cfg.StatePath(), instance, rep, passOutcome(err, a.termFired()))
+		outcome := passOutcome(err, a.termFired())
+		a.recordPass(stateDir, instance, rep, outcome)
 		if err != nil {
 			reason := runner.Classify(err)
 			var refused *lease.RefusedError
+			text := failText(reason, e)
 			if errors.As(err, &refused) {
-				return fail(reason, refused.Error()+"; check that Beacon's key has write scope and the lease subject is allowed")
+				text = refused.Error() + "; check that Beacon's key has write scope and the lease subject is allowed"
 			}
-			return fail(reason, failText(reason, e))
+			return a.failLoop(*once, stateDir, poll, interrupt, log, reason, text, true)
 		}
 		if *once || a.termFired() {
 			if a.termFired() {
@@ -524,6 +535,8 @@ func failText(reason logs.Reason, e *env) string {
 		return "the state directory could not be read or written; beacon outbox shows the outbox"
 	case logs.ReasonCanceled:
 		return "interrupted"
+	case logs.ReasonSigning:
+		return "refusing to run a binary whose signing identity does not match the one recorded by beacon service install"
 	}
 	return "the pass failed (" + string(reason) + "); beacon outbox shows what was recorded"
 }

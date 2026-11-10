@@ -11,7 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/runner"
 	"github.com/CrossTerra/beacon/internal/service"
 )
@@ -145,7 +147,8 @@ func (a *app) cmdServiceInstall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := a.checkIdentity(ctx, bin); err != nil {
+	id, err := a.checkIdentity(ctx, bin)
+	if err != nil {
 		return err
 	}
 	state, err := filepath.Abs(e.cfg.StatePath())
@@ -186,12 +189,20 @@ func (a *app) cmdServiceInstall(ctx context.Context, args []string) error {
 	if err := service.EnsureLog(spec.Stderr); err != nil {
 		return err
 	}
-	// Stop a previous job before replacing its definition. A job that is not loaded is not an error.
-	_ = lc.Bootout(ctx, service.Target(uid))
+	// Stop a previous job before replacing its definition. A job that is not loaded is not an error. Wait until it
+	// is gone before bootstrap, so the new job does not overlap the old one.
+	target := service.Target(uid)
+	_ = lc.Bootout(ctx, target)
+	if err := a.waitUnloaded(ctx, lc, target); err != nil {
+		return err
+	}
+	if err := service.WriteLeaf(state, id.Leaf); err != nil {
+		return err
+	}
 	if err := writePlist(path, plist); err != nil {
 		return err
 	}
-	_ = lc.Enable(ctx, service.Target(uid))
+	_ = lc.Enable(ctx, target)
 	if err := lc.Bootstrap(ctx, service.Domain(uid), path); err != nil {
 		os.Remove(path)
 		return err
@@ -201,18 +212,26 @@ func (a *app) cmdServiceInstall(ctx context.Context, args []string) error {
 	return nil
 }
 
-func (a *app) checkIdentity(ctx context.Context, path string) error {
-	var id service.Identity
-	var err error
-	if a.identify != nil {
-		id, err = a.identify(ctx, path)
-	} else {
-		id, err = service.CodesignIdentity(ctx, path)
+func (a *app) checkIdentity(ctx context.Context, path string) (service.Identity, error) {
+	id, err := a.identityOf(ctx, path)
+	if err != nil || !id.Stable() || !service.LeafOK(id.Leaf) {
+		return service.Identity{}, errors.New(errNotSigned)
 	}
-	if err != nil || !id.Stable() {
-		return errors.New(errNotSigned)
+	return id, nil
+}
+
+// waitUnloaded polls until launchd no longer has the job, or gives up. Bootstrap before that can overlap the old process.
+func (a *app) waitUnloaded(ctx context.Context, lc launcher, target string) error {
+	for i := 0; i < 50; i++ {
+		out, err := lc.Print(ctx, target)
+		if err != nil || !service.ParsePrint(out).Loaded {
+			return nil
+		}
+		if err := a.sleepFor(ctx, 100*time.Millisecond); err != nil {
+			return err
+		}
 	}
-	return nil
+	return errors.New("the previous agent is still loaded; beacon service uninstall stops it")
 }
 
 func resolveBinary(path string) (string, error) {
@@ -321,12 +340,42 @@ func (a *app) cmdServiceStatus(ctx context.Context, args []string) error {
 	}
 	var pass service.Pass
 	passErr := os.ErrNotExist
+	identity := "none"
 	// Status only needs the state directory. A rules or source error must not hide a pass that was recorded.
 	if cfg, err := a.loadConfig(*cfgPath); err == nil {
 		pass, passErr = service.ReadPass(cfg.StatePath())
+		identity = a.identityStatus(ctx, cfg.StatePath())
 	}
-	fmt.Fprint(a.stdout, service.FormatStatus(job, pass, passErr))
+	fmt.Fprint(a.stdout, service.FormatStatus(job, pass, passErr, identity))
 	return nil
+}
+
+// identityStatus compares the plist binary with the leaf hash install recorded. It does not echo either.
+func (a *app) identityStatus(ctx context.Context, state string) string {
+	want, err := service.ReadLeaf(state)
+	if errors.Is(err, os.ErrNotExist) {
+		return "none"
+	}
+	if err != nil {
+		return "unreadable"
+	}
+	dir, err := a.agentsDirectory()
+	if err != nil {
+		return "mismatch"
+	}
+	data, err := os.ReadFile(filepath.Join(dir, service.PlistName))
+	if err != nil {
+		return "mismatch"
+	}
+	bin := service.BinaryFromPlist(data)
+	if bin == "" {
+		return "mismatch"
+	}
+	id, err := a.identityOf(ctx, bin)
+	if err != nil || !strings.EqualFold(id.Leaf, want) {
+		return "mismatch"
+	}
+	return "ok"
 }
 
 func (a *app) cmdServiceLogs(args []string) error {
@@ -369,7 +418,93 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 			p.Lease = service.LeaseNotTaken
 		}
 	}
+	if service.Failed(outcome) {
+		prev, err := service.ReadPass(dir)
+		p.Failures = service.NextFailures(prev, err == nil)
+	}
 	_ = service.WritePass(dir, p)
+}
+
+// failLoop records a persistent failure and, unless this is a one-shot run, waits before the non-zero exit. The
+// wait is one poll interval, doubling up to 30 minutes, so launchd cannot restart the agent every throttle interval.
+// SIGTERM during the wait is a clean exit. alreadyRecorded means the caller wrote pass.json, including the streak.
+func (a *app) failLoop(once bool, dir string, poll time.Duration, interrupt context.Context, log *logs.Logger, reason logs.Reason, text string, alreadyRecorded bool) error {
+	log.Log(logs.RunFailed, logs.Why(reason))
+	if dir != "" && !alreadyRecorded {
+		a.recordPass(dir, "", nil, string(reason))
+	}
+	if !once && a.backoff(interrupt, poll, dir) {
+		log.Log(logs.RunStopped)
+		return nil
+	}
+	return runFailure{text: text}
+}
+
+// backoff waits. It reports whether the wait was interrupted, which is a clean stop.
+func (a *app) backoff(interrupt context.Context, poll time.Duration, dir string) bool {
+	n := 1
+	if prev, err := service.ReadPass(dir); err == nil && prev.Failures > 0 {
+		n = prev.Failures
+	}
+	return a.sleepFor(interrupt, service.Backoff(poll, n)) != nil
+}
+
+func (a *app) sleepFor(interrupt context.Context, d time.Duration) error {
+	if a.sleep != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-interrupt.Done():
+				cancel()
+			case <-a.termDone():
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return a.sleep(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-interrupt.Done():
+		return interrupt.Err()
+	case <-a.termDone():
+		return errors.New("stopped")
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (a *app) serviceStdout(state string) bool {
+	return sameFile(filepath.Join(state, service.StdoutName), 1)
+}
+
+// refusePinned refuses to run when install recorded a certificate and this binary is not signed with it.
+func (a *app) refusePinned(ctx context.Context, dir string) error {
+	want, err := service.ReadLeaf(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	id, err := a.identityOf(ctx, exe)
+	if err != nil || !strings.EqualFold(id.Leaf, want) {
+		return errors.New("signing identity does not match")
+	}
+	return nil
+}
+
+func (a *app) identityOf(ctx context.Context, path string) (service.Identity, error) {
+	if a.identify != nil {
+		return a.identify(ctx, path)
+	}
+	return service.CodesignIdentity(ctx, path)
 }
 
 // rotateServiceLogs rotates the service logs when this process's standard output or error is that file, which is

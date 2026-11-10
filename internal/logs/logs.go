@@ -59,8 +59,10 @@ const (
 	ReasonSourceAuth   Reason = "source_unauthorized"
 	ReasonScope        Reason = "scope_denied"
 	ReasonIdentity     Reason = "identity_mismatch"
-	ReasonItem         Reason = "item_invalid"
-	ReasonProject      Reason = "project_failed"
+	// ReasonSigning is a binary whose certificate is not the one install recorded.
+	ReasonSigning Reason = "signing_mismatch"
+	ReasonItem    Reason = "item_invalid"
+	ReasonProject Reason = "project_failed"
 )
 
 // Attr is a log attribute built by one of the helpers below.

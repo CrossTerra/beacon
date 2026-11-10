@@ -13,12 +13,15 @@ import (
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
 )
 
+const testLeaf = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 type fakeLaunch struct {
-	mu       sync.Mutex
-	calls    []string
-	printOut string
-	printErr error
-	bootErr  error
+	mu        sync.Mutex
+	calls     []string
+	printOut  string
+	printErr  error
+	bootErr   error
+	loadedFor int
 }
 
 func (f *fakeLaunch) Bootstrap(_ context.Context, domain, plist string) error {
@@ -46,6 +49,10 @@ func (f *fakeLaunch) Print(_ context.Context, target string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "print "+target)
+	if f.loadedFor > 0 {
+		f.loadedFor--
+		return "state = running\npid = 1\n", nil
+	}
 	return f.printOut, f.printErr
 }
 
@@ -66,7 +73,7 @@ func serviceApp(t *testing.T, h *harness, agents string, fl *fakeLaunch, signed 
 		if !signed {
 			return service.Identity{AdHoc: true, Identifier: "beacon"}, nil
 		}
-		return service.Identity{Authority: "Beacon Local Signing", Identifier: "dev.beacon.cli"}, nil
+		return service.Identity{Authority: "Beacon Local Signing", Identifier: "dev.beacon.cli", Leaf: testLeaf}, nil
 	}
 	return a
 }
@@ -108,6 +115,10 @@ func TestServiceInstallPlistAndRefusals(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "\n\t\t<string>run</string>\n") || !strings.Contains(string(data), service.StdoutName) {
 		t.Fatalf("plist:\n%s", data)
+	}
+	leaf, err := os.ReadFile(filepath.Join(dir, "state", service.LeafName))
+	if err != nil || strings.TrimSpace(string(leaf)) != testLeaf {
+		t.Fatalf("leaf %q err %v", leaf, err)
 	}
 	calls := fl.joined()
 	if !strings.Contains(calls, "bootstrap gui/501 "+plistPath) || !strings.Contains(calls, "enable gui/501/"+service.Label) {
@@ -209,7 +220,7 @@ func TestServiceStatusParsing(t *testing.T) {
 	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
-	want := "loaded: yes\nrunning: yes\npid: 4242\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\n"
+	want := "loaded: yes\nrunning: yes\npid: 4242\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\nidentity: none\n"
 	if h.stdout.String() != want {
 		t.Fatalf("status:\n%s", h.stdout.String())
 	}
@@ -455,6 +466,177 @@ func (w *watchWriter) Write(p []byte) (int, error) {
 		w.once.Do(func() { close(w.saw) })
 	}
 	return n, err
+}
+
+func TestPersistentFailureBacksOff(t *testing.T) {
+	h := newHarness(t)
+	h.store.Put("test", "sig_wrong")
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "backoff")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, append(data, []byte("poll_interval: 50ms\nlease:\n  period: 1m\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var slept []time.Duration
+	a := h.app(h.egressList(cfg))
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+	if code := a.main(context.Background(), []string{"run", "--config", cfg}); code == 0 {
+		t.Fatal("expected non-zero")
+	}
+	if len(slept) != 1 || slept[0] != 50*time.Millisecond {
+		t.Fatalf("slept %v", slept)
+	}
+	pass, err := service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil || pass.Outcome != "unauthorized" || pass.Failures != 1 {
+		t.Fatalf("%+v %v", pass, err)
+	}
+	if strings.Contains(string(mustRead(t, filepath.Join(dir, "state", service.PassName))), "sig_wrong") {
+		t.Fatal("pass record contains the token")
+	}
+	a = h.app(h.egressList(cfg))
+	slept = nil
+	a.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		return nil
+	}
+	if code := a.main(context.Background(), []string{"run", "--config", cfg}); code == 0 {
+		t.Fatal("expected non-zero")
+	}
+	if len(slept) != 1 || slept[0] != 100*time.Millisecond {
+		t.Fatalf("second slept %v", slept)
+	}
+	pass, err = service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil || pass.Failures != 2 {
+		t.Fatalf("%+v %v", pass, err)
+	}
+}
+
+func TestBackoffStopsOnSIGTERM(t *testing.T) {
+	h := newHarness(t)
+	h.store.Put("test", "sig_wrong")
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "backterm")
+	term, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	a := h.app(h.egressList(cfg))
+	a.term = term
+	var once sync.Once
+	a.sleep = func(ctx context.Context, _ time.Duration) error {
+		once.Do(func() { close(entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- a.main(context.Background(), []string{"run", "--config", cfg})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("backoff did not start")
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("exit %d\n%s", code, h.stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not exit")
+	}
+	pass, err := service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil || pass.Outcome != "unauthorized" {
+		t.Fatalf("%+v %v", pass, err)
+	}
+}
+
+func TestPinnedIdentityRefused(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "pin")
+	if err := service.WriteLeaf(filepath.Join(dir, "state"), testLeaf); err != nil {
+		t.Fatal(err)
+	}
+	other := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	a := h.app(h.egressList(cfg))
+	a.identify = func(context.Context, string) (service.Identity, error) {
+		return service.Identity{Authority: "Other", Leaf: other}, nil
+	}
+	if code := a.main(context.Background(), []string{"run", "--once", "--config", cfg}); code == 0 || !strings.Contains(h.stderr.String(), "signing identity") {
+		t.Fatalf("exit %d\n%s", code, h.stderr.String())
+	}
+	if len(h.server.Requests()) != 0 {
+		t.Fatalf("mismatched binary contacted Signal: %d", len(h.server.Requests()))
+	}
+	pass, err := service.ReadPass(filepath.Join(dir, "state"))
+	if err != nil || pass.Outcome != "signing_mismatch" {
+		t.Fatalf("%+v %v", pass, err)
+	}
+	agents := t.TempDir()
+	plist, err := service.Plist(service.Spec{
+		Binary: "/Users/winton/.local/bin/beacon",
+		Config: cfg,
+		Stdout: filepath.Join(dir, "state", service.StdoutName),
+		Stderr: filepath.Join(dir, "state", service.StderrName),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agents, service.PlistName), plist, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a = serviceApp(t, h, agents, &fakeLaunch{}, true)
+	a.identify = func(context.Context, string) (service.Identity, error) {
+		return service.Identity{Authority: "Other", Leaf: other}, nil
+	}
+	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if !strings.Contains(h.stdout.String(), "identity: mismatch\n") || strings.Contains(h.stdout.String(), testLeaf) || strings.Contains(h.stdout.String(), other) {
+		t.Fatalf("status:\n%s", h.stdout.String())
+	}
+}
+
+func TestForceWaitsUntilUnloaded(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "force")
+	agents := t.TempDir()
+	bin := testBinary(t)
+	fl := &fakeLaunch{}
+	a := serviceApp(t, h, agents, fl, true)
+	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	fl = &fakeLaunch{loadedFor: 2}
+	a = serviceApp(t, h, agents, fl, true)
+	a.sleep = func(context.Context, time.Duration) error { return nil }
+	if code := a.main(context.Background(), []string{"service", "install", "--force", "--config", cfg, "--binary", bin}); code != 0 {
+		t.Fatalf("force: %d\n%s", code, h.stderr.String())
+	}
+	calls := fl.joined()
+	if strings.Count(calls, "print ") < 3 || !strings.Contains(calls, "bootstrap ") {
+		t.Fatalf("calls:\n%s", calls)
+	}
+	boot := strings.Index(calls, "bootstrap ")
+	lastPrint := strings.LastIndex(calls[:boot], "print ")
+	if lastPrint < 0 {
+		t.Fatal("bootstrapped before print")
+	}
+
+	fl = &fakeLaunch{loadedFor: 100}
+	a = serviceApp(t, h, agents, fl, true)
+	a.sleep = func(context.Context, time.Duration) error { return nil }
+	if code := a.main(context.Background(), []string{"service", "install", "--force", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "still loaded") || strings.Contains(fl.joined(), "bootstrap ") {
+		t.Fatalf("exit %d\n%s\ncalls:\n%s", code, h.stderr.String(), fl.joined())
+	}
 }
 
 func mustRead(t *testing.T, path string) []byte {

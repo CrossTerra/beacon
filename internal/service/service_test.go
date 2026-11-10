@@ -215,22 +215,54 @@ TeamIdentifier=not set
 
 func TestFormatStatus(t *testing.T) {
 	at := time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC)
-	got := FormatStatus(Job{Loaded: true, Running: true, PID: 42}, Pass{At: at, Outcome: "ok", Lease: LeaseHeld, Holder: "0123456789abcdef"}, nil)
-	want := "loaded: yes\nrunning: yes\npid: 42\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\n"
+	got := FormatStatus(Job{Loaded: true, Running: true, PID: 42}, Pass{At: at, Outcome: "ok", Lease: LeaseHeld, Holder: "0123456789abcdef"}, nil, "ok")
+	want := "loaded: yes\nrunning: yes\npid: 42\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\nidentity: ok\n"
 	if got != want {
 		t.Fatalf("%q", got)
 	}
-	other := FormatStatus(Job{Loaded: true}, Pass{At: at, Outcome: "ok", Lease: LeaseOther}, nil)
-	if !strings.Contains(other, "holder: another instance\n") || strings.Contains(other, "0123456789abcdef") {
+	other := FormatStatus(Job{Loaded: true}, Pass{At: at, Outcome: "ok", Lease: LeaseOther}, nil, "mismatch")
+	if !strings.Contains(other, "holder: another instance\n") || strings.Contains(other, "0123456789abcdef") || !strings.Contains(other, "identity: mismatch\n") {
 		t.Fatalf("%s", other)
 	}
-	bad := FormatStatus(Job{}, Pass{}, ErrPass)
-	if strings.Contains(bad, "fixture") || !strings.Contains(bad, "last_pass: unreadable\n") {
+	bad := FormatStatus(Job{}, Pass{}, ErrPass, "not a code")
+	if strings.Contains(bad, "fixture") || !strings.Contains(bad, "last_pass: unreadable\n") || !strings.Contains(bad, "identity: unreadable\n") {
 		t.Fatalf("%s", bad)
 	}
-	none := FormatStatus(Job{}, Pass{}, os.ErrNotExist)
-	if !strings.Contains(none, "loaded: no\n") || !strings.Contains(none, "last_pass: none\n") {
+	none := FormatStatus(Job{}, Pass{}, os.ErrNotExist, "none")
+	if !strings.Contains(none, "loaded: no\n") || !strings.Contains(none, "last_pass: none\n") || !strings.Contains(none, "identity: none\n") {
 		t.Fatalf("%s", none)
+	}
+}
+
+func TestBackoffAndBodies(t *testing.T) {
+	poll := time.Minute
+	if Backoff(poll, 1) != poll || Backoff(poll, 2) != 2*poll || Backoff(poll, 3) != 4*poll {
+		t.Fatalf("backoff %s %s %s", Backoff(poll, 1), Backoff(poll, 2), Backoff(poll, 3))
+	}
+	if Backoff(poll, 20) != BackoffCap || Backoff(0, 1) != time.Minute {
+		t.Fatalf("cap %s default %s", Backoff(poll, 20), Backoff(0, 1))
+	}
+	if NextFailures(Pass{}, false) != 1 || NextFailures(Pass{Outcome: "ok"}, true) != 1 || NextFailures(Pass{Outcome: "unauthorized", Failures: 3}, true) != 4 {
+		t.Fatal("streak")
+	}
+	if ReportBodies(true, true, false) != true || ReportBodies(false, true, true) != false || ReportBodies(false, false, true) != true || ReportBodies(false, false, false) != false {
+		t.Fatal("bodies")
+	}
+	plist, err := Plist(Spec{
+		Binary: "/Users/winton/.local/bin/beacon",
+		Config: "/Users/winton/Library/Application Support/beacon/config.yaml",
+		Stdout: "/tmp/state/service.stdout.log",
+		Stderr: "/tmp/state/service.stderr.log",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if BinaryFromPlist(plist) != "/Users/winton/.local/bin/beacon" {
+		t.Fatalf("binary %q", BinaryFromPlist(plist))
+	}
+	sum := HashLeaf([]byte("leaf-cert"))
+	if !LeafOK(sum) {
+		t.Fatal(sum)
 	}
 }
 

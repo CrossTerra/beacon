@@ -91,10 +91,13 @@ same pull request.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the
-  keychain items Beacon uses. The launchd agent is that same user. Its standard output file holds the same text a
-  terminal run prints, including item keys and rule names; the JSON log does not. Both stay in the state directory.
+  keychain items Beacon uses. The launchd agent is that same user. Its standard output file holds item keys and rule
+  names, not bodies, unless the agent was started with `--bodies`. A terminal dry run still prints bodies. The JSON
+  log has neither. Both files stay in the state directory.
 - **launchd can kill a stop.** After SIGTERM, launchd waits 180 seconds and then sends SIGKILL. A send still in a
-  retry wait can be killed. The outbox recovers that the same way it recovers a crash. A non-zero exit is restarted,
-  at most once every 10 seconds, until the plist is removed.
+  retry wait can be killed. The outbox recovers that the same way it recovers a crash. A crash is restarted after
+  the 10-second throttle. A persistent failure (a refused key, a refused lease, an egress block, a state file) is
+  not: the process records the reason and waits one poll interval, doubling up to 30 minutes, before the non-zero
+  exit that launchd restarts.
 - **Beacon trusts the Signal host it is pointed at.** It checks TLS. It does not protect what the store does with
   data after it arrives.
