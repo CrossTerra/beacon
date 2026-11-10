@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -517,4 +518,77 @@ func TestDroppedEarlierIsSkipped(t *testing.T) {
 	if _, _, n, _ := rep.Counts(); n != 1 {
 		t.Fatalf("a key another rule drops is a new decision; never count %d", n)
 	}
+}
+
+// SIGTERM finishes the in-flight send and does not start the next one.
+func TestStopFinishesCurrentSend(t *testing.T) {
+	f := newFixture(t)
+	f.src.items = nil
+	w := &blockWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	r, done := f.runner(true, w)
+	defer done()
+	p := f.clock.t.Unix() / int64((5*time.Minute)/time.Second)
+	for _, n := range []int64{p, p + 1} {
+		key := r.Lease.Key(n)
+		if err := r.Outbox.Append(outbox.Lease, key, "beacon:lease:winton", "", []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Outbox.Mark(key, outbox.Sent, "evt", 201, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, key := range []string{"fx:a:1", "fx:b:1"} {
+		if err := r.Outbox.Append(outbox.Event, key, "fx:obj", "sends", []byte(`{"key":"`+key+`"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stop atomic.Bool
+	r.Stop = func() bool { return stop.Load() }
+	errc := make(chan error, 1)
+	go func() {
+		_, err := r.Run(context.Background())
+		errc <- err
+	}()
+	select {
+	case <-w.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("send did not start")
+	}
+	stop.Store(true)
+	close(w.release)
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pass did not finish")
+	}
+	if w.n != 1 {
+		t.Fatalf("writes %d, want the in-flight send only", w.n)
+	}
+	a, _ := r.Outbox.Get("fx:a:1")
+	b, _ := r.Outbox.Get("fx:b:1")
+	if a.State != outbox.Sent || b.State != outbox.Pending {
+		t.Fatalf("first %s, second %s", a.State, b.State)
+	}
+}
+
+type blockWriter struct {
+	n       int
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *blockWriter) Write(ctx context.Context, _ []byte) (signal.Result, error) {
+	w.n++
+	if w.n == 1 {
+		close(w.entered)
+		select {
+		case <-w.release:
+		case <-ctx.Done():
+			return signal.Result{}, ctx.Err()
+		}
+	}
+	return signal.Result{Outcome: signal.Written, Status: 201, EventID: "evt_x"}, nil
 }

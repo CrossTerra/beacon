@@ -52,7 +52,11 @@ same pull request.
    followed. There is no telemetry, no update check and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
    never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. The
-   Signal URL must be `https`, except to a loopback address.
+   Signal URL must be `https`, except to a loopback address. The per-user agent is a LaunchAgent in the user's GUI
+   session, never a LaunchDaemon. `beacon run` and `beacon service` refuse to start as root, so a plist copied into
+   `/Library/LaunchDaemons` exits instead of running as root. The plist names the signed binary, the config path and
+   the log paths. It has no environment variables and no credential. The agent reads keys from the keychain when a
+   pass sends, the same as a terminal `beacon run`.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
@@ -87,6 +91,10 @@ same pull request.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the
-  keychain items Beacon uses.
+  keychain items Beacon uses. The launchd agent is that same user. Its standard output file holds the same text a
+  terminal run prints, including item keys and rule names; the JSON log does not. Both stay in the state directory.
+- **launchd can kill a stop.** After SIGTERM, launchd waits 180 seconds and then sends SIGKILL. A send still in a
+  retry wait can be killed. The outbox recovers that the same way it recovers a crash. A non-zero exit is restarted,
+  at most once every 10 seconds, until the plist is removed.
 - **Beacon trusts the Signal host it is pointed at.** It checks TLS. It does not protect what the store does with
   data after it arrives.

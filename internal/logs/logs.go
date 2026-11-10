@@ -31,6 +31,8 @@ const (
 	DryRunNoSending Event = "dry_run"
 	LeaseExpired    Event = "lease_expired"
 	RunFailed       Event = "run_failed"
+	// RunStopped is a poll loop that exited after SIGTERM. It is not a failure.
+	RunStopped Event = "run_stopped"
 	// Retry is the summary of beacon outbox retry. Its attributes are counts only.
 	Retry Event = "retry"
 )
