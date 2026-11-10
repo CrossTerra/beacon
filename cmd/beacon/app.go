@@ -575,7 +575,7 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", g.Source)
 		}
 		if g.Cut {
-			fmt.Fprintf(w, "source %s: a read stopped at its limit (Gmail: 5000 per list; Slack: 2000 per search or channel); older items in its window were not read and will not be, unless they change.\n", g.Source)
+			fmt.Fprintf(w, "source %s: a read stopped at its limit (Gmail: 5000 per list; Slack: 2000 per search); older items in its window were not read and will not be, unless they change.\n", g.Source)
 		}
 	}
 	for _, p := range rep.Items {

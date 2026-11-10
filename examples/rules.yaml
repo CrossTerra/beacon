@@ -244,8 +244,9 @@ rules:
 
   # --- Slack
 
-  # Your own messages close your open asks: a reply in the thread, or any top-level message in a
-  # one-to-one direct message. They leave as a link only: no text, no channel name.
+  # Your own messages close your open asks: a reply in the thread, or a top-level message in a
+  # one-to-one direct message (it answers the earlier top-level messages there). They leave as a
+  # link only: no text, no channel name.
   - name: slack-own-messages
     match: {source: slack, own: true}
     tier: send
@@ -259,24 +260,49 @@ rules:
         author: {glob: "B*"}
     tier: never
 
-  # A direct message to you. Held, not sent, until Signal restricts slack:dm:*.
+  # A message that asked you was deleted: close the ask on its subject.
+  - name: slack-deleted
+    match: {source: slack, type: message_deleted}
+    tier: send
+    close_by_others: true
+
+  # A one-to-one direct message to you. Direct messages, group direct messages and private
+  # channels are personal (slack:dm:…): held, not sent, until Signal restricts slack:dm:*.
   - name: slack-direct-messages
-    match: {source: slack, type: dm_received}
+    match:
+      source: slack
+      type: dm_received
+      fields:
+        channel_type: im
     tier: send
     ask: me
     priority: high
-    fields: [channel, permalink, author, actor, references]
+    fields: [channel, channel_type, permalink, author, actor, references]
 
-  # A message that mentions you, in a channel or a group direct message.
+  # A message in a group direct message you are in.
+  - name: slack-group-messages
+    match:
+      source: slack
+      type: dm_received
+      fields:
+        channel_type: mpim
+    tier: send
+    ask: me
+    priority: medium
+    fields: [channel, channel_type, permalink, author, actor]
+
+  # A message that mentions you, or a user group you are in, or @here/@channel in a configured
+  # channel. No references: links in a channel message are its content.
   - name: slack-mentions
     match: {source: slack, type: mentioned}
     tier: send
     ask: me
     priority: medium
-    fields: [channel, permalink, author, actor, references]
+    fields: [channel, channel_type, permalink, author, actor]
 
-  # Replies in threads you posted in (thread_reply) and review requests in your configured channels
-  # (review_request) are not sent: add a rule for them once you have seen what they hold.
+  # Replies in threads you posted in or were mentioned in (thread_reply) and review requests in
+  # your configured channels (review_request) are not sent. To let someone else's answer close a
+  # mention, send thread replies with close_by_others: true once you have seen what they hold.
 
   - name: everything-else
     match: {}

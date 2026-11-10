@@ -19,7 +19,7 @@ const (
 	Workspace = "T0ACME"
 	User      = "U0WINTON"
 	// AllScopes are the read scopes Beacon needs.
-	AllScopes = "search:read,channels:history,groups:history,im:history,mpim:history"
+	AllScopes = "search:read,channels:history,groups:history,im:history,mpim:history,channels:read,groups:read,mpim:read,usergroups:read"
 	// Review is the configured channel.
 	Review = "C0REVIEW"
 )
@@ -35,16 +35,21 @@ type Server struct {
 	// Routes maps a method path ("/api/auth.test") to its handler.
 	Routes   map[string]http.HandlerFunc
 	requests []*http.Request
+	// Deleted holds "<channel>/<ts>" of messages that no longer exist.
+	Deleted map[string]bool
 }
 
 // New starts a fake Slack with the recorded answers.
 func New(t testing.TB) *Server {
-	s := &Server{t: t, Scopes: AllScopes}
+	s := &Server{t: t, Scopes: AllScopes, Deleted: map[string]bool{}}
 	s.Routes = map[string]http.HandlerFunc{
 		"/api/auth.test":             s.auth,
 		"/api/search.messages":       s.search,
 		"/api/conversations.replies": s.replies,
-		"/api/conversations.history": Text(HistoryReview),
+		"/api/conversations.history": s.history,
+		"/api/conversations.info":    Text(`{"ok":true,"channel":{"id":"C0REVIEW","is_channel":true,"is_private":false}}`),
+		"/api/users.conversations":   Text(`{"ok":true,"channels":[{"id":"G0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}`),
+		"/api/usergroups.list":       Text(UserGroups),
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -123,17 +128,42 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("channel") {
+	case Review:
+		io.WriteString(w, HistoryReview)
+	case "G0GROUP":
+		io.WriteString(w, HistoryGroup)
+	default:
+		io.WriteString(w, `{"ok":false,"error":"channel_not_found"}`)
+	}
+}
+
 func (s *Server) replies(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	if q.Get("inclusive") == "true" {
+		// A check that one message still exists.
+		s.mu.Lock()
+		gone := s.Deleted[q.Get("channel")+"/"+q.Get("oldest")]
+		s.mu.Unlock()
+		if gone {
+			io.WriteString(w, `{"ok":false,"error":"thread_not_found"}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"messages":[{"type":"message","user":"U0X","text":"x","ts":"`+q.Get("oldest")+`"}]}`)
+		return
+	}
 	switch q.Get("channel") + "/" + q.Get("ts") {
 	case "C0ENG/1794120000.000500":
 		io.WriteString(w, RepliesEng)
+	case "C0ENG/1794133800.000400":
+		io.WriteString(w, RepliesMention)
 	case "C0RANDOM/1794137000.001300":
 		io.WriteString(w, RepliesRandom)
 	case "C0REVIEW/1794136200.001100":
 		io.WriteString(w, RepliesReview)
 	default:
-		io.WriteString(w, `{"ok":false,"error":"thread_not_found"}`)
+		io.WriteString(w, `{"ok":true,"messages":[]}`)
 	}
 }
 
@@ -152,20 +182,21 @@ const (
   {"type":"message","channel":{"id":"D0DANA","is_im":true,"is_mpim":false},"user":"U0DANA","username":"dana","ts":"1793400000.000001","text":"old","permalink":"https://acme.slack.com/archives/D0DANA/p1793400000000001"}
 ]}}`
 
-	// Mentions: one in a group direct message, one top-level in a channel.
-	SearchMentions = `{"ok":true,"messages":{"paging":{"count":100,"total":2,"page":1,"pages":1},"matches":[
+	// Mentions: one in a group direct message, one top-level in a public channel, one in a private channel.
+	SearchMentions = `{"ok":true,"messages":{"paging":{"count":100,"total":3,"page":1,"pages":1},"matches":[
+  {"type":"message","channel":{"id":"C0SECRET","is_im":false,"is_mpim":false,"is_private":true},"user":"U0HR","ts":"1794134000.000450","text":"<@U0WINTON> the salary numbers https://github.com/acme/hr/pull/3","permalink":"https://acme.slack.com/archives/C0SECRET/p1794134000000450"},
   {"type":"message","channel":{"id":"G0GROUP","is_im":false,"is_mpim":true},"user":"U0DANA","ts":"1794136800.001200","text":"<@U0WINTON> thoughts on the offsite?","permalink":"https://acme.slack.com/archives/G0GROUP/p1794136800001200"},
-  {"type":"message","channel":{"id":"C0ENG","is_im":false,"is_mpim":false},"user":"U0BOB","ts":"1794133800.000400","text":"<@U0WINTON> can you look at the alerts?","permalink":"https://acme.slack.com/archives/C0ENG/p1794133800000400"}
+  {"type":"message","channel":{"id":"C0ENG","is_im":false,"is_mpim":false,"is_private":false},"user":"U0BOB","ts":"1794133800.000400","text":"<@U0WINTON> can you look at the alerts?","permalink":"https://acme.slack.com/archives/C0ENG/p1794133800000400"}
 ]}}`
 
 	// Winton's own messages: top-level in a channel that is not configured (no item; the thread is followed), in the
 	// configured channel, in Dana's direct message, and a reply in a C0ENG thread, whose thread_ts is only in the
 	// permalink.
 	SearchOwn = `{"ok":true,"messages":{"paging":{"count":100,"total":4,"page":1,"pages":1},"matches":[
-  {"type":"message","channel":{"id":"C0RANDOM","is_im":false,"is_mpim":false},"user":"U0WINTON","ts":"1794137000.001300","text":"hello all","permalink":"https://acme.slack.com/archives/C0RANDOM/p1794137000001300"},
-  {"type":"message","channel":{"id":"C0REVIEW","is_im":false,"is_mpim":false},"user":"U0WINTON","ts":"1794136200.001100","text":"Merged the fix","permalink":"https://acme.slack.com/archives/C0REVIEW/p1794136200001100"},
+  {"type":"message","channel":{"id":"C0RANDOM","is_im":false,"is_mpim":false,"is_private":false},"user":"U0WINTON","ts":"1794137000.001300","text":"hello all","permalink":"https://acme.slack.com/archives/C0RANDOM/p1794137000001300"},
+  {"type":"message","channel":{"id":"C0REVIEW","is_im":false,"is_mpim":false,"is_private":false},"user":"U0WINTON","ts":"1794136200.001100","text":"Merged the fix","permalink":"https://acme.slack.com/archives/C0REVIEW/p1794136200001100"},
   {"type":"message","channel":{"id":"D0DANA","is_im":true,"is_mpim":false},"user":"U0WINTON","ts":"1794133200.000300","text":"On it","permalink":"https://acme.slack.com/archives/D0DANA/p1794133200000300"},
-  {"type":"message","channel":{"id":"C0ENG","is_im":false,"is_mpim":false},"user":"U0WINTON","ts":"1794130000.000600","text":"I can take this","permalink":"https://acme.slack.com/archives/C0ENG/p1794130000000600?thread_ts=1794120000.000500&cid=C0ENG"}
+  {"type":"message","channel":{"id":"C0ENG","is_im":false,"is_mpim":false,"is_private":false},"user":"U0WINTON","ts":"1794130000.000600","text":"I can take this","permalink":"https://acme.slack.com/archives/C0ENG/p1794130000000600?thread_ts=1794120000.000500&cid=C0ENG"}
 ]}}`
 
 	// The C0ENG thread Carol started: her reply before Winton joined is not an item; Bob's after it is.
@@ -176,6 +207,22 @@ const (
   {"type":"message","user":"U0BOB","text":"Thanks, also see https://github.com/acme/app/pull/7","ts":"1794134400.000700","thread_ts":"1794120000.000500"}
 ],"response_metadata":{"next_cursor":""}}`
 
+	// Bob's mention in C0ENG started a thread; Carol answered it.
+	RepliesMention = `{"ok":true,"messages":[
+  {"type":"message","user":"U0BOB","text":"<@U0WINTON> can you look at the alerts?","ts":"1794133800.000400","thread_ts":"1794133800.000400"},
+  {"type":"message","user":"U0CAROL","text":"I'll handle it","ts":"1794134500.000750","thread_ts":"1794133800.000400"}
+]}`
+
+	// The group direct message Winton is in: Dana's mention (also found by search), Carol's message, Winton's answer.
+	HistoryGroup = `{"ok":true,"messages":[
+  {"type":"message","user":"U0WINTON","text":"sure","ts":"1794137600.001500"},
+  {"type":"message","user":"U0CAROL","text":"Lunch at noon?","ts":"1794137500.001400"},
+  {"type":"message","user":"U0DANA","text":"<@U0WINTON> thoughts on the offsite?","ts":"1794136800.001200"}
+]}`
+
+	// UserGroups: Winton is in oncall, not in design.
+	UserGroups = `{"ok":true,"usergroups":[{"id":"S0ONCALL","users":["U0WINTON","U0BOB"]},{"id":"S0DESIGN","users":["U0ERIN"]}]}`
+
 	RepliesRandom = `{"ok":true,"has_more":false,"messages":[
   {"type":"message","user":"U0WINTON","text":"hello all","ts":"1794137000.001300"}
 ]}`
@@ -184,9 +231,13 @@ const (
   {"type":"message","user":"U0WINTON","text":"Merged the fix","ts":"1794136200.001100"}
 ]}`
 
-	// The configured channel, newest first: Winton's own message, chatter, a join, and Erin's review request.
+	// The configured channel, newest first: Winton's own message, a mention of a user group he is not in, one he is in,
+	// an @here, chatter, a join, and Erin's review request.
 	HistoryReview = `{"ok":true,"has_more":false,"messages":[
   {"type":"message","user":"U0WINTON","text":"Merged the fix","ts":"1794136200.001100"},
+  {"type":"message","user":"U0BOB","text":"<!subteam^S0DESIGN|@design> mockups are up","ts":"1794135900.001070"},
+  {"type":"message","user":"U0BOB","text":"<!subteam^S0ONCALL|@oncall> the pager is noisy","ts":"1794135800.001060"},
+  {"type":"message","user":"U0FRANK","text":"<!here> deploy freeze at five","ts":"1794135700.001050"},
   {"type":"message","user":"U0FRANK","text":"lunch anyone? I can look for a table","ts":"1794135600.001000"},
   {"type":"message","subtype":"channel_join","user":"U0NEW","text":"<@U0NEW> has joined the channel","ts":"1794135300.000950"},
   {"type":"message","user":"U0ERIN","text":"PTAL <https://github.com/acme/app/pull/42|acme/app#42>, needs a review before the release","ts":"1794135000.000900"}

@@ -1,10 +1,13 @@
 package slack
 
 import (
+	"context"
+	"errors"
 	"net/url"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/CrossTerra/beacon/internal/source"
 )
@@ -15,6 +18,10 @@ var (
 	reviewWording = regexp.MustCompile(`(?i)\b(review|reviews|reviewing|look|approve|approval|ptal|eyes)\b`)
 	githubPull    = regexp.MustCompile(`https://github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)/pull/([0-9]+)`)
 	jiraIssue     = regexp.MustCompile(`https://[a-z0-9][a-z0-9-]*\.atlassian\.net/browse/([A-Z][A-Z0-9]+-[0-9]+)`)
+	// A user group mention is <!subteam^ID> or <!subteam^ID|@name>; a broadcast is <!here>, <!channel> or <!everyone>.
+	groupMention     = regexp.MustCompile(`<!subteam\^([A-Z0-9]+)[|>]`)
+	broadcast        = regexp.MustCompile(`<!(here|channel|everyone)[|>]`)
+	printableSubject = regexp.MustCompile(`^[\x21-\x7e]{1,200}$`)
 )
 
 // Message subtypes that are messages someone wrote. Joins, edits, deletions, topic changes and the rest are not events.
@@ -47,27 +54,46 @@ func (s *Source) items(msgs pool, web string) ([]source.Item, int) {
 func (s *Source) typeOf(m *message) string {
 	if s.own(m) {
 		// The person's own message is an event in a conversation Beacon follows: a direct or group direct message, a
-		// thread, or a configured channel. A top-level message elsewhere answers no ask Beacon recorded.
-		if m.personal() || m.inThread() || s.api.allowHistory(m.channel) {
+		// private channel, a thread, or a configured channel. A top-level message elsewhere answers no ask Beacon
+		// recorded.
+		if m.personal() || m.inThread() || s.api.configured(m.channel) {
 			return TypeOwn
 		}
 		return ""
 	}
+	kind := m.conversation()
 	switch {
-	case s.mentions(m.text):
+	case s.mentions(m):
 		return TypeMentioned
-	case m.direct():
+	case kind == kindIM || kind == kindMPIM:
 		return TypeDM
 	case m.followed && m.inThread() && tsLess(m.joined, m.ts):
 		return TypeThreadReply
-	case m.history && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
+	case m.history && s.api.configured(m.channel) && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
 		return TypeReviewRequest
 	}
 	return ""
 }
 
-func (s *Source) mentions(text string) bool {
-	return strings.Contains(text, "<@"+s.user+">") || strings.Contains(text, "<@"+s.user+"|")
+// mentions reports whether a message names the person: directly, through a user group they are in, or, in a
+// configured channel only, through @here, @channel or @everyone.
+func (s *Source) mentions(m *message) bool {
+	if strings.Contains(m.text, "<@"+s.user+">") || strings.Contains(m.text, "<@"+s.user+"|") {
+		return true
+	}
+	for _, g := range groupMention.FindAllStringSubmatch(m.text, -1) {
+		if s.groups[g[1]] {
+			return true
+		}
+	}
+	return s.api.configured(m.channel) && broadcast.MatchString(m.text)
+}
+
+func (s *Source) subject(channel, root, kind string) string {
+	if kind != kindChannel {
+		return PersonalStem + s.person + ":" + channel + ":" + root
+	}
+	return "slack:" + channel + ":" + root
 }
 
 func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
@@ -82,11 +108,8 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	if at.IsZero() {
 		return source.Item{}, false
 	}
-	subject := "slack:" + m.channel + ":" + m.root()
-	if m.personal() {
-		subject = PersonalStem + s.person + ":" + m.channel + ":" + m.root()
-	}
-	fields := map[string]string{"channel": m.channel, "ts": m.ts, "author": author}
+	kind := m.conversation()
+	fields := map[string]string{"channel": m.channel, "channel_type": kind, "ts": m.ts, "author": author}
 	if m.inThread() {
 		fields["thread_ts"] = m.threadTS
 	}
@@ -99,7 +122,7 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	key, version := source.FitKey(s.name+":"+m.channel+":"+m.ts, m.ts)
 	it := source.Item{
 		Source:     s.name,
-		Subject:    subject,
+		Subject:    s.subject(m.channel, m.root(), kind),
 		Key:        key,
 		Type:       typ,
 		EventTitle: title(typ, m.inThread()),
@@ -112,12 +135,97 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	switch typ {
 	case TypeOwn:
 		it.Own = true
-		// A top-level reply in a one-to-one direct message answers the earlier messages there, each its own subject.
-		it.CloseSiblings = m.direct() && !m.inThread()
+		// A top-level reply in a one-to-one direct message answers the earlier top-level messages there, each its own
+		// subject. Not later ones, and not replies inside a thread.
+		if kind == kindIM && !m.inThread() {
+			it.CloseSiblingsBefore = m.ts
+		}
 	case TypeDM, TypeMentioned:
 		it.Addressed = true
 	}
 	return it, true
+}
+
+// track keeps every message that addressed the person, for 7 days, to notice its deletion. Seen this pass, it exists.
+func (s *Source) track(p *pass, items []source.Item) {
+	for _, it := range items {
+		if !it.Addressed {
+			continue
+		}
+		root := it.Fields["thread_ts"]
+		p.cur.Asked[it.Fields["channel"]+"/"+it.Fields["ts"]] = &asked{Subject: it.Subject, Root: root, Kind: it.Fields["channel_type"], Checked: p.observed}
+	}
+	for k, a := range p.cur.Asked {
+		if p.msgs[k] != nil {
+			a.Checked = p.observed
+		}
+	}
+}
+
+// checkDeleted reads the tracked asks that are due, at most checksPerPass, and yields message_deleted for each that
+// is gone, on the ask's subject, so a close_by_others rule can close it.
+func (s *Source) checkDeleted(ctx context.Context, p *pass) ([]source.Item, error) {
+	for k := range p.cur.Asked {
+		_, ts, _ := strings.Cut(k, "/")
+		if tsTime(ts).Before(p.now.Add(-followFor)) {
+			delete(p.cur.Asked, k)
+		}
+	}
+	var keys []string
+	for k := range p.cur.Asked {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := p.cur.Asked[keys[i]].Checked, p.cur.Asked[keys[j]].Checked
+		if a != b {
+			return a < b
+		}
+		return keys[i] < keys[j]
+	})
+	var out []source.Item
+	checks := 0
+	for _, k := range keys {
+		a := p.cur.Asked[k]
+		if checked, err := time.Parse(time.RFC3339, a.Checked); err == nil && p.now.Sub(checked) < quietEvery {
+			continue
+		}
+		if checks == checksPerPass {
+			break
+		}
+		checks++
+		channel, ts, _ := strings.Cut(k, "/")
+		root := a.Root
+		if root == "" {
+			root = ts
+		}
+		alive, err := s.exists(ctx, p.tok, channel, root, ts)
+		switch {
+		case errors.Is(err, errMessageGone):
+			alive = false
+		case errors.Is(err, errGone):
+			// The conversation cannot be read now; that says nothing about the message. Try again in 15 minutes.
+			a.Checked = p.observed
+			continue
+		case err != nil:
+			return nil, err
+		}
+		if alive {
+			a.Checked = p.observed
+			continue
+		}
+		delete(p.cur.Asked, k)
+		obs := s.observed()
+		fields := map[string]string{"channel": channel, "channel_type": a.Kind, "ts": ts}
+		if a.Root != "" {
+			fields["thread_ts"] = a.Root
+		}
+		key, version := source.FitKey(s.name+":"+channel+":"+ts+":deleted", "deleted")
+		out = append(out, source.Item{
+			Source: s.name, Subject: a.Subject, Key: key, Type: TypeDeleted, EventTitle: "Deleted",
+			OccurredAt: obs, Fields: fields, Version: version,
+		})
+	}
+	return out, nil
 }
 
 // title describes the change. It never holds message text or a name.

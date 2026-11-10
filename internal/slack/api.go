@@ -23,22 +23,32 @@ import (
 const Base = "https://slack.com"
 
 // Scopes are the user scopes the token must hold. All are read-only.
-var Scopes = []string{"search:read", "channels:history", "groups:history", "im:history", "mpim:history"}
+var Scopes = []string{
+	"search:read", "channels:history", "groups:history", "im:history", "mpim:history",
+	"channels:read", "groups:read", "mpim:read", "usergroups:read",
+}
 
 // The methods Beacon calls, and how far apart it spaces calls to each. Slack limits each method per workspace by tier:
-// search.messages is Tier 2 (20 a minute), conversations.history and conversations.replies are Tier 3 (50 a minute for
-// an internal app). auth.test is called once a pass.
+// search.messages and usergroups.list are Tier 2 (20 a minute); conversations.history, conversations.replies,
+// conversations.info and users.conversations are Tier 3 (50 a minute for an internal app). auth.test is called once a
+// pass.
 const (
-	methodAuth    = "auth.test"
-	methodSearch  = "search.messages"
-	methodReplies = "conversations.replies"
-	methodHistory = "conversations.history"
+	methodAuth       = "auth.test"
+	methodSearch     = "search.messages"
+	methodReplies    = "conversations.replies"
+	methodHistory    = "conversations.history"
+	methodInfo       = "conversations.info"
+	methodGroupDMs   = "users.conversations"
+	methodUserGroups = "usergroups.list"
 )
 
 var spacing = map[string]time.Duration{
-	methodSearch:  3 * time.Second,
-	methodReplies: 1200 * time.Millisecond,
-	methodHistory: 1200 * time.Millisecond,
+	methodSearch:     3 * time.Second,
+	methodUserGroups: 3 * time.Second,
+	methodReplies:    1200 * time.Millisecond,
+	methodHistory:    1200 * time.Millisecond,
+	methodInfo:       1200 * time.Millisecond,
+	methodGroupDMs:   1200 * time.Millisecond,
 }
 
 var (
@@ -100,8 +110,10 @@ type api struct {
 	now      func() time.Time
 	sleep    func(context.Context, time.Duration) error
 	clock    source.Clock
-	// allowHistory reports whether conversations.history may read a channel: only the configured ones.
-	allowHistory func(string) bool
+	// configured reports whether a channel is one the config names; groupDM whether it is a group direct message
+	// the person is in. conversations.history reads only those, and conversations.info only configured ones.
+	configured func(string) bool
+	groupDM    func(string) bool
 	// user is the token's user. Search queries may name only this user.
 	user string
 	last map[string]time.Time
@@ -123,7 +135,7 @@ func newAPI(base string, o Options, now func() time.Time) (*api, error) {
 	return &api{
 		base: base, host: strings.ToLower(u.Hostname()), hostPort: hostPort(u), now: now, sleep: sleep,
 		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now}, last: map[string]time.Time{},
-		allowHistory: func(string) bool { return false },
+		configured: func(string) bool { return false }, groupDM: func(string) bool { return false },
 	}, nil
 }
 
@@ -169,15 +181,34 @@ func (a *api) allow(raw string) error {
 			return nil
 		}
 	case methodReplies:
-		if onlyKeys(q, "channel", "ts", "oldest", "limit", "cursor") && channelPattern.MatchString(q.Get("channel")) && tsPattern.MatchString(q.Get("ts")) && paging {
+		if onlyKeys(q, "channel", "ts", "oldest", "inclusive", "limit", "cursor") && channelPattern.MatchString(q.Get("channel")) &&
+			tsPattern.MatchString(q.Get("ts")) && optionalTS(q, "oldest") && paging {
 			return nil
 		}
 	case methodHistory:
-		if onlyKeys(q, "channel", "oldest", "limit", "cursor") && a.allowHistory(q.Get("channel")) && paging {
+		c := q.Get("channel")
+		if onlyKeys(q, "channel", "oldest", "latest", "limit", "cursor") && (a.configured(c) || a.groupDM(c)) &&
+			optionalTS(q, "oldest") && optionalTS(q, "latest") && paging {
+			return nil
+		}
+	case methodInfo:
+		if onlyKeys(q, "channel") && a.configured(q.Get("channel")) {
+			return nil
+		}
+	case methodGroupDMs:
+		if onlyKeys(q, "types", "exclude_archived", "limit", "cursor") && q.Get("types") == "mpim" && paging {
+			return nil
+		}
+	case methodUserGroups:
+		if onlyKeys(q, "include_users") {
 			return nil
 		}
 	}
 	return source.ErrScope
+}
+
+func optionalTS(q url.Values, key string) bool {
+	return q.Get(key) == "" || tsPattern.MatchString(q.Get(key))
 }
 
 func onlyKeys(q url.Values, keys ...string) bool {
@@ -276,6 +307,9 @@ func (a *api) call(ctx context.Context, token keychain.Secret, method string, q 
 // goes on without it.
 var errGone = errors.New("slack: that conversation cannot be read")
 
+// errMessageGone is a message, or a thread's root, that no longer exists: it was deleted. It is also errGone.
+var errMessageGone = fmt.Errorf("%w: the message is gone", errGone)
+
 // classify maps Slack's error codes. Its text is the code, a fixed word from Slack's list, never content.
 func classify(code string) error {
 	switch code {
@@ -284,7 +318,9 @@ func classify(code string) error {
 		return source.ErrUnauthorized
 	case "ratelimited":
 		return source.ErrRateLimited
-	case "channel_not_found", "thread_not_found", "not_in_channel", "is_archived":
+	case "thread_not_found", "message_not_found":
+		return errMessageGone
+	case "channel_not_found", "not_in_channel", "is_archived":
 		return errGone
 	}
 	if !codePattern.MatchString(code) {

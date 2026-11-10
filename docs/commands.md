@@ -147,8 +147,8 @@ through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, op
 
 `slack` reads the person's user token (`xoxp-…`) with echo off, and refuses any other kind of token. It calls
 `auth.test` through the egress guard to `slack.com`, and nothing else. If the token lacks one of the read scopes
-(`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`), it names them and stores
-nothing. Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
+(`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`,
+`mpim:read`, `usergroups:read`), it names them and stores nothing. Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
 and `user` and each `--channel`, names any other scopes the token holds (Beacon never uses them), and, when
 `person.identities` has no entry for the source, prints the one to add. See [`sources.md`](sources.md#slack).
 
@@ -249,7 +249,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
-| `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search or channel history); older items in its window were not read. The source only. |
+| `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search); older items in its window were not read. The source only. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
 

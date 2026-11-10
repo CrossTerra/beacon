@@ -85,7 +85,7 @@ type Input struct {
 	Rule   *rules.Rule
 	Person Person
 	// OpenAsks are the keys of events Beacon wrote that ask the person and are not yet closed, on the item's subject
-	// (and, for an own act with CloseSiblings, on its sibling subjects), oldest first.
+	// (and, for an own act with CloseSiblingsBefore, the earlier asks that opened its sibling subjects), oldest first.
 	OpenAsks []string
 	// Truncated omits the body and marks the event truncated. The marker is a fixed flag, not item content.
 	Truncated bool
@@ -114,7 +114,7 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
 			EventTitle: it.EventTitle,
 			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
 			// A retry closes the same asks the first attempt did.
-			CloseSiblings: it.CloseSiblings,
+			CloseSiblingsBefore: it.CloseSiblingsBefore,
 		},
 	}
 	if rule == nil {

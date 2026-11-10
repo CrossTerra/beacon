@@ -44,10 +44,47 @@ type Item struct {
 	ObservedAt *time.Time `json:"observed_at,omitempty"`
 	// Version is the source's version marker for this change: the last part of Key (DEC-9).
 	Version string `json:"version,omitempty"`
-	// CloseSiblings, on an own act, also closes the open asks on subjects that differ from Subject only in the last
-	// part. A top-level reply in a Slack direct message answers the earlier messages there, and DEC-10 makes each of
-	// them its own subject.
-	CloseSiblings bool `json:"close_siblings,omitempty"`
+	// CloseSiblingsBefore, on an own act, also closes earlier asks in the same conversation that DEC-10 makes their own
+	// subjects: an open ask on a sibling subject (one that differs from Subject only in the last part) that opened that
+	// subject (the ask's key ends in that last part, so it is not a reply inside it) and whose last part is before
+	// this value. A top-level reply in a Slack direct message sets it to its own ts.
+	CloseSiblingsBefore string `json:"close_siblings_before,omitempty"`
+}
+
+var decimalPattern = regexp.MustCompile(`^[0-9]{1,20}(\.[0-9]{1,20})?$`)
+
+// DecimalBefore reports whether a is less than b, both decimal numbers ("1794132000.000100"). Anything else is not
+// before anything, so a malformed bound closes nothing.
+func DecimalBefore(a, b string) bool {
+	if !decimalPattern.MatchString(a) || !decimalPattern.MatchString(b) {
+		return false
+	}
+	ai, af, _ := strings.Cut(a, ".")
+	bi, bf, _ := strings.Cut(b, ".")
+	ai, bi = strings.TrimLeft(ai, "0"), strings.TrimLeft(bi, "0")
+	if len(ai) != len(bi) {
+		return len(ai) < len(bi)
+	}
+	if ai != bi {
+		return ai < bi
+	}
+	for len(af) < len(bf) {
+		af += "0"
+	}
+	for len(bf) < len(af) {
+		bf += "0"
+	}
+	return af < bf
+}
+
+// ClosesSibling reports whether an own act on subject with CloseSiblingsBefore before closes the open ask askKey on
+// askSubject: a sibling subject other than its own, opened by that ask, before the bound.
+func ClosesSibling(subject, before, askSubject, askKey string) bool {
+	if before == "" || askSubject == subject || !IsSibling(subject, askSubject) {
+		return false
+	}
+	last := askSubject[len(SiblingPrefix(askSubject)):]
+	return strings.HasSuffix(askKey, ":"+last) && DecimalBefore(last, before)
 }
 
 // SiblingPrefix is the part of subject that its siblings share: everything up to and including the last colon. It
@@ -211,15 +248,18 @@ func Validate(it Item, fields, stateFields []string) error {
 	if len(it.State) > 0 && (it.ObservedAt == nil || it.ObservedAt.IsZero() || it.Version == "") {
 		return fmt.Errorf("a state snapshot needs observed_at and version")
 	}
-	if it.CloseSiblings {
+	if it.CloseSiblingsBefore != "" {
 		// Siblings share everything but the last part, so the prefix must name one conversation, not a stem or a
 		// person: closing every ask under "slack:dm:" or "slack:dm:<person>:" would answer conversations the act is
 		// not in. slack:dm:<person>:<channel>: has four parts.
 		if !it.Own {
-			return fmt.Errorf("close_siblings is for own acts")
+			return fmt.Errorf("close_siblings_before is for own acts")
 		}
 		if strings.Count(SiblingPrefix(it.Subject), ":") < 4 {
-			return fmt.Errorf("close_siblings needs a subject with at least four parts before the last")
+			return fmt.Errorf("close_siblings_before needs a subject with at least four parts before the last")
+		}
+		if !decimalPattern.MatchString(it.CloseSiblingsBefore) {
+			return fmt.Errorf("close_siblings_before is not a decimal bound")
 		}
 	}
 	return nil

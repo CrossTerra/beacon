@@ -544,16 +544,16 @@ func (o *Outbox) PendingEvents() []Entry {
 // OpenAsks returns the keys of event bodies on subject that ask someone and that no other body closes, oldest
 // first. Rejected and superseded bodies count for neither: they were not sent.
 func (o *Outbox) OpenAsks(subject string) []string {
-	return o.openAsks(func(s string) bool { return s == subject })
+	return o.openAsks(func(s, _ string) bool { return s == subject })
 }
 
-// OpenAsksSiblings returns the open asks, oldest first, on subject and on every subject that differs from it only in
-// the last part (source.IsSibling).
-func (o *Outbox) OpenAsksSiblings(subject string) []string {
-	return o.openAsks(func(s string) bool { return source.IsSibling(subject, s) })
+// OpenAsksSiblings returns the open asks, oldest first, on subject, and the asks on its sibling subjects that an own
+// act bounded by before closes (source.ClosesSibling).
+func (o *Outbox) OpenAsksSiblings(subject, before string) []string {
+	return o.openAsks(func(s, key string) bool { return s == subject || source.ClosesSibling(subject, before, s, key) })
 }
 
-func (o *Outbox) openAsks(on func(string) bool) []string {
+func (o *Outbox) openAsks(on func(subject, key string) bool) []string {
 	closed := map[string]bool{}
 	for _, k := range o.order {
 		e := o.entries[k]
@@ -567,7 +567,7 @@ func (o *Outbox) openAsks(on func(string) bool) []string {
 	var out []string
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.Kind == Event && on(e.Subject) && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
+		if e.Kind == Event && on(e.Subject, k) && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
 			out = append(out, k)
 		}
 	}

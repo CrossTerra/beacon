@@ -1,6 +1,7 @@
-// Package slack is the Slack source: direct messages, mentions, replies in threads the person posted in, the person's
-// own messages, and review requests in the channels the config names. It reads with the person's user token, which is
-// read from the keychain at the start of each pass and set only as an Authorization header.
+// Package slack is the Slack source: direct and group direct messages, mentions, replies in threads the person posted
+// in or was mentioned in, the person's own messages, review requests in the channels the config names, and the
+// deletion of a message that addressed the person. It reads with the person's user token, which is read from the
+// keychain at the start of each pass and set only as an Authorization header.
 package slack
 
 import (
@@ -9,10 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +20,7 @@ import (
 )
 
 // Fields is Slack's fixed field list (DEC-6). body is set only when a rule lists it.
-var Fields = []string{"channel", "ts", "thread_ts", "author", "permalink", "body"}
+var Fields = []string{"channel", "channel_type", "ts", "thread_ts", "author", "permalink", "body"}
 
 // StateFields is empty: Slack has no object state Beacon reads.
 var StateFields = []string{}
@@ -33,25 +32,42 @@ const (
 	TypeDM            = "dm_received"
 	TypeThreadReply   = "thread_reply"
 	TypeReviewRequest = "review_request"
+	TypeDeleted       = "message_deleted"
 )
 
-// PersonalStem is the stem of direct-message subjects (DEC-10). Channel subjects are not personal.
+// Conversation kinds, the channel_type field. Every kind but kindChannel is personal.
+const (
+	kindIM      = "im"
+	kindMPIM    = "mpim"
+	kindPrivate = "private"
+	kindChannel = "channel"
+)
+
+// PersonalStem is the stem of personal subjects (DEC-10): direct messages, group direct messages and private
+// channels. Public channel subjects are not personal.
 const PersonalStem = "slack:dm:"
 
 const (
-	// firstWindow is how far back a first run reads (DEC-23), and followFor how long a thread is followed after the
-	// person's latest post in it.
+	// firstWindow is how far back a first run reads (DEC-23); mentions are always searched that far back. followFor is
+	// how long a thread is followed after the person's latest post or mention there; an ask is checked for deletion as
+	// long.
 	firstWindow = 7 * 24 * time.Hour
 	followFor   = 7 * 24 * time.Hour
-	// threadsPerPass bounds conversations.replies calls in one pass. Threads not read wait for a later pass, oldest
-	// read first, each from its own watermark.
-	threadsPerPass = 40
-	// A thread with a message in the last activeFor is read every pass; a quieter one every quietEvery.
-	activeFor    = time.Hour
-	quietEvery   = 15 * time.Minute
+	// Calls per pass that wait for a later pass when there are more, longest unread first, each from its own
+	// watermark.
+	threadsPerPass  = 40
+	groupDMsPerPass = 20
+	checksPerPass   = 20
+	// A thread or group direct message with a message in the last activeFor is read every pass; a quieter one, and a
+	// deletion check, every quietEvery.
+	activeFor  = time.Hour
+	quietEvery = 15 * time.Minute
+	// groupsEvery is how often the person's user groups are read again.
+	groupsEvery  = time.Hour
 	searchPages  = 20
 	historyPages = 10
 	repliesPages = 10
+	listPages    = 10
 	// searchBackoff widens search's date-only after: so a message near midnight in any time zone is not missed. Only
 	// messages inside the window are kept.
 	searchBackoff = 48 * time.Hour
@@ -62,12 +78,12 @@ var personPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 // Options configures a Slack source.
 type Options struct {
 	Name string
-	// Person is the person's Signal handle without "@". Direct-message subjects carry it (DEC-10).
+	// Person is the person's Signal handle without "@". Personal subjects carry it (DEC-10).
 	Person string
 	// Workspace and User are the token's workspace and user ids; auth.test must report the same.
 	Workspace string
 	User      string
-	// Channels are channel ids whose top-level messages are read for review requests.
+	// Channels are channel ids whose top-level messages are read for review requests and @here/@channel.
 	Channels []string
 	// Identity is person.identities for this source, slack:user:<id>. Empty skips that check.
 	Identity string
@@ -91,6 +107,11 @@ type Source struct {
 	api       *api
 	now       func() time.Time
 	bodies    bool
+	// groups are the user groups the person is in, read at groupsAt.
+	groups   map[string]bool
+	groupsAt time.Time
+	// groupDMs are the group direct messages the person is in, as of this pass.
+	groupDMs map[string]bool
 }
 
 // New builds a Slack source. It reads no credential.
@@ -103,7 +124,7 @@ func New(o Options) (*Source, error) {
 		return nil, fmt.Errorf("slack: name %q is invalid", name)
 	}
 	if !personPattern.MatchString(o.Person) || strings.HasPrefix(o.Person, "act_") {
-		return nil, errors.New("slack: person.handle must be an @handle; direct-message subjects carry it")
+		return nil, errors.New("slack: person.handle must be an @handle; personal subjects carry it")
 	}
 	if !idPattern.MatchString(o.Workspace) || !idPattern.MatchString(o.User) {
 		return nil, errors.New("slack: workspace and user are required")
@@ -128,12 +149,14 @@ func New(o Options) (*Source, error) {
 		}
 	}
 	sort.Strings(channels)
-	a.allowHistory = func(c string) bool { return allowed[c] }
-	a.user = o.User
-	return &Source{
+	s := &Source{
 		name: name, person: o.Person, workspace: o.Workspace, user: o.User, identity: o.Identity,
-		channels: channels, token: o.Token, api: a, now: now,
-	}, nil
+		channels: channels, token: o.Token, api: a, now: now, groupDMs: map[string]bool{},
+	}
+	a.configured = func(c string) bool { return allowed[c] }
+	a.groupDM = func(c string) bool { return s.groupDMs[c] }
+	a.user = o.User
+	return s, nil
 }
 
 // Name implements source.Source.
@@ -154,54 +177,8 @@ func (s *Source) SetHTTP(c *http.Client) { s.api.http.HTTP = c }
 // SetBodies says whether a rule lists body for this source. Message text leaves only then.
 func (s *Source) SetBodies(b bool) { s.bodies = b }
 
-// PersonalStem is slack:dm:. A send pass holds direct-message items until Signal restricts slack:dm:*.
+// PersonalStem is slack:dm:. A send pass holds personal items until Signal restricts slack:dm:*.
 func (s *Source) PersonalStem() string { return PersonalStem }
-
-// cursorData is a pass's position: when it ran, the threads the person posted in, and each configured channel's
-// watermark. It holds ids and timestamps, no text.
-type cursorData struct {
-	// Since is the first server Date of the pass that stored it. Search reads from 15 minutes before it.
-	Since string `json:"since"`
-	// Threads are keyed by "<channel>/<thread ts>".
-	Threads map[string]*thread `json:"threads,omitempty"`
-	// Channels maps a configured channel to the newest message ts read there.
-	Channels map[string]string `json:"channels,omitempty"`
-}
-
-// thread is a thread the person posted in.
-type thread struct {
-	// DM is true when the thread is in a group direct message: its subjects are personal.
-	DM bool `json:"dm,omitempty"`
-	// Joined and Last are the ts of the person's first and latest post seen there.
-	Joined string `json:"joined"`
-	Last   string `json:"last"`
-	// Seen is the newest message ts read in the thread.
-	Seen string `json:"seen,omitempty"`
-	// Polled is when the thread was last read.
-	Polled string `json:"polled,omitempty"`
-}
-
-func parseCursor(b []byte) (cursorData, error) {
-	var c cursorData
-	if err := json.Unmarshal(b, &c); err != nil {
-		return cursorData{}, errors.New("slack: the cursor could not be read")
-	}
-	if _, err := time.Parse(time.RFC3339, c.Since); err != nil {
-		return cursorData{}, errors.New("slack: the cursor time could not be read")
-	}
-	for k, t := range c.Threads {
-		ch, root, ok := strings.Cut(k, "/")
-		if !ok || t == nil || !channelPattern.MatchString(ch) || !tsPattern.MatchString(root) || !tsPattern.MatchString(t.Joined) || !tsPattern.MatchString(t.Last) || (t.Seen != "" && !tsPattern.MatchString(t.Seen)) {
-			return cursorData{}, errors.New("slack: the cursor holds a thread it cannot read")
-		}
-	}
-	for ch, ts := range c.Channels {
-		if !channelPattern.MatchString(ch) || !tsPattern.MatchString(ts) {
-			return cursorData{}, errors.New("slack: the cursor holds a channel it cannot read")
-		}
-	}
-	return c, nil
-}
 
 // message is one Slack message, merged from every read that returned it.
 type message struct {
@@ -213,13 +190,12 @@ type message struct {
 	subtype   string
 	text      string
 	permalink string
-	// im and mpim are what search said about the conversation. A D… channel is a direct message whatever it said.
-	im   bool
-	mpim bool
-	// followed is set when the message was read from a thread the person posted in; joined is their first post there.
+	// kind is the conversation's kind, when a read said: im, mpim, private or channel.
+	kind string
+	// followed is set when the message was read from a followed thread; joined is when the person joined it.
 	followed bool
 	joined   string
-	// history is set when the message was read from a configured channel's top level.
+	// history is set when the message was read from a configured channel's or group direct message's top level.
 	history bool
 }
 
@@ -235,19 +211,27 @@ func (m *message) root() string {
 
 func (m *message) inThread() bool { return m.threadTS != "" && m.threadTS != m.ts }
 
-func (m *message) direct() bool { return m.im || strings.HasPrefix(m.channel, "D") }
-
-// personal is a direct or group direct message. Only a C… channel search did not mark as one is a channel; anything
-// else is treated as personal, which can only hold more back.
-func (m *message) personal() bool {
-	return m.direct() || m.mpim || !strings.HasPrefix(m.channel, "C")
+// conversation is the message's kind. A D… id is a direct message whatever a read said. A kind no read reported is
+// private: unknown is treated as personal, which can only hold more back.
+func (m *message) conversation() string {
+	switch {
+	case strings.HasPrefix(m.channel, "D"):
+		return kindIM
+	case m.kind != "":
+		return m.kind
+	}
+	return kindPrivate
 }
+
+func (m *message) personal() bool { return m.conversation() != kindChannel }
 
 func (s *Source) own(m *message) bool { return m.user == s.user && m.botID == "" }
 
+var kindRank = map[string]int{"": 0, kindChannel: 1, kindPrivate: 2, kindMPIM: 3, kindIM: 4}
+
 type pool map[string]*message
 
-// add merges m into the pool. Flags accumulate; a field already known is kept.
+// add merges m into the pool. Flags accumulate, the more personal kind wins, and a field already known is kept.
 func (p pool) add(m *message) {
 	if !channelPattern.MatchString(m.channel) || !tsPattern.MatchString(m.ts) || (m.threadTS != "" && !tsPattern.MatchString(m.threadTS)) {
 		return
@@ -257,8 +241,9 @@ func (p pool) add(m *message) {
 		p[m.key()] = m
 		return
 	}
-	old.im = old.im || m.im
-	old.mpim = old.mpim || m.mpim
+	if kindRank[m.kind] > kindRank[old.kind] {
+		old.kind = m.kind
+	}
 	old.followed = old.followed || m.followed
 	old.history = old.history || m.history
 	for _, f := range []struct {
@@ -272,6 +257,18 @@ func (p pool) add(m *message) {
 			*f.dst = f.v
 		}
 	}
+}
+
+// pass is one collect.
+type pass struct {
+	tok      keychain.Secret
+	cur      cursorData
+	msgs     pool
+	now      time.Time
+	floor    time.Time
+	floorTS  string
+	observed string
+	cut      bool
 }
 
 // Collect implements source.Source. A nil cursor reads the last 7 days (DEC-23).
@@ -291,9 +288,7 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 			return source.Collected{}, err
 		}
 	}
-	if cur.Threads == nil {
-		cur.Threads = map[string]*thread{}
-	}
+	cur.init()
 	id, err := s.api.identity(ctx, tok)
 	if err != nil {
 		return source.Collected{}, err
@@ -304,114 +299,87 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 	if id.Workspace != s.workspace || id.User != s.user || (s.identity != "" && s.identity != "slack:user:"+id.User) {
 		return source.Collected{}, source.ErrIdentity
 	}
-	now := s.now().UTC()
-	var since, floor time.Time
+	p := &pass{tok: tok, cur: cur, msgs: pool{}, now: s.now().UTC()}
+	var since time.Time
 	if first {
-		floor = now.Add(-firstWindow)
+		p.floor = p.now.Add(-firstWindow)
 	} else {
 		since, _ = time.Parse(time.RFC3339, cur.Since)
-		floor = since.Add(-source.Lookback)
+		p.floor = since.Add(-source.Lookback)
 	}
-	floorTS := formatTS(floor)
-	msgs := pool{}
-	cut := false
-	after := floor.Add(-searchBackoff).UTC().Format("2006-01-02")
-	me := "<@" + s.user + ">"
-	for _, q := range []string{"is:dm", me, "from:" + me} {
-		c, err := s.search(ctx, tok, q+" after:"+after, floor, msgs)
-		if err != nil {
-			return source.Collected{}, err
-		}
-		cut = cut || c
+	p.floorTS = formatTS(p.floor)
+	p.observed = s.observed().Format(time.RFC3339)
+	if err := s.collect(ctx, p); err != nil {
+		return source.Collected{}, err
 	}
-	// A thread the person posted in is followed for 7 days after their latest post there. One-to-one direct messages
-	// are not: search already reads every message in them.
-	for _, m := range msgs {
-		s.follow(cur.Threads, m)
+	items, dropped := s.items(p.msgs, id.URL)
+	s.track(p, items)
+	deleted, err := s.checkDeleted(ctx, p)
+	if err != nil {
+		return source.Collected{}, err
 	}
-	for k, t := range cur.Threads {
-		if tsTime(t.Last).Before(now.Add(-followFor)) {
-			delete(cur.Threads, k)
-		}
-	}
-	observed := s.observed()
-	for _, k := range pollOrder(cur.Threads, now) {
-		t := cur.Threads[k]
-		channel, root, _ := strings.Cut(k, "/")
-		oldest := t.Seen
-		if oldest == "" {
-			oldest = floorTS
-		}
-		got, err := s.replies(ctx, tok, channel, root, oldest)
-		if errors.Is(err, errGone) {
-			delete(cur.Threads, k)
-			continue
-		}
-		if err != nil {
-			return source.Collected{}, err
-		}
-		for _, m := range got {
-			if !tsLess(oldest, m.ts) {
-				continue
-			}
-			m.followed, m.joined, m.mpim = true, t.Joined, t.DM
-			if tsLess(t.Seen, m.ts) {
-				t.Seen = m.ts
-			}
-			msgs.add(m)
-			s.follow(cur.Threads, m)
-		}
-		t.Polled = observed.Format(time.RFC3339)
-	}
-	channels := map[string]string{}
-	for _, c := range s.channels {
-		oldest := cur.Channels[c]
-		if oldest == "" {
-			oldest = floorTS
-		}
-		got, c2, err := s.history(ctx, tok, c, oldest)
-		if errors.Is(err, errGone) {
-			// Unreadable this pass (archived, or the person left). Keep its watermark, so nothing is skipped if it
-			// comes back.
-			if w, ok := cur.Channels[c]; ok {
-				channels[c] = w
-			}
-			continue
-		}
-		if err != nil {
-			return source.Collected{}, err
-		}
-		cut = cut || c2
-		newest := oldest
-		for _, m := range got {
-			if !tsLess(oldest, m.ts) {
-				continue
-			}
-			m.history = true
-			if tsLess(newest, m.ts) {
-				newest = m.ts
-			}
-			msgs.add(m)
-			s.follow(cur.Threads, m)
-		}
-		channels[c] = newest
-	}
-	cur.Channels = channels
-	items, dropped := s.items(msgs, id.URL)
+	items = append(items, deleted...)
 	var times []time.Time
 	for _, it := range items {
-		times = append(times, it.OccurredAt)
+		if it.Type != TypeDeleted {
+			times = append(times, it.OccurredAt)
+		}
 	}
 	next, err := s.api.clock.Next(since, s.now(), times)
 	if err != nil {
 		return source.Collected{}, err
 	}
-	cur.Since = string(next)
-	data, err := json.Marshal(cur)
+	p.cur.Since = string(next)
+	data, err := json.Marshal(p.cur)
 	if err != nil {
 		return source.Collected{}, err
 	}
-	return source.Collected{Items: items, Next: data, Cut: cut, Dropped: dropped}, nil
+	return source.Collected{Items: items, Next: data, Cut: p.cut, Dropped: dropped}, nil
+}
+
+// collect runs every read of a pass into p.msgs and moves p.cur's watermarks.
+func (s *Source) collect(ctx context.Context, p *pass) error {
+	if err := s.loadGroups(ctx, p); err != nil {
+		return err
+	}
+	after := p.floor.Add(-searchBackoff).UTC().Format("2006-01-02")
+	me := "<@" + s.user + ">"
+	for _, q := range []string{"is:dm", "from:" + me} {
+		if err := s.search(ctx, p, q+" after:"+after, p.floor, func(*message) bool { return true }); err != nil {
+			return err
+		}
+	}
+	// Mentions are searched over the whole 7 days every pass. One that was not seen before, though older than the
+	// window, is a mention added by an edit or indexed late, and is kept.
+	window := p.now.Add(-firstWindow)
+	seen := map[string]bool{}
+	err := s.search(ctx, p, me+" after:"+window.Add(-searchBackoff).UTC().Format("2006-01-02"), window, func(m *message) bool {
+		seen[m.key()] = true
+		_, before := p.cur.Mentions[m.key()]
+		return !before || !tsTime(m.ts).Before(p.floor)
+	})
+	if err != nil {
+		return err
+	}
+	for k, ts := range p.cur.Mentions {
+		if tsTime(ts).Before(window) {
+			delete(p.cur.Mentions, k)
+		}
+	}
+	for k := range seen {
+		_, ts, _ := strings.Cut(k, "/")
+		p.cur.Mentions[k] = ts
+	}
+	if err := s.readChannels(ctx, p); err != nil {
+		return err
+	}
+	if err := s.readGroupDMs(ctx, p); err != nil {
+		return err
+	}
+	for _, m := range p.msgs {
+		s.follow(p, m)
+	}
+	return s.readThreads(ctx, p)
 }
 
 func (s *Source) observed() time.Time {
@@ -421,18 +389,25 @@ func (s *Source) observed() time.Time {
 	return s.now().UTC()
 }
 
-// follow records a thread the person posted in, outside one-to-one direct messages.
-func (s *Source) follow(threads map[string]*thread, m *message) {
-	if !s.own(m) || m.direct() {
+// follow records a thread the person posted in or was mentioned in, outside one-to-one direct messages (search reads
+// every message there). A thread followed for the first time is read from this pass's window, so a reply that comes
+// before a later pass reads it is not lost.
+func (s *Source) follow(p *pass, m *message) {
+	if m.conversation() == kindIM {
+		return
+	}
+	if !s.own(m) && !(s.mentions(m) && m.botID == "") {
 		return
 	}
 	k := m.channel + "/" + m.root()
-	t := threads[k]
+	t := p.cur.Threads[k]
 	if t == nil {
-		t = &thread{Joined: m.ts, Last: m.ts}
-		threads[k] = t
+		t = &thread{Joined: m.ts, Last: m.ts, Seen: p.floorTS}
+		p.cur.Threads[k] = t
 	}
-	t.DM = t.DM || m.personal()
+	if kindRank[m.conversation()] > kindRank[t.Kind] {
+		t.Kind = m.conversation()
+	}
 	if tsLess(m.ts, t.Joined) {
 		t.Joined = m.ts
 	}
@@ -441,205 +416,144 @@ func (s *Source) follow(threads map[string]*thread, m *message) {
 	}
 }
 
-// pollOrder is the threads this pass reads: those that are due, read longest ago first, at most threadsPerPass. A
-// thread with a message in the last hour is due every pass; a quieter one every 15 minutes. Each is read from its own
-// watermark, so one that waits loses nothing.
-func pollOrder(threads map[string]*thread, now time.Time) []string {
-	keys := make([]string, 0, len(threads))
-	for k, t := range threads {
-		if t.Polled != "" {
-			polled, err := time.Parse(time.RFC3339, t.Polled)
-			latest := t.Last
-			if tsLess(latest, t.Seen) {
-				latest = t.Seen
-			}
-			quiet := tsTime(latest).Before(now.Add(-activeFor))
-			if err == nil && quiet && now.Sub(polled) < quietEvery {
-				continue
-			}
-		}
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		a, b := threads[keys[i]].Polled, threads[keys[j]].Polled
-		if a != b {
-			return a < b
-		}
-		return keys[i] < keys[j]
-	})
-	if len(keys) > threadsPerPass {
-		keys = keys[:threadsPerPass]
-	}
-	return keys
-}
-
-// apiMessage is a message as conversations.replies and conversations.history return it.
-type apiMessage struct {
-	Type     string `json:"type"`
-	Subtype  string `json:"subtype"`
-	User     string `json:"user"`
-	BotID    string `json:"bot_id"`
-	Text     string `json:"text"`
-	TS       string `json:"ts"`
-	ThreadTS string `json:"thread_ts"`
-}
-
-func (a apiMessage) message(channel string) *message {
-	return &message{channel: channel, ts: a.TS, threadTS: a.ThreadTS, user: a.User, botID: a.BotID, subtype: a.Subtype, text: a.Text}
-}
-
-// search reads one query, newest first, and adds the matches inside the window. cut reports that it stopped at its
-// page limit with older matches in the window unread.
-func (s *Source) search(ctx context.Context, tok keychain.Secret, query string, floor time.Time, msgs pool) (bool, error) {
-	for page := 1; page <= searchPages; page++ {
-		q := url.Values{"query": {query}, "count": {"100"}, "page": {strconv.Itoa(page)}, "sort": {"timestamp"}, "sort_dir": {"desc"}}
-		var resp struct {
-			Messages struct {
-				Matches []struct {
-					Channel struct {
-						ID     string `json:"id"`
-						IsIM   bool   `json:"is_im"`
-						IsMPIM bool   `json:"is_mpim"`
-					} `json:"channel"`
-					User      string `json:"user"`
-					BotID     string `json:"bot_id"`
-					Subtype   string `json:"subtype"`
-					TS        string `json:"ts"`
-					ThreadTS  string `json:"thread_ts"`
-					Text      string `json:"text"`
-					Permalink string `json:"permalink"`
-				} `json:"matches"`
-				Paging struct {
-					Pages int `json:"pages"`
-				} `json:"paging"`
-			} `json:"messages"`
-		}
-		if _, err := s.api.call(ctx, tok, methodSearch, q, &resp); err != nil {
-			return false, err
-		}
-		older := false
-		for _, r := range resp.Messages.Matches {
-			if !tsPattern.MatchString(r.TS) {
-				continue
-			}
-			if tsTime(r.TS).Before(floor) {
-				older = true
-				continue
-			}
-			threadTS := r.ThreadTS
-			if threadTS == "" {
-				threadTS = permalinkThread(r.Permalink)
-			}
-			msgs.add(&message{
-				channel: r.Channel.ID, ts: r.TS, threadTS: threadTS, user: r.User, botID: r.BotID, subtype: r.Subtype,
-				text: r.Text, permalink: r.Permalink, im: r.Channel.IsIM, mpim: r.Channel.IsMPIM,
-			})
-		}
-		if older || page >= resp.Messages.Paging.Pages {
-			return false, nil
+// readThreads reads the followed threads that are due.
+func (s *Source) readThreads(ctx context.Context, p *pass) error {
+	for k, t := range p.cur.Threads {
+		if tsTime(t.Last).Before(p.now.Add(-followFor)) {
+			delete(p.cur.Threads, k)
 		}
 	}
-	return true, nil
+	for _, k := range dueOrder(p.cur.Threads, p.now, threadsPerPass) {
+		t := p.cur.Threads[k]
+		channel, root, _ := strings.Cut(k, "/")
+		oldest := t.Seen
+		if oldest == "" {
+			oldest = p.floorTS
+		}
+		got, err := s.replies(ctx, p.tok, channel, root, oldest)
+		if errors.Is(err, errGone) {
+			delete(p.cur.Threads, k)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, m := range got {
+			if !tsLess(oldest, m.ts) {
+				continue
+			}
+			m.followed, m.joined, m.kind = true, t.Joined, t.Kind
+			if tsLess(t.Seen, m.ts) {
+				t.Seen = m.ts
+			}
+			p.msgs.add(m)
+			s.follow(p, m)
+		}
+		t.Polled = p.observed
+	}
+	return nil
 }
 
-// permalinkThread is the thread_ts a search permalink names for a reply. Search does not always return thread_ts.
-func permalinkThread(raw string) string {
-	u, err := url.Parse(raw)
+// readChannels reads each configured channel's top level from its watermark. conversations.info says whether it is
+// private; a private channel's messages are personal.
+func (s *Source) readChannels(ctx context.Context, p *pass) error {
+	keep := map[string]*watermark{}
+	for _, c := range s.channels {
+		w := p.cur.Channels[c]
+		if w == nil {
+			w = &watermark{Seen: p.floorTS}
+		}
+		keep[c] = w
+		kind, err := s.info(ctx, p.tok, c)
+		if errors.Is(err, errGone) {
+			// Unreadable this pass (archived, or the person left). Its watermark stays, so nothing is skipped if it
+			// comes back.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		w.Kind = kind
+		if err := s.readHistory(ctx, p, c, w); err != nil && !errors.Is(err, errGone) {
+			return err
+		}
+	}
+	for c, w := range p.cur.Channels {
+		if w.Kind == kindMPIM {
+			keep[c] = w
+		}
+	}
+	p.cur.Channels = keep
+	return nil
+}
+
+// readGroupDMs lists the group direct messages the person is in and reads those that are due from their watermarks.
+func (s *Source) readGroupDMs(ctx context.Context, p *pass) error {
+	ids, err := s.listGroupDMs(ctx, p.tok)
 	if err != nil {
-		return ""
+		return err
 	}
-	if t := u.Query().Get("thread_ts"); tsPattern.MatchString(t) {
-		return t
+	s.groupDMs = map[string]bool{}
+	marks := map[string]*watermark{}
+	for _, c := range ids {
+		s.groupDMs[c] = true
+		w := p.cur.Channels[c]
+		if w == nil || w.Kind != kindMPIM {
+			w = &watermark{Seen: p.floorTS, Kind: kindMPIM}
+		}
+		marks[c] = w
 	}
-	return ""
+	for c, w := range p.cur.Channels {
+		if w.Kind != kindMPIM {
+			marks[c] = w
+		}
+	}
+	p.cur.Channels = marks
+	group := map[string]*watermark{}
+	for _, c := range ids {
+		group[c] = marks[c]
+	}
+	for _, c := range dueOrder(group, p.now, groupDMsPerPass) {
+		if err := s.readHistory(ctx, p, c, marks[c]); err != nil && !errors.Is(err, errGone) {
+			return err
+		}
+		marks[c].Polled = p.observed
+	}
+	return nil
 }
 
-// replies reads a thread from oldest, oldest first. A long thread stops at the page limit; the watermark moves only
-// as far as was read, so the next pass goes on from there.
-func (s *Source) replies(ctx context.Context, tok keychain.Secret, channel, root, oldest string) ([]*message, error) {
-	var out []*message
-	next := ""
-	for page := 0; page < repliesPages; page++ {
-		q := url.Values{"channel": {channel}, "ts": {root}, "oldest": {oldest}, "limit": {"200"}}
-		if next != "" {
-			q.Set("cursor", next)
-		}
-		var resp struct {
-			Messages []apiMessage `json:"messages"`
-			envelope
-		}
-		if _, err := s.api.call(ctx, tok, methodReplies, q, &resp); err != nil {
-			return nil, err
-		}
-		for _, m := range resp.Messages {
-			out = append(out, m.message(channel))
-		}
-		next = resp.Metadata.NextCursor
-		if next == "" {
-			break
-		}
+// readHistory reads one conversation's top level after its watermark. Slack returns history newest first, so a read
+// that stops at its page limit leaves a gap below what it read: the watermark stays, Gap is the oldest message read
+// and Head the newest, and the next pass reads the gap before anything newer. Nothing is skipped.
+func (s *Source) readHistory(ctx context.Context, p *pass, channel string, w *watermark) error {
+	got, more, err := s.history(ctx, p.tok, channel, w.Seen, w.Gap)
+	if err != nil {
+		return err
 	}
-	return out, nil
-}
-
-// history reads a configured channel's top-level messages after oldest. Slack returns them newest first, so a channel
-// over the page limit loses its oldest; cut says so.
-func (s *Source) history(ctx context.Context, tok keychain.Secret, channel, oldest string) ([]*message, bool, error) {
-	var out []*message
-	next := ""
-	for page := 0; page < historyPages; page++ {
-		q := url.Values{"channel": {channel}, "oldest": {oldest}, "limit": {"200"}}
-		if next != "" {
-			q.Set("cursor", next)
+	newest, oldestRead := "", ""
+	for _, m := range got {
+		if !tsLess(w.Seen, m.ts) || (w.Gap != "" && !tsLess(m.ts, w.Gap)) {
+			continue
 		}
-		var resp struct {
-			Messages []apiMessage `json:"messages"`
-			envelope
+		m.history, m.kind = true, w.Kind
+		if tsLess(newest, m.ts) {
+			newest = m.ts
 		}
-		if _, err := s.api.call(ctx, tok, methodHistory, q, &resp); err != nil {
-			return nil, false, err
+		if oldestRead == "" || tsLess(m.ts, oldestRead) {
+			oldestRead = m.ts
 		}
-		for _, m := range resp.Messages {
-			out = append(out, m.message(channel))
-		}
-		next = resp.Metadata.NextCursor
-		if next == "" {
-			return out, false, nil
-		}
+		p.msgs.add(m)
 	}
-	return out, true, nil
-}
-
-// formatTS writes a time as a Slack ts.
-func formatTS(t time.Time) string {
-	return fmt.Sprintf("%d.%06d", t.Unix(), t.Nanosecond()/1000)
-}
-
-// tsTime reads a Slack ts. A malformed one is the zero time.
-func tsTime(ts string) time.Time {
-	sec, micro, ok := splitTS(ts)
-	if !ok {
-		return time.Time{}
+	switch {
+	case more && oldestRead != "":
+		if w.Gap == "" {
+			w.Head = newest
+		}
+		w.Gap = oldestRead
+	case w.Gap != "":
+		w.Seen, w.Gap, w.Head = w.Head, "", ""
+	case newest != "":
+		w.Seen = newest
 	}
-	return time.Unix(sec, micro*1000).UTC()
-}
-
-func splitTS(ts string) (int64, int64, bool) {
-	a, b, ok := strings.Cut(ts, ".")
-	if !ok {
-		return 0, 0, false
-	}
-	sec, err1 := strconv.ParseInt(a, 10, 64)
-	micro, err2 := strconv.ParseInt(b, 10, 64)
-	return sec, micro, err1 == nil && err2 == nil
-}
-
-// tsLess reports whether a is before b. An empty a is before everything.
-func tsLess(a, b string) bool {
-	if a == "" {
-		return b != ""
-	}
-	as, am, _ := splitTS(a)
-	bs, bm, _ := splitTS(b)
-	return as < bs || (as == bs && am < bm)
+	return nil
 }

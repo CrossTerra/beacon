@@ -4,6 +4,10 @@ Status: built against fixtures; the live dry run against a real workspace is pen
 and stores the token after this pull request). What was built is described in [`docs/sources.md`](../docs/sources.md),
 [`docs/commands.md`](../docs/commands.md) and [`docs/configuration.md`](../docs/configuration.md).
 
+Revised after an independent review of #12: a bounded `close_siblings_before`, private channels and group direct
+messages as personal, group direct message history, watermarks that never skip (a new thread, a history read cut at
+its limit), user group and `@here` mentions, threads followed on a mention, edits that add a mention, and deletions.
+
 ## Goal
 
 The person's Slack as a source: direct messages, mentions, replies in threads they posted in, their own messages, and
@@ -31,10 +35,11 @@ conversation, so threads and channels keep their own watermark.
   | Scope | For |
   | --- | --- |
   | `search:read` | `search.messages`: direct messages, mentions, the person's own messages |
-  | `channels:history` | `conversations.replies` and `conversations.history` in public channels |
-  | `groups:history` | the same in private channels |
-  | `im:history` | `conversations.replies` in direct messages |
-  | `mpim:history` | `conversations.replies` in group direct messages |
+  | `channels:history`, `groups:history` | `conversations.replies` and `conversations.history` in public and private channels |
+  | `im:history`, `mpim:history` | the same in direct and group direct messages |
+  | `channels:read`, `groups:read` | `conversations.info`: whether a configured channel is private |
+  | `mpim:read` | `users.conversations`: the group direct messages the person is in |
+  | `usergroups:read` | `usergroups.list`: the user groups the person is in |
 
   `auth.test` returns the token's scopes (`X-OAuth-Scopes`). A token missing one is refused by `source add` (nothing is
   stored; the command names the missing scopes) and fails a pass with `source_unauthorized`. A token that also holds
@@ -47,15 +52,17 @@ conversation, so threads and channels keep their own watermark.
 
 - **Host.** `slack.com` only (the Web API at `https://slack.com/api/`). Listed by `beacon egress` from the source's
   `Hosts`, and `source add slack` uses the same list.
-- **Methods.** `auth.test`, `search.messages`, `conversations.replies`, `conversations.history`, all `GET`. Any other
-  path is refused before it is sent (`source_scope`).
+- **Methods.** `auth.test`, `search.messages`, `conversations.replies`, `conversations.history`,
+  `conversations.info`, `users.conversations`, `usergroups.list`, all `GET`. Any other path is refused before it is
+  sent (`source_scope`).
 - **Query keys per method.** `search.messages`: `query`, `count`, `page`, `sort`, `sort_dir`; the query must be one of
-  the three Beacon builds. `conversations.replies`: `channel`, `ts`, `oldest`, `limit`, `cursor`.
-  `conversations.history`: `channel`, `oldest`, `limit`, `cursor`, and the channel must be one the config names.
-  `auth.test`: none.
+  the three Beacon builds. `conversations.replies`: `channel`, `ts`, `oldest`, `inclusive`, `limit`, `cursor`.
+  `conversations.history`: `channel`, `oldest`, `latest`, `limit`, `cursor`, for a configured channel or a group
+  direct message the person is in. `conversations.info`: `channel`, configured only. `users.conversations`: `types`
+  (`mpim`), `exclude_archived`, `limit`, `cursor`. `usergroups.list`: `include_users`. `auth.test`: none.
 - **Rate limits.** Slack limits per method per workspace by tier. Beacon spaces its own calls to stay under them:
-  `search.messages` (Tier 2, 20 a minute) at most one every 3 seconds, `conversations.replies` and
-  `conversations.history` (Tier 3, 50 a minute for an internal app) at most one every 1.2 seconds. A `429` honours
+  `search.messages` and `usergroups.list` (Tier 2, 20 a minute) at most one every 3 seconds, the Tier 3 methods (50 a
+  minute for an internal app) at most one every 1.2 seconds. A `429` honours
   `Retry-After` like Phase 2 (a wait over two minutes ends the pass and the cursor stays); `"error":"ratelimited"`
   ends the pass the same way. A thread with a message in the last hour is read every pass, a quieter one every 15
   minutes, and a pass reads at most 40; the rest are read on later passes, longest unread first, each from its own
@@ -67,23 +74,24 @@ conversation, so threads and channels keep their own watermark.
 
 ### Collection
 
-- **Search** (`search.messages`, sorted newest first, 100 a page, at most 20 pages a query; past that the pass is
-  marked cut):
-  - `is:dm after:<date>`: one-to-one direct messages, including the person's own.
-  - `<@USER> after:<date>`: mentions, in channels and group direct messages.
-  - `from:<@USER> after:<date>`: the person's own messages. They are own acts, and they say which threads the person
-    posted in.
-
-  `after:` is a date. Beacon asks from two days before the window and keeps only messages whose `ts` is in it.
-- **Followed threads** (`conversations.replies`): every thread the person posted in during the last 7 days, outside
-  one-to-one direct messages (search already reads those). Each keeps its own watermark in the cursor: the newest
-  reply read, the person's first and latest post, and when it was read. A thread is dropped 7 days after the person's
-  latest post in it.
-- **Configured channels** (`conversations.history`, top-level messages): `channels` in the config, each with its own
-  watermark. Read for review requests and the person's own messages; mentions there are already in search.
-- **Window.** A pass reads from 15 minutes before the cursor (search; history and replies use their watermarks).
-  The first run reads the last 7 days (DEC-23). The cursor moves only after the runner decides every item, as every
-  source.
+- **Search** (`search.messages`, newest first, 100 a page, at most 20 pages a query; past that the pass is marked cut):
+  `is:dm` and `from:<@USER>` over the window; `<@USER>` over the last 7 days every pass, keeping one older than the
+  window only when the cursor has not seen it (an edit added the mention, or search indexed it late). `after:` is a
+  date; Beacon asks from two days earlier and keeps only messages in range.
+- **Configured channels** (`conversations.info`, then `conversations.history` from the channel's watermark): private
+  or public, then top-level messages.
+- **Group direct messages** (`users.conversations` with `types=mpim`, then `conversations.history` from each one's
+  watermark, at most 20 a pass).
+- **Followed threads** (`conversations.replies`): a thread the person posted in or was mentioned in during the last 7
+  days, outside one-to-one direct messages. A thread followed for the first time starts at that pass's window, so a
+  reply is not lost while it waits for a later pass.
+- **Deletions** (`conversations.replies` with `inclusive` on the message's own `ts`): each message that addressed the
+  person, at most every 15 minutes, 20 a pass, for 7 days.
+- **No skips.** Threads and group direct messages with a message in the last hour are read every pass, quieter ones
+  every 15 minutes, longest unread first. History is newest first: a read that stops at its page limit keeps its
+  watermark and records the gap below what it read; the next pass reads the gap before anything newer.
+- **Window.** A pass reads from 15 minutes before the cursor. The first run reads the last 7 days (DEC-23). The cursor
+  moves only after the runner decides every item.
 
 ### Items (DEC-18)
 
@@ -91,62 +99,55 @@ One item per message. When a message qualifies twice, the first type in this lis
 
 | Item | When | Addressed | Own | Event title |
 | --- | --- | --- | --- | --- |
-| `own_message` | The person's message (the API's `user` is the token's user, and no `bot_id`) in a direct or group direct message, in a thread, or in a configured channel | no | yes | Sent, or Replied in a thread |
-| `mentioned` | `<@USER>` in someone else's message | yes | no | Mentioned |
-| `dm_received` | Someone else's message in a one-to-one direct message | yes | no | Direct message |
-| `thread_reply` | Someone else's reply, after the person's first post, in a thread the person posted in | no | no | Thread reply |
-| `review_request` | Someone else's top-level message in a configured channel with a pull request link and review wording (`review`, `look`, `approve`, `PTAL`, …) | no | no | Review requested |
+| `own_message` | The person's message (the API's `user` is the token's user, and no `bot_id`) in a direct or group direct message, a private channel, a thread, or a configured channel | no | yes | Sent, or Replied in a thread |
+| `mentioned` | `<@USER>`, a user group the person is in, or `@here`/`@channel`/`@everyone` in a configured channel, in someone else's message | yes | no | Mentioned |
+| `dm_received` | Someone else's message in a one-to-one or group direct message | yes | no | Direct message |
+| `thread_reply` | Someone else's reply in a followed thread, after the person's first post or mention there | no | no | Thread reply |
+| `review_request` | Someone else's top-level message in a configured channel with a pull request link and review wording | no | no | Review requested |
+| `message_deleted` | A message that was `mentioned` or `dm_received` is gone; on its subject, so a `close_by_others` rule closes the ask | no | no | Deleted |
 
-Edits, reactions, joins and other message subtypes are not events. An own top-level message in a channel that is not
-configured is not an item (the thread it starts is still followed).
-
-- **Subject (DEC-10).** A channel message: `slack:<channel>:<thread ts>`, the thread root's `ts` (its own `ts` when
-  it is not in a thread). A one-to-one or group direct message: `slack:dm:<person>:<channel>:<thread ts>`, the person
-  being `person.handle` without `@`. Only a `C…` channel that search does not mark as a direct message is a channel;
-  anything else is treated as personal, which can only hold more back.
-- **Key.** `slack:<channel>:<ts>`; the version is the message `ts`.
-- **Fields.** `channel` (id), `ts`, `thread_ts` (the root, when in a thread), `author` (user or bot id), `permalink`,
-  `body` (the message text, set only when a rule lists `body`). No state fields: Slack has no object state Beacon reads.
-- **Actor.** `slack:user:<id>`, or `slack:bot:<id>` for an app. **Identity.** `person.identities.<name>` is
-  `slack:user:<user id>`; a mismatch with `auth.test`, as with the config's `workspace` and `user`, is
-  `identity_mismatch`.
-- **References (DEC-17).** A GitHub pull request URL in the text becomes `github:pr:<owner>/<repo>#<n>`; a Jira
-  `https://<site>.atlassian.net/browse/KEY-1` becomes `jira:KEY-1`.
-- **Text is read, not sent.** Slack returns a message's text with the message, whatever the scope, so Beacon reads it
-  on the machine to find mentions, review wording and links. It leaves only as `body`, when a rule lists it.
+- **Subject (DEC-10).** A public channel message: `slack:<channel>:<thread ts>`. A one-to-one or group direct
+  message, or a private channel: `slack:dm:<person>:<channel>:<thread ts>`. Private channels share the direct-message
+  stem, so one restriction keeps them private. A channel is public only when a read says `is_private: false`.
+- **Key.** `slack:<channel>:<ts>`; the version is the message `ts`. A deletion is `slack:<channel>:<ts>:deleted`.
+- **Fields.** `channel`, `channel_type` (`im`, `mpim`, `private`, `channel`), `ts`, `thread_ts`, `author`,
+  `permalink`, `body` (only when a rule lists it). No state fields.
+- **Actor and identity.** `slack:user:<id>` or `slack:bot:<id>`; `person.identities.<name>` is `slack:user:<id>`.
+- **References (DEC-17)** from GitHub pull request and Jira links in the text.
+- **Text is read, not sent**, except as `body` when a rule lists it.
 
 ### Answered (DEC-19, DEC-20)
 
-An own message in a thread is on the thread's subject, so it closes the open asks there. A one-to-one direct message
-has no thread for top-level messages: each is its own subject under DEC-10. An own top-level message in a one-to-one
-direct message closes the open asks on its sibling subjects, those that differ from its own only in the last part
-(the earlier top-level messages in that conversation). That is a new item flag, `close_siblings`, honoured only on
-own acts and kept in the stored decision so a retry closes the same asks. A top-level message in a channel or a group
-direct message closes nothing else: it may be about something else (bosun's "answered: likely").
+An own message in a thread closes the open asks on the thread's subject. An own top-level message in a one-to-one
+direct message sets `close_siblings_before` to its `ts`: it also closes an open ask on a sibling subject (same
+conversation) that opened that subject (top-level, not a question inside a thread there) with a `ts` before it. The
+bound is kept in the stored decision, so a retry closes the same asks. Top-level messages in channels and group direct
+messages close nothing else. Someone else's answer closes an ask only through a `close_by_others` rule.
 
 ### Personal subjects
 
-`slack:dm:` is already a fixed personal stem. The Slack source reports it, so a send pass reads Signal's restrictions
-and holds `slack:dm:` send items until `slack:dm:*` is restricted, exactly as Gmail. Channel subjects are not personal
-and are not held. A config with a Slack source needs `person.handle` as an `@handle`.
+`slack:dm:` is already a fixed personal stem; the source reports it, so a send pass holds direct messages, group
+direct messages and private channels until `slack:dm:*` is restricted. Public channel subjects are not held. A config
+with a Slack source needs `person.handle` as an `@handle`.
 
 ### Starter rules
 
-`examples/rules.yaml` gains: own messages `send` with `permalink` only (they close asks); bot messages `never`; direct
-messages and mentions `send` with `ask: me` (priority high for direct messages, medium for mentions) and
-`channel`, `permalink`, `author`, `actor`, `references`; thread replies and review requests fall to `never`. No rule
-lists `body`.
+Own messages `send` with `permalink` only; bots `never`; deletions `send` with `close_by_others`; one-to-one direct
+messages `send`, `ask: me`, high; group direct messages `send`, `ask: me`, medium; mentions `send`, `ask: me`, medium,
+without `references`; thread replies and review requests fall to `never`. No rule lists `body`.
 
 ## Out of scope
 
 Slack Connect specifics, user display names (`users:read`), files and attachments, reactions, unreads, posting or
-marking read, Enterprise Grid org-wide search, Socket Mode or the Events API, a live run in this pull request.
+marking read, edits seen only through history or replies, Enterprise Grid org-wide search, Socket Mode or the Events API, a live run in this pull request.
 
 ## Tests
 
-- The source against a fake Slack served by `httptest`, covering every item type, own acts, addressed, the
-  answered-by-sibling flag, pagination, `429` backoff, `ratelimited`, a refused token, a missing scope, an identity
-  mismatch, a skipped thread, and a cursor that only moves after commit.
+- The source against a fake Slack served by `httptest`, covering every item type, own acts, addressed, the bounded
+  sibling close (an ask posted after the reply, a thread question), private channels and group direct messages,
+  user group and `@here` mentions, an edit that adds a mention, a deletion, a deferred new thread, a history gap,
+  pagination, `429` backoff, `ratelimited`, a refused token, a missing scope, an identity mismatch, a skipped thread,
+  and a cursor that only moves after commit.
 - Keys are stable across passes; a message seen by two reads yields one item.
 - No request leaves `slack.com` and the four methods, and each method takes only its query keys.
 - Pacing: calls to one method are spaced by its tier.

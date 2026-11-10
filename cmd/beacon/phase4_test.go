@@ -123,7 +123,7 @@ func TestSourceAddSlack(t *testing.T) {
 	srv.Scopes = "search:read,channels:history"
 	store2 := keychain.NewMemory()
 	store = store2
-	if code := add(slacktest.Token); code == 0 || !strings.Contains(errOut.String(), "groups:history, im:history, mpim:history") {
+	if code := add(slacktest.Token); code == 0 || !strings.Contains(errOut.String(), "groups:history, im:history, mpim:history, channels:read, groups:read, mpim:read, usergroups:read") {
 		t.Fatalf("missing scope: exit %d\n%s", code, errOut.String())
 	}
 	if _, err := store2.Get("slack:T0ACME:U0WINTON"); err == nil {
@@ -148,6 +148,12 @@ func TestEgressListsSlack(t *testing.T) {
 
 // slackSetup writes a config with the Slack source and the starter rules, against the fake Slack and a fake Signal.
 func slackSetup(t *testing.T, send bool) (srv *slacktest.Server, sig *signaltest.Server, dir string, run func(args ...string) string) {
+	srv, sig, dir, run, _ = slackSetupClock(t, send)
+	return
+}
+
+// slackSetupClock is slackSetup with a clock the test moves.
+func slackSetupClock(t *testing.T, send bool) (srv *slacktest.Server, sig *signaltest.Server, dir string, run func(args ...string) string, advance func(time.Duration)) {
 	t.Helper()
 	srv = slacktest.New(t)
 	sig = signaltest.New("sig-key")
@@ -170,6 +176,9 @@ func slackSetup(t *testing.T, send bool) (srv *slacktest.Server, sig *signaltest
 	var out, errOut strings.Builder
 	var rec *egresstest.Recorder
 	a := slackApp(t, srv, store, &rec, "", &out, &errOut)
+	clock := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	advance = func(d time.Duration) { clock = clock.Add(d) }
 	a.configureClient = func(c *signal.Client) { c.Attempts = 1 }
 	run = func(args ...string) string {
 		t.Helper()
@@ -189,7 +198,7 @@ func slackSetup(t *testing.T, send bool) (srv *slacktest.Server, sig *signaltest
 		}
 		return out.String()
 	}
-	return srv, sig, dir, run
+	return srv, sig, dir, run, advance
 }
 
 func TestSlackStarterRules(t *testing.T) {
@@ -206,6 +215,12 @@ func TestSlackStarterRules(t *testing.T) {
 		"slack:C0ENG:1794134400.000700":    "never",
 		"slack:C0REVIEW:1794136200.001100": "send",
 		"slack:C0REVIEW:1794135000.000900": "never",
+		"slack:C0SECRET:1794134000.000450": "send",
+		"slack:C0ENG:1794134500.000750":    "never",
+		"slack:G0GROUP:1794137500.001400":  "send",
+		"slack:G0GROUP:1794137600.001500":  "send",
+		"slack:C0REVIEW:1794135800.001060": "send",
+		"slack:C0REVIEW:1794135700.001050": "send",
 	}
 	got := map[string]string{}
 	bodies := map[string]string{}
@@ -230,7 +245,7 @@ func TestSlackStarterRules(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("got %v\n%s", got, report)
 	}
-	for _, words := range []string{`"body"`, "deploy", "budget", "offsite", "alerts", "PTAL", "Merged"} {
+	for _, words := range []string{`"body"`, "deploy", "budget", "offsite", "alerts", "PTAL", "Merged", "salary", "acme/hr", "Lunch", "pager"} {
 		if strings.Contains(report, words) {
 			t.Fatalf("message text would leave (%s):\n%s", words, report)
 		}
@@ -251,7 +266,15 @@ func TestSlackStarterRules(t *testing.T) {
 	if mention := bodies["slack:C0ENG:1794133800.000400"]; !strings.Contains(mention, `"subject":"slack:C0ENG:1794133800.000400"`) || !strings.Contains(mention, `"priority":"medium"`) {
 		t.Fatalf("mention: %s", mention)
 	}
-	if !strings.Contains(report, "slack: dm_received 3 mentioned 2 own_message 3 review_request 1 thread_reply 1") {
+	// A private channel is personal, and a mention there sends no references.
+	secret := bodies["slack:C0SECRET:1794134000.000450"]
+	if !strings.Contains(secret, `"subject":"slack:dm:winton:C0SECRET:1794134000.000450"`) || !strings.Contains(secret, `"channel_type":"private"`) || strings.Contains(secret, "references") {
+		t.Fatalf("private mention: %s", secret)
+	}
+	if group := bodies["slack:G0GROUP:1794137500.001400"]; !strings.Contains(group, `"subject":"slack:dm:winton:G0GROUP:`) || !strings.Contains(group, `"priority":"medium"`) {
+		t.Fatalf("group message: %s", group)
+	}
+	if !strings.Contains(report, "slack: dm_received 4 mentioned 5 own_message 4 review_request 1 thread_reply 2") {
 		t.Fatalf("summary:\n%s", report)
 	}
 	if len(sig.Requests()) != 0 {
@@ -271,7 +294,7 @@ func TestSlackDirectMessagesWaitForRestriction(t *testing.T) {
 	run("accept-first")
 	sig.Restrict("gmail:*")
 	report := run("run", "--once")
-	if !strings.Contains(report, "source slack: 4 items held, not sent: slack:dm:* is not restricted in Signal") {
+	if !strings.Contains(report, "source slack: 7 items held, not sent: slack:dm:* is not restricted in Signal") {
 		t.Fatalf("report:\n%s", report)
 	}
 	sent := map[string]bool{}
@@ -281,13 +304,13 @@ func TestSlackDirectMessagesWaitForRestriction(t *testing.T) {
 			t.Fatalf("%s was sent under an unrestricted prefix", e.Key)
 		}
 	}
-	for _, k := range []string{"slack:C0ENG:1794133800.000400", "slack:C0ENG:1794130000.000600", "slack:C0REVIEW:1794136200.001100"} {
+	for _, k := range []string{"slack:C0ENG:1794133800.000400", "slack:C0ENG:1794130000.000600", "slack:C0REVIEW:1794136200.001100", "slack:C0REVIEW:1794135700.001050"} {
 		if !sent[k] {
 			t.Fatalf("channel item %s not sent; sent %v", k, sent)
 		}
 	}
 	held, err := os.ReadFile(filepath.Join(dir, "state", "held.jsonl"))
-	if err != nil || !strings.Contains(string(held), "slack:D0DANA:1794132000.000100") {
+	if err != nil || !strings.Contains(string(held), "slack:D0DANA:1794132000.000100") || !strings.Contains(string(held), "slack:C0SECRET:1794134000.000450") {
 		t.Fatalf("not held:\n%s", held)
 	}
 	st, err := cursor.Read(filepath.Join(dir, "state"))
@@ -325,5 +348,29 @@ func TestSlackDirectMessagesSentWhenRestricted(t *testing.T) {
 	run("run", "--once")
 	if len(sig.Events()) != n {
 		t.Fatal("a second pass sent again")
+	}
+}
+
+// A message that asked the person and is deleted closes that ask. (Dana's direct messages are already answered by
+// Winton's reply; Bob's mention is not.)
+func TestSlackDeletedAskCloses(t *testing.T) {
+	srv, sig, _, run, advance := slackSetupClock(t, true)
+	run("run", "--first", "--once")
+	run("accept-first")
+	sig.Restrict("slack:dm:*")
+	run("run", "--once")
+	if _, ok := sig.Event("slack:C0ENG:1794133800.000400"); !ok {
+		t.Fatal("the mention was not sent")
+	}
+	if e, _ := sig.Event("slack:D0DANA:1794133200.000300"); !strings.Contains(string(e.Body), `"closes":[{"key":"slack:D0DANA:1794132000.000100"},{"key":"slack:D0DANA:1794132600.000200"}]`) {
+		t.Fatalf("own reply %s", e.Body)
+	}
+	srv.Deleted["C0ENG/1794133800.000400"] = true
+	advance(16 * time.Minute)
+	run("run", "--once")
+	e, ok := sig.Event("slack:C0ENG:1794133800.000400:deleted")
+	if !ok || !strings.Contains(string(e.Body), `"closes":[{"key":"slack:C0ENG:1794133800.000400"}]`) ||
+		!strings.Contains(string(e.Body), `"subject":"slack:C0ENG:1794133800.000400"`) || strings.Contains(string(e.Body), `"to"`) {
+		t.Fatalf("deleted %s", e.Body)
 	}
 }

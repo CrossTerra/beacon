@@ -266,34 +266,41 @@ type asks struct {
 	closed map[string]bool
 }
 
-// forItem is the open asks an item's projection may close: on its subject, and for an own act that closes its
-// siblings, on theirs too.
+// forItem is the open asks an item's projection may close: on its subject, and for an own act bounded by
+// CloseSiblingsBefore, the earlier asks that opened its sibling subjects.
 func (a *asks) forItem(it source.Item) []string {
-	return a.openOn(it.Subject, it.Own && it.CloseSiblings)
+	before := ""
+	if it.Own {
+		before = it.CloseSiblingsBefore
+	}
+	return a.openOn(it.Subject, before)
 }
 
-func (a *asks) openOn(subject string, siblings bool) []string {
+func (a *asks) openOn(subject, before string) []string {
 	var base []string
 	if a.ob != nil {
-		if siblings {
-			base = a.ob.OpenAsksSiblings(subject)
+		if before != "" {
+			base = a.ob.OpenAsksSiblings(subject, before)
 		} else {
 			base = a.ob.OpenAsks(subject)
 		}
 	}
 	added := a.added[subject]
-	if siblings {
-		// Sibling subjects differ only in their last part; sorted, the asks this pass added stay in a fixed order.
-		added = nil
+	if before != "" {
+		// Sorted by subject, the asks this pass added stay in a fixed order.
 		var subjects []string
 		for s := range a.added {
-			if source.IsSibling(subject, s) {
+			if s != subject && source.IsSibling(subject, s) {
 				subjects = append(subjects, s)
 			}
 		}
 		sort.Strings(subjects)
 		for _, s := range subjects {
-			added = append(added, a.added[s]...)
+			for _, k := range a.added[s] {
+				if source.ClosesSibling(subject, before, s, k) {
+					added = append(added, k)
+				}
+			}
 		}
 	}
 	seen := map[string]bool{}

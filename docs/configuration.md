@@ -76,7 +76,7 @@ sources:
   - kind: slack
     workspace: T0123ABCD            # the workspace id; beacon source add slack writes it
     user: U0123ABCD                 # the token's user id
-    channels: ["C0123REVW"]         # optional; channel ids read for review requests
+    channels: ["C0123REVW"]         # optional; channel ids read for review requests and @here
 ```
 
 `name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
@@ -90,8 +90,9 @@ whose signed-in account is another. The hosts and the API are fixed.
 
 A Slack source takes `kind`, `name`, `workspace`, `user` and `channels`. `beacon source add slack` writes the
 workspace and user ids `auth.test` reports for the token, and stores the token in the keychain as
-`slack:<workspace>:<user>`. `channels` are channel ids (`C…`), not names; a direct message cannot be one. The source
-refuses a token whose workspace or user is another. The host and the API are fixed.
+`slack:<workspace>:<user>`. `channels` are channel ids (`C…`), not names; a direct message cannot be one. Their top
+level is read for review requests, `@here`, `@channel` and `@everyone`, which count as mentions only there. A private
+one is personal. The source refuses a token whose workspace or user is another. The host and the API are fixed.
 
 A GitHub `projects` list, plus every Jira source's projects, limits which issue keys become `jira:<KEY>` references.
 
