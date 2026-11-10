@@ -30,7 +30,7 @@ Collects, applies rules and projection, and records what it decided.
   lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
   new decision. Decisions from earlier passes are not printed again.
 
-With a Google source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
+With a Google or Slack source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
 has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
 Signal …` and which prefix to ask Signal's admin to restrict. If the restrictions cannot be read, those items are
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
@@ -126,6 +126,7 @@ not written to the config.
 beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh] [--yes]
 beacon source add jira --site SITE --project KEY [--project KEY]
 beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
+beacon source add slack [--channel ID]... [--name NAME]
 ```
 
 `--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
@@ -143,6 +144,13 @@ refresh token as `google:<account>:refresh`. The grant asks for the scopes of ev
 in the config; `--bodies` asks for `gmail.readonly` instead of `gmail.metadata`. It prints the scopes granted, never a token. The token exchange goes
 through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, opens the consent page. See
 [`sources.md`](sources.md#google).
+
+`slack` reads the person's user token (`xoxp-…`) with echo off, and refuses any other kind of token. It calls
+`auth.test` through the egress guard to `slack.com`, and nothing else. If the token lacks one of the read scopes
+(`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`), it names them and stores
+nothing. Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
+and `user` and each `--channel`, names any other scopes the token holds (Beacon never uses them), and, when
+`person.identities` has no entry for the source, prints the one to add. See [`sources.md`](sources.md#slack).
 
 ## `beacon seed FILE`
 
@@ -241,7 +249,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
-| `read_cut` | A source's read stopped at its limit (Gmail's first run); older items in its window were not read. The source only. |
+| `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search or channel history); older items in its window were not read. The source only. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
 

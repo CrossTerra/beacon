@@ -21,6 +21,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `state` | The object's current state, when the source returned it (DEC-28): only names in the source's state field list. |
 | `observed_at` | When the source returned `state`. Required with `state`. |
 | `version` | The source's version marker for this change: the last part of `key` (DEC-9). Required with `state`. |
+| `close_siblings` | On an own act only: it also closes the open asks on subjects that differ from its own only in the last part. Slack sets it on a top-level message in a one-to-one direct message, whose earlier messages are each their own subject (DEC-10). The subject must have at least four parts before the last, so the siblings are one conversation. It is kept in the stored decision, so a retry closes the same asks. |
 
 ## The request body
 
@@ -48,13 +49,13 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `subject`, `key`, `occurred_at` | Always, from the item. `occurred_at` is UTC with milliseconds. |
 | `type` | Always: `<source>.<item type>`. |
 | `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, else the `summary` field when the rule lists `summary`, else the `subject` field (a mail thread's subject) when the rule lists `subject`. It is not a description of this change. |
-| `title` | For GitHub, Jira, Gmail, Calendar and Drive, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment, review or mail text. For a fixture without one, the `title` field when the rule lists it. |
+| `title` | For GitHub, Jira, Gmail, Calendar, Drive and Slack, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment, review, mail or message text. For a fixture without one, the `title` field when the rule lists it. |
 | `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
 | `priority` | The rule's priority, with `to`. |
 | `due_at` | The item's due time, with `to`. |
-| `closes` | On the person's own acts, and on items a `close_by_others` rule sends: the keys of open asks on the same subject, oldest first, at most 20. |
+| `closes` | On the person's own acts, and on items a `close_by_others` rule sends: the keys of open asks on the same subject, oldest first, at most 20. An own act with `close_siblings` adds the open asks on its sibling subjects. |
 | `state` | The state snapshot (DEC-28), in the shape Signal stores: `fields` holds the state fields the rule lists that the item has, and `observed_at` and `version` sit beside `fields`. Omitted when the rule lists none, the item has no snapshot, or none of the listed fields is present. Any other key in `state` is refused. |
 
 Signal plan 12.01 stores the snapshot and rejects a `state` object with any key other than `fields`, `observed_at`

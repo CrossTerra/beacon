@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/CrossTerra/beacon/internal/source"
 )
 
 // FileName is the outbox file inside the state directory.
@@ -542,6 +544,16 @@ func (o *Outbox) PendingEvents() []Entry {
 // OpenAsks returns the keys of event bodies on subject that ask someone and that no other body closes, oldest
 // first. Rejected and superseded bodies count for neither: they were not sent.
 func (o *Outbox) OpenAsks(subject string) []string {
+	return o.openAsks(func(s string) bool { return s == subject })
+}
+
+// OpenAsksSiblings returns the open asks, oldest first, on subject and on every subject that differs from it only in
+// the last part (source.IsSibling).
+func (o *Outbox) OpenAsksSiblings(subject string) []string {
+	return o.openAsks(func(s string) bool { return source.IsSibling(subject, s) })
+}
+
+func (o *Outbox) openAsks(on func(string) bool) []string {
 	closed := map[string]bool{}
 	for _, k := range o.order {
 		e := o.entries[k]
@@ -555,7 +567,7 @@ func (o *Outbox) OpenAsks(subject string) []string {
 	var out []string
 	for _, k := range o.order {
 		e := o.entries[k]
-		if e.Kind == Event && e.Subject == subject && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
+		if e.Kind == Event && on(e.Subject) && e.Asks && e.State != Rejected && e.State != Superseded && !closed[k] {
 			out = append(out, k)
 		}
 	}

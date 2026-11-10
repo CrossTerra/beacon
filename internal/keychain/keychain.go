@@ -48,6 +48,18 @@ func GoogleClientAccount(email string) string { return "google:" + email + ":cli
 // GoogleRefreshAccount is the keychain account, under Service, of the refresh token for one Google account.
 func GoogleRefreshAccount(email string) string { return "google:" + email + ":refresh" }
 
+// SlackAccount is the keychain account, under Service, of the Slack user token for one user in one workspace.
+func SlackAccount(workspace, user string) string { return "slack:" + workspace + ":" + user }
+
+// SlackUserToken checks that s is a Slack user token (xoxp-). A bot or app token cannot search, and is refused
+// before it is stored.
+func SlackUserToken(s Secret) error {
+	if !strings.HasPrefix(string(s.value), "xoxp-") || strings.ContainsAny(string(s.value), " \t\r\n") {
+		return errors.New("keychain: that is not a Slack user token (xoxp-…); copy the User OAuth Token from the app's OAuth & Permissions page")
+	}
+	return nil
+}
+
 // FromString stores s as a secret. The caller must not log s. This is how `gh auth token` is imported.
 func FromString(s string) (Secret, error) {
 	s = strings.TrimSpace(s)

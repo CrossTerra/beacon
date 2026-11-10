@@ -69,10 +69,13 @@ type app struct {
 	agentsDir func() (string, error)
 	launchctl launcher
 	identify  func(context.Context, string) (service.Identity, error)
-	// sleep waits. Nil sleeps on the clock. Tests record the duration and return.
+	// sleep waits: the service's backoff, and a Slack source's spacing between calls. Nil sleeps on the clock. Tests
+	// record the duration and return.
 	sleep func(context.Context, time.Duration) error
 	// google replaces Google's endpoints and the browser opener. Empty uses Google's. Tests set it.
 	google googleEndpoints
+	// slackBase replaces https://slack.com. Tests set it.
+	slackBase string
 }
 
 type googleEndpoints struct {
@@ -91,7 +94,7 @@ Commands:
   cursor reset  clear a source cursor so the next collect reads open state
   egress        print every host Beacon may contact under the current config
   rules check   validate the rules file and report rules that can never match
-  source add    store a source credential in the keychain and enable the source (github, jira, google)
+  source add    store a source credential in the keychain and enable the source (github, jira, google, slack)
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
   service       install, uninstall, status or logs of the per-user launchd agent
@@ -572,7 +575,7 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", g.Source)
 		}
 		if g.Cut {
-			fmt.Fprintf(w, "source %s: a read stopped at its limit (5000 per list); older mail in its window was not read and will not be, unless it changes.\n", g.Source)
+			fmt.Fprintf(w, "source %s: a read stopped at its limit (Gmail: 5000 per list; Slack: 2000 per search or channel); older items in its window were not read and will not be, unless they change.\n", g.Source)
 		}
 	}
 	for _, p := range rep.Items {

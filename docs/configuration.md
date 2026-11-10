@@ -16,6 +16,7 @@ person:
     gmail: email:winton@example.com  # email:, never mailto:
     calendar: email:winton@example.com
     drive: email:winton@example.com
+    slack: slack:user:U0123ABCD
 rules: rules.yaml                    # relative paths are relative to this file
 state: state
 mode: dry-run                        # dry-run or send
@@ -31,23 +32,23 @@ sources:
 | --- | --- |
 | `signal.url` | The Signal base URL, with no path. `http` is allowed only to `localhost` or a loopback address. |
 | `signal.keychain_account` | The keychain account holding the Signal key, under the service `beacon`. |
-| `person.handle` | The person Beacon serves. Asks name it in `to` (DEC-27). With a Google source it must be an `@handle`: personal subjects carry it without the `@` (DEC-10). |
+| `person.handle` | The person Beacon serves. Asks name it in `to` (DEC-27). With a Google or Slack source it must be an `@handle`: personal subjects carry it without the `@` (DEC-10). |
 | `person.identities` | The person's own identity per source. An own act carries `by` with this identity (DEC-27). Signal must have it attached to the person's actor, and Beacon's key must have a `relay` prefix that covers it. |
 | `rules` | The rules file. Its grammar is in [`rules.md`](rules.md). |
 | `state` | The state directory: outbox, hold queue, dropped record, instance id. |
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25). Default `5m`. |
 | `poll_interval` | How often `beacon run` makes a pass. Default `1m`. The launchd agent runs this loop. |
-| `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`. See [Sources](#sources). |
+| `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`, `slack`. See [Sources](#sources). |
 
 ## The Signal key
 
 Signal's admin gives each person's Beacon its own integration actor and key (DEC-11): scopes `write` and `relay`,
 with `--identity-prefix` patterns that cover the person's identities (`github:*`, `slack:*`, `email:*`). With a
-Google source, the key also needs `read`: a send pass reads the restricted prefixes (`GET /api/restrictions`) and
-sends nothing under `gmail:`, `calendar:` or `drive:` until Signal's admin has restricted that prefix
-([`sources.md`](sources.md#google)). Beacon reads nothing else with it. Without Google sources, no `read` scope is
-needed.
+Google or Slack source, the key also needs `read`: a send pass reads the restricted prefixes (`GET /api/restrictions`)
+and sends nothing under `gmail:`, `calendar:`, `drive:` or `slack:dm:` until Signal's admin has restricted that prefix
+([`sources.md`](sources.md#google)). Beacon reads nothing else with it. Without Google or Slack sources, no `read`
+scope is needed.
 
 `beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the login
 keychain. `beacon run` reads it from there when it sends. A dry run does not read it.
@@ -72,16 +73,25 @@ sources:
     account: winton@example.com
   - kind: drive
     account: winton@example.com
+  - kind: slack
+    workspace: T0123ABCD            # the workspace id; beacon source add slack writes it
+    user: U0123ABCD                 # the token's user id
+    channels: ["C0123REVW"]         # optional; channel ids read for review requests
 ```
 
 `name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
-name: `github:user:<login>`, `jira:account:<account id>`, and `email:<address>` for `gmail`, `calendar` and
-`drive`.
+name: `github:user:<login>`, `jira:account:<account id>`, `email:<address>` for `gmail`, `calendar` and
+`drive`, and `slack:user:<user id>` for `slack`.
 
 A Google source takes `kind`, `name` and `account`, which is required. `beacon source add google --account` writes
 them and stores the grant every Google source of that account shares: the person's OAuth client and the refresh
 token, in the keychain as `google:<account>:client` and `google:<account>:refresh`. The source refuses a grant
 whose signed-in account is another. The hosts and the API are fixed.
+
+A Slack source takes `kind`, `name`, `workspace`, `user` and `channels`. `beacon source add slack` writes the
+workspace and user ids `auth.test` reports for the token, and stores the token in the keychain as
+`slack:<workspace>:<user>`. `channels` are channel ids (`C…`), not names; a direct message cannot be one. The source
+refuses a token whose workspace or user is another. The host and the API are fixed.
 
 A GitHub `projects` list, plus every Jira source's projects, limits which issue keys become `jira:<KEY>` references.
 

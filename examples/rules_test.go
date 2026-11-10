@@ -7,6 +7,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/google"
 	"github.com/CrossTerra/beacon/internal/jira"
 	"github.com/CrossTerra/beacon/internal/rules"
+	"github.com/CrossTerra/beacon/internal/slack"
 )
 
 func TestExampleChecks(t *testing.T) {
@@ -20,6 +21,7 @@ func TestExampleChecks(t *testing.T) {
 		"gmail":    {Fields: google.GmailFields, StateFields: google.GmailStateFields, Identity: true},
 		"calendar": {Fields: google.CalendarFields, StateFields: google.CalendarStateFields, Identity: true},
 		"drive":    {Fields: google.DriveFields, StateFields: google.DriveStateFields, Identity: true},
+		"slack":    {Fields: slack.Fields, StateFields: slack.StateFields, Identity: true},
 	}
 	sets := map[string]map[string]rules.Source{"all": all}
 	for name, s := range all {
@@ -39,7 +41,7 @@ func TestExampleListsNoBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"github", "jira", "gmail", "calendar", "drive"} {
+	for _, name := range []string{"github", "jira", "gmail", "calendar", "drive", "slack"} {
 		if f.Lists(name, "body") {
 			t.Errorf("a starter rule lists body for %s", name)
 		}
