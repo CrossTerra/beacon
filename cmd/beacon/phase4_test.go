@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -372,5 +373,42 @@ func TestSlackDeletedAskCloses(t *testing.T) {
 	if !ok || !strings.Contains(string(e.Body), `"closes":[{"key":"slack:C0ENG:1794133800.000400"}]`) ||
 		!strings.Contains(string(e.Body), `"subject":"slack:C0ENG:1794133800.000400"`) || strings.Contains(string(e.Body), `"to"`) {
 		t.Fatalf("deleted %s", e.Body)
+	}
+}
+
+// A deleted reply inside a thread closes the ask it opened, not the other ask in that thread.
+func TestSlackDeletedReplyClosesOnlyItsAsk(t *testing.T) {
+	srv, sig, _, run, advance := slackSetupClock(t, true)
+	// Bob's mention opened a thread; Erin's reply in it mentions Winton too. Two asks on one subject.
+	replies := srv.Routes["/api/conversations.replies"]
+	srv.Routes["/api/conversations.replies"] = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("inclusive") == "" && q.Get("channel") == "C0ENG" && q.Get("ts") == "1794133800.000400" {
+			io.WriteString(w, strings.Replace(slacktest.RepliesMention, "\n]", `,
+  {"type":"message","user":"U0ERIN","text":"<@U0WINTON> and this one","ts":"1794134600.000760","thread_ts":"1794133800.000400"}
+]`, 1))
+			return
+		}
+		replies(w, r)
+	}
+	run("run", "--first", "--once")
+	run("accept-first")
+	sig.Restrict("slack:dm:*")
+	run("run", "--once")
+	for _, k := range []string{"slack:C0ENG:1794133800.000400", "slack:C0ENG:1794134600.000760"} {
+		e, ok := sig.Event(k)
+		if !ok || !strings.Contains(string(e.Body), `"subject":"slack:C0ENG:1794133800.000400"`) || !strings.Contains(string(e.Body), `"to":["@winton"]`) {
+			t.Fatalf("%s: %s", k, e.Body)
+		}
+	}
+	srv.Deleted["C0ENG/1794134600.000760"] = true
+	advance(16 * time.Minute)
+	run("run", "--once")
+	e, ok := sig.Event("slack:C0ENG:1794134600.000760:deleted")
+	if !ok || !strings.Contains(string(e.Body), `"closes":[{"key":"slack:C0ENG:1794134600.000760"}]`) {
+		t.Fatalf("deleted %s", e.Body)
+	}
+	if strings.Contains(string(e.Body), "slack:C0ENG:1794133800.000400\"}") {
+		t.Fatalf("the deletion closed Bob's ask too: %s", e.Body)
 	}
 }

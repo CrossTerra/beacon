@@ -49,6 +49,9 @@ type Item struct {
 	// subject (the ask's key ends in that last part, so it is not a reply inside it) and whose last part is before
 	// this value. A top-level reply in a Slack direct message sets it to its own ts.
 	CloseSiblingsBefore string `json:"close_siblings_before,omitempty"`
+	// CloseOnly, when set, narrows what this item may close to these ask keys on its subject. A Slack deletion names the
+	// ask the deleted message opened, so a close_by_others rule closes that ask and not the others in its thread.
+	CloseOnly []string `json:"close_only,omitempty"`
 }
 
 var decimalPattern = regexp.MustCompile(`^[0-9]{1,20}(\.[0-9]{1,20})?$`)
@@ -247,6 +250,14 @@ func Validate(it Item, fields, stateFields []string) error {
 	}
 	if len(it.State) > 0 && (it.ObservedAt == nil || it.ObservedAt.IsZero() || it.Version == "") {
 		return fmt.Errorf("a state snapshot needs observed_at and version")
+	}
+	for _, k := range it.CloseOnly {
+		if !printable.MatchString(k) || !strings.HasPrefix(k, it.Source+":") {
+			return fmt.Errorf("close_only names a key that is not this source's")
+		}
+	}
+	if len(it.CloseOnly) > 0 && it.CloseSiblingsBefore != "" {
+		return fmt.Errorf("close_only and close_siblings_before do not combine")
 	}
 	if it.CloseSiblingsBefore != "" {
 		// Siblings share everything but the last part, so the prefix must name one conversation, not a stem or a

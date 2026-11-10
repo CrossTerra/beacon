@@ -104,7 +104,7 @@ One item per message. When a message qualifies twice, the first type in this lis
 | `dm_received` | Someone else's message in a one-to-one or group direct message | yes | no | Direct message |
 | `thread_reply` | Someone else's reply in a followed thread, after the person's first post or mention there | no | no | Thread reply |
 | `review_request` | Someone else's top-level message in a configured channel with a pull request link and review wording | no | no | Review requested |
-| `message_deleted` | A message that was `mentioned` or `dm_received` is gone; on its subject, so a `close_by_others` rule closes the ask | no | no | Deleted |
+| `message_deleted` | A message that was `mentioned` or `dm_received` is gone; on its subject, naming the ask it opened (`close_only`), so a `close_by_others` rule closes that ask only | no | no | Deleted |
 
 - **Subject (DEC-10).** A public channel message: `slack:<channel>:<thread ts>`. A one-to-one or group direct
   message, or a private channel: `slack:dm:<person>:<channel>:<thread ts>`. Private channels share the direct-message

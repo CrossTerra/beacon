@@ -267,13 +267,28 @@ type asks struct {
 }
 
 // forItem is the open asks an item's projection may close: on its subject, and for an own act bounded by
-// CloseSiblingsBefore, the earlier asks that opened its sibling subjects.
+// CloseSiblingsBefore, the earlier asks that opened its sibling subjects. CloseOnly narrows them to the asks it names.
 func (a *asks) forItem(it source.Item) []string {
 	before := ""
 	if it.Own {
 		before = it.CloseSiblingsBefore
 	}
-	return a.openOn(it.Subject, before)
+	open := a.openOn(it.Subject, before)
+	if len(it.CloseOnly) == 0 {
+		return open
+	}
+	// Only the named asks, and only while they are open on this subject.
+	named := map[string]bool{}
+	for _, k := range it.CloseOnly {
+		named[k] = true
+	}
+	var out []string
+	for _, k := range open {
+		if named[k] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 func (a *asks) openOn(subject, before string) []string {

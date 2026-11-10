@@ -88,3 +88,20 @@ func TestCloseSiblingsValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestCloseOnlyValidation(t *testing.T) {
+	it := Item{Source: "slack", Subject: "slack:C1:1700000000.000100", Key: "slack:C1:1700000000.000200:deleted",
+		Type: "message_deleted", OccurredAt: time.Unix(1700000000, 0), Version: "deleted", CloseOnly: []string{"slack:C1:1700000000.000200"}}
+	if err := Validate(it, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	other := it
+	other.CloseOnly = []string{"gmail:t1:m1"}
+	both := it
+	both.Own, both.Subject, both.CloseSiblingsBefore = true, "slack:dm:winton:D1:1700000000.000100", "1700000000.000100"
+	for name, b := range map[string]Item{"another source's key": other, "with close_siblings_before": both} {
+		if Validate(b, nil, nil) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

@@ -703,7 +703,8 @@ func TestDeletedAsk(t *testing.T) {
 	}
 	m := byKey(t, second.Items)
 	d, ok := m["slack:D0DANA:1794132000.000100:deleted"]
-	if !ok || len(m) != 1 || d.Type != TypeDeleted || d.Subject != "slack:dm:winton:D0DANA:1794132000.000100" || d.EventTitle != "Deleted" || d.Own || d.Actor != "" || d.Version != "deleted" {
+	if !ok || len(m) != 1 || d.Type != TypeDeleted || d.Subject != "slack:dm:winton:D0DANA:1794132000.000100" || d.EventTitle != "Deleted" || d.Own || d.Actor != "" || d.Version != "deleted" ||
+		strings.Join(d.CloseOnly, ",") != "slack:D0DANA:1794132000.000100" {
 		t.Fatalf("got %+v", second.Items)
 	}
 	if strings.Contains(string(second.Next), "D0DANA/1794132000.000100") {

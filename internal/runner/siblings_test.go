@@ -121,3 +121,68 @@ func mustRules(t *testing.T, y string) *rules.File {
 	}
 	return f
 }
+
+const deletionRules = `rules:
+  - name: deleted
+    match: {type: message_deleted}
+    tier: send
+    close_by_others: true
+  - name: asks
+    match: {own: false}
+    tier: send
+    ask: me
+`
+
+// A deletion that names its ask with close_only closes that ask only, though another ask is open on the same
+// subject (two asks in one thread), in a dry pass and from the outbox; the stored decision keeps the names.
+func TestCloseOnly(t *testing.T) {
+	at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	thread := "fx:dm:winton:C1:100.000000"
+	first := source.Item{Source: "fx", Subject: thread, Key: "fx:C1:100.000000", Type: "message", OccurredAt: at, Actor: "fx:user:dana"}
+	second := source.Item{Source: "fx", Subject: thread, Key: "fx:C1:200.000000", Type: "message", OccurredAt: at.Add(time.Minute), Actor: "fx:user:bob"}
+	deleted := source.Item{Source: "fx", Subject: thread, Key: "fx:C1:200.000000:deleted", Type: "message_deleted",
+		OccurredAt: at.Add(2 * time.Minute), Version: "deleted", CloseOnly: []string{"fx:C1:200.000000"}}
+	const want = `"closes":[{"key":"fx:C1:200.000000"}]`
+
+	f := newFixture(t)
+	f.src.items = []source.Item{first, second, deleted}
+	r, done := f.runner(false, nil)
+	r.Rules = mustRules(t, deletionRules)
+	rep, err := r.Run(context.Background())
+	done()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range rep.Items {
+		if p.Item.Key == deleted.Key && closesOf(p.Body) != want {
+			t.Fatalf("dry pass closes %s", closesOf(p.Body))
+		}
+	}
+
+	f = newFixture(t)
+	f.src.items = []source.Item{first, second}
+	r, done = f.runner(true, nil)
+	r.Rules = mustRules(t, deletionRules)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	f.src.items = []source.Item{deleted}
+	r, done = f.runner(true, nil)
+	r.Rules = mustRules(t, deletionRules)
+	defer done()
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e, ok := r.Outbox.Get(deleted.Key)
+	if !ok || closesOf(e.Body) != want {
+		t.Fatalf("deletion body %s", e.Body)
+	}
+	if open := r.Outbox.OpenAsks(thread); len(open) != 1 || open[0] != first.Key {
+		t.Fatalf("open after the deletion: %v", open)
+	}
+	var d project.Decision
+	if err := json.Unmarshal(e.Decision, &d); err != nil || len(d.Item.CloseOnly) != 1 || d.Item.CloseOnly[0] != second.Key {
+		t.Fatalf("decision %s", e.Decision)
+	}
+}

@@ -115,6 +115,7 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
 			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
 			// A retry closes the same asks the first attempt did.
 			CloseSiblingsBefore: it.CloseSiblingsBefore,
+			CloseOnly:           append([]string(nil), it.CloseOnly...),
 		},
 	}
 	if rule == nil {

@@ -260,7 +260,7 @@ rules:
         author: {glob: "B*"}
     tier: never
 
-  # A message that asked you was deleted: close the ask on its subject.
+  # A message that asked you was deleted: close the ask it opened, and no other.
   - name: slack-deleted
     match: {source: slack, type: message_deleted}
     tier: send

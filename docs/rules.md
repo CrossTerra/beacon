@@ -46,7 +46,7 @@ rules:
 | `state` | no | Which of the source's state fields go in the event's state snapshot (DEC-28). See [State](#state). |
 | `ask` | no | `me`: the event asks the person (DEC-21). Nobody else can be asked (DEC-12). |
 | `priority` | no | `low`, `medium`, `high` or `urgent`, for the ask. Needs `ask`. |
-| `close_by_others` | no | `true`: when this rule sends another person's act, it closes the person's open asks on the same subject (DEC-20). |
+| `close_by_others` | no | `true`: when this rule sends another person's act, it closes the person's open asks on the same subject (DEC-20), or only those the item names when it sets `close_only`. |
 
 A `never` rule takes none of `fields`, `state`, `ask`, `priority` or `close_by_others`.
 

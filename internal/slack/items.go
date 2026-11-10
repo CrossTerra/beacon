@@ -220,9 +220,12 @@ func (s *Source) checkDeleted(ctx context.Context, p *pass) ([]source.Item, erro
 			fields["thread_ts"] = a.Root
 		}
 		key, version := source.FitKey(s.name+":"+channel+":"+ts+":deleted", "deleted")
+		// The ask this message opened has the message's own key. Only that ask closes: in a thread, other asks on the
+		// same subject stay open.
+		askKey, _ := source.FitKey(s.name+":"+channel+":"+ts, ts)
 		out = append(out, source.Item{
 			Source: s.name, Subject: a.Subject, Key: key, Type: TypeDeleted, EventTitle: "Deleted",
-			OccurredAt: obs, Fields: fields, Version: version,
+			OccurredAt: obs, Fields: fields, Version: version, CloseOnly: []string{askKey},
 		})
 	}
 	return out, nil

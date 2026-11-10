@@ -518,7 +518,7 @@ threads they posted or were mentioned in, and the configured channels (DEC-23).
 | `dm_received` | Someone else's message in a one-to-one or group direct message (`channel_type` says which). | yes | Direct message |
 | `thread_reply` | Someone else's reply in a followed thread, after the person's first post or mention there. | no | Thread reply |
 | `review_request` | Someone else's top-level message in a configured channel with a pull request or merge request link and review wording (`review`, `look`, `approve`, `approval`, `PTAL`, `eyes`). | no | Review requested |
-| `message_deleted` | A message that was `mentioned` or `dm_received` no longer exists. On that message's subject, keyed `slack:<channel>:<ts>:deleted`, stamped with the pass's `Date`. A `close_by_others` rule makes it close the ask. | no | Deleted |
+| `message_deleted` | A message that was `mentioned` or `dm_received` no longer exists. On that message's subject, keyed `slack:<channel>:<ts>:deleted`, stamped with the pass's `Date`. It names the ask that message opened (`close_only`), so a `close_by_others` rule closes that ask and no other: another ask in the same thread stays open. | no | Deleted |
 
 Joins, edits, other message subtypes and reactions are not events (DEC-18); an edit that adds a mention is found by
 the mention search. A top-level message of the person's in a public channel that is not configured is not an item:
