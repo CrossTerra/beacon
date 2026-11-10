@@ -8,9 +8,9 @@ same pull request.
 
 | Leaves the machine | Never leaves the machine |
 | --- | --- |
-| Events a rule sent: the projected fields and state fields only | Source credentials (OAuth refresh tokens, API tokens) |
+| Events a rule sent: the projected fields and state fields, plus a GitHub or Jira event title that describes the change | Source credentials (OAuth refresh tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
-| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (the stored decision keeps listed fields only, not an unlisted body), the cursors, the seed file, classifier input and output |
+| Requests to the source APIs, made with your credentials, including on a dry run | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
@@ -25,7 +25,12 @@ same pull request.
    A rule lists the fields it sends. Message bodies, attachments and file contents leave only when a rule lists
    them. Attachments and file contents are out of scope for the first release. A state snapshot carries only the
    state fields a rule lists (DEC-28). Who caused a change leaves only when a rule lists `actor`; your own identity
-   leaves as `by` on your own acts (DEC-27).
+   leaves as `by` on your own acts (DEC-27). A GitHub or Jira event's title is a description of that change, not a
+   source field and not the object's title. It leaves with the event so a thread's events do not all read as the
+   pull request or issue title. It is built only from the change the source already recorded (who was requested, the
+   review state, a short commit sha, the check conclusion, the assignee's display name, the status names, the due
+   date) and it never includes comment or review text. The object's title leaves only when a rule lists `title` or
+   `summary`, as the thread title.
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
@@ -40,7 +45,7 @@ same pull request.
    apply, and that needs a field or actor the stored item does not have, cannot be proved, so the entry is
    superseded as never and not sent. A condition the item does have that already fails that rule does not block
    the send. The command logs counts only. The stored
-   decision keeps listed fields only; an unlisted field, including a body, is not written and does not leave.
+   decision keeps listed fields and the event title. An unlisted field, including a body, is not written and does not leave.
 6. **Fixed egress.** Beacon connects only to the source APIs, the configured Signal host and, if configured, a
    hosted classifier. `beacon egress` prints the list, and every HTTP request goes through a transport that
    refuses any other host before connecting. Proxy settings from the environment are ignored and redirects are not

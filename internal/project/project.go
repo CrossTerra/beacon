@@ -109,6 +109,9 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
 		Truncated: truncated,
 		Item: source.Item{
 			Source: it.Source, Subject: it.Subject, Key: it.Key, Type: it.Type,
+			// The change description is not a source field. A retry must project the same event title, and it
+			// never carries comment or body text.
+			EventTitle: it.EventTitle,
 			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
 		},
 	}
@@ -203,6 +206,11 @@ func Project(in Input) (*Body, []byte, error) {
 		OccurredAt: Instant(it.OccurredAt),
 		Open:       &Open{},
 	}
+	// GitHub and Jira set this to describe the change. It is not the object's title, and it is not gated by
+	// listing title: a thread's events would otherwise all read as that title. It never includes a body.
+	if it.EventTitle != "" {
+		b.Title = title(it.EventTitle)
+	}
 	fields := map[string]string{}
 	meta := map[string]any{}
 	for _, name := range r.Fields {
@@ -223,8 +231,12 @@ func Project(in Input) (*Body, []byte, error) {
 			}
 			switch name {
 			case FieldTitle:
-				b.Title = title(v)
-				b.Open.Title = b.Title
+				// The object's title stays on the thread. It is the event title only when the source did not
+				// describe the change.
+				b.Open.Title = title(v)
+				if b.Title == "" {
+					b.Title = b.Open.Title
+				}
 			case FieldBody:
 				if in.Truncated {
 					continue
@@ -233,6 +245,13 @@ func Project(in Input) (*Body, []byte, error) {
 			default:
 				fields[name] = v
 			}
+		}
+	}
+	// An issue's summary is its title. It stays on the thread when the rule lists it and did not list title.
+	// It also remains in metadata.fields, which is where a listed field other than title goes.
+	if b.Open.Title == "" {
+		if v, ok := fields["summary"]; ok {
+			b.Open.Title = title(v)
 		}
 	}
 	if len(fields) > 0 {

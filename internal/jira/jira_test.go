@@ -13,6 +13,8 @@ import (
 
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/project"
+	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -88,10 +90,37 @@ func TestCollectEveryItem(t *testing.T) {
 		}
 		t.Fatalf("got %v", keys)
 	}
+	titles := map[string]string{
+		"jira:ENG-1:501":          "Assigned to Winton",
+		"jira:ENG-1:503":          "To Do → In Progress",
+		"jira:ENG-1:510":          "In Progress → In Review",
+		"jira:ENG-1:504":          "Mentioned",
+		"jira:ENG-1:505":          "Due date set to 2026-11-09",
+		"jira:ENG-1:508:assignee": "Unassigned",
+		"jira:ENG-1:508:status":   "In Review → Done",
+		"jira:ENG-1:601:comment":  "Commented",
+		"jira:ENG-1:602:comment":  "Commented",
+	}
 	for k, typ := range want {
-		if byKey[k].Type != typ {
-			t.Fatalf("%s: %+v", k, byKey[k])
+		it := byKey[k]
+		if it.Type != typ {
+			t.Fatalf("%s: %+v", k, it)
 		}
+		if it.EventTitle != titles[k] {
+			t.Errorf("%s title %q, want %q", k, it.EventTitle, titles[k])
+		}
+		if it.EventTitle == "" || it.EventTitle == it.Fields["summary"] {
+			t.Errorf("%s title %q repeats the issue title", k, it.EventTitle)
+		}
+		if body := it.Fields["body"]; body != "" && strings.Contains(it.EventTitle, body) {
+			t.Errorf("%s title contains the comment", k)
+		}
+		if k == "jira:ENG-1:504" && (strings.Contains(it.EventTitle, "accountid") || strings.Contains(it.EventTitle, "old")) {
+			t.Errorf("mention title includes field text: %q", it.EventTitle)
+		}
+	}
+	if byKey["jira:ENG-1:501"].Fields["summary"] != "Fix the gate" {
+		t.Fatal("object title was replaced")
 	}
 	assigned := byKey["jira:ENG-1:501"]
 	if !assigned.Addressed || assigned.Own || assigned.Actor != "jira:account:acc-dana" {
@@ -121,6 +150,29 @@ func TestCollectEveryItem(t *testing.T) {
 	due := byKey["jira:ENG-1:505"]
 	if due.DueAt == nil || due.DueAt.UTC().Format(time.RFC3339) != "2026-11-10T07:59:59Z" || due.State["due"] != "2026-11-09" || due.State["status"] != "In Progress" || due.Fields["url"] != "https://acme.atlassian.net/browse/ENG-1" {
 		t.Fatalf("due %+v %v", due.DueAt, due)
+	}
+	rs, err := rules.Parse([]byte("rules:\n  - name: t\n    match: {}\n    tier: send\n    fields: [summary, from_status, to_status]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := project.Project(project.Input{Item: byKey["jira:ENG-1:503"], Rule: rs.Rules[0], Person: project.Person{Handle: "@winton"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBody := `{"subject":"jira:ENG-1","type":"jira.transitioned","key":"jira:ENG-1:503","occurred_at":"2026-11-07T22:00:00.000Z","title":"To Do → In Progress","open":{"title":"Fix the gate"},"metadata":{"fields":{"from_status":"To Do","summary":"Fix the gate","to_status":"In Progress"}}}`
+	if string(body) != wantBody {
+		t.Fatalf("got  %s\nwant %s", body, wantBody)
+	}
+	commentRule, err := rules.Parse([]byte("rules:\n  - name: t\n    match: {}\n    tier: send\n    fields: [summary, body]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, raw, err := project.Project(project.Input{Item: comment, Rule: commentRule.Rules[0], Person: project.Person{Handle: "@winton"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.Title != "Commented" || projected.Open.Title != "Fix the gate" || !strings.Contains(projected.Body, "please look") || strings.Contains(projected.Title, "please look") {
+		t.Fatalf("comment body %s", raw)
 	}
 	again, err := s.Collect(context.Background(), []byte("2026-11-07T20:00:00Z"))
 	if err != nil || len(again.Items) != len(got.Items) {
@@ -163,7 +215,7 @@ func TestFirstRunAndScope(t *testing.T) {
 	if comments {
 		t.Fatal("first run read comments")
 	}
-	if len(got.Items) != 1 || got.Items[0].Key != "jira:ENG-3:900" || got.Items[0].Type != TypeAssigned || !got.Items[0].Addressed {
+	if len(got.Items) != 1 || got.Items[0].Key != "jira:ENG-3:900" || got.Items[0].Type != TypeAssigned || !got.Items[0].Addressed || got.Items[0].EventTitle != "Assigned to Winton" {
 		t.Fatalf("%+v", got.Items)
 	}
 	sc, err := newScope("acme.atlassian.net", []string{"ENG"})
@@ -251,6 +303,27 @@ func TestLongRateLimit(t *testing.T) {
 	_, err := s.Collect(context.Background(), nil)
 	if !errors.Is(err, source.ErrRateLimited) || slept {
 		t.Fatalf("%v slept %v", err, slept)
+	}
+}
+
+func TestEventTitleFallbacks(t *testing.T) {
+	if got := eventTitle(emit{typ: TypeAssigned}); got != "Assigned" {
+		t.Fatalf("no name %q", got)
+	}
+	if got := eventTitle(emit{typ: TypeDueChanged}); got != "Due date cleared" {
+		t.Fatalf("cleared %q", got)
+	}
+	if got := eventTitle(emit{typ: TypeDueChanged, detail: "2026-11-09"}); got != "Due date set to 2026-11-09" {
+		t.Fatalf("due %q", got)
+	}
+	if got := eventTitle(emit{typ: TypeMentioned, detail: "see the whole description"}); got != "Mentioned" {
+		t.Fatalf("mention included field text: %q", got)
+	}
+	if got := eventTitle(emit{typ: TypeCommented, body: "please look"}); got != "Commented" {
+		t.Fatalf("comment title %q", got)
+	}
+	if got := eventTitle(emit{typ: TypeTransitioned}); got != "Transitioned" {
+		t.Fatalf("empty transition %q", got)
 	}
 }
 

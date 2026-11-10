@@ -279,7 +279,7 @@ func build(in buildInput) ([]source.Item, error) {
 			if e.RequestedTeam != nil {
 				team = e.RequestedTeam.key()
 			}
-			err = add(in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team)))
+			err = add(in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), requestedName(who, team)))
 		case "review_request_removed":
 			actor := loginOf(e.Actor)
 			if actor == "" {
@@ -365,7 +365,7 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 			at = obs
 		}
 		actor := loginOf(e.ReviewRequester)
-		it, err := in.item(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team))
+		it, err := in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), requestedName(who, team))
 		if err != nil {
 			return nil, err
 		}
@@ -423,6 +423,10 @@ func stamp(items []source.Item, snap map[string]string, obs time.Time, in buildI
 }
 
 func (in buildInput) item(typ, changeID, actorLogin string, at time.Time, reviewState, body string, addressed bool) (source.Item, error) {
+	return in.itemRequested(typ, changeID, actorLogin, at, reviewState, body, addressed, "")
+}
+
+func (in buildInput) itemRequested(typ, changeID, actorLogin string, at time.Time, reviewState, body string, addressed bool, requested string) (source.Item, error) {
 	if changeID == "" {
 		return source.Item{}, fmt.Errorf("github: a %s has no id", typ)
 	}
@@ -459,6 +463,7 @@ func (in buildInput) item(typ, changeID, actorLogin string, at time.Time, review
 		Subject:    fmt.Sprintf("github:pr:%s/%s#%d", pr.owner, pr.name, pr.Number),
 		Key:        key,
 		Type:       typ,
+		EventTitle: eventTitle(typ, reviewState, changeID, requested),
 		OccurredAt: at.UTC(),
 		Actor:      actor,
 		Own:        own,
@@ -466,6 +471,106 @@ func (in buildInput) item(typ, changeID, actorLogin string, at time.Time, review
 		Fields:     fields,
 		Version:    version,
 	}, nil
+}
+
+// shortSHALen is the length of a short commit sha in an event title. The key keeps the full sha.
+const shortSHALen = 7
+
+// eventTitle describes the change. It uses the type, who was requested, the review state, the commit sha, and
+// the check conclusion. It does not use the pull request title or any comment or review text.
+func eventTitle(typ, reviewState, changeID, requested string) string {
+	switch typ {
+	case TypeOpened:
+		return "Opened"
+	case TypeReady:
+		return "Ready for review"
+	case TypeReviewRequested:
+		if name := oneLine(requested); name != "" {
+			return "Review requested from " + name
+		}
+		return "Review requested"
+	case TypeReviewRequestRemoved:
+		return "Review request removed"
+	case TypeReviewed:
+		if state := reviewWords(reviewState); state != "" {
+			return "Reviewed: " + state
+		}
+		return "Reviewed"
+	case TypeCommented:
+		return "Commented"
+	case TypePushed:
+		if sha := shortSHA(strings.TrimPrefix(changeID, "push:")); sha != "" {
+			return "Pushed " + sha
+		}
+		return "Pushed"
+	case TypeChecksChanged:
+		if words := checksWords(checksConclusion(changeID)); words != "" {
+			return "Checks: " + words
+		}
+		return "Checks"
+	case TypeMerged:
+		return "Merged"
+	case TypeClosed:
+		return "Closed"
+	default:
+		return ""
+	}
+}
+
+// requestedName is the login, or the team as org/slug when the request names a team. A login wins when both are set.
+func requestedName(login, team string) string {
+	if login != "" {
+		return login
+	}
+	return team
+}
+
+func reviewWords(state string) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	switch state {
+	case "":
+		return ""
+	case "changes_requested":
+		return "changes requested"
+	default:
+		return strings.ReplaceAll(state, "_", " ")
+	}
+}
+
+func checksConclusion(changeID string) string {
+	rest := strings.TrimPrefix(changeID, "checks:")
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		return rest[i+1:]
+	}
+	return ""
+}
+
+func checksWords(conclusion string) string {
+	switch conclusion {
+	case "pass":
+		return "passing"
+	case "fail":
+		return "failing"
+	case "pending":
+		return "pending"
+	case "none":
+		return "none"
+	default:
+		return conclusion
+	}
+}
+
+func shortSHA(sha string) string {
+	sha = strings.TrimSpace(sha)
+	r := []rune(sha)
+	if len(r) <= shortSHALen {
+		return sha
+	}
+	return string(r[:shortSHALen])
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func snapshot(pr pull, reviews []review, checks []checkSuite, fetched bool) map[string]string {

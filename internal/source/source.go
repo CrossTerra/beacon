@@ -19,7 +19,11 @@ type Item struct {
 	// Key is "<source>:<native id>:<version>" (DEC-9). The same change always yields the same key.
 	Key string `json:"key"`
 	// Type is the kind of change, without the source prefix ("review_requested").
-	Type       string    `json:"type"`
+	Type string `json:"type"`
+	// EventTitle is a short description of this change, used as the event title. It is not a source field and not
+	// the object's title. GitHub and Jira set it. Empty means the projection uses the title field for the event
+	// title as well, which is how a fixture that omits it behaves.
+	EventTitle string    `json:"event_title,omitempty"`
 	OccurredAt time.Time `json:"occurred_at"`
 	// Actor is the identity of whoever caused the change ("github:user:dana").
 	Actor string `json:"actor"`

@@ -2,7 +2,9 @@
 # point the config's rules key at it. Check it with: beacon rules check
 #
 # First match wins. An item no rule matches is never sent. Bodies are not listed: comment and review
-# text stays on the machine unless you add body to a rule.
+# text stays on the machine unless you add body to a rule. `title` and `summary` are the object's
+# title, used as the thread title. The event title describes the change (Opened, Reviewed: approved,
+# Assigned to a name) and is not one of these fields.
 #
 # person.identities should name you as the token's user, or own acts are recorded as Beacon's:
 #   github: github:user:<login>

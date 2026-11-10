@@ -86,13 +86,14 @@ A matcher is a plain string (exact), or a mapping with exactly one of the forms 
 
 | Name | Goes to |
 | --- | --- |
-| `title` | The event title, and the thread title when the event opens one. Trimmed, and shortened to Signal's 300 characters. |
-| `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). |
+| `title` | The thread title (`open.title`): the object's title. Trimmed, and shortened to Signal's 300 characters. GitHub and Jira do not use this field as the event title. A source that sets no event title still uses it for both. |
+| `summary` | `metadata.fields.summary`. When the rule lists it and did not list `title`, it is also the thread title. An issue's summary is its title. |
+| `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). A body is never copied into a title. |
 | `actor` | `metadata.actor`: who caused the change, when it was not the person (DEC-27). On the person's own acts it is left out; their identity leaves only as `by`. |
 | `references` | `metadata.references`: explicit references to other subjects (DEC-17). |
 | any other source field | `metadata.fields.<name>`. |
 
-Without `title`, Signal titles the event (and a new thread) with its type.
+GitHub and Jira events carry a title that describes the change (see [`sources.md`](sources.md)). It is not listed in `fields`, and it never includes comment or review text. Without `title` or `summary`, the thread has no object title, and Signal titles a new thread with the event title. A source that sets no event title still uses `title` for the event and the thread; without it, Signal titles both with the type.
 
 ## State
 

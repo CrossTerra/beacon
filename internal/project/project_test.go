@@ -2,6 +2,7 @@ package project
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,12 @@ func TestTitleLimit(t *testing.T) {
 	if n := len([]rune(b.Title)); n != 299 {
 		t.Fatalf("title has %d runes, want 299: 298 units and one surrogate pair make Signal's 300", n)
 	}
+	it.EventTitle = it.Fields["title"]
+	it.Fields["title"] = "short"
+	b, _, _ = Project(Input{Item: it, Rule: rule("title"), Person: person})
+	if n := len([]rune(b.Title)); n != 299 || b.Open.Title != "short" {
+		t.Fatalf("event title %d runes, thread %q", len([]rune(b.Title)), b.Open.Title)
+	}
 }
 
 func stateItem() source.Item {
@@ -257,5 +264,108 @@ func TestActorNotSentForOwnActs(t *testing.T) {
 	b, _, _ = Project(Input{Item: baseItem(), Rule: rule("actor"), Person: person})
 	if b.Metadata["actor"] != "github:user:dana" {
 		t.Fatalf("other person's act lost metadata.actor: %v", b.Metadata)
+	}
+}
+
+// The event title describes the change. The object's title stays on the thread, and only when the rule lists it.
+// A comment stays out of the title. A source that sets no event title still uses the title field for both.
+func TestEventTitles(t *testing.T) {
+	at := time.Date(2026, 11, 7, 11, 0, 0, 123000000, time.UTC)
+	github := baseItem()
+	github.Type = "review_requested"
+	github.Key = "github:acme/app#7:timeline:21"
+	github.OccurredAt = at
+	github.EventTitle = "Review requested from winton"
+	github.Fields = map[string]string{
+		"title": "Add retries", "url": "https://github.com/acme/app/pull/7", "body": "SECRET-COMMENT",
+	}
+	_, data, err := Project(Input{Item: github, Rule: rule("title", "url"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"subject":"github:pr:acme/app#7","type":"github.review_requested","key":"github:acme/app#7:timeline:21","occurred_at":"2026-11-07T11:00:00.123Z","title":"Review requested from winton","open":{"title":"Add retries"},"metadata":{"fields":{"url":"https://github.com/acme/app/pull/7"}}}`
+	if string(data) != want {
+		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+	_, data, err = Project(Input{Item: github, Rule: rule("url"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("Add retries")) || bytes.Contains(data, []byte("SECRET-COMMENT")) || !bytes.Contains(data, []byte(`"title":"Review requested from winton"`)) {
+		t.Fatalf("unlisted object title or comment left, or the change description did not: %s", data)
+	}
+
+	jira := source.Item{
+		Source: "jira", Subject: "jira:ENG-1", Key: "jira:ENG-1:503", Type: "transitioned",
+		OccurredAt: at, EventTitle: "To Do → In Progress",
+		Fields: map[string]string{
+			"summary": "Fix the gate", "from_status": "To Do", "to_status": "In Progress", "body": "SECRET-COMMENT",
+		},
+	}
+	_, data, err = Project(Input{Item: jira, Rule: rule("summary", "from_status", "to_status"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"subject":"jira:ENG-1","type":"jira.transitioned","key":"jira:ENG-1:503","occurred_at":"2026-11-07T11:00:00.123Z","title":"To Do → In Progress","open":{"title":"Fix the gate"},"metadata":{"fields":{"from_status":"To Do","summary":"Fix the gate","to_status":"In Progress"}}}`
+	if string(data) != want {
+		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+	_, data, err = Project(Input{Item: jira, Rule: rule(), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"subject":"jira:ENG-1","type":"jira.transitioned","key":"jira:ENG-1:503","occurred_at":"2026-11-07T11:00:00.123Z","title":"To Do → In Progress","open":{}}`
+	if string(data) != want {
+		t.Fatalf("got  %s\nwant %s", data, want)
+	}
+
+	commented := jira
+	commented.Type = "commented"
+	commented.Key = "jira:ENG-1:601:comment"
+	commented.EventTitle = "Commented"
+	b, data, err := Project(Input{Item: commented, Rule: rule("body", "summary"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Commented" || b.Open.Title != "Fix the gate" || b.Body != "SECRET-COMMENT" || strings.Contains(b.Title, "SECRET-COMMENT") {
+		t.Fatalf("comment leaked into the title: %s", data)
+	}
+
+	fixture := baseItem()
+	fixture.Source = "fixture"
+	fixture.EventTitle = ""
+	_, data, err = Project(Input{Item: fixture, Rule: rule("title"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"title":"SECRET-TITLE"`)) || !bytes.Contains(data, []byte(`"open":{"title":"SECRET-TITLE"}`)) {
+		t.Fatalf("fixture title: %s", data)
+	}
+}
+
+func TestEventTitleSurvivesDecision(t *testing.T) {
+	it := baseItem()
+	it.EventTitle = "Review requested from dana"
+	d := Decide(it, rule("url"), false)
+	if d.Item.EventTitle != it.EventTitle || d.Item.Fields["title"] != "" || d.Item.Fields["body"] != "" {
+		t.Fatalf("decision kept the wrong fields: %+v", d.Item)
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("SECRET-BODY")) || bytes.Contains(raw, []byte("SECRET-TITLE")) {
+		t.Fatalf("decision stored an unlisted field: %s", raw)
+	}
+	var back Decision
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	b, data, err := Project(Input{Item: back.Item, Rule: rule("url"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Title != "Review requested from dana" || b.Open.Title != "" || bytes.Contains(data, []byte("SECRET-TITLE")) || bytes.Contains(data, []byte("SECRET-BODY")) {
+		t.Fatalf("retry: %s", data)
 	}
 }

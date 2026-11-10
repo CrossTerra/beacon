@@ -3,6 +3,7 @@ package jira
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/source"
@@ -71,6 +72,8 @@ type emit struct {
 	body       string
 	fromStatus string
 	toStatus   string
+	// detail is the assignee display name or the due date this change set. It is never comment text.
+	detail string
 }
 
 // itemsFrom builds the items for one issue. A history with more than one relevant change suffixes the changelog
@@ -115,7 +118,10 @@ func itemsFrom(name, person string, iss issue, histories []history, comments []c
 				typ = TypeUnassigned
 				addressed = false
 			}
-			pending = append(pending, emit{typ: typ, id: h.id, field: "assignee", actor: h.author, at: h.created, addressed: addressed})
+			pending = append(pending, emit{
+				typ: typ, id: h.id, field: "assignee", actor: h.author, at: h.created, addressed: addressed,
+				detail: assigneeChange.toString,
+			})
 		}
 		if statusChange != nil {
 			addressed := assignee == person && h.author != person
@@ -125,7 +131,10 @@ func itemsFrom(name, person string, iss issue, histories []history, comments []c
 			})
 		}
 		if dueChange != nil {
-			pending = append(pending, emit{typ: TypeDueChanged, id: h.id, field: "duedate", actor: h.author, at: h.created})
+			pending = append(pending, emit{
+				typ: TypeDueChanged, id: h.id, field: "duedate", actor: h.author, at: h.created,
+				detail: dueValue(dueChange),
+			})
 		}
 		for _, m := range mentions {
 			pending = append(pending, emit{typ: TypeMentioned, id: h.id, field: m.field, actor: h.author, at: h.created, addressed: true})
@@ -150,6 +159,7 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 	id := "open"
 	actor := ""
 	at := observed
+	nameOf := iss.assignee
 	for i := len(histories) - 1; i >= 0; i-- {
 		h := histories[i]
 		for _, it := range h.items {
@@ -157,6 +167,9 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 				id = h.id
 				actor = h.author
 				at = h.created
+				if it.toString != "" {
+					nameOf = it.toString
+				}
 				break
 			}
 		}
@@ -165,7 +178,7 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 		}
 	}
 	return finish(name, person, iss, []emit{{
-		typ: TypeAssigned, id: id, actor: actor, at: at, addressed: true,
+		typ: TypeAssigned, id: id, actor: actor, at: at, addressed: true, detail: nameOf,
 	}}, observed, loc)
 }
 
@@ -219,6 +232,7 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 			Subject:    "jira:" + iss.key,
 			Key:        key,
 			Type:       e.typ,
+			EventTitle: eventTitle(e),
 			OccurredAt: e.at.UTC(),
 			Actor:      actor,
 			Own:        e.actor != "" && e.actor == person,
@@ -233,6 +247,52 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// eventTitle describes the change. It uses the type and, when the change has them, the assignee's display name,
+// the status names, and the due date. It does not use the issue summary or any comment text.
+func eventTitle(e emit) string {
+	switch e.typ {
+	case TypeAssigned:
+		if name := oneLine(e.detail); name != "" {
+			return "Assigned to " + name
+		}
+		return "Assigned"
+	case TypeUnassigned:
+		return "Unassigned"
+	case TypeTransitioned:
+		from, to := oneLine(e.fromStatus), oneLine(e.toStatus)
+		if from == "" && to == "" {
+			return "Transitioned"
+		}
+		return from + " → " + to
+	case TypeCommented:
+		return "Commented"
+	case TypeMentioned:
+		return "Mentioned"
+	case TypeDueChanged:
+		if date := oneLine(e.detail); date != "" {
+			return "Due date set to " + date
+		}
+		return "Due date cleared"
+	default:
+		return ""
+	}
+}
+
+// dueValue is the date the changelog already returned. toString is the display value; to is the raw value.
+func dueValue(c *change) string {
+	if c == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(c.toString); s != "" {
+		return s
+	}
+	return strings.TrimSpace(c.to)
+}
+
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func stateOf(iss issue) map[string]string {

@@ -134,11 +134,46 @@ func TestCollectEveryItem(t *testing.T) {
 		}
 		t.Fatalf("items %d, want %d: %v", len(byKey), len(want), keys)
 	}
+	titles := map[string]string{
+		"github:acme/app#7:review:12":          "Reviewed: approved",
+		"github:acme/app#7:comment:13":         "Commented",
+		"github:acme/app#7:comment:14":         "Commented",
+		"github:acme/app#7:push:aaa111":        "Pushed aaa111",
+		"github:acme/app#7:push:abc111":        "Pushed abc111",
+		"github:acme/app#7:timeline:15":        "Merged",
+		"github:acme/app#8:opened:800":         "Opened",
+		"github:acme/app#8:timeline:21":        "Review requested from winton",
+		"github:acme/app#8:timeline:22":        "Review request removed",
+		"github:acme/app#8:review:23":          "Reviewed: changes requested",
+		"github:acme/app#8:timeline:24":        "Ready for review",
+		"github:acme/app#8:comment:26":         "Commented",
+		"github:acme/app#8:push:ccc999":        "Pushed ccc999",
+		"github:acme/app#8:push:bbb222":        "Pushed bbb222",
+		"github:acme/app#8:timeline:25":        "Closed",
+		"github:acme/app#8:review-comment:77":  "Commented",
+		"github:acme/app#9:checks:def456:fail": "Checks: failing",
+		"github:acme/lib#3:comment:31":         "Commented",
+	}
 	for k, typ := range want {
 		it, ok := byKey[k]
 		if !ok || it.Type != typ {
 			t.Fatalf("%s: %+v", k, it)
 		}
+		if it.EventTitle != titles[k] {
+			t.Errorf("%s title %q, want %q", k, it.EventTitle, titles[k])
+		}
+		if it.EventTitle == "" || it.EventTitle == it.Fields["title"] {
+			t.Errorf("%s title %q repeats the object title %q", k, it.EventTitle, it.Fields["title"])
+		}
+		if body := it.Fields["body"]; body != "" && strings.Contains(it.EventTitle, body) {
+			t.Errorf("%s title contains the comment", k)
+		}
+		if it.Key != k {
+			t.Errorf("key changed: %s", it.Key)
+		}
+	}
+	if byKey["github:acme/app#8:opened:800"].Fields["title"] != "Fix login" {
+		t.Fatal("object title was replaced")
 	}
 	if _, ok := byKey["github:acme/app#7:timeline:16"]; ok {
 		t.Fatal("a merge also yielded closed")
@@ -201,6 +236,18 @@ func TestCollectEveryItem(t *testing.T) {
 			t.Fatalf("cursor admitted a new item %s", it.Key)
 		}
 	}
+	rs, err := rules.Parse([]byte("rules:\n  - name: t\n    match: {}\n    tier: send\n    fields: [title, url]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := project.Project(project.Input{Item: byKey["github:acme/app#8:timeline:21"], Rule: rs.Rules[0], Person: project.Person{Handle: "@winton"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBody := `{"subject":"github:pr:acme/app#8","type":"github.review_requested","key":"github:acme/app#8:timeline:21","occurred_at":"2026-11-02T02:00:00.000Z","title":"Review requested from winton","open":{"title":"Fix login"},"metadata":{"fields":{"url":"https://github.com/acme/app/pull/8"}}}`
+	if string(body) != wantBody {
+		t.Fatalf("got  %s\nwant %s", body, wantBody)
+	}
 	assertStarterRules(t, got.Items)
 }
 
@@ -253,6 +300,22 @@ func TestFirstRunIsOpenState(t *testing.T) {
 	}
 	if !types["github:acme/app#9:opened:900 "+TypeOpened] || !types["github:acme/app#9:checks:def456:pass "+TypeChecksChanged] || !types["github:acme/app#8:timeline:21 "+TypeReviewRequested] {
 		t.Fatalf("%v", types)
+	}
+	for _, it := range got.Items {
+		switch it.Key {
+		case "github:acme/app#9:opened:900":
+			if it.EventTitle != "Opened" || it.Fields["title"] != "Own open" {
+				t.Fatalf("opened %+v", it.EventTitle)
+			}
+		case "github:acme/app#9:checks:def456:pass":
+			if it.EventTitle != "Checks: passing" {
+				t.Fatalf("checks %q", it.EventTitle)
+			}
+		case "github:acme/app#8:timeline:21":
+			if it.EventTitle != "Review requested from winton" {
+				t.Fatalf("request %q", it.EventTitle)
+			}
+		}
 	}
 }
 
@@ -596,6 +659,16 @@ func assertStarterRules(t *testing.T, items []source.Item) {
 			if _, ok := parsed["to"]; !ok {
 				t.Errorf("%s did not ask", it.Key)
 			}
+		}
+		if parsed["title"] != it.EventTitle {
+			t.Errorf("%s event title %v, want %s", it.Key, parsed["title"], it.EventTitle)
+		}
+		open, _ := parsed["open"].(map[string]any)
+		if open["title"] != it.Fields["title"] {
+			t.Errorf("%s thread title %v, want %s", it.Key, open["title"], it.Fields["title"])
+		}
+		if body := it.Fields["body"]; body != "" && strings.Contains(it.EventTitle, body) {
+			t.Errorf("%s sent the comment in the title", it.Key)
 		}
 	}
 }
