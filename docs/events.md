@@ -10,6 +10,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `subject` | The source's stable id for the object (DEC-10): 1 to 200 printable ASCII characters. |
 | `key` | `<source>:<native id>:<version>` (DEC-9). The same change always has the same key. |
 | `type` | The change, lowercase words joined by `_` and `.` (`review_requested`). |
+| `event_title` | A short description of this change, used as the event's `title`. Not a source field, and not the object's title. GitHub and Jira set it. Empty means the event title is the `title` field when a rule lists it. |
 | `occurred_at` | When it happened at the source. |
 | `actor` | The identity of who caused it (`github:user:dana`). |
 | `own` | The person caused it (DEC-19). |
@@ -32,7 +33,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
   "type": "github.review_requested",
   "key": "github:pr:acme/app#7:42",
   "occurred_at": "2026-11-07T11:00:00.123Z",
-  "title": "Add retries",
+  "title": "Review requested from dana",
   "open": {"title": "Add retries"},
   "to": ["@winton"],
   "priority": "high",
@@ -46,8 +47,9 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | --- | --- |
 | `subject`, `key`, `occurred_at` | Always, from the item. `occurred_at` is UTC with milliseconds. |
 | `type` | Always: `<source>.<item type>`. |
-| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the title when the rule lists `title`. |
-| `title`, `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
+| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, or the `summary` field when the rule lists `summary` and did not list `title`. It is not a description of this change. |
+| `title` | For GitHub and Jira, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment or review text. For any other source, the `title` field when the rule lists it. |
+| `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
 | `priority` | The rule's priority, with `to`. |
@@ -78,8 +80,8 @@ A body over Signal's 64 KB request limit, or with a body over 64 KB, is not appe
 ```
 
 `body` is the exact request body as a JSON string; `sha256` is its digest, checked on every load. `decision` is the
-ids, times, and listed fields used to project the body, also checked against `decision_sha256`. An unlisted field,
-including a body, is not stored. It stays on the machine and is not part of the request. `beacon outbox` does not
+ids, times, listed fields, and event title used to project the body, also checked against `decision_sha256`. An
+unlisted field, including a body, is not stored. It stays on the machine and is not part of the request. `beacon outbox` does not
 print it. An append from before this was stored has no `decision`. Each later line records Signal's answer and is the key's state from then on:
 
 ```json

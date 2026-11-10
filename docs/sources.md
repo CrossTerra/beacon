@@ -78,6 +78,23 @@ conclusion. A team request is addressed.
 **Items.** `opened`, `ready`, `review_requested`, `review_request_removed`, `reviewed` (field `review_state`),
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
 only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
+The event title describes the change. The pull request title stays the `title` field, and the thread title when a
+rule lists `title`. The event title never includes comment or review text. Keys and subjects are unchanged; a push
+key keeps the full sha.
+
+| Item | Event title |
+| --- | --- |
+| `opened` | Opened |
+| `ready` | Ready for review |
+| `review_requested` | Review requested from `<login or team>`. A team is `org/slug`. With no login or team, Review requested. |
+| `review_request_removed` | Review request removed |
+| `reviewed` | Reviewed: approved, Reviewed: changes requested, or Reviewed: commented. Any other state is that state with underscores as spaces. With no state, Reviewed. |
+| `commented` | Commented |
+| `pushed` | Pushed `<short sha>`. The short sha is the first 7 characters, or the whole sha when it is shorter. |
+| `checks_changed` | Checks: passing, Checks: failing, or Checks: pending. `pass` is passing and `fail` is failing. A conclusion of `none` is Checks: none. |
+| `merged` | Merged |
+| `closed` | Closed |
+
 `own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
 is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author or committer time when it is the current head. A commit made
 earlier can be pushed later. The head sha is emitted when it differs from the commit the person last reviewed,
@@ -137,7 +154,18 @@ item per issue, keyed by the latest assignment's changelog id, or `open` when th
 **Items.** `assigned`, `unassigned`, `transitioned` (`from_status`, `to_status`), `commented`, `mentioned`,
 `due_changed`. A comment is one item, `commented`, with `addressed` when it mentions the person. `mentioned` is
 only a mention added to the description or another field, so one change is not two items. `own` is set when the
-person caused the change.
+person caused the change. The event title describes the change. The issue summary stays the `summary` field, and
+the thread title when a rule lists `summary`. The event title never includes comment text or the text of a field
+a mention was added to. Keys and subjects are unchanged.
+
+| Item | Event title |
+| --- | --- |
+| `assigned` | Assigned to `<name>`. The name is the display name the changelog already returned, or the current assignee's display name on a first run that has none. With no name, Assigned. |
+| `unassigned` | Unassigned |
+| `transitioned` | `<from> → <to>`, the status names already on the item. With neither, Transitioned. |
+| `commented` | Commented |
+| `mentioned` | Mentioned |
+| `due_changed` | Due date set to `<date>`, the date the changelog already returned. A cleared due date is Due date cleared. |
 
 **Addressed.** Assignment to the person; a comment or field change that mentions the person; a transition, by
 someone else, of an issue assigned to the person.

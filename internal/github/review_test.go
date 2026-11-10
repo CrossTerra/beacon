@@ -128,6 +128,55 @@ func TestSearchCapAndOldHits(t *testing.T) {
 	}
 }
 
+func TestEventTitleShapes(t *testing.T) {
+	sha := strings.Repeat("ab", 20)
+	if got := eventTitle(TypePushed, "", "push:"+sha, ""); got != "Pushed abababa" {
+		t.Fatalf("short sha %q", got)
+	}
+	if got := eventTitle(TypePushed, "", "push:abc", ""); got != "Pushed abc" {
+		t.Fatalf("already short %q", got)
+	}
+	if got := eventTitle(TypeChecksChanged, "", "checks:"+sha+":pass", ""); got != "Checks: passing" {
+		t.Fatalf("checks %q", got)
+	}
+	if got := eventTitle(TypeChecksChanged, "", "checks:abc:none", ""); got != "Checks: none" {
+		t.Fatalf("none %q", got)
+	}
+	if got := eventTitle(TypeReviewed, "dismissed", "review:1", ""); got != "Reviewed: dismissed" {
+		t.Fatalf("dismissed %q", got)
+	}
+	if got := eventTitle(TypeReviewRequested, "", "timeline:1", ""); got != "Review requested" {
+		t.Fatalf("no target %q", got)
+	}
+	if got := eventTitle(TypeCommented, "", "comment:1", ""); strings.Contains(got, "body") {
+		t.Fatalf("comment title %q", got)
+	}
+	in := buildInput{
+		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+		PR: pull{ID: 1, Number: 1, owner: "acme", name: "app", Title: "Keep the key", HTMLURL: "https://github.com/acme/app/pull/1",
+			User: &ghUser{Login: "dana"}, Head: &struct {
+				Ref string `json:"ref"`
+				SHA string `json:"sha"`
+			}{SHA: sha}},
+		Timeline: []timelineEvent{
+			{ID: "1", Event: "reviewed", User: &ghUser{Login: "winton"}, State: "APPROVED", CommitID: "old", SubmittedAt: "2026-11-01T00:00:00Z"},
+		},
+	}
+	items, err := build(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pushed source.Item
+	for _, it := range items {
+		if it.Type == TypePushed {
+			pushed = it
+		}
+	}
+	if !strings.HasSuffix(pushed.Key, ":push:"+sha) || pushed.EventTitle != "Pushed abababa" || pushed.Fields["title"] != "Keep the key" {
+		t.Fatalf("key %s title %q object %q", pushed.Key, pushed.EventTitle, pushed.Fields["title"])
+	}
+}
+
 func TestPushIgnoresCommitTime(t *testing.T) {
 	in := buildInput{
 		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
@@ -150,6 +199,9 @@ func TestPushIgnoresCommitTime(t *testing.T) {
 	for _, it := range items {
 		if it.Type == TypePushed && strings.HasSuffix(it.Key, ":push:newhead") {
 			found = true
+			if it.EventTitle != "Pushed newhead" {
+				t.Fatalf("title %q", it.EventTitle)
+			}
 		}
 	}
 	if !found {
@@ -312,6 +364,9 @@ func TestTeamReviewRequest(t *testing.T) {
 	for _, it := range got.Items {
 		if it.Type == TypeReviewRequested && it.Addressed && strings.Contains(it.Key, "timeline:40") {
 			found = true
+			if it.EventTitle != "Review requested from acme/eng" || it.Fields["title"] != "Team" {
+				t.Fatalf("team request title %q object %q", it.EventTitle, it.Fields["title"])
+			}
 		}
 	}
 	if !found {

@@ -98,7 +98,9 @@ A fixture is a JSON file of recorded items, used by tests and to try rules:
 ```
 
 `fields` is the source's fixed field list and `state_fields` its state field list (DEC-28); an item with any other
-field or state field is refused. `observed_at` and `version` are reserved and cannot be state fields. An item with
+field or state field is refused. An item may set `event_title`, which is not a source field. GitHub and Jira set
+it to describe the change; a fixture that omits it keeps using `fields.title` as the event title.
+`observed_at` and `version` are reserved and cannot be state fields. An item with
 `state` needs `observed_at` and `version`, and `version` must be the last part of its key. The file holds one JSON
 value. The item shape is described in
 [`events.md`](events.md#items).
