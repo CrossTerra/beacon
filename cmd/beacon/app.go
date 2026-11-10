@@ -384,6 +384,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		a.configureClient(client)
 	}
 	r.Outbox, r.Queue, r.Writer = ob, q, client
+	r.Personal, r.Restrictions = personal(e.sources), client
 	r.Lease = &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 		Period: e.cfg.LeasePeriod(), Now: a.now}
 
@@ -449,6 +450,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	for _, f := range rep.Failed {
 		fmt.Fprintf(w, "source %s: not collected (%s)\n", f.Name, f.Reason)
 	}
+	for _, name := range rep.Gaps {
+		fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", name)
+	}
 	for _, p := range rep.Items {
 		rule := p.Rule
 		if rule == "" {
@@ -467,6 +471,12 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 		if p.Unaccepted {
 			fmt.Fprintln(w, "       first run not accepted; not recorded. Review, then beacon accept-first")
 		}
+		switch p.Withheld {
+		case logs.ReasonUnrestricted:
+			fmt.Fprintln(w, "       held, not sent: its subject prefix is not restricted in Signal")
+		case logs.ReasonRestrictionsUnknown:
+			fmt.Fprintln(w, "       not sent and not recorded: Signal's restricted prefixes could not be read")
+		}
 		switch {
 		case p.Err != nil:
 			fmt.Fprintf(w, "       error: %v\n", p.Err)
@@ -479,6 +489,17 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	}
 	s, h, n, k := rep.Counts()
 	fmt.Fprintf(w, "Items: %d send, %d hold, %d never, %d already handled.\n", s, h, n, k)
+	for _, wh := range rep.Withheld {
+		switch wh.Reason {
+		case logs.ReasonUnrestricted:
+			fmt.Fprintf(w, "source %s: %d items held, not sent: %s is not restricted in Signal, so every reader could read them. Ask Signal's admin to restrict %s.\n", wh.Source, wh.Items, wh.Prefix, wh.Prefix)
+		default:
+			fmt.Fprintf(w, "source %s: %d items not sent and not recorded, and its cursor stays: Signal's restricted prefixes could not be read (%s). Beacon's key needs the read scope.\n", wh.Source, wh.Items, rep.RestrictionsReason)
+		}
+	}
+	if rep.WithheldPending > 0 {
+		fmt.Fprintf(w, "Pending bodies on personal subjects not sent: %d. Their prefix is not restricted in Signal, or the restrictions could not be read.\n", rep.WithheldPending)
+	}
 	if !rep.Send {
 		return
 	}
@@ -707,6 +728,7 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 	}
 	r := &runner.Runner{
 		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf,
+		Personal: personal(e.sources), Restrictions: client,
 		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 			Period: e.cfg.LeasePeriod(), Now: a.now},
 	}
@@ -739,8 +761,11 @@ func (a *app) printRetry(rep *runner.RetryReport) {
 			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
 		}
 	}
-	fmt.Fprintf(w, "Retry: sent %d, replayed %d, refused %d, conflict %d, missing %d, failed %d, hold %d, never %d.\n",
-		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed, rep.Held, rep.Never)
+	fmt.Fprintf(w, "Retry: sent %d, replayed %d, refused %d, conflict %d, missing %d, failed %d, hold %d, never %d, withheld %d.\n",
+		rep.Sent, rep.Replayed, rep.Refused, rep.Conflict, rep.Missing, rep.Failed, rep.Held, rep.Never, rep.Withheld)
+	if rep.Withheld > 0 {
+		fmt.Fprintf(w, "%d rejected events on personal subjects were not sent: their prefix is not restricted in Signal, or the restrictions could not be read.\n", rep.Withheld)
+	}
 	fmt.Fprintf(w, "Pending: %d.\n", rep.Pending)
 	if rep.Missing > 0 {
 		fmt.Fprintf(w, "%d rejected events have no stored item and were not sent by this command. beacon cursor reset SOURCE, then beacon run --once, re-collects open state and sends a 400 if that collect yields the key. It does not re-read history. A 409 is not sent.\n", rep.Missing)

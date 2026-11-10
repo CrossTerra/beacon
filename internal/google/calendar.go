@@ -52,7 +52,16 @@ func NewCalendar(o Options) (*Calendar, error) {
 	return &Calendar{c}, nil
 }
 
-func calendarPath(p string) bool { return p == "/calendar/v3/calendars/primary/events" }
+func calendarPath(p string, q url.Values) bool {
+	if p == "/calendar/v3/calendars/primary/events" {
+		return onlyKeys(q, eventListKeys...)
+	}
+	id, ok := strings.CutPrefix(p, "/calendar/v3/calendars/primary/events/")
+	return ok && idPattern.MatchString(id) && onlyKeys(q, "fields")
+}
+
+// eventListKeys are the query keys an events list may carry.
+var eventListKeys = []string{"singleEvents", "showDeleted", "timeMin", "timeMax", "updatedMin", "maxResults", "fields", "pageToken"}
 
 // Fields implements source.Source.
 func (c *Calendar) Fields() []string { return append([]string(nil), CalendarFields...) }
@@ -74,8 +83,10 @@ type calSeen struct {
 	// R is the person's response.
 	R string `json:"r,omitempty"`
 	C bool   `json:"c,omitempty"`
-	// End is when the event ends, so an entry is dropped once the event is over.
-	End string `json:"end,omitempty"`
+	// Start and End place the event, so an entry is dropped once the event is over, and a full re-read knows which
+	// events it should have seen.
+	Start string `json:"start,omitempty"`
+	End   string `json:"end,omitempty"`
 }
 
 type calTime struct {
@@ -233,7 +244,16 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	if err != nil {
 		return source.Collected{}, err
 	}
-	if !first && !gone {
+	switch {
+	case gone:
+		// A full re-read of the window holds every event in it, deleted ones included. A known event in the
+		// window that is not there was deleted, or moved out. Each is read by id to tell which.
+		missing, err := c.missing(ctx, now, events, cur.Events)
+		if err != nil {
+			return source.Collected{}, err
+		}
+		events = append(events, missing...)
+	case !first:
 		// An event Beacon knows that moved into the past or beyond the window is not in that list. It is read
 		// without the window, so the move is a change and not a silence.
 		moved, err := c.movedOut(ctx, floor, events, cur.Events)
@@ -259,6 +279,11 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 		}
 		prev, known := cur.Events[e.ID]
 		next := e.seen()
+		if start := e.Start.at(tz); !start.IsZero() {
+			next.Start = start.Format(time.RFC3339)
+		} else if known {
+			next.Start = prev.Start
+		}
 		if end := e.End.at(tz); !end.IsZero() {
 			next.End = end.Format(time.RFC3339)
 		} else if known && prev.End != "" {
@@ -350,23 +375,72 @@ func changeType(e *calEvent, prev calSeen, known bool, next calSeen, floor time.
 }
 
 func (c *Calendar) list(ctx context.Context, now, updatedMin time.Time) ([]calEvent, *time.Location, error) {
-	fields := "items(id,status,etag,summary,location,start,end,created,updated,htmlLink,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
-	if c.bodies {
-		fields += ",description"
-	}
-	fields += "),nextPageToken,timeZone"
+	fields := "items(" + eventFields(c.bodies) + "),nextPageToken,timeZone"
 	q := url.Values{
 		"singleEvents": {"true"},
 		"timeMin":      {now.Format(time.RFC3339)},
 		"timeMax":      {now.Add(calendarWindow).Format(time.RFC3339)},
 		"maxResults":   {"250"},
 		"fields":       {fields},
+		// A cancelled event must be seen as cancelled, not as missing.
+		"showDeleted": {"true"},
 	}
 	if !updatedMin.IsZero() {
 		q.Set("updatedMin", updatedMin.Format(time.RFC3339))
-		q.Set("showDeleted", "true")
 	}
 	return listEvents(ctx, &c.common, q)
+}
+
+// missing reads, by id, each event the cursor places in the window that a full re-read of the window did not
+// return. One that is gone is a cancelled event; one that moved is itself.
+func (c *Calendar) missing(ctx context.Context, now time.Time, inWindow []calEvent, known map[string]calSeen) ([]calEvent, error) {
+	seen := map[string]bool{}
+	for _, e := range inWindow {
+		seen[e.ID] = true
+	}
+	var out []calEvent
+	for _, id := range sortedIDs(known) {
+		s := known[id]
+		if seen[id] || s.C || !idPattern.MatchString(id) {
+			continue
+		}
+		end, err1 := parseTime(s.End)
+		start, err2 := parseTime(s.Start)
+		if err1 != nil || err2 != nil || !end.After(now) || !start.Before(now.Add(calendarWindow)) {
+			continue
+		}
+		body, err := c.get(ctx, c.base+"/calendar/v3/calendars/primary/events/"+id+"?"+url.Values{"fields": {eventFields(c.bodies)}}.Encode())
+		if isStatus(err, http.StatusNotFound) || isStatus(err, http.StatusGone) {
+			out = append(out, calEvent{ID: id, Status: "cancelled", ETag: "gone"})
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var e calEvent
+		if err := json.Unmarshal(body, &e); err != nil || e.ID != id {
+			return nil, errors.New("calendar: an event could not be read")
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+func sortedIDs(m map[string]calSeen) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func eventFields(bodies bool) string {
+	f := "id,status,etag,summary,location,start,end,created,updated,htmlLink,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
+	if bodies {
+		f += ",description"
+	}
+	return f
 }
 
 // movedOut reads events updated since floor with no time window, not expanded, and keeps those Beacon knows that the
@@ -375,11 +449,7 @@ func (c *Calendar) movedOut(ctx context.Context, floor time.Time, inWindow []cal
 	if len(known) == 0 {
 		return nil, nil
 	}
-	fields := "items(id,status,etag,summary,location,start,end,created,updated,htmlLink,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
-	if c.bodies {
-		fields += ",description"
-	}
-	fields += "),nextPageToken,timeZone"
+	fields := "items(" + eventFields(c.bodies) + "),nextPageToken,timeZone"
 	q := url.Values{
 		"singleEvents": {"false"},
 		"showDeleted":  {"true"},
@@ -450,7 +520,7 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 		"start":     e.Start.String(),
 		"end":       e.End.String(),
 		"organizer": strings.ToLower(e.Organizer.Email),
-		"attendees": strconv.Itoa(len(e.Attendees)),
+		"attendees": attendeeCount(e),
 		"response":  resp,
 		"link":      e.HTMLLink,
 	}
@@ -499,27 +569,34 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 	if e.Organizer.Email != "" {
 		organizer = "email:" + strings.ToLower(e.Organizer.Email)
 	}
+	// Calendar does not say who made a change. An own act closes the person's asks, so it is own only when it is
+	// provably theirs: their response, or an event their account created. Organising an event proves nothing about
+	// who changed or cancelled it: a co-organiser or a delegate can. The organizer is the actor only when it is
+	// someone else.
+	if e.Organizer.Self {
+		organizer = ""
+	}
 	switch typ {
 	case TypeResponded:
 		it.Own = true
 		if me := e.selfEmail(); me != "" {
 			it.Actor = "email:" + me
 		}
-	case TypeResponseNeeded:
-		it.Addressed = true
-		it.Actor = organizer
-	case TypeUpcoming:
-		it.Actor = organizer
-	default:
-		if e.Organizer.Self {
+	case TypeCreated:
+		if e.Creator.Self {
 			it.Own = true
 			if me := e.selfEmail(); me != "" {
 				it.Actor = "email:" + me
 			}
 		} else {
 			it.Actor = organizer
-			it.Addressed = typ == TypeChanged && resp == "needsAction"
 		}
+	case TypeResponseNeeded:
+		it.Addressed = true
+		it.Actor = organizer
+	default:
+		it.Actor = organizer
+		it.Addressed = typ == TypeChanged && resp == "needsAction" && !e.Organizer.Self
 	}
 	return it
 }
@@ -549,4 +626,13 @@ func calendarTitle(typ, resp string, moved bool) string {
 		return "Upcoming"
 	}
 	return ""
+}
+
+// attendeeCount is how many attendees the event lists, or "" for an event with none listed, which is the person's
+// own event or one Google returned without its details.
+func attendeeCount(e *calEvent) string {
+	if len(e.Attendees) == 0 {
+		return ""
+	}
+	return strconv.Itoa(len(e.Attendees))
 }

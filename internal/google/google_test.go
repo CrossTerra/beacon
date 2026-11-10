@@ -37,7 +37,7 @@ func newAuth(t *testing.T, srv *googletest.Server) *Auth {
 
 func opts(t *testing.T, srv *googletest.Server) Options {
 	return Options{
-		Person: "winton", Identity: "email:" + googletest.Email, Auth: newAuth(t, srv), Base: srv.URL,
+		Person: "winton", Account: googletest.Email, Identity: "email:" + googletest.Email, Auth: newAuth(t, srv), Base: srv.URL,
 		HTTP: srv.Client(), Now: func() time.Time { return testNow },
 		Sleep: func(context.Context, time.Duration) error { return nil },
 	}
@@ -67,6 +67,16 @@ func keys(m map[string]source.Item) []string {
 	return out
 }
 
+// history is the history id in a Gmail cursor.
+func history(t *testing.T, next []byte) string {
+	t.Helper()
+	c, err := parseGmailCursor(next)
+	if err != nil {
+		t.Fatalf("cursor %q: %v", next, err)
+	}
+	return c.HistoryID
+}
+
 func send(t *testing.T, yaml string) *rules.Rule {
 	t.Helper()
 	f, err := rules.Parse([]byte(yaml))
@@ -87,7 +97,7 @@ func TestGmailEveryItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.Next) != "350" {
+	if history(t, got.Next) != "350" || !strings.Contains(string(got.Next), `"at":"2026-11-08T12:00:00Z"`) || got.Gap {
 		t.Fatalf("next %q", got.Next)
 	}
 	if q := srv.Query("/gmail/v1/users/me/history"); q.Get("startHistoryId") != "100" {
@@ -99,6 +109,7 @@ func TestGmailEveryItem(t *testing.T) {
 		"gmail:t1:m2":         TypeSent,
 		"gmail:t2:m3":         TypeReceived,
 		"gmail:t4:m5":         TypeReceived,
+		"gmail:t5:m6":         TypeReceived,
 		"gmail:t1:starred:m1": TypeStarred,
 	}
 	if len(m) != len(want) {
@@ -106,7 +117,7 @@ func TestGmailEveryItem(t *testing.T) {
 	}
 	titles := map[string]string{
 		"gmail:t1:m1": "New message", "gmail:t1:m2": "Replied", "gmail:t2:m3": "New message",
-		"gmail:t4:m5": "New message", "gmail:t1:starred:m1": "Starred",
+		"gmail:t4:m5": "New message", "gmail:t5:m6": "New message", "gmail:t1:starred:m1": "Starred",
 	}
 	for k, typ := range want {
 		it := m[k]
@@ -130,7 +141,7 @@ func TestGmailEveryItem(t *testing.T) {
 	wantFields := map[string]string{
 		"from": "dana@example.com", "to": "winton@example.com, ops@example.com", "subject": "Budget review",
 		"date": "2026-11-08T10:00:00Z", "labels": "INBOX, Projects, STARRED, UNREAD",
-		"link": "https://mail.google.com/mail/u/winton@example.com/#all/t1",
+		"link": "https://mail.google.com/mail/?authuser=winton%40example.com#all/t1",
 	}
 	for k, v := range wantFields {
 		if recv.Fields[k] != v {
@@ -152,6 +163,10 @@ func TestGmailEveryItem(t *testing.T) {
 	}
 	if m["gmail:t2:m3"].Addressed {
 		t.Fatal("a message to a list addressed the person")
+	}
+	// A From header is the sender's claim. Without the SENT label, mail "from" the person is someone else's.
+	if forged := m["gmail:t5:m6"]; forged.Own || forged.Type != TypeReceived || forged.Actor != "email:winton@example.com" || !forged.Addressed {
+		t.Fatalf("forged From %+v", forged)
 	}
 	star := m["gmail:t1:starred:m1"]
 	if star.Own || star.Actor != "" || star.Addressed {
@@ -223,7 +238,7 @@ func TestGmailFirstRun(t *testing.T) {
 	if q := srv.Query("/gmail/v1/users/me/threads"); q.Get("labelIds") != "INBOX" || q.Get("q") != "" {
 		t.Fatalf("inbox query %v", q)
 	}
-	if string(got.Next) != "300" {
+	if history(t, got.Next) != "300" {
 		t.Fatalf("next %q", got.Next)
 	}
 	m := byKey(t, got.Items, GmailFields, GmailStateFields)
@@ -242,12 +257,29 @@ func TestGmailExpiredHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := g.Collect(context.Background(), []byte("5"))
+	got, err := g.Collect(context.Background(), []byte(`{"history_id":"5","at":"2026-11-08T09:00:00Z"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.Next) != "300" || len(got.Items) != 4 {
-		t.Fatalf("next %q items %d", got.Next, len(got.Items))
+	if history(t, got.Next) != "300" || !got.Gap {
+		t.Fatalf("next %q gap %v", got.Next, got.Gap)
+	}
+	// Open state, and every inbox and sent message since the last pass: m1, the earlier message of t1, is not lost.
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	want := []string{"gmail:t1:m1 received", "gmail:t1:m2 sent", "gmail:t1:starred:m1 starred", "gmail:t2:m3 received", "gmail:t4:m5 received", "gmail:t5:m6 received"}
+	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v", keys(m))
+	}
+	if q := srv.Query("/gmail/v1/users/me/messages"); q.Get("q") != "" {
+		t.Fatal("a search needs gmail.readonly; the gap is read by label")
+	}
+	// A later last pass reads less: m1 (10:00) is before 10:45 less the lookback.
+	got, err = g.Collect(context.Background(), []byte(`{"history_id":"5","at":"2026-11-08T10:45:00Z"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := byKey(t, got.Items, GmailFields, GmailStateFields)["gmail:t1:m1"]; ok {
+		t.Fatal("read before the last pass")
 	}
 }
 
@@ -258,6 +290,12 @@ func TestGmailIdentityScopeAndLimits(t *testing.T) {
 	g, _ := NewGmail(o)
 	if _, err := g.Collect(context.Background(), []byte("100")); !errors.Is(err, source.ErrIdentity) {
 		t.Fatalf("identity: %v", err)
+	}
+	o = opts(t, srv)
+	o.Account, o.Identity = "other@example.com", ""
+	g, _ = NewGmail(o)
+	if _, err := g.Collect(context.Background(), []byte("100")); !errors.Is(err, source.ErrIdentity) {
+		t.Fatalf("a grant for another account: %v", err)
 	}
 
 	srv = googletest.New(t)
@@ -386,11 +424,12 @@ func TestCalendarEveryItem(t *testing.T) {
 	if !resp.Own || resp.Actor != "email:winton@example.com" || resp.EventTitle != "Responded: accepted" || resp.Addressed {
 		t.Fatalf("responded %+v", resp)
 	}
+	// Calendar does not say who changed or cancelled an event, so organising it does not make the change own.
 	moved := m["calendar:ev2:changed:3102"]
-	if !moved.Own || moved.EventTitle != "Rescheduled" {
+	if moved.Own || moved.Actor != "" || moved.EventTitle != "Rescheduled" {
 		t.Fatalf("changed %+v", moved)
 	}
-	if c := m["calendar:ev4:cancelled:3104"]; !c.Own || c.EventTitle != "Cancelled" || c.State["status"] != "cancelled" {
+	if c := m["calendar:ev4:cancelled:3104"]; c.Own || c.Actor != "" || c.EventTitle != "Cancelled" || c.State["status"] != "cancelled" {
 		t.Fatalf("cancelled %+v", c)
 	}
 	if cr := m["calendar:ev5:created:3105"]; cr.Own || cr.Actor != "email:dana@example.com" || cr.EventTitle != "Created" {
@@ -432,16 +471,82 @@ func TestCalendarGoneReadsTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if q := srv.Query("/calendar/v3/calendars/primary/events"); q.Get("showDeleted") != "true" {
+		t.Fatalf("a window read without deleted events: %v", q)
+	}
+	// updatedMin is too old. The full window holds ev2 and ev4 unchanged; ev1 and ev3 are missing from it.
 	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("updatedMin") != "" {
+		q := r.URL.Query()
+		if q.Get("updatedMin") != "" {
 			w.WriteHeader(http.StatusGone)
 			return
 		}
-		io.WriteString(w, googletest.EventsFirst)
+		if q.Get("showDeleted") != "true" {
+			t.Errorf("the full re-read must include deleted events: %v", q)
+		}
+		io.WriteString(w, strings.Replace(strings.Replace(googletest.EventsFirst, `"id":"ev1"`, `"id":"evX1"`, 1), `"id":"ev3"`, `"id":"evX3"`, 1))
+	}
+	// ev3 was deleted outright; ev1 moved beyond the window.
+	srv.Routes["/calendar/v3/calendars/primary/events/ev3"] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
+	srv.Routes["/calendar/v3/calendars/primary/events/ev1"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"id":"ev1","status":"confirmed","etag":"\"3301\"","summary":"Design review","location":"Room 1","start":{"dateTime":"2026-12-20T17:00:00Z"},"end":{"dateTime":"2026-12-20T18:00:00Z"},
+  "created":"2026-11-01T00:00:00Z","updated":"2026-11-08T12:40:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"needsAction"}]}`)
 	}
 	got, err := c.Collect(context.Background(), first.Next)
-	if err != nil || len(got.Items) != 0 {
-		t.Fatalf("%v %d", err, len(got.Items))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	for k := range m {
+		if strings.HasPrefix(k, "calendar:evX") {
+			delete(m, k)
+		}
+	}
+	want := []string{"calendar:ev1:changed:3301 changed", "calendar:ev3:cancelled:gone cancelled"}
+	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v", keys(m))
+	}
+	if gone := m["calendar:ev3:cancelled:gone"]; gone.Own || gone.Subject != "calendar:winton:ev3" {
+		t.Fatalf("%+v", gone)
+	}
+	// The cancel is remembered: a second full re-read does not cancel it again.
+	again, err := c.Collect(context.Background(), got.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range again.Items {
+		if strings.HasPrefix(it.Key, "calendar:ev3:") || strings.HasPrefix(it.Key, "calendar:ev1:") {
+			t.Fatalf("again: %s", it.Key)
+		}
+	}
+}
+
+func TestCalendarCreatedByThePerson(t *testing.T) {
+	srv := googletest.New(t)
+	c, _ := NewCalendar(opts(t, srv))
+	first, _ := c.Collect(context.Background(), nil)
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("singleEvents") != "true" {
+			io.WriteString(w, `{"items":[]}`)
+			return
+		}
+		io.WriteString(w, `{"timeZone":"UTC","items":[
+  {"id":"ev7","status":"confirmed","etag":"\"3107\"","summary":"Focus","start":{"dateTime":"2026-11-09T08:00:00Z"},"end":{"dateTime":"2026-11-09T09:00:00Z"},
+   "created":"2026-11-08T12:30:00Z","updated":"2026-11-08T12:30:00Z","organizer":{"email":"winton@example.com","self":true},"creator":{"email":"winton@example.com","self":true}},
+  {"id":"ev8","status":"confirmed","etag":"\"3108\"","summary":"Booked for you","start":{"dateTime":"2026-11-09T10:00:00Z"},"end":{"dateTime":"2026-11-09T11:00:00Z"},
+   "created":"2026-11-08T12:31:00Z","updated":"2026-11-08T12:31:00Z","organizer":{"email":"winton@example.com","self":true},"creator":{"email":"assistant@example.com"}}
+]}`)
+	}
+	got, err := c.Collect(context.Background(), first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	if it := m["calendar:ev7:created:3107"]; !it.Own || it.Actor != "email:winton@example.com" {
+		t.Fatalf("created by the person %+v", it)
+	}
+	if it := m["calendar:ev8:created:3108"]; it.Own || it.Actor != "" {
+		t.Fatalf("created by a delegate %+v", it)
 	}
 }
 
@@ -458,9 +563,13 @@ func TestDriveEveryItem(t *testing.T) {
 	if string(got.Next) != "2026-11-08T12:00:00Z" {
 		t.Fatalf("next %q", got.Next)
 	}
-	fq := srv.Query("/drive/v3/files")
-	if !strings.Contains(fq.Get("q"), "modifiedTime > '2026-11-08T09:45:00Z'") || !strings.Contains(fq.Get("q"), "trashed = false") {
-		t.Fatalf("files query %v", fq)
+	fqs := srv.Queries("/drive/v3/files")
+	if len(fqs) != 2 || !strings.HasPrefix(fqs[0].Get("q"), "modifiedTime > '2026-11-08T09:45:00Z'") || !strings.Contains(fqs[0].Get("q"), "trashed = false") ||
+		!strings.HasPrefix(fqs[1].Get("q"), "viewedByMeTime > '2026-10-25T12:00:00Z'") || fqs[1].Get("orderBy") != "viewedByMeTime desc" {
+		t.Fatalf("files queries %v", fqs)
+	}
+	if n := len(srv.Queries("/drive/v3/files/f1/comments")); n != 1 {
+		t.Fatalf("f1, both modified and viewed, had its comments read %d times", n)
 	}
 	cq := srv.Query("/drive/v3/files/f1/comments")
 	if cq.Get("startModifiedTime") != "2026-11-08T09:45:00Z" || strings.Contains(cq.Get("fields"), "content") {
@@ -479,10 +588,11 @@ func TestDriveEveryItem(t *testing.T) {
 		"drive:f1:comment:c3 commented",
 		"drive:f1:reply:c1:r1 resolved",
 		"drive:f1:reply:c1:r2 mentioned",
+		"drive:f2:comment:c7 mentioned",
 		"drive:notes:n1 notes_created",
 	}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
-		t.Fatalf("got %v", keys(m))
+		t.Fatalf("got %v (f2 was not modified; it was opened recently)", keys(m))
 	}
 	assigned := m["drive:f1:comment:c2"]
 	if assigned.Subject != "drive:winton:f1" || !assigned.Addressed || assigned.Own || assigned.EventTitle != "Assigned" || assigned.Version != "c2" {
@@ -532,7 +642,7 @@ func TestDriveFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fq := srv.Query("/drive/v3/files"); !strings.Contains(fq.Get("q"), "modifiedTime > '2026-11-01T12:00:00Z'") {
+	if fq := srv.Queries("/drive/v3/files")[0]; !strings.Contains(fq.Get("q"), "modifiedTime > '2026-11-01T12:00:00Z'") {
 		t.Fatalf("files query %v", fq)
 	}
 	if srv.Query("/calendar/v3/calendars/primary/events").Get("updatedMin") != "" {
@@ -540,7 +650,7 @@ func TestDriveFirstRun(t *testing.T) {
 	}
 	m := byKey(t, got.Items, DriveFields, DriveStateFields)
 	// c1 is resolved and c3 and r1 are own acts; c5 is older than 7 days.
-	want := []string{"drive:f1:comment:c2 assigned", "drive:notes:n1 notes_created"}
+	want := []string{"drive:f1:comment:c2 assigned", "drive:f2:comment:c7 mentioned", "drive:notes:n1 notes_created"}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v", keys(m))
 	}
@@ -567,14 +677,28 @@ func TestScopeAndHosts(t *testing.T) {
 		allow bool
 	}{
 		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=1", true},
-		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/threads/abc123", true},
+		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/threads/abc123?format=metadata&metadataHeaders=From", true},
+		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/threads/abc123", false},
+		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/messages/abc123?format=raw", false},
+		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/messages/abc123?format=full&alt=media", false},
+		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=1&q=from:x", false},
 		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/me/messages/abc/attachments/x", false},
 		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/other@example.com/profile", false},
 		{&g.common, "https://www.googleapis.com/gmail/v1/users/me/profile", false},
-		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?x=1", true},
+		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&showDeleted=true", true},
+		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?x=1", false},
+		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events/ev1?fields=id", true},
+		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events/ev1/instances", false},
 		{&c.common, "https://www.googleapis.com/calendar/v3/users/me/calendarList", false},
 		{&c.common, "https://www.googleapis.com/drive/v3/files", false},
-		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/comments", true},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/comments?startModifiedTime=x&fields=y", true},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc?fields=id,name", true},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc?alt=media", false},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc?fields=id&acknowledgeAbuse=true", false},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/export?mimeType=text/plain", true},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/export?mimeType=application/pdf", false},
+		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/comments?alt=media", false},
+		{&d.common, "https://www.googleapis.com/drive/v3/about?fields=user&alt=json", false},
 		{&d.common, "https://www.googleapis.com/drive/v3/files/abc/permissions", false},
 		{&d.common, "https://www.googleapis.com/drive/v3/files/../about", false},
 		{&d.common, "http://www.googleapis.com/drive/v3/about", false},
@@ -631,7 +755,7 @@ func TestGmailThreadFailures(t *testing.T) {
 	srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }
 	g, _ := NewGmail(opts(t, srv))
 	got, err := g.Collect(context.Background(), []byte("100"))
-	if err != nil || string(got.Next) != "350" {
+	if err != nil || history(t, got.Next) != "350" {
 		t.Fatalf("%v %q", err, got.Next)
 	}
 	for _, it := range got.Items {
@@ -700,7 +824,7 @@ func TestGmailBodyForbiddenKeepsTheItem(t *testing.T) {
 	g, _ := NewGmail(opts(t, srv))
 	g.SetBodies(true)
 	got, err := g.Collect(context.Background(), []byte("100"))
-	if err != nil || string(got.Next) != "350" {
+	if err != nil || history(t, got.Next) != "350" {
 		t.Fatalf("%v %q", err, got.Next)
 	}
 	m := byKey(t, got.Items, GmailFields, GmailStateFields)

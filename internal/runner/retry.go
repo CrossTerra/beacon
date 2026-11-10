@@ -28,7 +28,9 @@ type RetryReport struct {
 	Held    int
 	Never   int
 	Pending int
-	Lease   *lease.Status
+	// Withheld is rejected entries on personal subjects Signal would not keep private. They stay rejected.
+	Withheld int
+	Lease    *lease.Status
 	// LeaseReason is set when the lease could not be taken, or the pass stopped because it ran out.
 	LeaseReason logs.Reason
 }
@@ -64,8 +66,17 @@ func (r *Runner) RetryRejected(ctx context.Context) (*RetryReport, error) {
 	}
 	r.Log.Log(logs.LeaseHeld, logs.Period(st.Period), logs.Until(st.Until))
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
+	if err := r.readRestrictions(ctx, true); err != nil {
+		r.logRetry(rep)
+		return rep, err
+	}
 	for _, e := range r.Outbox.Entries() {
 		if e.Kind != outbox.Event || e.State != outbox.Rejected {
+			continue
+		}
+		if r.withholds(e.Subject) != "" {
+			// A personal subject Signal would not keep private. It stays rejected; a later retry may send it.
+			rep.Withheld++
 			continue
 		}
 		if e.Status == 409 || e.Code == "idempotency_conflict" {
@@ -126,6 +137,7 @@ func (r *Runner) logRetry(rep *RetryReport) {
 		logs.Count("failed", rep.Failed),
 		logs.Count("hold", rep.Held),
 		logs.Count("never", rep.Never),
+		logs.Count("withheld", rep.Withheld),
 		logs.Count("pending", rep.Pending),
 	)
 }

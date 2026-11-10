@@ -35,24 +35,25 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 	}
 	var out []source.Source
 	names := map[string]bool{}
-	var auth *google.Auth
+	// One grant per Google account, shared by that account's sources.
+	auths := map[string]*google.Auth{}
 	for _, s := range cfg.Sources {
 		var src source.Source
-		if s.IsGoogle() && auth == nil {
-			var err error
-			auth, err = google.NewAuth(google.AuthOptions{
+		if s.IsGoogle() && auths[s.Account] == nil {
+			auth, err := google.NewAuth(google.AuthOptions{
 				TokenURL: a.google.tokenURL,
-				Client:   a.secretFunc(keychain.GoogleClientAccount),
-				Refresh:  a.secretFunc(keychain.GoogleRefreshAccount),
+				Client:   a.secretFunc(keychain.GoogleClientAccount(s.Account)),
+				Refresh:  a.secretFunc(keychain.GoogleRefreshAccount(s.Account)),
 				Now:      a.now,
 			})
 			if err != nil {
 				return nil, err
 			}
+			auths[s.Account] = auth
 		}
 		gopts := google.Options{
-			Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"),
-			Identity: cfg.Person.Identities[s.SourceName()], Auth: auth, Now: a.now,
+			Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"), Account: s.Account,
+			Identity: cfg.Person.Identities[s.SourceName()], Auth: auths[s.Account], Now: a.now,
 		}
 		switch s.Kind {
 		case "gmail":
@@ -134,6 +135,17 @@ func live(s source.Source) bool {
 	return !fixture
 }
 
+// personal maps each personal source to its subject stem. A send waits until Signal restricts that stem.
+func personal(sources []source.Source) map[string]string {
+	out := map[string]string{}
+	for _, s := range sources {
+		if p, ok := s.(interface{ PersonalStem() string }); ok {
+			out[s.Name()] = p.PersonalStem()
+		}
+	}
+	return out
+}
+
 func (a *app) secretFunc(account string) func() (keychain.Secret, error) {
 	return func() (keychain.Secret, error) {
 		if a.keychain == nil {
@@ -194,6 +206,7 @@ func (a *app) cmdSource(ctx context.Context, args []string) error {
 // the chosen Google sources. Every scope is read-only.
 func (a *app) addGoogle(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("source add google")
+	account := fs.String("account", "", "the Google account to read, its primary address (required)")
 	clientFile := fs.String("client-file", "", "OAuth client JSON of a Desktop app from your Google Cloud project; stored in the keychain (default: the client already stored)")
 	gmail := fs.Bool("gmail", false, "enable Gmail")
 	calendar := fs.Bool("calendar", false, "enable Calendar")
@@ -204,7 +217,11 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("usage: beacon source add google [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]")
+		return fmt.Errorf("usage: beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]")
+	}
+	email := strings.ToLower(strings.TrimSpace(*account))
+	if email == "" {
+		return errors.New("pass --account with the Google account's address")
 	}
 	cfg, err := a.loadConfig(*cfgPath)
 	if err != nil {
@@ -216,16 +233,16 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 	}
 	for _, k := range config.GoogleKinds {
 		if chosen[k] {
-			cfg.Sources = upsert(cfg.Sources, config.Source{Kind: k})
+			cfg.Sources = upsert(cfg.Sources, config.Source{Kind: k, Account: email})
 		}
 	}
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	// One grant serves every Google source in the config, so it asks for all their scopes.
+	// One grant serves every Google source in the config that reads this account, so it asks for all their scopes.
 	var kinds, names []string
 	for _, s := range cfg.Sources {
-		if s.IsGoogle() {
+		if s.IsGoogle() && s.Account == email {
 			kinds = append(kinds, s.Kind)
 			names = append(names, s.SourceName())
 		}
@@ -244,14 +261,14 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := store.Set(keychain.GoogleClientAccount, client); err != nil {
+		if err := store.Set(keychain.GoogleClientAccount(email), client); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "Stored the OAuth client in the keychain as %s/%s\n", keychain.Service, keychain.GoogleClientAccount)
+		fmt.Fprintf(a.stdout, "Stored the OAuth client in the keychain as %s/%s\n", keychain.Service, keychain.GoogleClientAccount(email))
 	} else {
-		client, err = store.Get(keychain.GoogleClientAccount)
+		client, err = store.Get(keychain.GoogleClientAccount(email))
 		if errors.Is(err, keychain.ErrNotFound) {
-			return errors.New("no Google OAuth client is stored; pass --client-file with the JSON of a Desktop app client")
+			return errors.New("no Google OAuth client is stored for that account; pass --client-file with the JSON of a Desktop app client")
 		}
 		if err != nil {
 			return err
@@ -270,7 +287,7 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 		AuthURL: a.google.authURL, TokenURL: a.google.tokenURL,
 		HTTP:   limited.HTTPClient(transport(egress.Addresses(egress.List(u, srcs)))),
 		Scopes: google.Scopes(kinds, *bodies),
-		Out:    a.stderr,
+		Out:    a.stderr, LoginHint: email,
 	}
 	if *open {
 		flow.Open = a.google.open
@@ -282,14 +299,14 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := store.Set(keychain.GoogleRefreshAccount, tok.Refresh); err != nil {
+	if err := store.Set(keychain.GoogleRefreshAccount(email), tok.Refresh); err != nil {
 		return err
 	}
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.stdout, "Stored the Google refresh token in the keychain as %s/%s\nGranted read-only: %s\nEnabled sources %s\n",
-		keychain.Service, keychain.GoogleRefreshAccount, strings.Join(tok.Scopes, " "), strings.Join(names, ", "))
+		keychain.Service, keychain.GoogleRefreshAccount(email), strings.Join(tok.Scopes, " "), strings.Join(names, ", "))
 	return nil
 }
 

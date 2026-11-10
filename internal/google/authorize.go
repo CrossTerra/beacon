@@ -34,6 +34,8 @@ type Flow struct {
 	Open func(string) error
 	// Timeout is how long to wait for the redirect. Zero is five minutes.
 	Timeout time.Duration
+	// LoginHint is the Google account the consent screen should offer. Empty offers any.
+	LoginHint string
 }
 
 // ErrNotGranted means the person did not grant every scope asked for. The text names the scopes, not a token.
@@ -109,7 +111,7 @@ func (f Flow) Run(ctx context.Context, client keychain.Secret) (keychain.Token, 
 	go func() { _ = srv.Serve(ln) }()
 	defer srv.Close()
 
-	consent := authURL + "?" + url.Values{
+	params := url.Values{
 		"client_id":             {clientID},
 		"redirect_uri":          {redirect},
 		"response_type":         {"code"},
@@ -119,7 +121,11 @@ func (f Flow) Run(ctx context.Context, client keychain.Secret) (keychain.Token, 
 		"state":                 {state},
 		"access_type":           {"offline"},
 		"prompt":                {"consent"},
-	}.Encode()
+	}
+	if f.LoginHint != "" {
+		params.Set("login_hint", f.LoginHint)
+	}
+	consent := authURL + "?" + params.Encode()
 	if f.Out != nil {
 		fmt.Fprintf(f.Out, "Open this URL in your browser and allow read-only access:\n\n  %s\n\nWaiting for the redirect to %s\n", consent, redirect)
 	}

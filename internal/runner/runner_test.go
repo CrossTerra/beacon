@@ -518,3 +518,33 @@ func TestDroppedEarlierIsSkipped(t *testing.T) {
 		t.Fatalf("a key another rule drops is a new decision; never count %d", n)
 	}
 }
+
+func TestRestrictingStem(t *testing.T) {
+	for _, tc := range []struct {
+		prefixes []string
+		subject  string
+		want     string
+	}{
+		{[]string{"gmail:*"}, "gmail:winton:thread:1", "gmail:"},
+		{[]string{"gmail:*", "gmail:winton:*"}, "gmail:winton:thread:1", "gmail:winton:"},
+		{[]string{"calendar:*"}, "gmail:winton:thread:1", ""},
+		{[]string{"gmail"}, "gmail:winton:thread:1", ""},
+		{nil, "drive:winton:f1", ""},
+	} {
+		if got := RestrictingStem(tc.prefixes, tc.subject); got != tc.want {
+			t.Errorf("%v %s: %q, want %q", tc.prefixes, tc.subject, got, tc.want)
+		}
+	}
+	r := &Runner{Personal: map[string]string{"gmail": "gmail:"}, restrictRead: true, restricted: []string{"gmail:*", "gmail:winton:*"}}
+	if r.withholds("gmail:winton:thread:1") != logs.ReasonUnrestricted {
+		t.Fatal("a longer stem moves the owner; the subject is not the person's")
+	}
+	r.restricted = []string{"gmail:*"}
+	if r.withholds("gmail:winton:thread:1") != "" || r.withholds("github:pr:a/b#1") != "" {
+		t.Fatal("withholds")
+	}
+	r.restrictRead = false
+	if r.withholds("gmail:winton:thread:1") != logs.ReasonRestrictionsUnknown {
+		t.Fatal("unread restrictions must withhold")
+	}
+}

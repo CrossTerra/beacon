@@ -110,7 +110,7 @@ func TestLoopbackHTTP(t *testing.T) {
 }
 
 func TestGoogleConfig(t *testing.T) {
-	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", "sources:\n  - kind: gmail\n  - kind: calendar\n  - kind: drive\n", 1)
+	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", "sources:\n  - kind: gmail\n    account: winton@example.com\n  - kind: calendar\n    account: winton@example.com\n  - kind: drive\n    account: winton@example.com\n", 1)
 	c, err := Parse([]byte(y))
 	if err != nil {
 		t.Fatal(err)
@@ -122,6 +122,9 @@ func TestGoogleConfig(t *testing.T) {
 		strings.Replace(y, `"@winton"`, "act_abc", 1),
 		strings.Replace(y, "  - kind: drive\n", "  - kind: drive\n    site: acme\n", 1),
 		strings.Replace(y, "  - kind: drive\n", "  - kind: drive\n    host: evil.example\n", 1),
+		strings.Replace(y, "  - kind: drive\n    account: winton@example.com\n", "  - kind: drive\n", 1),
+		strings.Replace(y, "account: winton@example.com", "account: Winton@Example.com", 1),
+		strings.Replace(y, "account: winton@example.com", "account: winton", 1),
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("parsed:\n%s", bad)

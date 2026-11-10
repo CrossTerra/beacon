@@ -12,6 +12,7 @@ same pull request.
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
+| With a Google source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
 ## Properties
@@ -64,9 +65,17 @@ same pull request.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
-9. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
-   Another instance collects and keeps its bodies pending.
-10. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
+9. **Personal subjects stay personal.** Gmail, Calendar and Drive subjects carry the person's handle
+   (`gmail:<handle>:…`, DEC-10). A send pass reads Signal's restricted prefixes first, and sends an event on such a
+   subject only when the longest restricted stem it is under is its own (`gmail:*`), which is what makes Signal keep
+   it to its owner. Otherwise the source's send items are held locally; if the restrictions cannot be read, they are
+   not recorded and the cursor stays. A pending body, or a refusal `beacon outbox retry --rejected` would resend, on
+   such a subject waits the same way. Your own acts are recorded from the source's own record only: a Gmail message is
+   yours only with the `SENT` label, never because its From header names you, and a calendar change is yours only when
+   it is your response or an event your account created.
+10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
+    Another instance collects and keeps its bodies pending.
+11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
     request). Signed releases, notarized macOS builds and an SBOM per release arrive in Phase 7.
 
 ## Known limits
@@ -76,9 +85,14 @@ same pull request.
 - **Signal has no per-event visibility yet.** Until it does, any key that can read the store can read every event
   Beacon sends, including full bodies a rule allowed. Rules that send bodies from personal sources (direct mail,
   direct messages, private files) should wait for visibility, or be limited to content the whole organization may
-  read. Gmail, Calendar and Drive subjects carry the person's handle (`gmail:<handle>:…`) so that Signal can restrict
-  them to their owner; that holds only after Signal's admin restricts `gmail:*`, `calendar:*` and `drive:*`. Before
-  then, those events are readable by every reader key.
+  read. Gmail, Calendar and Drive events are the exception: Beacon sends them only once Signal restricts their prefix
+  (property 9), and holds them until then. That check is only as good as Signal's answer, and a restriction lifted
+  after an event was sent does not hide that event again (Signal keeps the owner it recorded).
+- **Drive comments are found through recent activity.** A comment does not reliably change a file's modified time,
+  so Beacon reads the comments of files modified since the last pass and files you opened in the last 14 days. A
+  mention on a file you have not opened in that time, and that was not otherwise modified, is not seen.
+- **Gmail's history expires.** After about a week without a pass, Gmail cannot list what changed. Beacon re-reads
+  open state and inbox and sent mail since the last pass, and says so; other changes in that gap are lost.
 - **Google read scopes are broad.** `drive.readonly` can read every file the person can, and `gmail.metadata` every
   message's headers. Beacon asks for names, links, headers and comment metadata, and reads bodies only when a rule
   lists `body`, but the grant itself is not narrower. Revoke it at

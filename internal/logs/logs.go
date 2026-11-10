@@ -33,6 +33,13 @@ const (
 	RunFailed       Event = "run_failed"
 	// Retry is the summary of beacon outbox retry. Its attributes are counts only.
 	Retry Event = "retry"
+	// Withheld is a personal source whose send items were held or not recorded, because its subject prefix is not
+	// restricted in Signal or the restrictions could not be read.
+	Withheld Event = "withheld"
+	// HistoryGap is a source that could not read every change since its cursor, and re-read what it could.
+	HistoryGap Event = "history_gap"
+	// RestrictionsUnread is a send pass that could not read Signal's restricted prefixes.
+	RestrictionsUnread Event = "restrictions_unread"
 )
 
 // Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths
@@ -59,6 +66,13 @@ const (
 	ReasonIdentity     Reason = "identity_mismatch"
 	ReasonItem         Reason = "item_invalid"
 	ReasonProject      Reason = "project_failed"
+	// ReasonUnrestricted is a personal subject prefix Signal does not restrict: its events would be readable by
+	// every reader key.
+	ReasonUnrestricted Reason = "prefix_unrestricted"
+	// ReasonRestrictionsUnknown is a pass that could not read Signal's restricted prefixes.
+	ReasonRestrictionsUnknown Reason = "restrictions_unknown"
+	// ReasonNoRead is a Signal key without the read scope, which listing the restrictions needs.
+	ReasonNoRead Reason = "no_read_scope"
 )
 
 // Attr is a log attribute built by one of the helpers below.

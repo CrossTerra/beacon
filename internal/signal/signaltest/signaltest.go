@@ -47,6 +47,9 @@ type Server struct {
 	requests []Request
 	// Script, when set, is asked first for each request, with its number from 1.
 	Script func(n int, req Request) Reply
+	// Restricted are the prefixes GET /api/restrictions lists. NoRead answers it 403, as for a key without read.
+	Restricted []string
+	NoRead     bool
 }
 
 // New starts a fake that accepts the bearer token.
@@ -72,6 +75,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	if r.Header.Get("Authorization") != "Bearer "+s.Token {
 		reply(w, http.StatusUnauthorized, `{"error":{"code":"unauthorized","message":"Invalid credentials."}}`, nil)
+		return
+	}
+	if r.URL.Path == "/api/restrictions" && r.Method == http.MethodGet {
+		s.mu.Lock()
+		noRead, prefixes := s.NoRead, append([]string(nil), s.Restricted...)
+		s.mu.Unlock()
+		if noRead {
+			reply(w, http.StatusForbidden, `{"error":{"code":"forbidden","message":"Missing scope."}}`, nil)
+			return
+		}
+		data := make([]map[string]string, 0, len(prefixes))
+		for _, p := range prefixes {
+			data = append(data, map[string]string{"prefix": p, "created_at": "2026-11-01T00:00:00.000Z"})
+		}
+		out, _ := json.Marshal(map[string]any{"data": data, "next_cursor": nil})
+		reply(w, http.StatusOK, string(out), nil)
 		return
 	}
 	if r.URL.Path != "/api/events" || r.Method != http.MethodPost {
@@ -158,4 +177,11 @@ func (s *Server) RequestsFor(key string) []Request {
 		}
 	}
 	return out
+}
+
+// Restrict sets the prefixes GET /api/restrictions lists.
+func (s *Server) Restrict(prefixes ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Restricted = append([]string(nil), prefixes...)
 }

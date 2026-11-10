@@ -26,7 +26,9 @@ type Options struct {
 	Name string
 	// Person is the person's Signal handle without "@". Personal subjects carry it (DEC-10).
 	Person string
-	// Identity is person.identities for this source, email:<address>. Empty skips the check.
+	// Account is the Google account this source reads. The API must report it as the signed-in account.
+	Account string
+	// Identity is person.identities for this source, email:<address>. Empty skips that check.
 	Identity string
 	Auth     *Auth
 	// Base replaces the API base URL (tests). Gmail's is GmailBase; Calendar's and Drive's is APIBase.
@@ -38,7 +40,9 @@ type Options struct {
 
 // common is what every Google source holds.
 type common struct {
+	kind     string
 	name     string
+	account  string
 	person   string
 	identity string
 	base     string
@@ -49,11 +53,11 @@ type common struct {
 	now      func() time.Time
 	clock    source.Clock
 	bodies   bool
-	// paths reports whether a URL path is one this source calls.
-	paths func(string) bool
+	// paths reports whether a URL path, with its query, is one this source calls.
+	paths func(string, url.Values) bool
 }
 
-func newCommon(o Options, kind, defBase string, paths func(string) bool) (common, error) {
+func newCommon(o Options, kind, defBase string, paths func(string, url.Values) bool) (common, error) {
 	name := o.Name
 	if name == "" {
 		name = kind
@@ -81,7 +85,7 @@ func newCommon(o Options, kind, defBase string, paths func(string) bool) (common
 		now = time.Now
 	}
 	return common{
-		name: name, person: o.Person, identity: o.Identity, base: base, host: strings.ToLower(u.Hostname()),
+		kind: kind, name: name, account: strings.ToLower(o.Account), person: o.Person, identity: o.Identity, base: base, host: strings.ToLower(u.Hostname()),
 		hostPort: hostPort(u), auth: o.Auth, now: now, paths: paths,
 		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now},
 	}, nil
@@ -105,6 +109,10 @@ func (c *common) SetHTTP(h *http.Client) {
 	c.auth.SetHTTP(h)
 }
 
+// PersonalStem is the subject stem this source's personal subjects start with ("gmail:"). The person's handle
+// follows it (DEC-10). Signal keeps such a subject private only when "<stem>*" is restricted.
+func (c *common) PersonalStem() string { return c.kind + ":" }
+
 // SetBodies says whether a rule lists body for this source. Bodies are read only then.
 func (c *common) SetBodies(b bool) { c.bodies = b }
 
@@ -115,12 +123,16 @@ func (c *common) observed() time.Time {
 	return c.now().UTC()
 }
 
-// checkIdentity compares person.identities with the address the API says is the person's.
+// checkIdentity compares the configured account and person.identities with the address the API says is the
+// person's. A grant for another account is refused.
 func (c *common) checkIdentity(email string) error {
-	if c.identity == "" || email == "" {
+	if email == "" {
 		return nil
 	}
-	if !strings.EqualFold(c.identity, "email:"+email) {
+	if c.account != "" && !strings.EqualFold(c.account, email) {
+		return source.ErrIdentity
+	}
+	if c.identity != "" && !strings.EqualFold(c.identity, "email:"+email) {
 		return source.ErrIdentity
 	}
 	return nil
@@ -151,10 +163,26 @@ func (c *common) allow(raw string) error {
 	if err != nil || u.Host == "" || !secureURL(u) || !strings.EqualFold(u.Hostname(), c.host) || hostPort(u) != c.hostPort {
 		return source.ErrScope
 	}
-	if !c.paths(u.EscapedPath()) {
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil || u.Fragment != "" || !c.paths(u.EscapedPath(), q) {
 		return source.ErrScope
 	}
 	return nil
+}
+
+// onlyKeys reports whether q has no key outside keys. alt, key, and any other parameter a path does not need is
+// refused: alt=media on a file would download its content.
+func onlyKeys(q url.Values, keys ...string) bool {
+	allowed := map[string]bool{}
+	for _, k := range keys {
+		allowed[k] = true
+	}
+	for k := range q {
+		if !allowed[k] {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *common) get(ctx context.Context, raw string) ([]byte, error) {

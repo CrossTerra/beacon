@@ -5,7 +5,8 @@ A source yields items. Beacon has GitHub, Jira, Gmail, Google Calendar and Googl
 what leaves; anything else stays.
 
 Credentials are in the keychain, under the service `beacon`: account `source:<name>` for GitHub and Jira, and
-`google:client` and `google:refresh` for the [Google grant](#google) the three Google sources share. They are read
+`google:<address>:client` and `google:<address>:refresh` for the [Google grant](#google) a Google account's sources
+share. They are read
 when a pass needs them and set only as an Authorization header (or, for the Google grant, sent only to Google's
 token endpoint). They are never written to the config, the log, or the outbox.
 
@@ -194,21 +195,24 @@ distinct. A history with one field change uses the changelog id alone. Both form
 
 ## Google
 
-`kind: gmail`, `kind: calendar`, `kind: drive`. The three share one OAuth grant, from an OAuth client the person
-creates in their own Google Cloud project (DEC-2). Every scope is read-only.
+`kind: gmail`, `kind: calendar`, `kind: drive`, each with `account:`, the Google account's primary address. The
+sources of one account share one OAuth grant, from an OAuth client the person creates in their own Google Cloud
+project (DEC-2). Every scope is read-only.
 
 **The client.** In Google Cloud Console, create an OAuth client of type *Desktop app* and download its JSON.
-`beacon source add google --client-file <json>` stores its id and secret in the keychain as `google:client`. A web
+`beacon source add google --account <address> --client-file <json>` stores its id and secret in the keychain as
+`google:<address>:client`. A web
 client is refused: Beacon's redirect is a loopback address. Google documents an installed app's secret as not
 confidential; Beacon still keeps it only in the keychain.
 
 **Authorising.** `beacon source add google` runs the installed-app flow (RFC 8252): it prints the consent URL (and
 opens it with `--open`), listens on `127.0.0.1` on a random port for one redirect, and exchanges the code, with a
 PKCE (S256) verifier, at `oauth2.googleapis.com`. The person's browser, not Beacon, contacts the consent page at
-`accounts.google.com`. A request to the listener without the flow's `state` is refused and the flow keeps waiting.
-The refresh token is stored in the keychain as `google:refresh`. If the person does not grant every scope asked for,
-nothing is stored and the command names the missing scopes. The grant covers every Google source in the config, so
-adding one later (`--drive`) asks again for all of them. Without `--client-file`, the stored client is used.
+`accounts.google.com`, with `login_hint` set to the account. A request to the listener without the flow's `state` is
+refused and the flow keeps waiting. The refresh token is stored in the keychain as `google:<address>:refresh`. If the person does not grant every scope asked for,
+nothing is stored and the command names the missing scopes. The grant covers every Google source in the config for that
+account, so adding one later (`--drive`) asks again for all of them. Without `--client-file`, the account's stored
+client is used.
 
 **Each pass** exchanges the refresh token for an access token, held in memory only and reused by the three sources
 until a minute before it expires. A refused refresh (revoked, expired, or a changed client) is
@@ -234,15 +238,32 @@ list, fails the pass.
 refuses any URL outside the paths it uses: Gmail `/gmail/v1/users/me/` `profile`, `labels`, `history`, `threads`,
 `messages` and one thread or message by id; Calendar `/calendar/v3/calendars/primary/events`; Drive
 `/drive/v3/about`, `/drive/v3/files`, one file by id with `comments` or `export`, and the primary calendar's events.
+Each path also takes only the query keys Beacon sends there, so `alt=media` (a file's content), a search on Gmail,
+`format=raw` on a message, or an export to anything but plain text is refused before it is sent.
 
 **Personal subjects (DEC-10).** The person in a subject is `person.handle` without `@`: `gmail:winton:thread:…`.
 Signal reads the owner of a restricted prefix there. A config with a Google source needs `person.handle` as an
-`@handle`. Until Signal's admin restricts `gmail:*`, `calendar:*` and `drive:*`, every reader key can read these
-events (see the [trust model](trust-model.md#known-limits)).
+`@handle`.
 
-**Identity.** `person.identities.<name>` is `email:<address>`, the account's primary address. Gmail checks it
-against the profile, Drive against `about`, Calendar against the attendee, organizer or creator marked `self`. A
-mismatch is `identity_mismatch`.
+**Nothing personal is sent unless Signal keeps it private.** A send pass with a Google source first reads Signal's
+restricted prefixes (`GET /api/restrictions`, which needs the `read` scope on Beacon's key). A subject is private
+only when the longest restricted stem it is under is its source's own (`gmail:*` for `gmail:winton:…`): Signal
+reads the owner right after that stem. Then:
+
+- When Signal answers and the stem is not restricted (or a longer stem such as `gmail:winton:*` would move the
+  owner), the source's `send` items are held in the local queue instead, `beacon run` says which prefix to restrict,
+  and the log has `withheld` with `prefix_unrestricted`. Held is a decision: the cursor moves.
+- When the restrictions cannot be read (no `read` scope, `401`, Signal unreachable), the source's `send` items are
+  reported and not recorded, and its cursor stays, so a later pass that can read them decides those items again.
+  The log has `restrictions_unread` and `withheld` with `restrictions_unknown`.
+- A body already pending on a personal subject is not sent while its stem is not shown to be restricted; it stays
+  pending. `beacon outbox retry --rejected` skips such an entry the same way and counts it as `withheld`.
+
+A dry run does not contact Signal and does not check.
+
+**Identity.** `account` and `person.identities.<name>` (`email:<address>`) must both be the account's primary
+address. Gmail checks them against the profile, Drive against `about`, Calendar against the attendee, organizer or
+creator marked `self`. A mismatch is `identity_mismatch`, so a grant for another account reads nothing.
 
 **Bodies.** A Google source reads a body only when a `send` or `hold` rule that can match it lists `body`. Without
 one, Gmail does not fetch a message, Calendar does not ask for descriptions, and Drive asks for neither comment text
@@ -250,9 +271,16 @@ nor notes text.
 
 ### Gmail
 
-**Cursor.** The mailbox's history id. Each pass reads `users.history.list` from it (`messageAdded`, `labelAdded`),
-and the next cursor is the history id that response reports. An expired history id (`404`) reads open state again;
-keys make the overlap harmless. The history id has no lookback, so a thread the history names is skipped only when
+**Cursor.** The mailbox's history id, and the time of the pass that stored it (the server's `Date`, else the newest
+message seen). Each pass reads `users.history.list` from the id (`messageAdded`, `labelAdded`), and the next cursor
+is the history id that response reports.
+
+**An expired history id** (`404`, after about a week) cannot say what changed. The pass reads open state again (as a
+first run), and every inbox and sent message since 15 minutes before the stored time (at most 14 days), so earlier
+messages in a thread and the person's own mail in the gap are not lost. It lists by label, newest first:
+`gmail.metadata` cannot search, so there is no `q=after:`. Keys make the overlap harmless. `beacon run` reports the
+gap and the log has `history_gap`: a change in the gap to mail no longer in the inbox (archived or deleted), or a
+star on mail older than 14 days, is not recovered. The history id has no lookback, so a thread the history names is skipped only when
 it is gone (`404`, deleted since). Any other failure reading it, a `403` included, fails the pass and the cursor
 stays. A body is optional: a message that will not give up its body (`404`, or a permission `403`) is sent without
 it; a rate limit or a refused grant there still fails the pass.
@@ -263,8 +291,9 @@ newest message of any kind, so paging stops at a thread whose newest message, dr
 with a recent draft and older mail is skipped and paging goes on. The cursor is the profile's
 history id, read before listing, so nothing that arrives during the pass is missed.
 
-**Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, or
-From is the person), `starred` (`STARRED` added). A draft that is sent may gain `SENT` without arriving as a new
+**Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, and
+only that), `starred` (`STARRED` added). A From header is the sender's claim: mail that says it is from the person
+and has no `SENT` label is `received`, not own, and does not close an ask. A draft that is sent may gain `SENT` without arriving as a new
 message; that is `sent` too, with the same key. Drafts, spam, trash and chats are skipped. Other label changes,
 reads and archiving are not events (DEC-18).
 
@@ -282,7 +311,8 @@ own: starring is a note to oneself, not an answer, and must not close an ask.
 
 **Fields.** `from` (the address), `to` (addresses, comma-separated), `subject` (the thread's subject, its first
 message's), `date` (RFC 3339, UTC), `labels` (label names, sorted, comma-separated; system labels by id, such as
-`INBOX` and `CATEGORY_PROMOTIONS`), `link` (`https://mail.google.com/mail/u/<address>/#all/<thread id>`), `body`
+`INBOX` and `CATEGORY_PROMOTIONS`), `link` (`https://mail.google.com/mail/?authuser=<address>#all/<thread id>`,
+which opens the right account when several are signed in), `body`
 (the `text/plain` part, only with `gmail.readonly` and a rule that lists `body`). `subject` is the thread title when
 a rule lists it and lists neither `title` nor `summary`.
 
@@ -295,9 +325,11 @@ message's sender).
 days, updated since 15 minutes before the cursor, with deleted events. An event Beacon knows that moved into the
 past or beyond 30 days is not in that list, so the pass also reads events updated since then with no time window and
 not expanded (a moved instance of a recurring event is its own event there), and compares the ones Beacon knows.
-That move is `changed` (or `cancelled`), not a silence. If Google refuses that `updatedMin` as too old (`410`), the
-whole window is read; the fingerprints keep unchanged events quiet, and a move out of the window in that gap is not
-seen.
+That move is `changed` (or `cancelled`), not a silence. Every list includes deleted events, so a cancel is seen
+as a cancel. If Google refuses that `updatedMin` as too old (`410`), the whole window is read again; the
+fingerprints keep unchanged events quiet. Then an event the cursor places in the window that the re-read did not
+return is read by id: gone (`404`, `410`) or cancelled is `cancelled` (key version `gone` when Google returns
+nothing), and moved is `changed`.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
 its summary, location, start, end and status, a hash of its start and end, the person's response, and whether it is
@@ -319,9 +351,11 @@ the event's `updated` time, is not an event.
 | `changed` | The summary, location, start, end or status changed. An event that enters the window already old, unseen, is `changed` once. | Rescheduled when the start or end changed, else Changed |
 | `upcoming` | First run only. | Upcoming |
 
-`created`, `changed` and `cancelled` are own when the person organises the event. A `changed` event the person has
-not answered is addressed. The actor is the organizer, or the person on their own acts. The title never includes
-the summary, a name or the description.
+Calendar does not say who changed an event. An own act closes the person's asks, so an item is own only when it is
+provably theirs: `responded`, and `created` for an event whose creator is the person's account. A change or a
+cancel of an event the person organises is not own (a co-organiser or a delegate can make it), and has no actor.
+Otherwise the actor is the organizer. A `changed` event the person has not answered is addressed. The title never
+includes the summary, a name or the description.
 
 **Subject.** `calendar:<person>:<event id>`. **Key.** `calendar:<event id>:<item>:<etag>`; the version is the
 event's etag.
@@ -338,9 +372,11 @@ event's etag.
 
 **Cursor.** The first server `Date` of the pass, as above.
 
-**Comments.** Docs, Sheets and Slides the person can read (`corpora=user`, shared drives included) modified since
-15 minutes before the cursor. A comment updates a file's `modifiedTime`. For each, `comments.list` from the same
-time. A comment or reply created since then yields one item when it concerns the person:
+**Comments.** A comment does not reliably change a file's `modifiedTime`, so each pass reads the comments of every
+recently active Doc, Sheet and Slides file the person can read (`corpora=user`, shared drives included): those
+modified since 15 minutes before the cursor, and those the person opened in the last 14 days (`viewedByMeTime`, the
+200 most recent). For each, `comments.list` with `startModifiedTime` at the same time says which comments changed.
+A mention on a file the person has neither opened in 14 days nor seen modified is not found. A comment or reply created since then yields one item when it concerns the person:
 
 | Item | When | Event title |
 | --- | --- | --- |

@@ -35,7 +35,9 @@ One pass of `beacon run`:
    reported and not recorded.
 5. **Commit.** The source's cursor is stored only after every item of the pass has been recorded, and only on a
    send pass. A crash before that collects the same items again; keys make that harmless.
-6. **Send.** Only while this instance holds the lease (DEC-25). Pending bodies are sent oldest first, as stored,
+6. **Send.** Only while this instance holds the lease (DEC-25). A body on a personal subject (`gmail:`, `calendar:`,
+   `drive:`) is sent only when Signal restricts its prefix; the restrictions are read at the start of the pass, and
+   a send item of a source whose prefix is not restricted was held at step 4 instead. Pending bodies are sent oldest first, as stored,
    each under a deadline at the end of the lease. If Signal is unavailable, or the lease runs out, the pass stops
    and the rest stay pending, because a later body may close an ask an earlier one opens.
 
@@ -61,7 +63,7 @@ the cursor, so it shows what a send pass would do next.
 | `internal/project` | Builds the request body from an item and its rule. |
 | `internal/outbox` | The append-only record of every body, and each key's state. |
 | `internal/queue` | The hold queue and the record of dropped keys. |
-| `internal/signal` | The Signal client: `POST /api/events`, nothing else. |
+| `internal/signal` | The Signal client: `POST /api/events`, and `GET /api/restrictions` when a personal source is enabled. Nothing else. |
 | `internal/lease` | The send lease. |
 | `internal/runner` | One pass: collect, decide, record, send. The only code that hands item content to the client. |
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |

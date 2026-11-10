@@ -29,6 +29,13 @@ Collects, applies rules and projection, and records what it decided.
   lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
   new decision. Decisions from earlier passes are not printed again.
 
+With a Google source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
+has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
+Signal …` and which prefix to ask Signal's admin to restrict. If the restrictions cannot be read, those items are
+printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
+lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
+`run` says so and what was re-read. See [`sources.md`](sources.md#google).
+
 It exits non-zero when the pass cannot go on: Signal refused the key (401) or the lease claim, another process holds
 the outbox, the key is not in the keychain, or the config, rules or a source cannot be loaded. The message names the
 reason and the command that shows details (`beacon rules check`, `beacon outbox`); it never repeats an error's text,
@@ -57,8 +64,9 @@ Runs the current rules on each stored item and sends only what they still send. 
 stored decision and the current rule list it. If the rules now hold or drop the item, the entry is recorded
 `superseded` and not sent. It requires `mode: send` and the lease. It does not send an entry Signal accepted, and
 it does not touch a `409`. An entry with no stored item is not sent by this command. A `400` of that kind is
-decided again when a later collect yields the key. The log and the summary are counts only: sent, replayed,
-refused, conflict, missing, failed, hold, never, pending. See [`events.md`](events.md#retrying-a-refusal).
+decided again when a later collect yields the key. An entry on a personal subject whose prefix Signal does not
+restrict is not sent and is counted as withheld. The log and the summary are counts only: sent, replayed, refused,
+conflict, missing, failed, hold, never, withheld, pending. See [`events.md`](events.md#retrying-a-refusal).
 
 ```bash
 beacon outbox retry --rejected
@@ -105,7 +113,7 @@ not written to the config.
 ```bash
 beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh] [--yes]
 beacon source add jira --site SITE --project KEY [--project KEY]
-beacon source add google [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
+beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
 ```
 
 `--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
@@ -114,11 +122,13 @@ the API token with echo off. On a pipe both lines are read by one reader, so the
 account is `source:<name>` under the service `beacon`. `--name` overrides the default, which is the kind.
 
 `google` enables Gmail, Calendar and Drive, or only those named with `--gmail`, `--calendar` and `--drive`, and
-authorises read-only access to the person's own OAuth client. `--client-file` is the JSON of a *Desktop app* client
-from the person's Google Cloud project; its id and secret are stored as `google:client`. Without it, the stored
-client is used. The command prints the consent URL (`--open` also opens it in the default browser), waits up to five
-minutes on `127.0.0.1` for the redirect, exchanges the code with PKCE, and stores the refresh token as
-`google:refresh`. The grant asks for the scopes of every Google source in the config; `--bodies` asks for
+authorises read-only access to the person's own OAuth client, for the Google account `--account` names (required;
+written to each source as `account`). `--client-file` is the JSON of a *Desktop app* client from the person's
+Google Cloud project; its id and secret are stored as `google:<account>:client`. Without it, that account's stored
+client is used. The command prints the consent URL (`--open` also opens it in the default browser; `login_hint` is
+the account), waits up to five minutes on `127.0.0.1` for the redirect, exchanges the code with PKCE, and stores the
+refresh token as `google:<account>:refresh`. The grant asks for the scopes of every Google source of that account
+in the config; `--bodies` asks for
 `gmail.readonly` instead of `gmail.metadata`. It prints the scopes granted, never a token. The token exchange goes
 through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, opens the consent page. See
 [`sources.md`](sources.md#google).
@@ -162,10 +172,14 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `dry_run` | A dry run ended without sending. |
 | `lease_held`, `lease_not_held`, `lease_failed`, `lease_expired` | The lease; `lease_expired` is a pass stopped because the lease ran out. |
 | `send_result`, `send_stopped` | Each answer from Signal; a pass that stopped sending. |
-| `retry` | `beacon outbox retry --rejected` finished. Counts only: sent, replayed, refused, conflict, missing, failed, pending. |
+| `retry` | `beacon outbox retry --rejected` finished. Counts only: sent, replayed, refused, conflict, missing, failed, hold, never, withheld, pending. |
+| `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
+| `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
+| `history_gap` | A source's change history expired; it re-read what it could. The source only. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
 `egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,
-`source_unauthorized`, `scope_denied`, `identity_mismatch`, `item_invalid`, `project_failed`. A source that was not collected is also printed by
+`source_unauthorized`, `scope_denied`, `identity_mismatch`, `item_invalid`, `project_failed`, `prefix_unrestricted`,
+`restrictions_unknown`, `no_read_scope`. A source that was not collected is also printed by
 `run`, with the reason and not the error text.

@@ -43,8 +43,11 @@ sources:
 ## The Signal key
 
 Signal's admin gives each person's Beacon its own integration actor and key (DEC-11): scopes `write` and `relay`,
-with `--identity-prefix` patterns that cover the person's identities (`github:*`, `slack:*`, `email:*`). Beacon
-needs no `read` scope in Phase 1.
+with `--identity-prefix` patterns that cover the person's identities (`github:*`, `slack:*`, `email:*`). With a
+Google source, the key also needs `read`: a send pass reads the restricted prefixes (`GET /api/restrictions`) and
+sends nothing under `gmail:`, `calendar:` or `drive:` until Signal's admin has restricted that prefix
+([`sources.md`](sources.md#google)). Beacon reads nothing else with it. Without Google sources, no `read` scope is
+needed.
 
 `beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the login
 keychain. `beacon run` reads it from there when it sends. A dry run does not read it.
@@ -63,18 +66,22 @@ sources:
   - kind: jira
     site: acme                      # acme.atlassian.net; a label, not a hostname
     projects: ["ENG", "OPS"]
-  - kind: gmail                     # gmail, calendar and drive share the Google grant
+  - kind: gmail                     # gmail, calendar and drive share the account's Google grant
+    account: winton@example.com     # the Google account's primary address, lowercase
   - kind: calendar
+    account: winton@example.com
   - kind: drive
+    account: winton@example.com
 ```
 
 `name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
 name: `github:user:<login>`, `jira:account:<account id>`, and `email:<address>` for `gmail`, `calendar` and
 `drive`.
 
-A Google source takes only `kind` and `name`. `beacon source add google` writes them and stores the grant, which
-every Google source in the file shares: the person's OAuth client and the refresh token, in the keychain as
-`google:client` and `google:refresh`. The hosts and the API are fixed.
+A Google source takes `kind`, `name` and `account`, which is required. `beacon source add google --account` writes
+them and stores the grant every Google source of that account shares: the person's OAuth client and the refresh
+token, in the keychain as `google:<account>:client` and `google:<account>:refresh`. The source refuses a grant
+whose signed-in account is another. The hosts and the API are fixed.
 
 A GitHub `projects` list, plus every Jira source's projects, limits which issue keys become `jira:<KEY>` references.
 

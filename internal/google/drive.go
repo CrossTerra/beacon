@@ -33,6 +33,8 @@ const (
 const (
 	// driveFirst is how far back a first run reads.
 	driveFirst = 7 * 24 * time.Hour
+	// driveViewed is how far back a file the person opened counts as recently active.
+	driveViewed = 14 * 24 * time.Hour
 	// notesWindow is how far back meetings are read for notes.
 	notesWindow = 7 * 24 * time.Hour
 	// notesBodyMax is how much of a meeting notes file is read when a rule lists body.
@@ -60,17 +62,34 @@ func NewDrive(o Options) (*Drive, error) {
 	return &Drive{c}, nil
 }
 
-func drivePath(p string) bool {
+func drivePath(p string, q url.Values) bool {
 	switch p {
-	case "/drive/v3/about", "/drive/v3/files", "/calendar/v3/calendars/primary/events":
-		return true
+	case "/drive/v3/about":
+		return onlyKeys(q, "fields")
+	case "/drive/v3/files":
+		return onlyKeys(q, "q", "fields", "pageSize", "corpora", "includeItemsFromAllDrives", "supportsAllDrives", "orderBy", "pageToken")
+	case "/calendar/v3/calendars/primary/events":
+		return onlyKeys(q, eventListKeys...)
 	}
 	rest, ok := strings.CutPrefix(p, "/drive/v3/files/")
 	if !ok {
 		return false
 	}
 	id, suffix, _ := strings.Cut(rest, "/")
-	return idPattern.MatchString(id) && (suffix == "" || suffix == "comments" || suffix == "export")
+	if !idPattern.MatchString(id) {
+		return false
+	}
+	switch suffix {
+	case "":
+		// Metadata only: alt=media would download the file.
+		return onlyKeys(q, "fields", "supportsAllDrives")
+	case "comments":
+		return onlyKeys(q, "startModifiedTime", "pageSize", "fields", "pageToken")
+	case "export":
+		// Meeting notes as plain text, read only when a rule lists body.
+		return onlyKeys(q, "mimeType") && q.Get("mimeType") == "text/plain"
+	}
+	return false
 }
 
 // Fields implements source.Source.
@@ -147,7 +166,7 @@ func (d *Drive) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		return source.Collected{}, err
 	}
 	obs := d.observed()
-	files, err := d.files(ctx, floor)
+	files, err := d.files(ctx, now, floor)
 	if err != nil {
 		return source.Collected{}, err
 	}
@@ -198,25 +217,51 @@ func (d *Drive) getJSON(ctx context.Context, raw string, dest any) error {
 	return nil
 }
 
-// files lists Docs, Sheets and Slides the person can read that changed since floor. A comment updates a file's
-// modifiedTime.
-func (d *Drive) files(ctx context.Context, floor time.Time) ([]driveFile, error) {
+// files lists the Docs, Sheets and Slides whose comments are read this pass. A comment does not reliably change a
+// file's modifiedTime, so a file's comments are read when it is recently active by either measure: modified since
+// floor, or opened by the person in the last 14 days (at most 200 files, most recent first). comments.list with
+// startModifiedTime then says which comments changed. A mention on a file the person has neither opened recently nor
+// seen modified is not found.
+func (d *Drive) files(ctx context.Context, now, floor time.Time) ([]driveFile, error) {
 	var kinds []string
 	for m := range mimeTypes {
 		kinds = append(kinds, "mimeType = '"+m+"'")
 	}
 	sort.Strings(kinds)
+	types := " and trashed = false and (" + strings.Join(kinds, " or ") + ")"
+	modified, err := d.listFiles(ctx, "modifiedTime > '"+floor.Format(time.RFC3339)+"'"+types, "modifiedTime desc", 50)
+	if err != nil {
+		return nil, err
+	}
+	viewed, err := d.listFiles(ctx, "viewedByMeTime > '"+now.Add(-driveViewed).Format(time.RFC3339)+"'"+types, "viewedByMeTime desc", 2)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []driveFile
+	for _, f := range append(modified, viewed...) {
+		if !seen[f.ID] {
+			seen[f.ID] = true
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// listFiles pages through a files query. A modified-files query that does not end within maxPages fails the pass;
+// the recently-viewed query is capped by design and stops there.
+func (d *Drive) listFiles(ctx context.Context, query, order string, maxPages int) ([]driveFile, error) {
 	q := url.Values{
-		"q":                         {"modifiedTime > '" + floor.Format(time.RFC3339) + "' and trashed = false and (" + strings.Join(kinds, " or ") + ")"},
+		"q":                         {query},
 		"fields":                    {"nextPageToken,files(id,name,mimeType,webViewLink)"},
 		"pageSize":                  {"100"},
 		"corpora":                   {"user"},
 		"includeItemsFromAllDrives": {"true"},
 		"supportsAllDrives":         {"true"},
-		"orderBy":                   {"modifiedTime desc"},
+		"orderBy":                   {order},
 	}
 	var out []driveFile
-	for pages := 0; pages < 50; pages++ {
+	for pages := 0; pages < maxPages; pages++ {
 		var page struct {
 			Files         []driveFile `json:"files"`
 			NextPageToken string      `json:"nextPageToken"`
@@ -233,6 +278,9 @@ func (d *Drive) files(ctx context.Context, floor time.Time) ([]driveFile, error)
 			return out, nil
 		}
 		q.Set("pageToken", page.NextPageToken)
+	}
+	if strings.HasPrefix(query, "viewedByMeTime") {
+		return out, nil
 	}
 	return nil, errors.New("drive: file pagination did not end")
 }

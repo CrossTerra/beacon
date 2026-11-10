@@ -54,11 +54,14 @@ func New(t testing.TB) *Server {
 		"/gmail/v1/users/me/labels":             text(Labels),
 		"/gmail/v1/users/me/history":            s.history,
 		"/gmail/v1/users/me/threads":            text(InboxThreads),
-		"/gmail/v1/users/me/messages":           text(Starred),
+		"/gmail/v1/users/me/messages":           s.messages,
 		"/gmail/v1/users/me/threads/t1":         text(ThreadT1),
 		"/gmail/v1/users/me/threads/t2":         text(ThreadT2),
 		"/gmail/v1/users/me/threads/t3":         text(ThreadT3),
 		"/gmail/v1/users/me/threads/t4":         text(ThreadT4),
+		"/gmail/v1/users/me/threads/t5":         text(ThreadT5),
+		"/gmail/v1/users/me/messages/m6":        text(`{"id":"m6","payload":{"mimeType":"text/plain","body":{"data":"V2lyZQ"}}}`),
+		"/drive/v3/files/f2/comments":           text(CommentsF2),
 		"/gmail/v1/users/me/threads/t8":         text(ThreadT8),
 		"/gmail/v1/users/me/threads/t9":         text(ThreadT9),
 		"/gmail/v1/users/me/messages/m1":        text(FullM1),
@@ -67,7 +70,7 @@ func New(t testing.TB) *Server {
 		"/gmail/v1/users/me/messages/m5":        text(`{"id":"m5","payload":{"mimeType":"text/plain","body":{"data":"U2FsZQ=="}}}`),
 		"/calendar/v3/calendars/primary/events": s.events,
 		"/drive/v3/about":                       text(`{"user":{"emailAddress":"` + Email + `"}}`),
-		"/drive/v3/files":                       text(Files),
+		"/drive/v3/files":                       s.files,
 		"/drive/v3/files/f1/comments":           text(CommentsF1),
 		"/drive/v3/files/n1":                    text(NotesN1),
 		"/drive/v3/files/n1/export":             text("Weekly sync\nDecisions: ship on Friday.\n"),
@@ -116,6 +119,17 @@ func (s *Server) Called(path string) bool {
 	return false
 }
 
+// Queries returns the query of every request to path, in order.
+func (s *Server) Queries(path string) []url.Values {
+	var out []url.Values
+	for _, r := range s.Requests() {
+		if r.URL.Path == path {
+			out = append(out, r.URL.Query())
+		}
+	}
+	return out
+}
+
 // Query returns the query of the last request to path.
 func (s *Server) Query(path string) url.Values {
 	var q url.Values
@@ -160,6 +174,25 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Query().Get("labelIds") {
+	case "INBOX":
+		io.WriteString(w, InboxMessages)
+	case "SENT":
+		io.WriteString(w, SentMessages)
+	default:
+		io.WriteString(w, Starred)
+	}
+}
+
+func (s *Server) files(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Query().Get("q"), "viewedByMeTime") {
+		io.WriteString(w, ViewedFiles)
+		return
+	}
+	io.WriteString(w, Files)
+}
+
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("pageToken") == "p2" {
 		io.WriteString(w, HistoryPage2)
@@ -193,6 +226,7 @@ const (
   {"id":"203","messagesAdded":[{"message":{"id":"m3","threadId":"t2","labelIds":["INBOX","UNREAD"]}}]},
   {"id":"204","messagesAdded":[{"message":{"id":"m4","threadId":"t3","labelIds":["DRAFT"]}}]},
   {"id":"205","messagesAdded":[{"message":{"id":"m5","threadId":"t4","labelIds":["INBOX","CATEGORY_PROMOTIONS","UNREAD"]}}]},
+  {"id":"208","messagesAdded":[{"message":{"id":"m6","threadId":"t5","labelIds":["INBOX","UNREAD"]}}]},
   {"id":"206","labelsAdded":[{"message":{"id":"m1","threadId":"t1","labelIds":["INBOX","STARRED"]},"labelIds":["STARRED"]}]},
   {"id":"207","labelsAdded":[{"message":{"id":"m3","threadId":"t2","labelIds":["INBOX","Label_1"]},"labelIds":["Label_1"]}]}
 ],"historyId":"350"}`
@@ -231,6 +265,16 @@ const (
   {"id":"m8d","threadId":"t8","labelIds":["DRAFT"],"internalDate":"1794138300000","payload":{"headers":[
     {"name":"From","value":"winton@example.com"},{"name":"Subject","value":"Re: Old thread"}]}}
 ]}`
+
+	// ThreadT5's message claims to be from the person, and has no SENT label: someone forged the From header.
+	ThreadT5 = `{"id":"t5","messages":[
+  {"id":"m6","threadId":"t5","labelIds":["INBOX","UNREAD"],"internalDate":"1794138300000","payload":{"headers":[
+    {"name":"From","value":"Winton <winton@example.com>"},{"name":"To","value":"winton@example.com"},{"name":"Subject","value":"Please wire the funds"}]}}
+]}`
+
+	// InboxMessages and SentMessages are the label listings a pass reads when the history has expired.
+	InboxMessages = `{"messages":[{"id":"m5","threadId":"t4"},{"id":"m6","threadId":"t5"},{"id":"m3","threadId":"t2"},{"id":"m1","threadId":"t1"},{"id":"m9","threadId":"t9"}]}`
+	SentMessages  = `{"messages":[{"id":"m2","threadId":"t1"}]}`
 
 	InboxThreads = `{"threads":[{"id":"t4"},{"id":"t8"},{"id":"t2"},{"id":"t1"},{"id":"t9"}]}`
 	Starred      = `{"messages":[{"id":"m1","threadId":"t1"}]}`
@@ -282,6 +326,13 @@ const (
 // Drive. f1 is a Doc with comments; n1 is meeting notes for evA, which the person accepted.
 const (
 	Files = `{"files":[{"id":"f1","name":"Q4 plan","mimeType":"application/vnd.google-apps.document","webViewLink":"https://docs.google.com/document/d/f1/edit?usp=drivesdk"}]}`
+
+	// ViewedFiles are files the person opened recently. f2's comments did not change its modifiedTime.
+	ViewedFiles = `{"files":[{"id":"f2","name":"Hiring rubric","mimeType":"application/vnd.google-apps.spreadsheet","webViewLink":"https://docs.google.com/spreadsheets/d/f2/edit"},{"id":"f1","name":"Q4 plan","mimeType":"application/vnd.google-apps.document","webViewLink":"https://docs.google.com/document/d/f1/edit?usp=drivesdk"}]}`
+
+	CommentsF2 = `{"comments":[
+  {"id":"c7","createdTime":"2026-11-08T11:55:00Z","author":{"displayName":"Erin","me":false},"mentionedEmailAddresses":["winton@example.com"],"resolved":false,"content":"@winton can you score row 4"}
+]}`
 
 	CommentsF1 = `{"comments":[
   {"id":"c1","createdTime":"2026-11-08T11:00:00Z","author":{"displayName":"Dana Lee","me":false},"mentionedEmailAddresses":["winton@example.com"],"resolved":true,"content":"@winton please check the numbers",

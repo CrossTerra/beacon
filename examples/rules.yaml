@@ -131,12 +131,13 @@ rules:
 
   # --- Google
 
-  # Your own mail, responses, comments and resolves close your open asks on that thread.
+  # Your own mail (the SENT label, never a From header), calendar responses and events your account
+  # created, and your comments and resolves close your open asks on that thread. Your sent mail leaves
+  # as its link and ids only: no subject, no addresses.
   - name: gmail-own-acts
     match: {source: gmail, own: true}
     tier: send
-    fields: [subject, link]
-    state: [unread, starred, last_from]
+    fields: [link]
 
   - name: calendar-own-acts
     match: {source: calendar, own: true}
@@ -189,7 +190,8 @@ rules:
     fields: [summary, start, end, organizer, attendees, link, actor]
     state: [status, start, end, response]
 
-  # Someone else created, changed or cancelled an event on your calendar.
+  # An event on your calendar was created by someone else, changed or cancelled. Calendar does not say
+  # who changed an event, so a change to an event you organise is here too, not an own act.
   - name: calendar-changes
     match:
       source: calendar

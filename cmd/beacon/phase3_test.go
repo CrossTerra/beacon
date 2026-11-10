@@ -16,6 +16,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/egress/egresstest"
 	"github.com/CrossTerra/beacon/internal/google/googletest"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
 )
 
@@ -32,6 +33,9 @@ state: state
 mode: dry-run
 sources:
 `
+
+// googleSources are the three Google sources for the fixture's account.
+const googleSources = "  - kind: gmail\n    account: winton@example.com\n  - kind: calendar\n    account: winton@example.com\n  - kind: drive\n    account: winton@example.com\n"
 
 // googleApp is an app whose Google endpoints are the fake, and whose transport fails the test on any host not on
 // the egress list.
@@ -67,6 +71,9 @@ func TestSourceAddGoogle(t *testing.T) {
 		u, _ := url.Parse(consent)
 		q := u.Query()
 		asked = strings.Fields(q.Get("scope"))
+		if q.Get("login_hint") != googletest.Email {
+			t.Errorf("login_hint %q", q.Get("login_hint"))
+		}
 		srv.Challenge = q.Get("code_challenge")
 		go func() {
 			resp, err := http.Get(fmt.Sprintf("%s?code=%s&state=%s", q.Get("redirect_uri"), srv.Code, url.QueryEscape(q.Get("state"))))
@@ -76,7 +83,11 @@ func TestSourceAddGoogle(t *testing.T) {
 		}()
 		return nil
 	}
-	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--client-file", clientFile, "--open"}); code != 0 {
+	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--client-file", clientFile, "--open"}); code == 0 || !strings.Contains(errOut.String(), "--account") {
+		t.Fatalf("no --account: exit %d\n%s", code, errOut.String())
+	}
+	errOut.Reset()
+	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--account", "Winton@Example.com", "--client-file", clientFile, "--open"}); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
 	}
 	if strings.Join(asked, " ") != googletest.AllScopes {
@@ -97,15 +108,15 @@ func TestSourceAddGoogle(t *testing.T) {
 			t.Fatalf("config holds a credential:\n%s", data)
 		}
 	}
-	for _, kind := range []string{"kind: gmail", "kind: calendar", "kind: drive"} {
+	for _, kind := range []string{"kind: gmail", "kind: calendar", "kind: drive", "account: winton@example.com"} {
 		if !strings.Contains(string(data), kind) {
 			t.Fatalf("missing %s:\n%s", kind, data)
 		}
 	}
-	if _, err := store.Get(keychain.GoogleClientAccount); err != nil {
+	if _, err := store.Get("google:winton@example.com:client"); err != nil {
 		t.Fatal("client not stored")
 	}
-	refresh, err := store.Get(keychain.GoogleRefreshAccount)
+	refresh, err := store.Get("google:winton@example.com:refresh")
 	if err != nil {
 		t.Fatal("refresh token not stored")
 	}
@@ -124,7 +135,7 @@ func TestSourceAddGoogle(t *testing.T) {
 	// Google source in the config.
 	out.Reset()
 	errOut.Reset()
-	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--gmail", "--open"}); code != 0 {
+	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--account", googletest.Email, "--gmail", "--open"}); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
 	}
 	if strings.Join(asked, " ") != googletest.AllScopes {
@@ -140,13 +151,13 @@ func TestSourceAddGoogleNeedsClient(t *testing.T) {
 	var out, errOut strings.Builder
 	var rec *egresstest.Recorder
 	a := googleApp(t, srv, keychain.NewMemory(), &rec, &out, &errOut)
-	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg}); code == 0 || !strings.Contains(errOut.String(), "--client-file") {
+	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--account", googletest.Email}); code == 0 || !strings.Contains(errOut.String(), "--client-file") {
 		t.Fatalf("exit %d\n%s", code, errOut.String())
 	}
 	web := filepath.Join(dir, "web.json")
 	must(t, os.WriteFile(web, []byte(`{"web":{"client_id":"a","client_secret":"b"}}`), 0o600))
 	errOut.Reset()
-	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--client-file", web}); code == 0 || !strings.Contains(errOut.String(), "Desktop app") {
+	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--account", googletest.Email, "--client-file", web}); code == 0 || !strings.Contains(errOut.String(), "Desktop app") {
 		t.Fatalf("exit %d\n%s", code, errOut.String())
 	}
 }
@@ -155,15 +166,15 @@ func TestGoogleStarterRules(t *testing.T) {
 	srv := googletest.New(t)
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
-	must(t, os.WriteFile(cfg, []byte(googleConfig+"  - kind: gmail\n  - kind: calendar\n  - kind: drive\n"), 0o600))
+	must(t, os.WriteFile(cfg, []byte(googleConfig+googleSources), 0o600))
 	rulesFile, err := os.ReadFile(filepath.Join("..", "..", "examples", "rules.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), rulesFile, 0o600))
 	store := keychain.NewMemory()
-	store.Put(keychain.GoogleClientAccount, `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
-	store.Put(keychain.GoogleRefreshAccount, googletest.Refresh)
+	store.Put(keychain.GoogleClientAccount(googletest.Email), `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
+	store.Put(keychain.GoogleRefreshAccount(googletest.Email), googletest.Refresh)
 	var out, errOut strings.Builder
 	var rec *egresstest.Recorder
 	a := googleApp(t, srv, store, &rec, &out, &errOut)
@@ -226,8 +237,14 @@ func TestGoogleStarterRules(t *testing.T) {
 		"calendar:ev2:upcoming:3002":        "send",
 		"calendar:ev4:upcoming:3004":        "send",
 		"drive:f1:comment:c2":               "send",
+		"drive:f2:comment:c7":               "send",
 		"drive:notes:n1":                    "send",
 	})
+	for _, line := range strings.Split(first, "\n") {
+		if strings.Contains(line, `"key":"gmail:t1:m2"`) && (strings.Contains(line, "Budget") || strings.Contains(line, "dana@") || !strings.Contains(line, `"link"`)) {
+			t.Fatalf("an own sent mail leaves more than its link and ids: %s", line)
+		}
+	}
 	if !strings.Contains(first, `"to":["@winton"]`) || !strings.Contains(first, `"subject":"calendar:winton:ev1"`) || !strings.Contains(first, `"due_at":"2026-11-09T17:00:00.000Z"`) {
 		t.Fatalf("the response-needed ask is not in the report:\n%s", first)
 	}
@@ -268,7 +285,9 @@ func TestGoogleStarterRules(t *testing.T) {
 		"drive:f1:comment:c3":               "send",
 		"drive:f1:reply:c1:r1":              "send",
 		"drive:f1:reply:c1:r2":              "send",
+		"drive:f2:comment:c7":               "send",
 		"drive:notes:n1":                    "send",
+		"gmail:t5:m6":                       "hold",
 	})
 	if !strings.Contains(later, `"by":{"identity":"email:winton@example.com"}`) {
 		t.Fatalf("own acts carry no by:\n%s", later)
@@ -285,7 +304,7 @@ func TestGoogleStarterRules(t *testing.T) {
 func TestEgressListsGoogleHosts(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
-	must(t, os.WriteFile(cfg, []byte(googleConfig+"  - kind: gmail\n  - kind: calendar\n  - kind: drive\n"), 0o600))
+	must(t, os.WriteFile(cfg, []byte(googleConfig+googleSources), 0o600))
 	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules: []\n"), 0o600))
 	var out strings.Builder
 	a := &app{stdout: &out, stderr: &out}
@@ -306,7 +325,7 @@ func TestEgressListsGoogleHosts(t *testing.T) {
 func TestGoogleNeedsHandle(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
-	must(t, os.WriteFile(cfg, []byte(strings.Replace(googleConfig, `"@winton"`, "act_123", 1)+"  - kind: gmail\n"), 0o600))
+	must(t, os.WriteFile(cfg, []byte(strings.Replace(googleConfig, `"@winton"`, "act_123", 1)+"  - kind: gmail\n    account: winton@example.com\n"), 0o600))
 	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), []byte("rules: []\n"), 0o600))
 	var out strings.Builder
 	a := &app{stdout: &out, stderr: &out}
@@ -321,11 +340,12 @@ func TestGoogleSendCommitsCursors(t *testing.T) {
 	srv := googletest.New(t)
 	sig := signaltest.New("sig-key")
 	t.Cleanup(sig.Close)
+	sig.Restrict("gmail:*", "calendar:*", "drive:*")
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 	conf := strings.Replace(googleConfig, "https://signal.example.com", sig.URL+"\n  keychain_account: test", 1)
 	conf = strings.Replace(conf, "mode: dry-run", "mode: send", 1)
-	must(t, os.WriteFile(cfg, []byte(conf+"  - kind: gmail\n  - kind: calendar\n  - kind: drive\n"), 0o600))
+	must(t, os.WriteFile(cfg, []byte(conf+googleSources), 0o600))
 	rulesFile, err := os.ReadFile(filepath.Join("..", "..", "examples", "rules.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -333,8 +353,8 @@ func TestGoogleSendCommitsCursors(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), rulesFile, 0o600))
 	store := keychain.NewMemory()
 	store.Put("test", "sig-key")
-	store.Put(keychain.GoogleClientAccount, `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
-	store.Put(keychain.GoogleRefreshAccount, googletest.Refresh)
+	store.Put(keychain.GoogleClientAccount(googletest.Email), `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
+	store.Put(keychain.GoogleRefreshAccount(googletest.Email), googletest.Refresh)
 	var out, errOut strings.Builder
 	var rec *egresstest.Recorder
 	a := googleApp(t, srv, store, &rec, &out, &errOut)
@@ -360,7 +380,7 @@ func TestGoogleSendCommitsCursors(t *testing.T) {
 	run("accept-first")
 	run("run", "--once")
 	gm, ok := cursors().Get("gmail")
-	if !ok || string(gm) != "300" {
+	if !ok || !strings.Contains(string(gm), `"history_id":"300"`) {
 		t.Fatalf("gmail cursor %q", gm)
 	}
 	if d, ok := cursors().Get("drive"); !ok || string(d) != "2026-11-08T12:00:00Z" {
@@ -396,7 +416,165 @@ func TestGoogleSendCommitsCursors(t *testing.T) {
 	if q := srv.Query("/drive/v3/files/f1/comments"); q.Get("startModifiedTime") != "2026-11-08T11:45:00Z" {
 		t.Fatalf("drive read from %v", q)
 	}
-	if gm, _ := cursors().Get("gmail"); string(gm) != "350" {
+	if gm, _ := cursors().Get("gmail"); !strings.Contains(string(gm), `"history_id":"350"`) {
 		t.Fatalf("gmail cursor %q", gm)
+	}
+}
+
+// googleSendSetup is a send-mode config with the three Google sources and the starter rules, against the fake
+// Google and the fake Signal. run fails the test on a non-zero exit and returns the report.
+func googleSendSetup(t *testing.T) (sig *signaltest.Server, dir string, a *app, run func(args ...string) string) {
+	t.Helper()
+	srv := googletest.New(t)
+	sig = signaltest.New("sig-key")
+	t.Cleanup(sig.Close)
+	dir = t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	conf := strings.Replace(googleConfig, "https://signal.example.com", sig.URL+"\n  keychain_account: test", 1)
+	conf = strings.Replace(conf, "mode: dry-run", "mode: send", 1)
+	must(t, os.WriteFile(cfg, []byte(conf+googleSources), 0o600))
+	rulesFile, err := os.ReadFile(filepath.Join("..", "..", "examples", "rules.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), rulesFile, 0o600))
+	store := keychain.NewMemory()
+	store.Put("test", "sig-key")
+	store.Put(keychain.GoogleClientAccount(googletest.Email), `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
+	store.Put(keychain.GoogleRefreshAccount(googletest.Email), googletest.Refresh)
+	var out, errOut strings.Builder
+	var rec *egresstest.Recorder
+	a = googleApp(t, srv, store, &rec, &out, &errOut)
+	a.configureClient = func(c *signal.Client) { c.Attempts = 1 }
+	run = func(args ...string) string {
+		t.Helper()
+		out.Reset()
+		errOut.Reset()
+		if code := a.main(context.Background(), append(args, "--config", cfg)); code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
+		}
+		return out.String() + errOut.String()
+	}
+	run("run", "--first", "--once")
+	run("accept-first")
+	return sig, dir, a, run
+}
+
+func personalEvents(sig *signaltest.Server) []string {
+	var out []string
+	for _, e := range sig.Events() {
+		for _, stem := range []string{`"subject":"gmail:`, `"subject":"calendar:`, `"subject":"drive:`} {
+			if strings.Contains(string(e.Body), stem) {
+				out = append(out, e.Key)
+			}
+		}
+	}
+	return out
+}
+
+func TestPersonalPrefixesMustBeRestricted(t *testing.T) {
+	sig, dir, _, run := googleSendSetup(t)
+	// Only calendar:* is restricted, and gmail has a longer stem under which Signal would read "thread" as the
+	// owner. Gmail and Drive send items are held, and only Calendar's are sent.
+	sig.Restrict("calendar:*", "gmail:winton:*")
+	report := run("run", "--once")
+	for _, want := range []string{
+		"source gmail: 2 items held, not sent: gmail:* is not restricted in Signal",
+		"source drive: 3 items held, not sent: drive:* is not restricted in Signal",
+		"held, not sent: its subject prefix is not restricted in Signal",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report misses %q:\n%s", want, report)
+		}
+	}
+	if !strings.Contains(report, `"msg":"withheld","source":"gmail","items":2,"reason":"prefix_unrestricted"`) {
+		t.Fatalf("log:\n%s", report)
+	}
+	for _, k := range personalEvents(sig) {
+		if !strings.HasPrefix(k, "calendar:") {
+			t.Fatalf("%s was sent under an unrestricted prefix", k)
+		}
+	}
+	if len(personalEvents(sig)) == 0 {
+		t.Fatal("calendar, which is restricted, sent nothing")
+	}
+	held, err := os.ReadFile(filepath.Join(dir, "state", "held.jsonl"))
+	if err != nil || !strings.Contains(string(held), "gmail:t1:starred:m1") || !strings.Contains(string(held), "drive:f1:comment:c2") {
+		t.Fatalf("not held:\n%s", held)
+	}
+	// Held is a decision: the cursors move, and a later pass does not decide those keys again.
+	st, err := cursor.Read(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Get("gmail"); !ok {
+		t.Fatal("gmail cursor did not move")
+	}
+}
+
+func TestUnreadableRestrictionsSendNothingPersonal(t *testing.T) {
+	sig, dir, _, run := googleSendSetup(t)
+	sig.NoRead = true
+	report := run("run", "--once")
+	if !strings.Contains(report, "Signal's restricted prefixes could not be read (no_read_scope). Beacon's key needs the read scope.") ||
+		!strings.Contains(report, `"msg":"restrictions_unread","reason":"no_read_scope"`) {
+		t.Fatalf("report:\n%s", report)
+	}
+	if k := personalEvents(sig); len(k) != 0 {
+		t.Fatalf("sent %v without proof the prefixes are restricted", k)
+	}
+	st, err := cursor.Read(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gmail", "calendar", "drive"} {
+		if _, ok := st.Get(name); ok {
+			t.Fatalf("%s cursor moved past items it did not record", name)
+		}
+	}
+	if held, _ := os.ReadFile(filepath.Join(dir, "state", "held.jsonl")); strings.Contains(string(held), "gmail:t1:starred:m1") {
+		t.Fatal("an unverified send was held for good; it should wait for a pass that can read the restrictions")
+	}
+	// Once Signal answers and the prefixes are restricted, the same items are decided and sent.
+	sig.NoRead = false
+	sig.Restrict("gmail:*", "calendar:*", "drive:*")
+	run("run", "--once")
+	if _, ok := sig.Event("gmail:t1:starred:m1"); !ok {
+		t.Fatal("not sent once the prefixes were restricted")
+	}
+	st, _ = cursor.Read(filepath.Join(dir, "state"))
+	if _, ok := st.Get("gmail"); !ok {
+		t.Fatal("gmail cursor did not move")
+	}
+}
+
+func TestPendingPersonalBodiesWaitForTheRestriction(t *testing.T) {
+	sig, _, _, run := googleSendSetup(t)
+	sig.Restrict("gmail:*", "calendar:*", "drive:*")
+	// Signal is down for events: everything is appended and stays pending.
+	sig.Script = func(_ int, req signaltest.Request) signaltest.Reply {
+		if strings.HasPrefix(req.Key, "claim:") {
+			return signaltest.Reply{}
+		}
+		return signaltest.Reply{Status: 503, Body: `{"error":{"code":"unavailable","message":"down"}}`}
+	}
+	run("run", "--once")
+	if len(personalEvents(sig)) != 0 {
+		t.Fatal("sent while Signal was down")
+	}
+	// The gmail restriction is lifted before the pending bodies go.
+	sig.Script = nil
+	sig.Restrict("calendar:*", "drive:*")
+	report := run("run", "--once")
+	if !strings.Contains(report, "Pending bodies on personal subjects not sent: 2.") {
+		t.Fatalf("report:\n%s", report)
+	}
+	for _, k := range personalEvents(sig) {
+		if strings.HasPrefix(k, "gmail:") {
+			t.Fatalf("%s was sent after gmail:* was lifted", k)
+		}
+	}
+	if _, ok := sig.Event("drive:f1:comment:c2"); !ok {
+		t.Fatal("drive, still restricted, was not sent")
 	}
 }

@@ -44,18 +44,33 @@ func NewGmail(o Options) (*Gmail, error) {
 	return &Gmail{c}, nil
 }
 
-func gmailPath(p string) bool {
+func gmailPath(p string, q url.Values) bool {
 	const prefix = "/gmail/v1/users/me/"
-	if !strings.HasPrefix(p, prefix) {
+	rest, ok := strings.CutPrefix(p, prefix)
+	if !ok {
 		return false
 	}
-	rest := strings.TrimPrefix(p, prefix)
 	switch rest {
-	case "profile", "labels", "history", "threads", "messages":
-		return true
+	case "profile", "labels":
+		return onlyKeys(q)
+	case "history":
+		return onlyKeys(q, "startHistoryId", "historyTypes", "maxResults", "pageToken")
+	case "threads", "messages":
+		return onlyKeys(q, "labelIds", "maxResults", "pageToken")
 	}
 	kind, id, ok := strings.Cut(rest, "/")
-	return ok && (kind == "threads" || kind == "messages") && idPattern.MatchString(id)
+	if !ok || !idPattern.MatchString(id) {
+		return false
+	}
+	switch kind {
+	case "threads":
+		// Headers only.
+		return onlyKeys(q, "format", "metadataHeaders") && q.Get("format") == "metadata"
+	case "messages":
+		// A body, read only when a rule lists body. Never raw, never an attachment.
+		return onlyKeys(q, "format") && q.Get("format") == "full"
+	}
+	return false
 }
 
 // Fields implements source.Source.
@@ -140,9 +155,10 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		return source.Collected{}, err
 	}
 	g.clock.Reset()
+	var cur gmailCursor
 	if len(cursor) > 0 {
-		if _, err := strconv.ParseUint(string(cursor), 10, 64); err != nil {
-			return source.Collected{}, errors.New("gmail: the cursor is not a history id")
+		if cur, err = parseGmailCursor(cursor); err != nil {
+			return source.Collected{}, err
 		}
 	}
 	var profile struct {
@@ -165,17 +181,26 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	}
 	threads := map[string]*gmailThread{}
 	var refs []ref
-	next := profile.HistoryID
+	gap := false
+	next := gmailCursor{HistoryID: profile.HistoryID, At: cur.At}
 	if len(cursor) == 0 {
 		refs, err = g.open(ctx, threads)
 	} else {
 		var got string
-		refs, got, err = g.history(ctx, string(cursor))
+		refs, got, err = g.history(ctx, cur.HistoryID)
 		if isStatus(err, http.StatusNotFound) {
-			// The history id expired. Read open state again; keys make the overlap harmless.
+			// The history id expired, so the changes since it are gone from the API. Read open state again, and
+			// every inbox and sent message since the last pass, so earlier messages and the person's own acts in
+			// the gap are not lost. Keys make the overlap harmless. The gap is reported.
+			gap = true
 			refs, err = g.open(ctx, threads)
+			if err == nil {
+				var more []ref
+				more, err = g.since(ctx, threads, cur.At)
+				refs = append(refs, more...)
+			}
 		} else if got != "" {
-			next = got
+			next.HistoryID = got
 		}
 	}
 	if err != nil {
@@ -211,7 +236,101 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		items = append(items, it)
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Key < items[j].Key })
-	return source.Collected{Items: items, Next: []byte(next)}, nil
+	// The time of this pass bounds a later gap read. It is the server's Date, else the newest message seen.
+	if t := g.clock.First(); !t.IsZero() {
+		next.At = t.Format(time.RFC3339)
+	} else {
+		newest, _ := parseTime(next.At)
+		for _, it := range items {
+			if it.OccurredAt.After(newest) {
+				newest = it.OccurredAt
+			}
+		}
+		if !newest.IsZero() {
+			next.At = newest.UTC().Format(time.RFC3339)
+		}
+	}
+	data, err := json.Marshal(next)
+	if err != nil {
+		return source.Collected{Items: items}, err
+	}
+	return source.Collected{Items: items, Next: data, Gap: gap}, nil
+}
+
+// gmailCursor is the history id to read from, and when the pass that stored it ran. The time bounds what a pass
+// re-reads when the history id has expired.
+type gmailCursor struct {
+	HistoryID string `json:"history_id"`
+	At        string `json:"at,omitempty"`
+}
+
+func parseGmailCursor(b []byte) (gmailCursor, error) {
+	var c gmailCursor
+	if err := json.Unmarshal(b, &c); err != nil {
+		// A bare history id, with no time.
+		c = gmailCursor{HistoryID: string(b)}
+	}
+	if _, err := strconv.ParseUint(c.HistoryID, 10, 64); err != nil {
+		return gmailCursor{}, errors.New("gmail: the cursor is not a history id")
+	}
+	if c.At != "" {
+		if _, err := parseTime(c.At); err != nil {
+			return gmailCursor{}, errors.New("gmail: the cursor time could not be read")
+		}
+	}
+	return c, nil
+}
+
+// since lists inbox and sent messages, newest first, back to 15 minutes before at (14 days when at is unknown). It
+// uses labels, not a search: gmail.metadata cannot search.
+func (g *Gmail) since(ctx context.Context, threads map[string]*gmailThread, at string) ([]ref, error) {
+	cutoff := g.now().Add(-gmailLookback)
+	if t, err := parseTime(at); err == nil && t.Add(-source.Lookback).After(cutoff) {
+		cutoff = t.Add(-source.Lookback)
+	}
+	var refs []ref
+	for _, label := range []string{"INBOX", "SENT"} {
+		token := ""
+	pages:
+		for pages := 0; pages < 20; pages++ {
+			q := url.Values{"labelIds": {label}, "maxResults": {"100"}}
+			if token != "" {
+				q.Set("pageToken", token)
+			}
+			var page struct {
+				Messages []struct {
+					ID       string `json:"id"`
+					ThreadID string `json:"threadId"`
+				} `json:"messages"`
+				NextPageToken string `json:"nextPageToken"`
+			}
+			if err := g.getJSON(ctx, "messages", q, &page); err != nil {
+				return nil, err
+			}
+			for _, m := range page.Messages {
+				t, err := g.thread(ctx, threads, m.ThreadID)
+				if gone(err) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				msg := t.find(m.ID)
+				if msg == nil {
+					continue
+				}
+				if msg.at().Before(cutoff) {
+					break pages
+				}
+				refs = append(refs, ref{thread: t.ID, message: m.ID})
+			}
+			if page.NextPageToken == "" {
+				break
+			}
+			token = page.NextPageToken
+		}
+	}
+	return refs, nil
 }
 
 func (g *Gmail) url(path string, q url.Values) string {
@@ -458,7 +577,9 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 		}
 	}
 	from := firstAddress(m.header("From"))
-	own := m.has("SENT") || (from != "" && from == me)
+	// Only the SENT label says the person sent it. A From header is the sender's claim, and anyone can write the
+	// person's address there; it must not make an own act that closes their asks.
+	own := m.has("SENT")
 	typ := TypeReceived
 	if own {
 		typ = TypeSent
@@ -484,7 +605,7 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 		"subject": oneLine(live[0].header("Subject")),
 		"date":    at.Format(time.RFC3339),
 		"labels":  labelNames(m.LabelIDs, labels),
-		"link":    "https://mail.google.com/mail/u/" + url.PathEscape(me) + "/#all/" + t.ID,
+		"link":    "https://mail.google.com/mail/?" + url.Values{"authuser": {me}}.Encode() + "#all/" + t.ID,
 	}
 	state := g.threadState(live, labels)
 	keyID := t.ID + ":" + m.ID
