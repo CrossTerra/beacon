@@ -198,8 +198,10 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		}
 		seen[it.Key] = true
 		if bodies && it.Type != TypeStarred {
+			// The item is already built from the thread. A body that one message will not give up (gone, or a
+			// permission 403) is left out; the item is still emitted. A rate limit or a refused grant fails the pass.
 			body, err := g.body(ctx, r.message)
-			if err != nil && !gone(err) {
+			if err != nil && !unavailable(err) {
 				return source.Collected{Items: items}, err
 			}
 			if body != "" {

@@ -254,7 +254,8 @@ nor notes text.
 and the next cursor is the history id that response reports. An expired history id (`404`) reads open state again;
 keys make the overlap harmless. The history id has no lookback, so a thread the history names is skipped only when
 it is gone (`404`, deleted since). Any other failure reading it, a `403` included, fails the pass and the cursor
-stays.
+stays. A body is optional: a message that will not give up its body (`404`, or a permission `403`) is sent without
+it; a rate limit or a refused grant there still fails the pass.
 
 **First run.** The latest message of each inbox thread with a message in the last 14 days, and starred messages from
 the last 14 days. Both lists are newest first, and paging stops at the first older entry. The inbox list is ordered by a thread's

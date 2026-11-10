@@ -689,3 +689,29 @@ func TestCalendarMovedOutOfTheWindow(t *testing.T) {
 		t.Fatalf("%+v", m["calendar:ev3:changed:3203"])
 	}
 }
+
+func TestGmailBodyForbiddenKeepsTheItem(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Scope = ScopeGmailReadonly
+	srv.Routes["/gmail/v1/users/me/messages/m1"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"code":403,"errors":[{"reason":"forbidden"}]}}`)
+	}
+	g, _ := NewGmail(opts(t, srv))
+	g.SetBodies(true)
+	got, err := g.Collect(context.Background(), []byte("100"))
+	if err != nil || string(got.Next) != "350" {
+		t.Fatalf("%v %q", err, got.Next)
+	}
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	if it, ok := m["gmail:t1:m1"]; !ok || it.Fields["body"] != "" {
+		t.Fatalf("item %+v", it)
+	}
+	srv.Routes["/gmail/v1/users/me/messages/m1"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"code":403,"errors":[{"reason":"rateLimitExceeded"}]}}`)
+	}
+	if _, err := g.Collect(context.Background(), []byte("100")); !errors.Is(err, source.ErrRateLimited) {
+		t.Fatalf("a rate limit on a body: %v", err)
+	}
+}
