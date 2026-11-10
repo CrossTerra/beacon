@@ -86,6 +86,12 @@ type Source struct {
 	// Account is the Google account a Gmail, Calendar or Drive source reads, its primary address. Its grant is in the
 	// keychain as google:<account>:client and google:<account>:refresh.
 	Account string `yaml:"account,omitempty"`
+	// Workspace and User are a Slack source's workspace (team) id and the token's user id. The token is in the
+	// keychain as slack:<workspace>:<user>.
+	Workspace string `yaml:"workspace,omitempty"`
+	User      string `yaml:"user,omitempty"`
+	// Channels are Slack channel ids whose top-level messages a Slack source reads for review requests.
+	Channels []string `yaml:"channels,omitempty"`
 }
 
 // GoogleKinds are the source kinds that share the Google grant.
@@ -136,6 +142,10 @@ var (
 	sitePattern     = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 	accountPattern  = regexp.MustCompile(`^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$`)
 	hostPattern     = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$`)
+	// Slack ids: a workspace is T… (E… on Enterprise Grid), a user U… or W…, a channel C….
+	workspacePattern = regexp.MustCompile(`^[TE][A-Z0-9]{2,30}$`)
+	slackUserPattern = regexp.MustCompile(`^[UW][A-Z0-9]{2,30}$`)
+	channelPattern   = regexp.MustCompile(`^C[A-Z0-9]{2,30}$`)
 )
 
 // Load reads and validates the config file at path.
@@ -216,7 +226,15 @@ func (c *Config) validate() error {
 		} else {
 			names[name] = i
 		}
+		if s.Kind != "slack" && s.slackKeys() {
+			errs = append(errs, fmt.Errorf("sources[%d]: workspace, user and channels are for a slack source", i))
+		}
 		switch s.Kind {
+		case "slack":
+			errs = append(errs, s.validateSlack(i)...)
+			if !strings.HasPrefix(c.Person.Handle, "@") {
+				errs = append(errs, fmt.Errorf("sources[%d]: a slack source needs person.handle as @handle: direct-message subjects carry it (DEC-10)", i))
+			}
 		case "fixture":
 			if s.Path == "" {
 				errs = append(errs, fmt.Errorf("sources[%d]: a fixture needs path", i))
@@ -243,6 +261,35 @@ func (c *Config) validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (s Source) slackKeys() bool {
+	return s.Workspace != "" || s.User != "" || len(s.Channels) > 0
+}
+
+func (s Source) validateSlack(i int) []error {
+	var errs []error
+	at := fmt.Sprintf("sources[%d]", i)
+	if s.Path != "" || s.Host != "" || len(s.Repos) > 0 || len(s.Projects) > 0 || s.Site != "" || s.Account != "" {
+		errs = append(errs, fmt.Errorf("%s: a slack source takes only kind, name, workspace, user and channels; beacon source add slack writes them", at))
+	}
+	if !workspacePattern.MatchString(s.Workspace) {
+		errs = append(errs, fmt.Errorf("%s: a slack source needs workspace, the workspace id (T…)", at))
+	}
+	if !slackUserPattern.MatchString(s.User) {
+		errs = append(errs, fmt.Errorf("%s: a slack source needs user, the token's user id (U…)", at))
+	}
+	seen := map[string]bool{}
+	for _, c := range s.Channels {
+		if !channelPattern.MatchString(c) {
+			errs = append(errs, fmt.Errorf("%s: channel %q is not a channel id (C…)", at, c))
+		}
+		if seen[c] {
+			errs = append(errs, fmt.Errorf("%s: channel %q is listed twice", at, c))
+		}
+		seen[c] = true
+	}
+	return errs
 }
 
 func (s Source) validateGitHub(i int) []error {

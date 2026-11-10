@@ -56,7 +56,7 @@ func TestRejected(t *testing.T) {
 		"signal identity":  {"github:user:winton", "signal:actor:x"},
 		"bad handle":       {`"@winton"`, `"winton"`},
 		"bad mode":         {"mode: dry-run", "mode: live"},
-		"unknown source":   {"kind: fixture", "kind: slack"},
+		"unknown source":   {"kind: fixture", "kind: teams"},
 		"lease too short":  {"mode: dry-run", "mode: dry-run\nlease:\n  period: 30s"},
 		"poll too slow":    {"mode: dry-run", "mode: dry-run\npoll_interval: 4m"},
 		"secret in config": {"mode: dry-run", "mode: dry-run\ntoken: sig_x"},
@@ -125,6 +125,30 @@ func TestGoogleConfig(t *testing.T) {
 		strings.Replace(y, "  - kind: drive\n    account: winton@example.com\n", "  - kind: drive\n", 1),
 		strings.Replace(y, "account: winton@example.com", "account: Winton@Example.com", 1),
 		strings.Replace(y, "account: winton@example.com", "account: winton", 1),
+	} {
+		if _, err := Parse([]byte(bad)); err == nil {
+			t.Fatalf("parsed:\n%s", bad)
+		}
+	}
+}
+
+func TestSlackConfig(t *testing.T) {
+	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", "sources:\n  - kind: slack\n    workspace: T0ACME\n    user: U0WINTON\n    channels: [C0REVIEW]\n", 1)
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Sources[0].SourceName() != "slack" || c.Sources[0].Channels[0] != "C0REVIEW" {
+		t.Fatalf("%+v", c.Sources)
+	}
+	for _, bad := range []string{
+		strings.Replace(y, `"@winton"`, "act_abc", 1),
+		strings.Replace(y, "workspace: T0ACME\n", "", 1),
+		strings.Replace(y, "user: U0WINTON", "user: winton", 1),
+		strings.Replace(y, "[C0REVIEW]", "[D0DIRECT]", 1),
+		strings.Replace(y, "[C0REVIEW]", "[C0REVIEW, C0REVIEW]", 1),
+		strings.Replace(y, "    channels:", "    account: winton@example.com\n    channels:", 1),
+		strings.Replace(valid, "path: fixture.json", "path: fixture.json\n    channels: [C0REVIEW]", 1),
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("parsed:\n%s", bad)

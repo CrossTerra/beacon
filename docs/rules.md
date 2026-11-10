@@ -46,7 +46,7 @@ rules:
 | `state` | no | Which of the source's state fields go in the event's state snapshot (DEC-28). See [State](#state). |
 | `ask` | no | `me`: the event asks the person (DEC-21). Nobody else can be asked (DEC-12). |
 | `priority` | no | `low`, `medium`, `high` or `urgent`, for the ask. Needs `ask`. |
-| `close_by_others` | no | `true`: when this rule sends another person's act, it closes the person's open asks on the same subject (DEC-20). |
+| `close_by_others` | no | `true`: when this rule sends another person's act, it closes the person's open asks on the same subject (DEC-20), or only those the item names when it sets `close_only`. |
 
 A `never` rule takes none of `fields`, `state`, `ask`, `priority` or `close_by_others`.
 
@@ -89,7 +89,7 @@ A matcher is a plain string (exact), or a mapping with exactly one of the forms 
 | `title` | The thread title (`open.title`): the object's title. Trimmed, and shortened to Signal's 300 characters. The service sources do not use this field as the event title. A source that sets no event title still uses it for both. |
 | `summary` | `metadata.fields.summary`. When the rule lists it and did not list `title`, it is also the thread title. An issue's or a calendar event's summary is its title. |
 | `subject` | `metadata.fields.subject`. When the rule lists it and lists neither `title` nor `summary`, it is also the thread title. A mail thread's subject is its title. |
-| `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). A body is never copied into a title. A Google source does not read a body unless a `send` or `hold` rule that can match it lists `body`. |
+| `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). A body is never copied into a title. A Google source does not read a body unless a `send` or `hold` rule that can match it lists `body`; a Slack source reads message text on the machine and sets `body` only then. |
 | `actor` | `metadata.actor`: who caused the change, when it was not the person (DEC-27). On the person's own acts it is left out; their identity leaves only as `by`. |
 | `references` | `metadata.references`: explicit references to other subjects (DEC-17). |
 | any other source field | `metadata.fields.<name>`. |

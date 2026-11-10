@@ -1,12 +1,12 @@
 # Sources
 
-A source yields items. Beacon has GitHub, Jira, Gmail, Google Calendar and Google Drive, beside the
+A source yields items. Beacon has GitHub, Jira, Gmail, Google Calendar, Google Drive and Slack, beside the
 [fixture](configuration.md#fixture-source). Each has a fixed field list and a fixed state field list. A rule names
 what leaves; anything else stays.
 
 Credentials are in the keychain, under the service `beacon`: account `source:<name>` for GitHub and Jira, and
 `google:<address>:client` and `google:<address>:refresh` for the [Google grant](#google) a Google account's sources
-share. They are read
+share, and `slack:<workspace id>:<user id>` for a [Slack](#slack) user token. They are read
 when a pass needs them and set only as an Authorization header (or, for the Google grant, sent only to Google's
 token endpoint). They are never written to the config, the log, or the outbox.
 
@@ -27,6 +27,7 @@ clock fails the pass. With no `Date`, the cursor is the newest source event time
 push or a check change. If there is no `Date` and no such event time, the cursor is not moved. A pass reads from
 the committed cursor minus 15 minutes, so indexing lag and clock skew land in an overlap. Gmail's cursor is the
 mailbox's history id, and Calendar's adds a fingerprint per event; see [Gmail](#gmail) and [Calendar](#calendar).
+Slack's adds a watermark per followed thread and configured channel; see [Slack](#slack).
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run). `beacon cursor reset <source>` removes a committed
@@ -46,7 +47,8 @@ Each source honours `Retry-After` and, when present, `X-RateLimit-Remaining` and
 most two minutes is slept, then the request is retried. A longer wait ends the pass. The cursor is not moved, so
 the next pass resumes from it. Google answers a rate limit with `429`, or with a `403` whose reason is
 `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded` or `RESOURCE_EXHAUSTED`; both end the pass the same
-way.
+way. Slack answers with `429` and `Retry-After`, or `"error":"ratelimited"`, which ends the pass; Beacon also spaces
+its own Slack calls by each method's tier ([Slack](#slack)).
 
 ## GitHub
 
@@ -417,3 +419,144 @@ notes text; only when a rule lists it). **State.** For comments: `resolved` (`tr
 
 DEC-29 (one authoritative event per act) needs Signal phase 12 and is not built. Beacon records every change it is
 sent.
+
+## Slack
+
+`kind: slack`, with `workspace` and `user`, and optional `channels`. A user token (`xoxp-…`) the person provides, from
+a Slack app they create in their own workspace (DEC-2). Beacon calls only read methods with it.
+
+**The app and the token.** At [api.slack.com/apps](https://api.slack.com/apps), create an app in the workspace (not
+distributed), add the *User Token Scopes* below, and install it. Copy the *User OAuth Token* from *OAuth &
+Permissions*, then run `beacon source add slack` and paste it. A bot or app token is refused: search needs a user
+token. The token is stored in the keychain as `slack:<workspace id>:<user id>`, the ids `auth.test` reports.
+
+**Scopes.** All user scopes, all read-only:
+
+| Scope | For |
+| --- | --- |
+| `search:read` | `search.messages`: direct messages, mentions, the person's own messages |
+| `channels:history`, `groups:history` | `conversations.replies` and `conversations.history` in public and private channels |
+| `im:history`, `mpim:history` | The same in direct and group direct messages |
+| `channels:read`, `groups:read` | `conversations.info` on a configured channel: is it private |
+| `mpim:read` | `users.conversations`: the group direct messages the person is in |
+| `usergroups:read` | `usergroups.list`: the user groups the person is in, so a group mention is a mention |
+
+`auth.test` reports the token's scopes. A token missing one is refused by `source add`, and fails a pass with
+`source_unauthorized`. A token that also holds other scopes (say, a write scope from an app the person already had)
+is accepted, and `source add` names them; Beacon never calls a method that uses them. `conversations.unreads` is not
+used: with a user token it is slow and ignores its filters.
+
+**Host and methods.** `slack.com` only, listed by `beacon egress`. Every request is a `GET` to one of seven methods,
+each with only the query keys Beacon sends:
+
+| Method | Keys | Limited to |
+| --- | --- | --- |
+| `auth.test` | none | |
+| `search.messages` | `query`, `count`, `page`, `sort`, `sort_dir` | the three queries below, naming only the token's user |
+| `conversations.replies` | `channel`, `ts`, `oldest`, `inclusive`, `limit`, `cursor` | |
+| `conversations.history` | `channel`, `oldest`, `latest`, `limit`, `cursor` | configured channels, and group direct messages the person is in |
+| `conversations.info` | `channel` | configured channels |
+| `users.conversations` | `types` (`mpim` only), `exclude_archived`, `limit`, `cursor` | |
+| `usergroups.list` | `include_users` | |
+
+Anything else is refused before it is sent (`source_scope`), so a request cannot post, mark read, list users or
+channels, or read the history of a channel the config does not name.
+
+**Rate limits.** Slack limits each method per workspace by tier. Beacon spaces its own calls: `search.messages` and
+`usergroups.list` (Tier 2, 20 a minute) at most one every 3 seconds, the `conversations.*` methods and
+`users.conversations` (Tier 3, 50 a minute for an app built for one workspace) at most one every 1.2 seconds. A `429`
+honours `Retry-After` as above; `"error":"ratelimited"` ends the pass. An app distributed to other workspaces outside
+the Slack Marketplace gets one `conversations.*` call a minute; create the app for your own workspace.
+
+**Errors.** `invalid_auth`, `not_authed`, `token_revoked`, `token_expired`, `account_inactive`, `missing_scope`,
+`not_allowed_token_type`, `no_permission` are `source_unauthorized`; run `beacon source add slack` again with a valid
+token. `channel_not_found`, `thread_not_found`, `not_in_channel` or `is_archived` on one thread drops that thread, and
+on a channel or group direct message skips it for the pass and keeps its watermark. Any other error fails the pass,
+and the cursor stays.
+
+**Each pass.**
+
+- `auth.test`: the workspace and user must be the config's, and `person.identities.<name>` (`slack:user:<id>`) the
+  token's user, or the pass fails with `identity_mismatch`.
+- `usergroups.list`, once an hour: the user groups the person is in.
+- `search.messages`, newest first, 100 a page, at most 20 pages a query: `is:dm` (one-to-one direct messages,
+  including the person's own) and `from:<@USER>` (the person's own messages) over the window; `<@USER>` (mentions)
+  over the last 7 days every pass. A mention older than the window that the cursor has not seen is kept: an edit
+  added it, or search indexed it late. `after:` takes a date, so Beacon asks from two days before and keeps only
+  messages in range. A query that reaches its page limit inside its range marks the pass cut; `run` says so.
+- `conversations.info` and `conversations.history` for each configured channel: whether it is private, and its top
+  level from its watermark, for review requests, `@here`/`@channel`/`@everyone`, user group mentions and the person's
+  own messages.
+- `users.conversations` and `conversations.history` for each group direct message the person is in, from its
+  watermark: at most 20 a pass.
+- `conversations.replies` for each followed thread: a thread the person posted in, or was mentioned in, in the last 7
+  days, outside one-to-one direct messages (search reads every message there). A thread starts at the window of the
+  pass that followed it, so a reply is not lost if the thread waits for a later pass.
+- `conversations.replies` with `inclusive` and the message's own `ts`, for messages that addressed the person, to
+  notice a deletion: each at most every 15 minutes, at most 20 a pass, for 7 days.
+
+A thread or group direct message with a message in the last hour is read every pass; a quieter one every 15 minutes;
+the longest unread first. Each keeps its own watermark, so one that waits loses nothing. History is returned newest
+first: a read that stops at its page limit (2000 messages) keeps its watermark, records the gap below what it read,
+and the next pass reads that gap before anything newer. Nothing is skipped and the pass is not cut.
+
+**Cursor.** The first server `Date` of the pass, as above; search reads from 15 minutes before it. Beside it: each
+followed thread (its kind, the person's first and latest post or mention there, the newest message read, when it was
+read), each configured channel's and group direct message's watermark (and a gap, when a read stopped at its limit),
+the mentions seen in the last 7 days, and the messages that addressed the person, with their subjects, for the
+deletion check. The cursor holds ids, kinds, subjects and timestamps, no text.
+
+**First run.** The last 7 days: direct and group direct messages, mentions, the person's own messages, replies in
+threads they posted or were mentioned in, and the configured channels (DEC-23).
+
+**Items.** One per message. When a message qualifies twice, the first in this table wins.
+
+| Item | When | Addressed | Event title |
+| --- | --- | --- | --- |
+| `own_message` | The person's message: the API's `user` is the token's user and there is no `bot_id`. Only in a direct or group direct message, a private channel, a thread, or a configured channel. Own. | no | Sent, or Replied in a thread |
+| `mentioned` | Someone else's message with `<@USER>`, a user group the person is in, or, in a configured channel only, `@here`, `@channel` or `@everyone`. | yes | Mentioned |
+| `dm_received` | Someone else's message in a one-to-one or group direct message (`channel_type` says which). | yes | Direct message |
+| `thread_reply` | Someone else's reply in a followed thread, after the person's first post or mention there. | no | Thread reply |
+| `review_request` | Someone else's top-level message in a configured channel with a pull request or merge request link and review wording (`review`, `look`, `approve`, `approval`, `PTAL`, `eyes`). | no | Review requested |
+| `message_deleted` | A message that was `mentioned` or `dm_received` no longer exists. On that message's subject, keyed `slack:<channel>:<ts>:deleted`, stamped with the pass's `Date`. It names the ask that message opened (`close_only`), so a `close_by_others` rule closes that ask and no other: another ask in the same thread stays open. | no | Deleted |
+
+Joins, edits, other message subtypes and reactions are not events (DEC-18); an edit that adds a mention is found by
+the mention search. A top-level message of the person's in a public channel that is not configured is not an item:
+it answers no ask Beacon recorded. The thread it starts is still followed. An app's message has a `bot_id`: its
+`author` is that id and its actor `slack:bot:<id>`, and it is never own. The title never includes message text or a
+name.
+
+**Answered (DEC-19, DEC-20).** An own message in a thread is on the thread's subject, so it closes the open asks
+there. A one-to-one direct message has no thread for its top-level messages: each is its own subject. An own
+top-level message there sets `close_siblings_before` to its own `ts`, so it also closes the open asks that opened the
+conversation's other subjects before it: earlier top-level messages, not a question inside a thread there and not a
+message posted after it, even one search indexed late ([`events.md`](events.md#items)). An own top-level message in a
+channel or a group direct message closes nothing else: it may be about something else. Someone else's answer closes
+an ask only through a `close_by_others` rule, for example on `thread_reply` in a thread the person was mentioned in.
+
+**Subject (DEC-10).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or the message's own
+when it is not in a thread. In a one-to-one or group direct message, or a private channel,
+`slack:dm:<person>:<channel>:<thread ts>`, the person being `person.handle` without `@`. Private channels use the same
+stem as direct messages, so one restriction (`slack:dm:*`) keeps them all private. A channel is public only when a
+read says so: `is_private: false` on a search match, or `conversations.info` for a configured channel. A channel no
+read described, or any id that is not `C…`, is treated as private. **Key.** `slack:<channel>:<ts>`; the version is the
+message `ts`.
+
+**Personal subjects.** `slack:dm:` is a fixed personal stem. Direct messages, group direct messages and private
+channels are held until Signal restricts `slack:dm:*`, exactly as Gmail's are held until `gmail:*` is ([Google](#google),
+"Nothing personal is sent unless Signal keeps it private"). Public channel items are not personal and are not held.
+
+**Fields.** `channel` (id), `channel_type` (`im`, `mpim`, `private` or `channel`), `ts`, `thread_ts` (the root, when
+the message is a reply), `author` (user or bot id), `permalink` (Slack's, or built from the workspace address
+`auth.test` reports), `body` (the message text, only when a rule lists `body`). No state fields: Slack has no object
+state Beacon reads.
+
+**Text is read on the machine.** Slack returns a message's text with the message, whatever the scope. Beacon reads it
+to find mentions, review wording and links, and it leaves only as `body`, when a rule lists it.
+
+**References (DEC-17).** A GitHub pull request link becomes `github:pr:<owner>/<repo>#<n>`, and a Jira link
+`https://<site>.atlassian.net/browse/KEY-1` becomes `jira:KEY-1`. They come from the text, and leave only when a rule
+lists `references`; the starter rules list them only for one-to-one direct messages.
+
+**Identity.** `person.identities.<name>` is `slack:user:<user id>`. Own messages carry it as `by`. Others are
+`slack:user:<id>` in `metadata.actor` when a rule lists `actor`. Display names need `users:read` and are not read.

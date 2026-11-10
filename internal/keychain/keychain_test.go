@@ -183,3 +183,30 @@ func TestSystem(t *testing.T) {
 		t.Fatalf("after: %v", err)
 	}
 }
+
+func TestSlackUserToken(t *testing.T) {
+	for _, tc := range []struct {
+		token string
+		ok    bool
+	}{
+		{"xoxp-123-456-789-abc", true},
+		{"xoxb-123-456-abc", false},
+		{"xoxe.xoxp-1-abc", false},
+		{"sig_value", false},
+	} {
+		s, err := FromString(tc.token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = SlackUserToken(s)
+		if (err == nil) != tc.ok {
+			t.Errorf("%d: %v", len(tc.token), err)
+		}
+		if err != nil && strings.Contains(err.Error(), tc.token) {
+			t.Fatal("the error names the token")
+		}
+	}
+	if SlackAccount("T1", "U2") != "slack:T1:U2" {
+		t.Fatal(SlackAccount("T1", "U2"))
+	}
+}

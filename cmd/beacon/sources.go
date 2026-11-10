@@ -23,6 +23,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/limited"
 	"github.com/CrossTerra/beacon/internal/runner"
 	"github.com/CrossTerra/beacon/internal/seed"
+	"github.com/CrossTerra/beacon/internal/slack"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -77,6 +78,18 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 				return nil, err
 			}
 			src = d
+		case "slack":
+			sl, err := slack.New(slack.Options{
+				Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"),
+				Workspace: s.Workspace, User: s.User, Channels: s.Channels,
+				Identity: cfg.Person.Identities[s.SourceName()],
+				Token:    a.secretFunc(keychain.SlackAccount(s.Workspace, s.User)),
+				Base:     a.slackBase, Now: a.now, Sleep: a.sleep,
+			})
+			if err != nil {
+				return nil, err
+			}
+			src = sl
 		case "fixture":
 			f, err := source.LoadFixture(cfg.Resolve(s.Path))
 			if err != nil {
@@ -188,9 +201,11 @@ func (a *app) prepare(e *env, r *runner.Runner, send bool) error {
 
 func (a *app) cmdSource(ctx context.Context, args []string) error {
 	if len(args) < 2 || args[0] != "add" {
-		return fmt.Errorf("usage: beacon source add github|jira|google [flags]")
+		return fmt.Errorf("usage: beacon source add github|jira|google|slack [flags]")
 	}
 	switch args[1] {
+	case "slack":
+		return a.addSlack(ctx, args[2:])
 	case "github":
 		return a.addGitHub(ctx, args[2:])
 	case "jira":
@@ -198,8 +213,85 @@ func (a *app) cmdSource(ctx context.Context, args []string) error {
 	case "google":
 		return a.addGoogle(ctx, args[2:])
 	default:
-		return fmt.Errorf("usage: beacon source add github|jira|google [flags]")
+		return fmt.Errorf("usage: beacon source add github|jira|google|slack [flags]")
 	}
+}
+
+// addSlack reads the person's user token, checks it with auth.test, stores it under the workspace and user, and
+// enables the source. Beacon calls only read methods with it.
+func (a *app) addSlack(ctx context.Context, args []string) error {
+	fs, cfgPath := a.flags("source add slack")
+	var channels repeatFlag
+	fs.Var(&channels, "channel", "channel id (C…) whose top-level messages are read for review requests (repeatable)")
+	name := fs.String("name", "slack", "source name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: beacon source add slack [--channel ID]... [--name NAME]")
+	}
+	cfg, err := a.loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(cfg.Person.Handle, "@") {
+		return errors.New("a slack source needs person.handle as @handle: direct-message subjects carry it (DEC-10)")
+	}
+	fmt.Fprint(a.stderr, "Slack user token, xoxp-… (input hidden): ")
+	token, err := keychain.ReadSecret(ctx, a.stdin)
+	fmt.Fprintln(a.stderr)
+	if err != nil {
+		return err
+	}
+	if err := keychain.SlackUserToken(token); err != nil {
+		return err
+	}
+	transport := a.transport
+	if transport == nil {
+		transport = egress.Transport
+	}
+	base := a.slackBase
+	if base == "" {
+		base = slack.Base
+	}
+	id, err := slack.Verify(ctx, limited.HTTPClient(transport(slack.Hosts(base))), base, token)
+	if err != nil {
+		if errors.Is(err, source.ErrUnauthorized) {
+			return errors.New("slack refused the token, or it is not a user token; nothing was stored")
+		}
+		return err
+	}
+	if len(id.Missing) > 0 {
+		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(id.Missing, ", "))
+	}
+	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: channels}
+	if src.Name == "slack" {
+		src.Name = ""
+	}
+	cfg.Sources = upsert(cfg.Sources, src)
+	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	account := keychain.SlackAccount(id.Workspace, id.User)
+	if err := store.Set(account, token); err != nil {
+		return err
+	}
+	if err := writeConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "Stored the Slack token in the keychain as %s/%s\nEnabled source %s (workspace %s, user %s)\n",
+		keychain.Service, account, src.SourceName(), id.Workspace, id.User)
+	if len(id.Extra) > 0 {
+		fmt.Fprintf(a.stdout, "The token also holds %s. Beacon never calls a method that uses them; a token with only the read scopes is safer.\n", strings.Join(id.Extra, ", "))
+	}
+	if cfg.Person.Identities[src.SourceName()] == "" {
+		fmt.Fprintf(a.stdout, "Set person.identities.%s: slack:user:%s so your own messages carry by.\n", src.SourceName(), id.User)
+	}
+	return nil
 }
 
 // addGoogle stores the person's OAuth client, runs the installed-app flow, stores the refresh token, and enables

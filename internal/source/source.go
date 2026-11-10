@@ -44,6 +44,69 @@ type Item struct {
 	ObservedAt *time.Time `json:"observed_at,omitempty"`
 	// Version is the source's version marker for this change: the last part of Key (DEC-9).
 	Version string `json:"version,omitempty"`
+	// CloseSiblingsBefore, on an own act, also closes earlier asks in the same conversation that DEC-10 makes their own
+	// subjects: an open ask on a sibling subject (one that differs from Subject only in the last part) that opened that
+	// subject (the ask's key ends in that last part, so it is not a reply inside it) and whose last part is before
+	// this value. A top-level reply in a Slack direct message sets it to its own ts.
+	CloseSiblingsBefore string `json:"close_siblings_before,omitempty"`
+	// CloseOnly, when set, narrows what this item may close to these ask keys on its subject. A Slack deletion names the
+	// ask the deleted message opened, so a close_by_others rule closes that ask and not the others in its thread.
+	CloseOnly []string `json:"close_only,omitempty"`
+}
+
+var decimalPattern = regexp.MustCompile(`^[0-9]{1,20}(\.[0-9]{1,20})?$`)
+
+// DecimalBefore reports whether a is less than b, both decimal numbers ("1794132000.000100"). Anything else is not
+// before anything, so a malformed bound closes nothing.
+func DecimalBefore(a, b string) bool {
+	if !decimalPattern.MatchString(a) || !decimalPattern.MatchString(b) {
+		return false
+	}
+	ai, af, _ := strings.Cut(a, ".")
+	bi, bf, _ := strings.Cut(b, ".")
+	ai, bi = strings.TrimLeft(ai, "0"), strings.TrimLeft(bi, "0")
+	if len(ai) != len(bi) {
+		return len(ai) < len(bi)
+	}
+	if ai != bi {
+		return ai < bi
+	}
+	for len(af) < len(bf) {
+		af += "0"
+	}
+	for len(bf) < len(af) {
+		bf += "0"
+	}
+	return af < bf
+}
+
+// ClosesSibling reports whether an own act on subject with CloseSiblingsBefore before closes the open ask askKey on
+// askSubject: a sibling subject other than its own, opened by that ask, before the bound.
+func ClosesSibling(subject, before, askSubject, askKey string) bool {
+	if before == "" || askSubject == subject || !IsSibling(subject, askSubject) {
+		return false
+	}
+	last := askSubject[len(SiblingPrefix(askSubject)):]
+	return strings.HasSuffix(askKey, ":"+last) && DecimalBefore(last, before)
+}
+
+// SiblingPrefix is the part of subject that its siblings share: everything up to and including the last colon. It
+// is "" when the subject has no colon.
+func SiblingPrefix(subject string) string {
+	i := strings.LastIndex(subject, ":")
+	if i < 0 {
+		return ""
+	}
+	return subject[:i+1]
+}
+
+// IsSibling reports whether other differs from subject only in the last part. A subject is its own sibling.
+func IsSibling(subject, other string) bool {
+	p := SiblingPrefix(subject)
+	if p == "" || !strings.HasPrefix(other, p) {
+		return false
+	}
+	return !strings.Contains(other[len(p):], ":")
 }
 
 // Lookback is how far before a committed cursor a pass reads again. Indexing lag and clock skew land in this
@@ -62,8 +125,8 @@ const (
 
 // PersonalStems are subject prefixes Signal keeps private only when that prefix is restricted (DEC-10). They are
 // fixed, not taken from the enabled sources: a body already in the outbox is still personal after its source is
-// removed from the config. slack:dm: is here before the Slack source exists, so a direct-message body cannot leave
-// unchecked.
+// removed from the config. slack:dm: covers Slack's direct and group direct messages; its channel subjects are not
+// personal.
 var PersonalStems = []string{"gmail:", "calendar:", "drive:", "slack:dm:"}
 
 // PersonalStem is the longest personal stem subject starts with, or "" when it is not personal.
@@ -187,6 +250,28 @@ func Validate(it Item, fields, stateFields []string) error {
 	}
 	if len(it.State) > 0 && (it.ObservedAt == nil || it.ObservedAt.IsZero() || it.Version == "") {
 		return fmt.Errorf("a state snapshot needs observed_at and version")
+	}
+	for _, k := range it.CloseOnly {
+		if !printable.MatchString(k) || !strings.HasPrefix(k, it.Source+":") {
+			return fmt.Errorf("close_only names a key that is not this source's")
+		}
+	}
+	if len(it.CloseOnly) > 0 && it.CloseSiblingsBefore != "" {
+		return fmt.Errorf("close_only and close_siblings_before do not combine")
+	}
+	if it.CloseSiblingsBefore != "" {
+		// Siblings share everything but the last part, so the prefix must name one conversation, not a stem or a
+		// person: closing every ask under "slack:dm:" or "slack:dm:<person>:" would answer conversations the act is
+		// not in. slack:dm:<person>:<channel>: has four parts.
+		if !it.Own {
+			return fmt.Errorf("close_siblings_before is for own acts")
+		}
+		if strings.Count(SiblingPrefix(it.Subject), ":") < 4 {
+			return fmt.Errorf("close_siblings_before needs a subject with at least four parts before the last")
+		}
+		if !decimalPattern.MatchString(it.CloseSiblingsBefore) {
+			return fmt.Errorf("close_siblings_before is not a decimal bound")
+		}
 	}
 	return nil
 }

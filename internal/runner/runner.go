@@ -266,14 +266,61 @@ type asks struct {
 	closed map[string]bool
 }
 
-func (a *asks) open(subject string) []string {
+// forItem is the open asks an item's projection may close: on its subject, and for an own act bounded by
+// CloseSiblingsBefore, the earlier asks that opened its sibling subjects. CloseOnly narrows them to the asks it names.
+func (a *asks) forItem(it source.Item) []string {
+	before := ""
+	if it.Own {
+		before = it.CloseSiblingsBefore
+	}
+	open := a.openOn(it.Subject, before)
+	if len(it.CloseOnly) == 0 {
+		return open
+	}
+	// Only the named asks, and only while they are open on this subject.
+	named := map[string]bool{}
+	for _, k := range it.CloseOnly {
+		named[k] = true
+	}
+	var out []string
+	for _, k := range open {
+		if named[k] {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+func (a *asks) openOn(subject, before string) []string {
 	var base []string
 	if a.ob != nil {
-		base = a.ob.OpenAsks(subject)
+		if before != "" {
+			base = a.ob.OpenAsksSiblings(subject, before)
+		} else {
+			base = a.ob.OpenAsks(subject)
+		}
+	}
+	added := a.added[subject]
+	if before != "" {
+		// Sorted by subject, the asks this pass added stay in a fixed order.
+		var subjects []string
+		for s := range a.added {
+			if s != subject && source.IsSibling(subject, s) {
+				subjects = append(subjects, s)
+			}
+		}
+		sort.Strings(subjects)
+		for _, s := range subjects {
+			for _, k := range a.added[s] {
+				if source.ClosesSibling(subject, before, s, k) {
+					added = append(added, k)
+				}
+			}
+		}
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, k := range append(base, a.added[subject]...) {
+	for _, k := range append(base, added...) {
 		if a.closed[k] || seen[k] {
 			continue
 		}
@@ -469,7 +516,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 // project builds the body. If the body or the request is over Signal's limit, it tries again without the body and
 // marks the event truncated. The marker is a fixed flag, not item content.
 func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project.Body, []byte, bool, error) {
-	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.open(it.Subject)}
+	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.forItem(it)}
 	b, body, err := project.Project(in)
 	if err == nil {
 		return b, body, false, nil
@@ -754,10 +801,7 @@ func (r *Runner) Explain(ctx context.Context, key string) (*Explanation, error) 
 		d := r.Rules.Decide(it)
 		ex.Tier, ex.Rule = d.Tier, d.Rule
 		if ex.Entry == nil && d.Tier != rules.Never {
-			var open []string
-			if r.Outbox != nil {
-				open = r.Outbox.OpenAsks(it.Subject)
-			}
+			open := (&asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}).forItem(it)
 			_, ex.Body, ex.Err = project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: open})
 		}
 		break

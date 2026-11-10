@@ -36,7 +36,7 @@ One pass of `beacon run`:
 5. **Commit.** The source's cursor is stored only after every item of the pass has been recorded, and only on a
    send pass. A crash before that collects the same items again; keys make that harmless.
 6. **Send.** Only while this instance holds the lease (DEC-25). A body on a personal subject (`gmail:`, `calendar:`,
-   `drive:`) is sent only when Signal restricts its prefix; the restrictions are read at the start of the pass, and
+   `drive:`, `slack:dm:`) is sent only when Signal restricts its prefix; the restrictions are read at the start of the pass, and
    a send item of a source whose prefix is not restricted was held at step 4 instead. Pending bodies are sent oldest first, as stored,
    each under a deadline at the end of the lease. If Signal is unavailable, or the lease runs out, the pass stops
    and the rest stay pending, because a later body may close an ask an earlier one opens.
@@ -55,6 +55,7 @@ repeats every `poll_interval`, and it still writes nothing.
 | `internal/source` | The `Item` shape, the `Source` interface, and the fixture source. |
 | `internal/github`, `internal/jira` | The GitHub and Jira sources. See [`sources.md`](sources.md). |
 | `internal/google` | The Gmail, Calendar and Drive sources, the OAuth grant they share, and the installed-app flow `beacon source add google` runs. |
+| `internal/slack` | The Slack source, and the `auth.test` check `beacon source add slack` runs before it stores the token. |
 | `internal/cursor` | Committed cursors, which sources have completed `beacon run --first`, and which of those have been accepted. |
 | `internal/seed` | The seed file (DEC-24). |
 | `internal/limited` | Rate-limit backoff for source HTTP. |
@@ -72,8 +73,9 @@ repeats every `poll_interval`, and it still writes nothing.
 | `internal/service` | The per-user launchd agent: the plist, the last-pass record, log rotation. It does not read a credential and it does not send. |
 
 Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
-`internal/egress/egresstest` (a transport that fails the test on any host not on the egress list), and
-`internal/google/googletest` (a fake Google: the token endpoint and recorded Gmail, Calendar and Drive responses).
+`internal/egress/egresstest` (a transport that fails the test on any host not on the egress list),
+`internal/google/googletest` (a fake Google: the token endpoint and recorded Gmail, Calendar and Drive responses), and
+`internal/slack/slacktest` (a fake Slack Web API with recorded answers for every Slack item).
 
 ## The state directory
 
@@ -103,5 +105,6 @@ A source implements `source.Source`: a name, a fixed field list, a fixed state f
 contacts, and `Collect`. `Collect` takes the committed cursor and returns the next one; the runner stores it after
 deciding. Its hosts appear in `beacon egress` and in the transport guard without other changes. A source keeps its
 credentials in the keychain through `internal/keychain`, and reads them per pass. A source that can skip reading
-bodies implements `SetBodies`; the app tells it whether any rule could send one. Every source but the fixture reads
+bodies implements `SetBodies`; the app tells it whether any rule could send one. A source whose subjects can be
+personal implements `PersonalStem`, and its stem must be in `source.PersonalStems`. Every source but the fixture reads
 open state on its first run and waits for `beacon accept-first`. The sources are [`sources.md`](sources.md).

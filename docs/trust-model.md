@@ -12,7 +12,7 @@ same pull request.
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
-| With a Google source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | |
+| With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
 ## Properties
@@ -30,10 +30,12 @@ same pull request.
    and not the object's title. It leaves with the event so a thread's events do not all read as the pull request,
    issue, mail or file title. It is built only from the change the source already recorded (who was requested, the
    review state, a short commit sha, the check conclusion, the assignee's display name, the status names, the due
-   date; for Google, the item type and the person's calendar response) and it never includes comment, review or
-   mail text, a mail subject, an event summary or a file name. The object's title leaves only when a rule lists
+   date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
+   comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
    `title`, `summary` or `subject`, as the thread title. A Google source does not even read a mail body, an event
-   description, comment text or meeting notes unless a rule that can match it lists `body`.
+   description, comment text or meeting notes unless a rule that can match it lists `body`. Slack returns a message's
+   text with the message, so the Slack source reads it on the machine to find mentions, review wording and links; it
+   leaves only as `body`, when a rule lists it.
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
@@ -53,7 +55,11 @@ same pull request.
    host and, if configured, a hosted classifier. `beacon egress` prints the list, and every HTTP request goes through
    a transport that refuses any other host before connecting. Proxy settings from the environment are ignored and
    redirects are not followed. Each Google source also refuses any URL outside the API paths it uses, because
-   `www.googleapis.com` serves other APIs too. `beacon source add google` listens on `127.0.0.1` for one OAuth
+   `www.googleapis.com` serves other APIs too. The Slack source refuses any method but `auth.test`,
+   `search.messages`, `conversations.replies`, `conversations.history`, `conversations.info`, `users.conversations`
+   (group direct messages only) and `usergroups.list`, any query key those calls do not use, a search that is not one
+   of its three, and the history of a channel the config does not name or a group direct message the person is not
+   in, so its token cannot post, mark read or list the workspace's people or channels through Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
@@ -66,12 +72,16 @@ same pull request.
    read-only scopes on the person's own OAuth client (DEC-2). The client and the refresh token are in the keychain;
    the keychain package builds the token requests, reads the authorisation code from the redirect (checking `state`,
    with a PKCE verifier) and reads the token responses, so no other code holds a token's bytes. An access token is
-   kept in memory, not on disk.
+   kept in memory, not on disk. Slack access is a user token the person provides, from an app in their own workspace,
+   with read scopes only. `beacon source add slack` refuses anything that is not a user token (`xoxp-`) and a token
+   missing a read scope, and stores it under the workspace and user (`slack:<workspace>:<user>`).
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
-   person's handle (`gmail:<handle>:…`, DEC-10). Those stems are fixed, not taken from the enabled sources, so a body
+   person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and
+   private channels; a Slack channel is public only when Slack says so (`is_private: false`), and any other is
+   treated as private. Those stems are fixed, not taken from the enabled sources, so a body
    already in the outbox stays personal after its source is removed. A send pass reads Signal's restricted prefixes
    when a personal source is enabled or the outbox holds a pending or rejected event under one of those stems, and
    again immediately before pending bodies are sent, so a restriction lifted during the pass is honoured. It sends
@@ -80,7 +90,10 @@ same pull request.
    are not recorded and the cursor stays. A pending body, or a refusal `beacon outbox retry --rejected` would resend,
    waits the same way, including after the source is gone. Your own acts are recorded from the source's own record only: a Gmail message is
    yours only with the `SENT` label, never because its From header names you, and a calendar change is yours only when
-   it is your response or an event your account created.
+   it is your response or an event your account created, and a Slack message is yours only when Slack's `user` is the
+   token's user and it has no `bot_id`. Your own top-level message in a one-to-one Slack direct message also closes
+   the asks on that conversation's earlier top-level messages, which DEC-10 makes separate subjects: only those
+   before it, never a question inside a thread there, and never an ask in another conversation.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
 11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
@@ -93,8 +106,9 @@ same pull request.
 - **Signal has no per-event visibility yet.** Until it does, any key that can read the store can read every event
   Beacon sends, including full bodies a rule allowed. Rules that send bodies from personal sources (direct mail,
   direct messages, private files) should wait for visibility, or be limited to content the whole organization may
-  read. Gmail, Calendar and Drive events are the exception: Beacon sends them only once Signal restricts their prefix
-  (property 9), and holds them until then. That check is only as good as Signal's answer, and a restriction lifted
+  read. Gmail, Calendar, Drive and Slack direct-message and private-channel events are the exception: Beacon sends
+  them only once Signal restricts their prefix (property 9), and holds them until then. Slack public channel events
+  are not personal: a rule that sends a channel message's `body` or `references` sends what it wrote to every reader. That check is only as good as Signal's answer, and a restriction lifted
   after an event was sent does not hide that event again (Signal keeps the owner it recorded).
 - **Drive comments are found through recent activity.** A comment does not reliably change a file's modified time,
   so Beacon reads the comments of files modified since the last pass and files you opened in the last 14 days. A
@@ -105,6 +119,16 @@ same pull request.
   message's headers. Beacon asks for names, links, headers and comment metadata, and reads bodies only when a rule
   lists `body`, but the grant itself is not narrower. Revoke it at
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+- **Slack read scopes are broad, and the token is the person's.** `channels:history` can read every public channel,
+  and `search:read` everything the person can find. Beacon calls seven read methods and reads the conversations its
+  collection names, but the token itself is not narrower, and a token the person reuses may hold write scopes Beacon
+  never calls. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
+  [api.slack.com/apps](https://api.slack.com/apps).
+- **Slack is read by search and by watermark.** Search indexes with a delay, which the 15-minute lookback covers;
+  mentions are searched over 7 days, which also finds one an edit added. A quiet followed thread or group direct
+  message is read every 15 minutes, so a message there can arrive that late; a deletion is checked every 15 minutes,
+  20 a pass, so it can take longer when many asks are open. An edit that adds a mention in a message Beacon read
+  only by history or replies, not search, is not seen.
 - **An installed app's OAuth secret is not secret to Google.** Google treats a Desktop app's client secret as
   public; what protects the grant is the person's consent, PKCE and the refresh token, which stays in the keychain.
 - **Other people are attributed in metadata, not `by`.** Signal accepts `by` only for identities an actor already
