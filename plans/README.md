@@ -71,7 +71,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | 7a | [Per-user launchd agent](phase-7a.md) | complete | 2 |
 | 8 | macOS menu-bar shell | pending | 5, 7 |
 | 9 | Local agent sessions as a source (DEC-26) | pending | 1 |
-| 10 | [Sealed events: personal content encrypted to the person and their agents](phase-10.md) (proposed DEC-30 to DEC-41) | pending | 3, 4, Signal 12.08 |
+| 10 | [Sealed rules: personal content sealed at rest by Signal, for the person or also their agents](phase-10.md) (proposed DEC-30 to DEC-37) | pending | 3, 4, Signal 12.08 |
 
 Each phase gets its own plan file with goal, scope, out of scope, design notes, tests and an exit gate before work
 starts. Phase 1 is [`phase-1.md`](phase-1.md).
@@ -97,7 +97,7 @@ starts. Phase 1 is [`phase-1.md`](phase-1.md).
 | Redaction | Recovery from a rule that sent too much. | Designed, not built |
 | An integration actor and key per person, with `relay` prefixes | DEC-11 | Built |
 | External identities | `by` for people who are not Signal actors (DEC-27) | Not designed |
-| Sealed events, published keys and crypto-shredding | Personal bodies that Signal's operators cannot read (Phase 10) | Planned (Signal 12.08) |
+| Sealed events (KMS at rest, levels, crypto-shredding) | Personal bodies unreadable from the database, backups and admin-minted keys (Phase 10) | Planned (Signal 12.08) |
 
 ## Dependencies on Signal, in order
 
