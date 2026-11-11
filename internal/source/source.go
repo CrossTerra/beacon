@@ -159,6 +159,41 @@ type Collected struct {
 	// ClearResume asks the runner to drop a resume cursor stored earlier, because this collect finished that
 	// read and is not committing a completed cursor (a dry run, or a first run not yet accepted).
 	ClearResume bool
+	// Limit is the rate-limit answer that paused a Partial read, when the source knows it. The runner logs it.
+	Limit *RateLimit
+}
+
+// RateLimit is what an API said when it refused a call for its rate limit. It holds no body, no URL and no item
+// data: a status, the API's own reason code from a fixed list (or ""), and the wait it asked for.
+type RateLimit struct {
+	// Status is the HTTP status: 429, or 403 with a rate-limit reason.
+	Status int
+	// Reason is a fixed reason code the source recognised (Google's rateLimitExceeded, userRateLimitExceeded, ...),
+	// or "" when the answer had none it knows. Never free text.
+	Reason string
+	// RetryAfter is the wait the answer asked for. Negative means it named none.
+	RetryAfter time.Duration
+	// Units is what the source had spent of its own quota budget in the last minute, when it keeps one. Zero
+	// otherwise.
+	Units int
+}
+
+// RateLimitError is ErrRateLimited with what the API said. errors.Is(err, ErrRateLimited) holds for it.
+type RateLimitError struct{ RateLimit }
+
+func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
+
+// Is makes a RateLimitError match ErrRateLimited.
+func (e *RateLimitError) Is(target error) bool { return target == ErrRateLimited }
+
+// LimitOf returns the RateLimit an error carries, or nil.
+func LimitOf(err error) *RateLimit {
+	var rl *RateLimitError
+	if errors.As(err, &rl) {
+		l := rl.RateLimit
+		return &l
+	}
+	return nil
 }
 
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.

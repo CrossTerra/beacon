@@ -87,7 +87,7 @@ func newCommon(o Options, kind, defBase string, paths func(string, url.Values) b
 	return common{
 		kind: kind, name: name, account: strings.ToLower(o.Account), person: o.Person, identity: o.Identity, base: base, host: strings.ToLower(u.Hostname()),
 		hostPort: hostPort(u), auth: o.Auth, now: now, paths: paths,
-		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now},
+		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now, Reason: rateReason},
 	}, nil
 }
 
@@ -230,33 +230,74 @@ func (c *common) call(ctx context.Context, method, raw string, limit int64, acce
 	return data, nil
 }
 
-// classify403 reads Google's error reasons. A rate limit ends the pass; a missing scope is ErrUnauthorized; a
-// permission on one object is errPermission (the object is skipped). Any other 403 fails the pass: it is not read
-// as "this object is gone".
-func classify403(body []byte) error {
-	var e struct {
-		Error struct {
-			Status string `json:"status"`
-			Errors []struct {
-				Reason string `json:"reason"`
-			} `json:"errors"`
-			Details []struct {
-				Reason string `json:"reason"`
-			} `json:"details"`
-		} `json:"error"`
-	}
+// googleError is the part of Google's error body Beacon reads: reason codes, and the message only to compare it
+// with a fixed text. Neither is logged as read.
+type googleError struct {
+	Error struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Errors  []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"errors"`
+		Details []struct {
+			Reason string `json:"reason"`
+		} `json:"details"`
+	} `json:"error"`
+}
+
+func googleReasons(body []byte) (reasons []string, concurrent bool) {
+	var e googleError
 	_ = json.Unmarshal(body, &e)
-	reasons := []string{e.Error.Status}
+	reasons = []string{e.Error.Status}
+	msgs := []string{e.Error.Message}
 	for _, r := range e.Error.Errors {
 		reasons = append(reasons, r.Reason)
+		msgs = append(msgs, r.Message)
 	}
 	for _, r := range e.Error.Details {
 		reasons = append(reasons, r.Reason)
 	}
+	for _, m := range msgs {
+		// Gmail's per-user limit on concurrent requests answers with rateLimitExceeded and this message.
+		concurrent = concurrent || strings.Contains(strings.ToLower(m), "too many concurrent requests")
+	}
+	return reasons, concurrent
+}
+
+// rateReason is the rate-limit reason code in a Google error body, from a fixed list, or "". A concurrent-request
+// limit is "concurrentRequests", which Google does not name as a reason of its own. It never returns body text.
+func rateReason(body []byte) string {
+	reasons, concurrent := googleReasons(body)
+	if concurrent {
+		return "concurrentRequests"
+	}
+	for _, r := range reasons {
+		if rateLimitReason(r) {
+			return r
+		}
+	}
+	return ""
+}
+
+func rateLimitReason(r string) bool {
+	switch r {
+	case "rateLimitExceeded", "userRateLimitExceeded", "RESOURCE_EXHAUSTED", "quotaExceeded", "RATE_LIMIT_EXCEEDED", "dailyLimitExceeded":
+		return true
+	}
+	return false
+}
+
+// classify403 reads Google's error reasons. A rate limit ends the pass; a missing scope is ErrUnauthorized; a
+// permission on one object is errPermission (the object is skipped). Any other 403 fails the pass: it is not read
+// as "this object is gone".
+func classify403(body []byte) error {
+	reasons, _ := googleReasons(body)
+	if r := rateReason(body); r != "" {
+		return &source.RateLimitError{RateLimit: source.RateLimit{Status: http.StatusForbidden, Reason: r, RetryAfter: -1}}
+	}
 	for _, r := range reasons {
 		switch r {
-		case "rateLimitExceeded", "userRateLimitExceeded", "RESOURCE_EXHAUSTED", "quotaExceeded", "RATE_LIMIT_EXCEEDED":
-			return source.ErrRateLimited
 		case "insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT":
 			return source.ErrUnauthorized
 		}

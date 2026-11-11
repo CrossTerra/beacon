@@ -507,12 +507,17 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
 		r.Outbox, r.Queue = ob, q
-		for {
+		for pass := 0; ; pass++ {
 			if a.termFired() {
 				log.Log(logs.RunStopped)
 				return nil
 			}
 			a.rotateServiceLogs(stateDir)
+			if pass > 0 {
+				if err := a.prepare(e, r, send); err != nil {
+					return fail(runner.Classify(err), failText(runner.Classify(err), e))
+				}
+			}
 			rep, err := r.Run(work)
 			if err != nil {
 				return fail(runner.Classify(err), failText(runner.Classify(err), e))
@@ -568,12 +573,22 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	r.Lease = &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 		Period: e.cfg.LeasePeriod(), Now: a.now}
 
-	for {
+	for pass := 0; ; pass++ {
 		if a.termFired() {
 			log.Log(logs.RunStopped)
 			return nil
 		}
 		a.rotateServiceLogs(stateDir)
+		// Read the cursors and the first-run acceptance again before every pass, so beacon accept-first and beacon
+		// cursor reset take effect on the next pass of a running agent, not only after a restart. A source the agent
+		// still thinks is not accepted stores no cursor and no resume, and reads its whole open-state window again
+		// every pass.
+		if pass > 0 {
+			if err := a.prepare(e, r, send); err != nil {
+				reason := runner.Classify(err)
+				return a.failLoop(*once, stateDir, poll, interrupt, log, reason, failText(reason, e), false)
+			}
+		}
 		rep, err := r.Run(work)
 		if rep != nil {
 			a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), false))

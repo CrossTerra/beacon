@@ -36,6 +36,8 @@ const gmailLookback = 14 * 24 * time.Hour
 type Gmail struct {
 	common
 	quota *gmailQuota
+	// limit is the last rate limit Google answered in this collect, for the log.
+	limit *source.RateLimit
 }
 
 // NewGmail builds the Gmail source. It reads no credential.
@@ -44,7 +46,14 @@ func NewGmail(o Options) (*Gmail, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Gmail{common: c, quota: &gmailQuota{now: c.now, sleep: o.Sleep}}, nil
+	g := &Gmail{common: c, quota: &gmailQuota{now: c.now, sleep: o.Sleep}}
+	// Every request Google sees is counted, a retry included, and Gmail does its own backoff (getJSON). Calls are
+	// made one at a time: a source collects on one goroutine.
+	g.http.MaxAttempts = 1
+	g.http.Before = func(ctx context.Context, req *http.Request) error {
+		return g.quota.take(ctx, gmailRequestUnits(req))
+	}
+	return g, nil
 }
 
 func gmailPath(p string, q url.Values) bool {
@@ -160,6 +169,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		return source.Collected{}, err
 	}
 	g.clock.Reset()
+	g.limit = nil
 	var cur gmailCursor
 	if len(cursor) > 0 {
 		if cur, err = parseGmailCursor(cursor); err != nil {
@@ -219,7 +229,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			if gapScan != nil {
 				// A gap re-read that hits a rate limit fails the pass. The history cursor stays, so the next pass
 				// retries the gap. This is not a first-run resume.
-				err = source.ErrRateLimited
+				err = g.limitErr()
 			}
 			if err == nil {
 				var more []ref
@@ -307,7 +317,15 @@ func (g *Gmail) partial(next gmailCursor, scan *gmailScan, items []source.Item) 
 	if err != nil {
 		return source.Collected{Items: items}, err
 	}
-	return source.Collected{Items: items, Next: data, Partial: true, Cut: scan.InboxCut}, nil
+	return source.Collected{Items: items, Next: data, Partial: true, Cut: scan.InboxCut, Limit: g.limit}, nil
+}
+
+// limitErr is the rate limit this collect last met, as an error.
+func (g *Gmail) limitErr() error {
+	if g.limit == nil {
+		return source.ErrRateLimited
+	}
+	return &source.RateLimitError{RateLimit: *g.limit}
 }
 
 // gmailCursor is the history id to read from, and when the pass that stored it ran. The time bounds what a pass
@@ -437,12 +455,29 @@ func (g *Gmail) url(path string, q url.Values) string {
 }
 
 func (g *Gmail) getJSON(ctx context.Context, path string, q url.Values, dest any) error {
-	// Pace before the call. A 429 still comes back as ErrRateLimited after Retry-After; an open-state scan
-	// turns that into a resume cursor instead of failing the collect.
-	if err := g.quota.take(ctx, gmailUnits(path)); err != nil {
-		return err
+	// The quota paces every attempt before it is sent (NewGmail). A rate limit from Google means something else
+	// spent this person's minute too: wait out the Retry-After, or a whole minute when it names none, and try once
+	// more. A second rate limit is returned; an open-state scan turns it into a resume cursor instead of failing.
+	var body []byte
+	var err error
+	for attempt := 0; ; attempt++ {
+		body, err = g.get(ctx, g.url(path, q))
+		limit := source.LimitOf(err)
+		if limit == nil {
+			break
+		}
+		limit.Units = g.quota.recent()
+		g.limit = limit
+		err = &source.RateLimitError{RateLimit: *limit}
+		wait := limit.RetryAfter
+		if wait < 0 {
+			wait = gmailLimitWait
+		}
+		if attempt > 0 || wait > gmailMaxLimitWait {
+			break
+		}
+		g.quota.hold(wait)
 	}
-	body, err := g.get(ctx, g.url(path, q))
 	if err != nil {
 		return err
 	}

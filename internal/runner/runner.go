@@ -230,6 +230,14 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		// A dry run writes no cursor: a later send must not skip threads the dry run merely printed.
 		resume := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Partial && got.Next != nil && r.Cursors != nil
 		clear := err == nil && r.Send && got.ClearResume && !resume && !commit && r.Cursors != nil
+		limit := got.Limit
+		if err != nil {
+			limit = source.LimitOf(err)
+		}
+		if limit != nil {
+			r.Log.Log(logs.RateLimited, logs.Source(s.Name()), logs.Status(limit.Status), logs.LimitReason(limit.Reason),
+				logs.RetryAfter(limit.RetryAfter), logs.Count("units", limit.Units))
+		}
 		if err == nil && got.Partial {
 			r.Log.Log(logs.ReadPaused, logs.Source(s.Name()), logs.Why(logs.ReasonRateLimit))
 			r.partial = append(r.partial, s.Name())
