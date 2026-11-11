@@ -17,13 +17,15 @@ restores it and ends `init` without writing anything. It refuses to overwrite a 
 ## `beacon key set`
 
 ```bash
-beacon key set
+beacon key set [--force]
 ```
 
 Replaces the Signal key in the keychain, in the same account `init` used. It reads the new key from standard input,
 with echo off when that is a terminal, and does not print it. Before storing, it checks the key with `GET /api/me`.
-Signal must accept it. A refusal, or no answer, stores nothing and leaves the previous key. It prints the actor and
-the scopes, so a rotation or a wider key can be confirmed, and never the key.
+Signal must accept it, and the key's actor must be the configured person or their agent: the handle in
+`person.handle`, or the actor the key already stored is. `--force` stores it anyway. A refusal, a mismatch, or no
+answer stores nothing and leaves the previous key. It prints the actor and the scopes, so a rotation or a wider key
+can be confirmed, and never the key.
 
 ## `beacon run`
 
@@ -47,8 +49,8 @@ Signal …` and which prefix to ask Signal's admin to restrict. If the restricti
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
 lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
 `run` says so and what was re-read, and when a read stopped at its limit, it says that too. When a Gmail open-state
-scan stops at a rate limit, `run` says the next pass continues from where it stopped. A pass that only finishes
-that scan is not a completed `--first`: it lists the remainder. Run again for the summary. See [`sources.md`](sources.md#google).
+scan stops at a rate limit, `run` says the next pass continues from where it stopped. Only a send pass stores that
+place. A dry run does not, so the next send reads the window again. See [`sources.md`](sources.md#google).
 
 It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
 the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,
@@ -198,7 +200,9 @@ beacon service logs [--stdout]
 ```
 
 `install` writes the plist and bootstraps it. The job runs the signed binary with `run` and `--config` set to the
-absolute config path: the poll loop, not `--once`. It starts at load. launchd restarts it only when it exits
+absolute config path: the poll loop, not `--once`. It starts at load. The process reads the config when it starts
+and does not reload it: there is no SIGHUP handler and no watch on the file. Restart the agent after a config
+change. An invalid config is not applied over a running one; the process exits, and launchd restarts it only when it exits
 non-zero, and not more than once every 10 seconds. A clean exit after SIGTERM stays stopped. launchd waits 180
 seconds after SIGTERM before killing the process, which covers one send. The plist sets no environment variables
 and no credential; the agent reads keys from the keychain when a pass sends, the same as a terminal `beacon run`.

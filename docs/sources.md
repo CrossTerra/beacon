@@ -14,9 +14,9 @@ token endpoint). They are never written to the config, the log, or the outbox.
 
 `Collect` returns the items and an opaque next cursor. The runner stores it in `cursors.json` only after every item
 of that pass has been sent to the outbox, held, or dropped, and only on a send pass. A crash before that collects
-the same items again; keys make that harmless (DEC-9). A dry run reads the cursor and does not write a completed
-one. A rate limit or a failed collect leaves the cursor where it is, except a Gmail open-state scan that stops at a
-rate limit: that stores a resume cursor so the next pass continues, including a dry run. An item that fails validation, or that a rule matched but
+the same items again; keys make that harmless (DEC-9). A dry run reads the cursor and does not write one. A rate
+limit or a failed collect leaves the cursor where it is. A Gmail open-state scan that stops at a rate limit stores
+a resume cursor only on a send pass, after the items already read were recorded. An item that fails validation, or that a rule matched but
 could not be projected, is dropped and logged by count, with a fixed reason code and no item content. That does not
 freeze the source: the cursor still moves.
 
@@ -307,16 +307,21 @@ units per second and 15,000 per minute. `messages.get` with metadata costs 5 uni
 10, `threads.list` 10, `history.list` 2, and profile and labels 1. Beacon spends at most 200 units in any second and
 12,000 in any minute, under those limits, so a 14-day scan does not burst into a 429. A `429`, or a `403` whose
 reason is a rate limit, is still honoured (`Retry-After`, then backoff). If the limit still stops an open-state
-scan after something has been read, the collect does not fail. It keeps the items read so far and stores a resume
-cursor: the history id read before listing, and where in the inbox or starred list it stopped (a page token and the
-ids already fetched, not message content). The next pass, including a dry run, continues from there and does not
-fetch those ids again. When a rule lists `body`, the body is read before the thread is marked done, so a pause
-cannot record the item without it. It is not a completed first run, and it is not a history cursor: history is read only once
-the scan finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that
-only finishes a scan an earlier pass started lists the remainder, not the whole window, so it is not a completed
-first run. The resume cursor is dropped and the next pass reads the window from the start, paced under the quota.
-That pass is the summary `accept-first` requires. The page cap (5000 per list) is counted across those passes, not
-restarted, and a cap already hit is not forgotten if a later pass pauses.
+scan after something has been read, the collect does not fail. On a send pass, after those items are recorded, it
+stores a resume cursor: the history id read before listing, and where in the inbox or starred list it stopped (a
+page token and the ids already fetched, not message content), marked as written by a send pass. The next send pass
+continues from there and does not fetch those ids again. A dry run writes no cursor and takes no lock. A resume
+cursor that was not written by a send pass is discarded, and that pass starts the scan again, so threads a dry run
+printed are not skipped when sending. When a rule lists `body`, the body is read before the thread is marked done,
+so a pause cannot record the item without it. It is not a history cursor: history is read only once the scan
+finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that only
+finishes a scan an earlier pass started lists the remainder, not the whole window, so it is not a completed first
+run. The page cap (5000 per list) is counted across those passes, not restarted, and a cap already hit is not
+forgotten if a later pass pauses.
+
+A page token is not a stable offset. Archiving or deleting threads between passes can move an unchanged thread
+onto a page the resume cursor already finished, and that thread is not read. Gmail history does not name it: the
+thread did not change. That mail is missed until something about it changes.
 
 **Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, and
 only that), `starred` (`STARRED` added). A From header is the sender's claim: mail that says it is from the person

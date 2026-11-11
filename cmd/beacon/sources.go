@@ -172,8 +172,8 @@ func (a *app) secretFunc(account string) func() (keychain.Secret, error) {
 	}
 }
 
-// prepare loads the cursor, the seed and the first-run acceptance. A send pass may commit a completed cursor.
-// A run, including a dry run, may store a Gmail resume cursor, so it opens the store for writing. explain does not.
+// prepare loads the cursor, the seed and the first-run acceptance. A send pass may commit a cursor. A dry run
+// and explain open the store read-only: they write no cursor, so no lock is taken.
 func (a *app) prepare(e *env, r *runner.Runner, send bool) error {
 	return a.prepareStore(e, r, send)
 }

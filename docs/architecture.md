@@ -42,11 +42,10 @@ One pass of `beacon run`:
    and the rest stay pending, because a later body may close an ask an earlier one opens.
 
 A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing except `beacon run --first`,
-which records in `first.json` which sources completed that summary, and a Gmail resume cursor when an open-state
-scan stops at a rate limit. It does not write a completed cursor, the outbox, the
+which records in `first.json` which sources completed that summary. It does not write a cursor, the outbox, the
 queue, or `pass.json`. It may contact source APIs to collect; it does not contact Signal. It reads the outbox, the
 hold queue and the cursor, so it shows what a send pass would do next. Without `--once` or `--first`, the pass
-repeats every `poll_interval`, and it still writes nothing but that resume cursor.
+repeats every `poll_interval`, and it still writes nothing.
 
 ## Packages
 
@@ -86,7 +85,7 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `held.jsonl` | Held items, in full | No |
 | `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
 | `instance` | This instance's random id, used in lease claims | Inside lease claims |
-| `cursors.json` | Each source's committed cursor, opaque. A Gmail resume cursor, while an open-state scan is unfinished, is stored here too, including by a dry run | No |
+| `cursors.json` | Each source's committed cursor, opaque. A Gmail resume cursor, while a send pass's open-state scan is unfinished, is stored here too. A dry run does not write it | No |
 | `first.json` | Sources whose `beacon run --first` completed. `accept-first` requires it | No |
 | `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
 | `seed` | Imported seed lines (DEC-24) | No |
@@ -98,8 +97,7 @@ The directory is created `0700` and the files `0600`, and it is synced when a fi
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue
 files are opened for writing only under that lock. A line torn by a crash is cut off when a send pass opens the
 file under the lock. A dry run and `beacon explain` take no lock. They read the outbox and the
-queue files, skip a torn last line (it may be a record a sending process is appending), and create no file there.
-A dry run may write a Gmail resume cursor in `cursors.json`; `explain` writes nothing.
+queue files, skip a torn last line (it may be a record a sending process is appending), and create no file.
 
 ## Adding a source
 

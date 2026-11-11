@@ -340,6 +340,33 @@ func TestGmailPartialReadsBodyBeforeSkip(t *testing.T) {
 	}
 }
 
+func TestGmailDiscardsADryRunResume(t *testing.T) {
+	srv := googletest.New(t)
+	g, err := NewGmail(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A cursor a dry run left skips t4. A send pass must not trust it.
+	raw, err := json.Marshal(gmailCursor{
+		HistoryID: "300",
+		Scan:      &gmailScan{HistoryID: "300", Cutoff: "2026-10-25T12:00:00Z", Phase: "inbox", Skip: []string{"t4"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.Collect(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !srv.Called("/gmail/v1/users/me/threads/t4") {
+		t.Fatal("a dry-run resume cursor skipped a thread")
+	}
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	if _, ok := m["gmail:t4:m5"]; !ok {
+		t.Fatalf("missing the skipped thread: %v", keys(m))
+	}
+}
+
 func TestGmailResumeKeepsThePageCap(t *testing.T) {
 	srv := googletest.New(t)
 	pages := 0
@@ -359,7 +386,7 @@ func TestGmailResumeKeepsThePageCap(t *testing.T) {
 	// is just under it. Start at the last slot so a resume cannot list another gapPages.
 	start, err := json.Marshal(gmailCursor{
 		HistoryID: "300",
-		Scan:      &gmailScan{HistoryID: "300", Cutoff: "2026-10-25T12:00:00Z", Phase: "inbox", Page: "p", Pages: gapPages - 1},
+		Scan:      &gmailScan{HistoryID: "300", Cutoff: "2026-10-25T12:00:00Z", Phase: "inbox", Page: "p", Pages: gapPages - 1, By: scanBySend},
 	})
 	if err != nil {
 		t.Fatal(err)

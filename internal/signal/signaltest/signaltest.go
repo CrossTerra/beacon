@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 )
 
@@ -50,6 +51,15 @@ type Server struct {
 	// Restricted are the prefixes GET /api/restrictions lists. NoRead answers it 403, as for a key without read.
 	Restricted []string
 	NoRead     bool
+	// Actor is who GET /api/me reports for Token. Zero uses the default agent.
+	Actor MeActor
+	// Tokens are further bearer tokens the fake accepts, each with its own actor.
+	Tokens map[string]MeActor
+}
+
+// MeActor is the actor GET /api/me returns for a token.
+type MeActor struct {
+	ID, Type, Handle, WorksFor string
 }
 
 // New starts a fake that accepts the bearer token.
@@ -57,6 +67,33 @@ func New(token string) *Server {
 	s := &Server{Token: token, byKey: map[string]int{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
+}
+
+func (s *Server) actor(token string) (MeActor, bool) {
+	if token == "" {
+		return MeActor{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if a, ok := s.Tokens[token]; ok {
+		return a, true
+	}
+	if token != s.Token {
+		return MeActor{}, false
+	}
+	a := s.Actor
+	if a.ID == "" {
+		a = MeActor{ID: "act_test", Type: "agent", Handle: "beacon"}
+	}
+	return a, true
+}
+
+func jsonString(s string) string {
+	if s == "" {
+		return "null"
+	}
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
@@ -73,12 +110,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	script := s.Script
 	s.mu.Unlock()
 
-	if r.Header.Get("Authorization") != "Bearer "+s.Token {
+	actor, ok := s.actor(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if !ok {
 		reply(w, http.StatusUnauthorized, `{"error":{"code":"unauthorized","message":"Invalid credentials."}}`, nil)
 		return
 	}
 	if r.URL.Path == "/api/me" && r.Method == http.MethodGet {
-		reply(w, http.StatusOK, `{"organization":{"name":"Signal"},"actor":{"id":"act_test","type":"agent","name":"Beacon","handle":"beacon"},"scopes":["read","write","relay"],"key":{"id":"key_test","name":"beacon"}}`, nil)
+		reply(w, http.StatusOK, fmt.Sprintf(`{"organization":{"name":"Signal"},"actor":{"id":%q,"type":%q,"name":"Beacon","handle":%q,"works_for":%s},"scopes":["read","write","relay"],"key":{"id":"key_test","name":"beacon"}}`,
+			actor.ID, actor.Type, actor.Handle, jsonString(actor.WorksFor)), nil)
 		return
 	}
 	if r.URL.Path == "/api/restrictions" && r.Method == http.MethodGet {

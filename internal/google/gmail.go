@@ -190,6 +190,12 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	var openCut bool
 	next := gmailCursor{HistoryID: profile.HistoryID, At: cur.At}
 	// A scan cursor is an open-state read that stopped at a rate limit. It is not a history cursor.
+	if cur.Scan != nil && cur.Scan.By != scanBySend {
+		// A resume cursor a dry run left, or one this process did not write on a send pass, is not progress.
+		// Trusting it would skip threads that were printed and never sent. Start the scan again.
+		cur = gmailCursor{}
+		cursor = nil
+	}
 	openState := len(cursor) == 0 || cur.Scan != nil
 	var scan *gmailScan
 	if openState {
@@ -294,6 +300,7 @@ func (g *Gmail) partial(next gmailCursor, scan *gmailScan, items []source.Item) 
 	if scan.HistoryID == "" {
 		scan.HistoryID = next.HistoryID
 	}
+	scan.By = scanBySend
 	next.HistoryID = scan.HistoryID
 	next.Scan = scan
 	data, err := json.Marshal(next)
@@ -328,7 +335,11 @@ type gmailScan struct {
 	Pages int `json:"pages,omitempty"`
 	// InboxCut is true when the inbox list already hit its cap, so a later pause does not forget read_cut.
 	InboxCut bool `json:"inbox_cut,omitempty"`
+	// By is "send" only on a resume a send pass stored. Any other value is discarded: a dry run writes no cursor.
+	By string `json:"by,omitempty"`
 }
+
+const scanBySend = "send"
 
 func parseGmailCursor(b []byte) (gmailCursor, error) {
 	var c gmailCursor

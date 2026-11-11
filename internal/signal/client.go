@@ -227,9 +227,12 @@ func (c *Client) retryAfter(h string) time.Duration {
 
 // Me is who a key is, from GET /api/me. It holds no secret.
 type Me struct {
-	// Handle is the actor's handle without "@", when it has one.
-	Handle string
-	Scopes []string
+	// ID is the actor id (act_…). Handle is the handle without "@", when it has one.
+	ID       string
+	Type     string
+	Handle   string
+	WorksFor string
+	Scopes   []string
 }
 
 // Me checks the key with GET /api/me. A 401 is ErrUnauthorized. Any other failure is ErrUnavailable. It makes one
@@ -264,14 +267,17 @@ func (c *Client) Me(ctx context.Context) (Me, error) {
 	}
 	var parsed struct {
 		Actor struct {
-			Handle string `json:"handle"`
+			ID       string `json:"id"`
+			Type     string `json:"type"`
+			Handle   string `json:"handle"`
+			WorksFor string `json:"works_for"`
 		} `json:"actor"`
 		Scopes []string `json:"scopes"`
 	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed.Actor.ID == "" {
 		return Me{}, ErrUnavailable
 	}
-	return Me{Handle: parsed.Actor.Handle, Scopes: parsed.Scopes}, nil
+	return Me{ID: parsed.Actor.ID, Type: parsed.Actor.Type, Handle: parsed.Actor.Handle, WorksFor: parsed.Actor.WorksFor, Scopes: parsed.Scopes}, nil
 }
 
 // Restrictions returns the restricted subject prefixes (`gmail:*`), from GET /api/restrictions. It makes one attempt:

@@ -116,6 +116,9 @@ same pull request.
   mention on a file you have not opened in that time, and that was not otherwise modified, is not seen.
 - **Gmail's history expires.** After about a week without a pass, Gmail cannot list what changed. Beacon re-reads
   open state and inbox and sent mail since the last pass, and says so; other changes in that gap are lost.
+- **A `fromGmail` calendar event is not Gmail.** Calendar events of type `fromGmail` can carry text taken from mail
+  (a flight, a reservation). Beacon sends them under `calendar:`, so a Signal restriction on `gmail:*` does not cover
+  them. They leave only when a calendar rule matches, and only the fields that rule lists.
 - **Google read scopes are broad.** `drive.readonly` can read every file the person can, and `gmail.metadata` every
   message's headers. Beacon asks for names, links, headers and comment metadata, and reads bodies only when a rule
   lists `body`, but the grant itself is not narrower. Revoke it at

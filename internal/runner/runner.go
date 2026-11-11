@@ -226,13 +226,15 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		// A limited or failed pass does not move the cursor. Items already read are still decided: a later pass
 		// collects them again, and keys make that harmless.
 		commit := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Next != nil && r.Cursors != nil && !got.Partial
-		resume := err == nil && got.Partial && got.Next != nil && r.Cursors != nil
-		clear := err == nil && got.ClearResume && !resume && !commit && r.Cursors != nil
-		if resume {
+		// A resume cursor is stored only on a send pass, and only when the items already read are recorded.
+		// A dry run writes no cursor: a later send must not skip threads the dry run merely printed.
+		resume := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Partial && got.Next != nil && r.Cursors != nil
+		clear := err == nil && r.Send && got.ClearResume && !resume && !commit && r.Cursors != nil
+		if err == nil && got.Partial {
 			r.Log.Log(logs.ReadPaused, logs.Source(s.Name()), logs.Why(logs.ReasonRateLimit))
 			r.partial = append(r.partial, s.Name())
 		}
-		if clear {
+		if err == nil && got.ClearResume {
 			r.continued = append(r.continued, s.Name())
 		}
 		if err != nil {
@@ -423,8 +425,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	// again; keys make that harmless.
 	for _, p := range passes {
 		// A source whose send items could not be recorded keeps its cursor, so they are collected again.
-		// A resume cursor is the exception: the read stopped, and the next pass continues from it, including a
-		// dry run. It is not stored when the items could not be recorded, or those items would not be read again.
+		// A resume cursor is stored only when those items were recorded. A dry run writes nothing.
 		switch {
 		case p.commit && !r.deferred[p.name]:
 			if err := r.Cursors.Commit(p.name, p.next); err != nil {

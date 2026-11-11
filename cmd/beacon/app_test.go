@@ -664,7 +664,9 @@ func TestKeySet(t *testing.T) {
 	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "keyset")
 	allowed := h.egressList(cfg)
 	const next = "sig_rotated_key_value"
-	h.server.Token = next
+	h.server.Tokens = map[string]signaltest.MeActor{
+		next: {ID: "act_test", Type: "agent", Handle: "beacon"},
+	}
 	a := h.app(allowed)
 	a.stdin = strings.NewReader(next + "\n")
 	if code := h.run(a, "key", "set", "--config", cfg); code != 0 {
@@ -689,7 +691,6 @@ func TestKeySet(t *testing.T) {
 	if !sawMe {
 		t.Fatal("did not verify the key with GET /api/me")
 	}
-	h.server.Token = token
 	a = h.app(allowed)
 	a.stdin = strings.NewReader("sig_refused_key\n")
 	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
@@ -700,6 +701,27 @@ func TestKeySet(t *testing.T) {
 	}
 	if !h.store.Contains("test", next) {
 		t.Fatal("a refusal replaced the stored key")
+	}
+	const other = "sig_other_actor_key"
+	h.server.Tokens[other] = signaltest.MeActor{ID: "act_other", Type: "agent", Handle: "other"}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader(other + "\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a key for another actor")
+	}
+	if strings.Contains(h.stdout.String()+h.stderr.String(), other) {
+		t.Fatal("printed the other key")
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("a mismatched actor replaced the stored key")
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader(other + "\n")
+	if code := h.run(a, "key", "set", "--force", "--config", cfg); code != 0 {
+		t.Fatalf("force: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	if !h.store.Contains("test", other) || strings.Contains(h.stdout.String()+h.stderr.String(), other) {
+		t.Fatal("force did not store the key, or printed it")
 	}
 }
 

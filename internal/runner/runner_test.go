@@ -35,6 +35,7 @@ type fakeSource struct {
 	cursor  []byte
 	partial bool
 	clear   bool
+	collect func(cursor []byte) (source.Collected, error)
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
@@ -43,6 +44,9 @@ func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
 func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
 	f.cursor = append([]byte(nil), cursor...)
+	if f.collect != nil {
+		return f.collect(cursor)
+	}
 	return source.Collected{Items: f.items, Next: f.next, Dropped: f.dropped, Partial: f.partial, ClearResume: f.clear}, f.err
 }
 
@@ -333,38 +337,57 @@ func TestCursorCommitsAfterDecide(t *testing.T) {
 	}
 }
 
-// A read that stops at a rate limit stores a resume cursor even on a dry run, so the next pass continues.
-// Finishing that read on a dry run clears it: a dry run still does not commit a completed cursor.
-func TestResumeCursorOnDryRun(t *testing.T) {
+// A dry run that pauses does not store a cursor. The next send, of an accepted source with no cursor, collects
+// every item again and sends each one a rule sends. Trusting the dry run's place would skip the ones it printed.
+func TestDryRunPauseDoesNotHideItemsFromSend(t *testing.T) {
 	f := newFixture(t)
+	all := []source.Item{items()[0], {Source: "fx", Subject: "fx:obj:9", Key: "fx:obj:9:1", Type: "changed",
+		OccurredAt: items()[0].OccurredAt, Actor: "fx:user:dana", Fields: map[string]string{"title": "SECRET-TITLE-9", "label": "send"}}}
+	f.src.collect = func(cursor []byte) (source.Collected, error) {
+		f.src.cursor = append([]byte(nil), cursor...)
+		if len(cursor) > 0 {
+			// A trusted resume would return only the remainder.
+			return source.Collected{Items: all[1:], Next: []byte("done")}, nil
+		}
+		if f.src.partial {
+			return source.Collected{Items: all[:1], Next: []byte("resume-from-dry-run"), Partial: true}, nil
+		}
+		return source.Collected{Items: all, Next: []byte("done")}, nil
+	}
 	f.src.partial = true
-	f.src.next = []byte("resume")
 	cur := &memCursor{}
-	r, done := f.runner(false, nil)
-	r.Cursors = cur
-	defer done()
-	rep, err := r.Run(context.Background())
+	dry, done := f.runner(false, nil)
+	dry.Cursors = cur
+	rep, err := dry.Run(context.Background())
+	done()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cur.commits != 1 || string(cur.m["fx"]) != "resume" || len(rep.Partial) != 1 || rep.Partial[0] != "fx" {
-		t.Fatalf("resume %+v partial %v", cur.m, rep.Partial)
+	if cur.commits != 0 || len(cur.m) != 0 {
+		t.Fatalf("a dry run stored a cursor: %+v", cur.m)
 	}
-	if len(rep.Failed) != 0 {
-		t.Fatal("a paused read failed the collect")
+	if len(rep.Partial) != 1 {
+		t.Fatal("a paused dry run failed or was not reported")
 	}
 	f.src.partial = false
-	f.src.clear = true
-	f.src.next = []byte("done")
-	rep, err = r.Run(context.Background())
+	send, doneSend := f.runner(true, nil)
+	send.Cursors = cur
+	rep, err = send.Run(context.Background())
+	doneSend()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cur.m["fx"]; ok {
-		t.Fatal("a finished dry run left the resume cursor")
+	if s, _, _, _ := rep.Counts(); s != 2 {
+		t.Fatalf("send pass decided %d send items, want both threads", s)
 	}
-	if len(rep.Continued) != 1 || rep.Continued[0] != "fx" {
-		t.Fatalf("a finished resume was not reported: %v", rep.Continued)
+	if len(f.src.cursor) != 0 {
+		t.Fatalf("send pass trusted a cursor: %q", f.src.cursor)
+	}
+	if _, ok := f.server.Event("fx:obj:1:1"); !ok {
+		t.Fatal("the thread the dry run printed was not sent")
+	}
+	if _, ok := f.server.Event("fx:obj:9:1"); !ok {
+		t.Fatal("the later thread was not sent")
 	}
 }
 

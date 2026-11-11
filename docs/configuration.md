@@ -51,7 +51,8 @@ and sends nothing under `gmail:`, `calendar:`, `drive:` or `slack:dm:` until Sig
 scope is needed.
 
 `beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the login
-keychain. `beacon key set` replaces that key, in the same account, after `GET /api/me` accepts it. It reads from
+keychain. `beacon key set` replaces that key, in the same account, after `GET /api/me` accepts it and the actor is the
+configured person or the agent the stored key already is (`--force` stores another actor). It reads from
 standard input the same way and does not print the key. A refusal stores nothing. `beacon run` reads the key from
 the keychain when it sends. A dry run does not read it.
 

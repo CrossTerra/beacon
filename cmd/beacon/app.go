@@ -326,6 +326,7 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: beacon key set [--config PATH]")
 	}
 	fs, cfgPath := a.flags("key set")
+	force := fs.Bool("force", false, "store the key even if its actor is not the configured person or their agent")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -361,6 +362,20 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 		}
 		return errors.New("signal did not accept the key; it was not stored")
 	}
+	var old signal.Me
+	if existing, err := store.Get(e.cfg.KeychainAccount()); err == nil {
+		prev := signal.New(u, a.transport(egress.Addresses(e.egress())), existing)
+		if a.configureClient != nil {
+			a.configureClient(prev)
+		}
+		old, err = prev.Me(ctx)
+		if err != nil && !errors.Is(err, signal.ErrUnauthorized) {
+			return errors.New("the key already stored could not be checked; the new key was not stored")
+		}
+	}
+	if !*force && !actorAllowed(me, old, e.cfg.Person.Handle) {
+		return errors.New("the key's actor is not the configured person or their agent; pass --force to store it")
+	}
 	if err := store.Set(e.cfg.KeychainAccount(), secret); err != nil {
 		return err
 	}
@@ -377,6 +392,31 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.stdout, "Scopes: %s\n", strings.Join(me.Scopes, ", "))
 	}
 	return nil
+}
+
+// actorAllowed reports whether next is the configured person, the actor the stored key already is, or an agent of
+// that person. A handle is compared without "@".
+func actorAllowed(next, prev signal.Me, person string) bool {
+	person = strings.TrimPrefix(strings.TrimSpace(person), "@")
+	if person == "" || next.ID == "" {
+		return false
+	}
+	if next.ID == person || strings.EqualFold(next.Handle, person) {
+		return true
+	}
+	if prev.ID != "" && next.ID == prev.ID {
+		return true
+	}
+	if prev.Handle != "" && next.Handle != "" && strings.EqualFold(next.Handle, prev.Handle) {
+		return true
+	}
+	if next.WorksFor != "" && next.WorksFor == person {
+		return true
+	}
+	if prev.Type == "human" && next.WorksFor != "" && next.WorksFor == prev.ID {
+		return true
+	}
+	return false
 }
 
 // --- run
@@ -438,8 +478,8 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	send := e.cfg.Mode == config.Send && !*dry && !*first
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
 		AfterAppend: a.afterAppend}
-	// A dry run may store a Gmail resume cursor. A completed cursor is committed only when sending.
-	if err := a.prepareStore(e, r, true); err != nil {
+	// A dry run reads cursors and does not write them. No lock: it must not leave a resume a send pass trusts.
+	if err := a.prepare(e, r, send); err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	// SIGTERM finishes the write already in progress and does not start another. SIGINT still cancels work.
