@@ -42,6 +42,8 @@ const (
 	HistoryGap Event = "history_gap"
 	// ReadCut is a source whose read stopped at its limit, so older items in its window were not read.
 	ReadCut Event = "read_cut"
+	// ReadPaused is a source whose read stopped at a rate limit and will continue next pass. Not a failure.
+	ReadPaused Event = "read_paused"
 	// RestrictionsUnread is a send pass that could not read Signal's restricted prefixes.
 	RestrictionsUnread Event = "restrictions_unread"
 )

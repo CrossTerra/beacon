@@ -298,7 +298,18 @@ const (
    "organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"},{"email":"bob@example.com","responseStatus":"needsAction"}]},
   {"id":"ev4","status":"confirmed","etag":"\"3004\"","summary":"Offsite","start":{"date":"2026-11-12"},"end":{"date":"2026-11-13"},
    "created":"2026-11-03T00:00:00Z","updated":"2026-11-03T00:00:00Z","htmlLink":"https://www.google.com/calendar/event?eid=ev4",
-   "organizer":{"email":"winton@example.com","self":true}}
+   "organizer":{"email":"winton@example.com","self":true},"eventType":"default"},
+  {"id":"evWL","status":"confirmed","etag":"\"3090\"","summary":"Home","eventType":"workingLocation","start":{"date":"2026-11-09"},"end":{"date":"2026-11-10"},
+   "created":"2026-11-01T00:00:00Z","updated":"2026-11-01T00:00:00Z","htmlLink":"https://www.google.com/calendar/event?eid=evWL",
+   "organizer":{"email":"winton@example.com","self":true}},
+  {"id":"evOOO","status":"confirmed","etag":"\"3091\"","summary":"Out of office","eventType":"outOfOffice","start":{"dateTime":"2026-11-10T08:00:00Z"},"end":{"dateTime":"2026-11-10T18:00:00Z"},
+   "created":"2026-11-01T00:00:00Z","updated":"2026-11-01T00:00:00Z",
+   "organizer":{"email":"winton@example.com","self":true}},
+  {"id":"evFT","status":"confirmed","etag":"\"3092\"","summary":"Focus","eventType":"focusTime","start":{"dateTime":"2026-11-10T15:00:00Z"},"end":{"dateTime":"2026-11-10T16:00:00Z"},
+   "created":"2026-11-01T00:00:00Z","updated":"2026-11-01T00:00:00Z",
+   "organizer":{"email":"winton@example.com","self":true}},
+  {"id":"evBD","status":"confirmed","etag":"\"3093\"","summary":"Birthday","eventType":"birthday","start":{"date":"2026-11-11"},"end":{"date":"2026-11-12"},
+   "created":"2026-11-01T00:00:00Z","updated":"2026-11-01T00:00:00Z"}
 ]}`
 
 	EventsChanged = `{"timeZone":"America/Los_Angeles","items":[

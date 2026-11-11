@@ -60,8 +60,24 @@ func calendarPath(p string, q url.Values) bool {
 	return ok && idPattern.MatchString(id) && onlyKeys(q, "fields")
 }
 
-// eventListKeys are the query keys an events list may carry.
-var eventListKeys = []string{"singleEvents", "showDeleted", "timeMin", "timeMax", "updatedMin", "maxResults", "fields", "pageToken"}
+// eventListKeys are the query keys an events list may carry. eventTypes asks only for meetings, not working
+// locations and the other blocks Calendar records as events.
+var eventListKeys = []string{"singleEvents", "showDeleted", "timeMin", "timeMax", "updatedMin", "maxResults", "fields", "pageToken", "eventTypes"}
+
+// keptEventTypes are the event types Beacon reads. The API's other types are not meetings.
+var keptEventTypes = []string{"default", "fromGmail"}
+
+// skippedEventType reports an event Calendar records that is not a meeting: a working location (all-day "Home"),
+// an out-of-office block, a focus-time block, or a birthday. Empty is kept: a response that omits the field is a
+// normal event.
+func skippedEventType(t string) bool {
+	switch t {
+	case "workingLocation", "outOfOffice", "focusTime", "birthday":
+		return true
+	default:
+		return false
+	}
+}
 
 // Fields implements source.Source.
 func (c *Calendar) Fields() []string { return append([]string(nil), CalendarFields...) }
@@ -150,6 +166,7 @@ type calEvent struct {
 	Created     string      `json:"created"`
 	Updated     string      `json:"updated"`
 	HTMLLink    string      `json:"htmlLink"`
+	EventType   string      `json:"eventType"`
 	Organizer   calPerson   `json:"organizer"`
 	Creator     calPerson   `json:"creator"`
 	Attendees   []calPerson `json:"attendees"`
@@ -270,6 +287,11 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 		if !idPattern.MatchString(e.ID) {
 			continue
 		}
+		if skippedEventType(e.EventType) {
+			// Not a meeting. Drop it, and forget one a previous cursor tracked, so it is not read again.
+			delete(cur.Events, e.ID)
+			continue
+		}
 		if err := c.checkIdentity(e.selfEmail()); err != nil {
 			return source.Collected{}, err
 		}
@@ -384,6 +406,7 @@ func (c *Calendar) list(ctx context.Context, now, updatedMin time.Time) ([]calEv
 		"fields":       {fields},
 		// A cancelled event must be seen as cancelled, not as missing.
 		"showDeleted": {"true"},
+		"eventTypes":  keptEventTypes,
 	}
 	if !updatedMin.IsZero() {
 		q.Set("updatedMin", updatedMin.Format(time.RFC3339))
@@ -442,7 +465,7 @@ func sortedIDs(m map[string]calSeen) []string {
 }
 
 func eventFields(bodies bool) string {
-	f := "id,status,etag,summary,location,start,end,created,updated,htmlLink,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
+	f := "id,status,etag,summary,location,start,end,created,updated,htmlLink,eventType,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
 	if bodies {
 		f += ",description"
 	}
@@ -462,6 +485,7 @@ func (c *Calendar) movedOut(ctx context.Context, floor time.Time, inWindow []cal
 		"updatedMin":   {floor.Format(time.RFC3339)},
 		"maxResults":   {"250"},
 		"fields":       {fields},
+		"eventTypes":   keptEventTypes,
 	}
 	all, _, err := listEvents(ctx, &c.common, q)
 	if err != nil {

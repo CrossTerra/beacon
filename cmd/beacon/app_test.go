@@ -658,6 +658,93 @@ func TestRulesCheck(t *testing.T) {
 	}
 }
 
+func TestKeySet(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "keyset")
+	allowed := h.egressList(cfg)
+	const next = "sig_rotated_key_value"
+	h.server.Tokens = map[string]signaltest.MeActor{
+		next: {ID: "act_test", Type: "agent", Handle: "beacon"},
+	}
+	a := h.app(allowed)
+	a.stdin = strings.NewReader(next + "\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code != 0 {
+		t.Fatalf("%d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	out := h.stdout.String() + h.stderr.String()
+	if strings.Contains(out, next) || strings.Contains(out, "key_test") {
+		t.Fatalf("printed the key:\n%s", out)
+	}
+	if !strings.Contains(h.stdout.String(), "Actor: @beacon") || !strings.Contains(h.stdout.String(), "Scopes: read, relay, write") {
+		t.Fatalf("stdout:\n%s", h.stdout.String())
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("the accepted key was not stored")
+	}
+	var sawMe bool
+	for _, r := range h.server.Requests() {
+		if r.Path == "/api/me" && r.Method == http.MethodGet {
+			sawMe = true
+		}
+	}
+	if !sawMe {
+		t.Fatal("did not verify the key with GET /api/me")
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_refused_key\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a key Signal refused")
+	}
+	if strings.Contains(h.stdout.String()+h.stderr.String(), "sig_refused_key") {
+		t.Fatal("printed the refused key")
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("a refusal replaced the stored key")
+	}
+	const other = "sig_other_actor_key"
+	h.server.Tokens[other] = signaltest.MeActor{ID: "act_other", Type: "agent", Handle: "other"}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader(other + "\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a key for another actor")
+	}
+	if strings.Contains(h.stdout.String()+h.stderr.String(), other) {
+		t.Fatal("printed the other key")
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("a mismatched actor replaced the stored key")
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader(other + "\n")
+	if code := h.run(a, "key", "set", "--force", "--config", cfg); code != 0 {
+		t.Fatalf("force: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	if !h.store.Contains("test", other) || strings.Contains(h.stdout.String()+h.stderr.String(), other) {
+		t.Fatal("force did not store the key, or printed it")
+	}
+	// The stored key is now other, which this fake refuses. A new agent key is still accepted: the old key
+	// cannot name its actor. A different person is not.
+	h.server.Token = "sig_not_used"
+	h.server.Tokens = map[string]signaltest.MeActor{
+		"sig_replacement_agent": {ID: "act_new_agent", Type: "agent", Handle: "beacon"},
+		"sig_other_person":      {ID: "act_human", Type: "human", Handle: "someone"},
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_replacement_agent\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code != 0 {
+		t.Fatalf("refused stored key blocked an agent rotation: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	if !h.store.Contains("test", "sig_replacement_agent") {
+		t.Fatal("an agent key was not stored after the old key was refused")
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_other_person\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a different person's key after the old key was refused")
+	}
+}
+
 func TestInit(t *testing.T) {
 	h := newHarness(t)
 	store := keychain.NewMemory()

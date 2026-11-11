@@ -72,6 +72,8 @@ type Runner struct {
 	restrictRead bool
 	deferred     map[string]bool
 	gaps         []Gap
+	partial      []string
+	continued    []string
 }
 
 // Gap is a source that could not read its whole window: its change history expired (Expired), or a read stopped at
@@ -98,10 +100,11 @@ type Withheld struct {
 	Items  int
 }
 
-// Cursors is the committed cursor of each source.
+// Cursors is the committed cursor of each source. Reset removes one, so the next collect reads open state.
 type Cursors interface {
 	Get(name string) ([]byte, bool)
 	Commit(name string, next []byte) error
+	Reset(name string) (bool, error)
 }
 
 // Seeder is the seed file's never-list.
@@ -164,6 +167,12 @@ type Report struct {
 	RestrictionsReason logs.Reason
 	// Gaps are sources that could not read their whole window: an expired history, or a read cut at its limit.
 	Gaps []Gap
+	// Partial are sources whose read stopped at a rate limit. The next pass continues; they are not failed, and
+	// not a completed first run.
+	Partial []string
+	// Continued are sources that finished a scan an earlier pass had stopped. The items are only the remainder,
+	// so this is not a completed first-run summary.
+	Continued []string
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -188,6 +197,10 @@ type passSource struct {
 	name   string
 	next   []byte
 	commit bool
+	// resume stores next even when the pass does not commit a completed cursor: a read stopped at a rate limit.
+	resume bool
+	// clear drops a resume cursor when this collect finished that read and is not committing a completed cursor.
+	clear bool
 }
 
 // Collect gathers items from every source, validated and sorted by when they happened, then by key.
@@ -202,6 +215,8 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 	var passes []passSource
 	var failed []SourceFailure
 	r.gaps = nil
+	r.partial = nil
+	r.continued = nil
 	for _, s := range r.Sources {
 		var cursor []byte
 		if r.Cursors != nil {
@@ -210,7 +225,18 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		got, err := s.Collect(ctx, cursor)
 		// A limited or failed pass does not move the cursor. Items already read are still decided: a later pass
 		// collects them again, and keys make that harmless.
-		commit := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Next != nil && r.Cursors != nil
+		commit := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Next != nil && r.Cursors != nil && !got.Partial
+		// A resume cursor is stored only on a send pass, and only when the items already read are recorded.
+		// A dry run writes no cursor: a later send must not skip threads the dry run merely printed.
+		resume := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Partial && got.Next != nil && r.Cursors != nil
+		clear := err == nil && r.Send && got.ClearResume && !resume && !commit && r.Cursors != nil
+		if err == nil && got.Partial {
+			r.Log.Log(logs.ReadPaused, logs.Source(s.Name()), logs.Why(logs.ReasonRateLimit))
+			r.partial = append(r.partial, s.Name())
+		}
+		if err == nil && got.ClearResume {
+			r.continued = append(r.continued, s.Name())
+		}
 		if err != nil {
 			reason := Classify(err)
 			if reason == "" || reason == logs.ReasonInternal {
@@ -248,7 +274,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			}
 			r.gaps = append(r.gaps, Gap{Source: s.Name(), Expired: got.Gap, Cut: got.Cut})
 		}
-		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit})
+		passes = append(passes, passSource{name: s.Name(), next: got.Next, commit: commit, resume: resume, clear: clear})
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		if !items[i].OccurredAt.Equal(items[j].OccurredAt) {
@@ -353,7 +379,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
 
 	items, passes, failed := r.collect(ctx)
-	rep.Failed, rep.Gaps = failed, r.gaps
+	rep.Failed, rep.Gaps, rep.Partial, rep.Continued = failed, r.gaps, r.partial, r.continued
 	if err := r.readRestrictions(ctx, r.Send); err != nil {
 		return rep, err
 	}
@@ -399,11 +425,20 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	// again; keys make that harmless.
 	for _, p := range passes {
 		// A source whose send items could not be recorded keeps its cursor, so they are collected again.
-		if !p.commit || r.deferred[p.name] {
-			continue
-		}
-		if err := r.Cursors.Commit(p.name, p.next); err != nil {
-			return rep, err
+		// A resume cursor is stored only when those items were recorded. A dry run writes nothing.
+		switch {
+		case p.commit && !r.deferred[p.name]:
+			if err := r.Cursors.Commit(p.name, p.next); err != nil {
+				return rep, err
+			}
+		case p.resume && !r.deferred[p.name]:
+			if err := r.Cursors.Commit(p.name, p.next); err != nil {
+				return rep, err
+			}
+		case p.clear:
+			if _, err := r.Cursors.Reset(p.name); err != nil {
+				return rep, err
+			}
 		}
 	}
 	s, h, n, k := rep.Counts()
