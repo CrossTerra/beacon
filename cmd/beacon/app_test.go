@@ -658,6 +658,51 @@ func TestRulesCheck(t *testing.T) {
 	}
 }
 
+func TestKeySet(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "keyset")
+	allowed := h.egressList(cfg)
+	const next = "sig_rotated_key_value"
+	h.server.Token = next
+	a := h.app(allowed)
+	a.stdin = strings.NewReader(next + "\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code != 0 {
+		t.Fatalf("%d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	out := h.stdout.String() + h.stderr.String()
+	if strings.Contains(out, next) || strings.Contains(out, "key_test") {
+		t.Fatalf("printed the key:\n%s", out)
+	}
+	if !strings.Contains(h.stdout.String(), "Actor: @beacon") || !strings.Contains(h.stdout.String(), "Scopes: read, relay, write") {
+		t.Fatalf("stdout:\n%s", h.stdout.String())
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("the accepted key was not stored")
+	}
+	var sawMe bool
+	for _, r := range h.server.Requests() {
+		if r.Path == "/api/me" && r.Method == http.MethodGet {
+			sawMe = true
+		}
+	}
+	if !sawMe {
+		t.Fatal("did not verify the key with GET /api/me")
+	}
+	h.server.Token = token
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_refused_key\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a key Signal refused")
+	}
+	if strings.Contains(h.stdout.String()+h.stderr.String(), "sig_refused_key") {
+		t.Fatal("printed the refused key")
+	}
+	if !h.store.Contains("test", next) {
+		t.Fatal("a refusal replaced the stored key")
+	}
+}
+
 func TestInit(t *testing.T) {
 	h := newHarness(t)
 	store := keychain.NewMemory()

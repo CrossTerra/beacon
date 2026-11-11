@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +33,20 @@ func client(t *testing.T, s *signaltest.Server) (*signal.Client, *[]time.Duratio
 }
 
 var body = []byte(`{"subject":"s","type":"t","key":"k1","open":{}}`)
+
+func TestMe(t *testing.T) {
+	s := signaltest.New(token)
+	defer s.Close()
+	c, _ := client(t, s)
+	me, err := c.Me(context.Background())
+	if err != nil || me.Handle != "beacon" || strings.Join(me.Scopes, ",") != "read,write,relay" {
+		t.Fatalf("%+v %v", me, err)
+	}
+	s.Token = "other"
+	if _, err := c.Me(context.Background()); !errors.Is(err, signal.ErrUnauthorized) {
+		t.Fatalf("refused key: %v", err)
+	}
+}
 
 func TestWrittenReplayedConflict(t *testing.T) {
 	s := signaltest.New(token)

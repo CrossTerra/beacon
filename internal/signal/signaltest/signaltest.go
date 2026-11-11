@@ -77,6 +77,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusUnauthorized, `{"error":{"code":"unauthorized","message":"Invalid credentials."}}`, nil)
 		return
 	}
+	if r.URL.Path == "/api/me" && r.Method == http.MethodGet {
+		reply(w, http.StatusOK, `{"organization":{"name":"Signal"},"actor":{"id":"act_test","type":"agent","name":"Beacon","handle":"beacon"},"scopes":["read","write","relay"],"key":{"id":"key_test","name":"beacon"}}`, nil)
+		return
+	}
 	if r.URL.Path == "/api/restrictions" && r.Method == http.MethodGet {
 		s.mu.Lock()
 		noRead, prefixes := s.NoRead, append([]string(nil), s.Restricted...)

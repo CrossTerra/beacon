@@ -14,6 +14,17 @@ the Signal key, read from standard input, in the keychain. Echo is off while it 
 restores it and ends `init` without writing anything. It refuses to overwrite a config without `--force`.
 `--keychain-account` names the keychain account.
 
+## `beacon key set`
+
+```bash
+beacon key set
+```
+
+Replaces the Signal key in the keychain, in the same account `init` used. It reads the new key from standard input,
+with echo off when that is a terminal, and does not print it. Before storing, it checks the key with `GET /api/me`.
+Signal must accept it. A refusal, or no answer, stores nothing and leaves the previous key. It prints the actor and
+the scopes, so a rotation or a wider key can be confirmed, and never the key.
+
 ## `beacon run`
 
 Collects, applies rules and projection, and records what it decided.
@@ -35,9 +46,11 @@ has its send items held, and `run` prints `source <name>: N items held, not sent
 Signal …` and which prefix to ask Signal's admin to restrict. If the restrictions cannot be read, those items are
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
 lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
-`run` says so and what was re-read, and when a read stopped at its limit, it says that too. See [`sources.md`](sources.md#google).
+`run` says so and what was re-read, and when a read stopped at its limit, it says that too. When a Gmail open-state
+scan stops at a rate limit, `run` says the next pass continues from where it stopped; that source is not a completed
+`--first` until a pass finishes the scan. See [`sources.md`](sources.md#google).
 
-It exits non-zero when the pass cannot go on: Signal refused the key (401) or the lease claim, another process holds
+It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
 the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,
 or the config, rules or a source cannot be loaded. The message names the
 reason and the command that shows details (`beacon rules check`, `beacon outbox`); it never repeats an error's text,
@@ -250,6 +263,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
 | `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search); older items in its window were not read. The source only. |
+| `read_paused` | A Gmail open-state scan stopped at a rate limit and will continue next pass. Not a failure. The source, and `reason` `rate_limited`. |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
 

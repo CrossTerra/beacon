@@ -18,6 +18,7 @@ accounts; sending stays off until the first run is accepted. The plan is in [`pl
 ```bash
 go build -trimpath -o beacon ./cmd/beacon
 ./beacon init --signal-url https://signal.example.com --handle @you   # asks for the Signal key; stores it in the keychain
+./beacon key set                                                       # replace that key; checks it with Signal first
 ./beacon rules check
 ./beacon run --once            # a dry run until the config says mode: send
 ./beacon explain <key>         # the rule, and the exact body

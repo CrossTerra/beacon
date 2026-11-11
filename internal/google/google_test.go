@@ -248,6 +248,107 @@ func TestGmailFirstRun(t *testing.T) {
 	}
 }
 
+// A first run that hits a rate limit mid-scan does not fail the collect. The next pass continues from the
+// threads already fetched, and does not spend quota on them again.
+func TestGmailFirstRunResumesAfterRateLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"429", http.StatusTooManyRequests, ""},
+		{"403", http.StatusForbidden, `{"error":{"code":403,"errors":[{"reason":"rateLimitExceeded"}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := googletest.New(t)
+			limited := true
+			srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) {
+				if limited {
+					if tc.status == http.StatusTooManyRequests {
+						w.Header().Set("Retry-After", "1")
+					}
+					w.WriteHeader(tc.status)
+					io.WriteString(w, tc.body)
+					return
+				}
+				io.WriteString(w, googletest.ThreadT2)
+			}
+			g, err := NewGmail(opts(t, srv))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := g.Collect(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("a mid-scan rate limit failed the collect: %v", err)
+			}
+			if !got.Partial || history(t, got.Next) != "300" || !strings.Contains(string(got.Next), `"phase":"inbox"`) {
+				t.Fatalf("resume %v %s", got.Partial, got.Next)
+			}
+			m := byKey(t, got.Items, GmailFields, GmailStateFields)
+			if _, ok := m["gmail:t4:m5"]; !ok {
+				t.Fatalf("lost the thread read before the limit: %v", keys(m))
+			}
+			if _, ok := m["gmail:t2:m3"]; ok {
+				t.Fatal("emitted the thread the limit stopped on")
+			}
+			limited = false
+			before := countPath(srv, "/gmail/v1/users/me/threads/t4")
+			again, err := g.Collect(context.Background(), got.Next)
+			if err != nil || again.Partial {
+				t.Fatalf("resume: %v partial %v", err, again.Partial)
+			}
+			if countPath(srv, "/gmail/v1/users/me/threads/t4") != before {
+				t.Fatal("the next pass fetched a thread the first pass had already read")
+			}
+			if history(t, again.Next) != "300" || strings.Contains(string(again.Next), `"scan"`) {
+				t.Fatalf("finished cursor %s", again.Next)
+			}
+			got2 := byKey(t, again.Items, GmailFields, GmailStateFields)
+			if _, ok := got2["gmail:t2:m3"]; !ok {
+				t.Fatalf("did not continue: %v", keys(got2))
+			}
+		})
+	}
+}
+
+func countPath(srv *googletest.Server, path string) int {
+	n := 0
+	for _, r := range srv.Requests() {
+		if r.URL.Path == path {
+			n++
+		}
+	}
+	return n
+}
+
+func TestGmailQuotaStaysUnderTheBudget(t *testing.T) {
+	var slept []time.Duration
+	q := &gmailQuota{
+		now: func() time.Time { return testNow },
+		sleep: func(_ context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			return nil
+		},
+	}
+	for i := 0; i < gmailSecondBudget/10; i++ {
+		if err := q.take(context.Background(), 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(slept) != 0 {
+		t.Fatalf("waited before the second budget was spent: %v", slept)
+	}
+	if err := q.take(context.Background(), gmailUnits("threads/t1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(slept) != 1 || slept[0] < time.Second {
+		t.Fatalf("did not wait out the per-second budget: %v", slept)
+	}
+	if gmailUnits("messages/m1") != 5 || gmailUnits("threads") != 10 || gmailUnits("history") != 2 {
+		t.Fatalf("units messages %d threads %d history %d", gmailUnits("messages/m1"), gmailUnits("threads"), gmailUnits("history"))
+	}
+}
+
 func TestGmailExpiredHistory(t *testing.T) {
 	srv := googletest.New(t)
 	srv.Routes["/gmail/v1/users/me/history"] = func(w http.ResponseWriter, _ *http.Request) {
@@ -372,6 +473,9 @@ func TestCalendarEveryItem(t *testing.T) {
 	if q.Get("updatedMin") != "" || q.Get("singleEvents") != "true" || q.Get("timeMin") != "2026-11-08T12:00:00Z" || strings.Contains(q.Get("fields"), "description") {
 		t.Fatalf("first query %v", q)
 	}
+	if !strings.Contains(q.Get("fields"), "eventType") || strings.Join(q["eventTypes"], ",") != "default,fromGmail" {
+		t.Fatalf("event types %v fields %s", q["eventTypes"], q.Get("fields"))
+	}
 	m := byKey(t, first.Items, CalendarFields, CalendarStateFields)
 	want := []string{"calendar:ev1:response_needed:3001 response_needed", "calendar:ev2:upcoming:3002 upcoming", "calendar:ev4:upcoming:3004 upcoming"}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
@@ -400,6 +504,9 @@ func TestCalendarEveryItem(t *testing.T) {
 	}
 	if strings.Contains(string(first.Next), "Design review") || strings.Contains(string(first.Next), "Room 1") {
 		t.Fatalf("cursor holds event content: %s", first.Next)
+	}
+	if strings.Contains(string(first.Next), "evWL") || strings.Contains(string(first.Next), "evOOO") || strings.Contains(string(first.Next), "evFT") || strings.Contains(string(first.Next), "evBD") {
+		t.Fatal("a working location, out of office, focus time or birthday was fingerprinted")
 	}
 
 	second, err := c.Collect(context.Background(), first.Next)
@@ -686,6 +793,7 @@ func TestScopeAndHosts(t *testing.T) {
 		{&g.common, "https://gmail.googleapis.com/gmail/v1/users/other@example.com/profile", false},
 		{&g.common, "https://www.googleapis.com/gmail/v1/users/me/profile", false},
 		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&showDeleted=true", true},
+		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?eventTypes=default&eventTypes=fromGmail", true},
 		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events?x=1", false},
 		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events/ev1?fields=id", true},
 		{&c.common, "https://www.googleapis.com/calendar/v3/calendars/primary/events/ev1/instances", false},

@@ -172,11 +172,16 @@ func (a *app) secretFunc(account string) func() (keychain.Secret, error) {
 	}
 }
 
-// prepare loads the cursor, the seed and the first-run acceptance. A send pass may commit cursors; a dry run must not.
+// prepare loads the cursor, the seed and the first-run acceptance. A send pass may commit a completed cursor.
+// A run, including a dry run, may store a Gmail resume cursor, so it opens the store for writing. explain does not.
 func (a *app) prepare(e *env, r *runner.Runner, send bool) error {
+	return a.prepareStore(e, r, send)
+}
+
+func (a *app) prepareStore(e *env, r *runner.Runner, writable bool) error {
 	var st *cursor.Store
 	var err error
-	if send {
+	if writable {
 		st, err = cursor.Open(e.cfg.StatePath())
 	} else {
 		st, err = cursor.Read(e.cfg.StatePath())
@@ -690,9 +695,14 @@ func (a *app) recordFirst(e *env, rep *runner.Report) error {
 	for _, f := range rep.Failed {
 		failed[f.Name] = true
 	}
+	partial := map[string]bool{}
+	for _, n := range rep.Partial {
+		partial[n] = true
+	}
 	var names []string
 	for _, s := range e.sources {
-		if live(s) && !failed[s.Name()] {
+		// A read that stopped at a rate limit is not a completed summary.
+		if live(s) && !failed[s.Name()] && !partial[s.Name()] {
 			names = append(names, s.Name())
 		}
 	}

@@ -14,8 +14,9 @@ token endpoint). They are never written to the config, the log, or the outbox.
 
 `Collect` returns the items and an opaque next cursor. The runner stores it in `cursors.json` only after every item
 of that pass has been sent to the outbox, held, or dropped, and only on a send pass. A crash before that collects
-the same items again; keys make that harmless (DEC-9). A dry run reads the cursor and does not write it. A rate
-limit or a failed collect leaves the cursor where it is. An item that fails validation, or that a rule matched but
+the same items again; keys make that harmless (DEC-9). A dry run reads the cursor and does not write a completed
+one. A rate limit or a failed collect leaves the cursor where it is, except a Gmail open-state scan that stops at a
+rate limit: that stores a resume cursor so the next pass continues, including a dry run. An item that fails validation, or that a rule matched but
 could not be projected, is dropped and logged by count, with a fixed reason code and no item content. That does not
 freeze the source: the cursor still moves.
 
@@ -48,7 +49,8 @@ most two minutes is slept, then the request is retried. A longer wait ends the p
 the next pass resumes from it. Google answers a rate limit with `429`, or with a `403` whose reason is
 `rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded` or `RESOURCE_EXHAUSTED`; both end the pass the same
 way. Slack answers with `429` and `Retry-After`, or `"error":"ratelimited"`, which ends the pass; Beacon also spaces
-its own Slack calls by each method's tier ([Slack](#slack)).
+its own Slack calls by each method's tier ([Slack](#slack)). Gmail also paces its own calls, and a first-run scan
+that still hits the limit resumes instead of failing the collect; see [Gmail](#gmail).
 
 ## GitHub
 
@@ -300,6 +302,19 @@ with a recent draft and older mail is skipped and paging goes on. Each list read
 it stops, `beacon run` says so, and the log has `read_cut`: older mail in the 14 days is not read unless it changes. The cursor is the profile's
 history id, read before listing, so nothing that arrives during the pass is missed.
 
+Gmail paces every call under the per-user quota a Cloud project that used the API before May 2026 still has: 250
+units per second and 15,000 per minute. `messages.get` with metadata costs 5 units, `messages.list` 5, `threads.get`
+10, `threads.list` 10, `history.list` 2, and profile and labels 1. Beacon spends at most 200 units in any second and
+12,000 in any minute, under those limits, so a 14-day scan does not burst into a 429. A `429`, or a `403` whose
+reason is a rate limit, is still honoured (`Retry-After`, then backoff). If the limit still stops an open-state
+scan after something has been read, the collect does not fail. It keeps the items read so far and stores a resume
+cursor: the history id read before listing, and where in the inbox or starred list it stopped (a page token and the
+ids already fetched, not message content). The next pass, including a dry run, continues from there and does not
+fetch those ids again. It is not a completed first run, and it is not a history cursor: history is read only once
+the scan finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that
+finishes the scan is a completed first run. A dry run does not keep that as a history cursor, so the send pass
+after `accept-first` reads the window again before anything is sent.
+
 **Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, and
 only that), `starred` (`STARRED` added). A From header is the sender's claim: mail that says it is from the person
 and has no `SENT` label is `received`, not own, and does not close an ask. A draft that is sent may gain `SENT` without arriving as a new
@@ -348,6 +363,11 @@ the event's `updated` time, is not an event.
 
 **First run.** Events in the next 7 days: `response_needed` for an invitation the person has not answered, and
 `upcoming` for the rest. The rest of the 30-day window is fingerprinted and not emitted.
+
+**Not meetings.** Beacon skips events whose `eventType` is `workingLocation`, `outOfOffice`, `focusTime` or
+`birthday`. A working location is an all-day "Home" or "Office"; the others are blocks and birthdays. The list asks
+the API for `default` and `fromGmail` only, and an event of a skipped type that still arrives is dropped and not
+fingerprinted. An all-day event of type `default` is kept. The field is the API's `eventType`, not the summary.
 
 **Items.** One per event per pass, in this order:
 

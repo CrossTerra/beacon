@@ -153,6 +153,12 @@ type Collected struct {
 	// Cut is true when a read stopped at its limit (an open-state read, or a gap re-read), so older items in its
 	// window were not read. The cursor still moves; the runner reports it.
 	Cut bool
+	// Partial is true when Next is a resume point, not a completed cursor. The read stopped at a rate limit and
+	// the next pass continues from Next. The runner stores it even on a dry run. It is not a completed collect.
+	Partial bool
+	// ClearResume asks the runner to drop a resume cursor stored earlier, because this collect finished that
+	// read and is not committing a completed cursor (a dry run, or a first run not yet accepted).
+	ClearResume bool
 }
 
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.

@@ -87,6 +87,7 @@ const usage = `usage: beacon <command> [flags]
 
 Commands:
   init          write a config and an empty rules file, and store the Signal key in the keychain
+  key set       replace the Signal key in the keychain, after Signal accepts it
   run           collect, apply rules and projection; print what would be sent (dry run), or send
   explain KEY   show the matching rule, the classifier's answer and the exact body for one item
   outbox        list what was sent, with keys, times and Signal event ids
@@ -116,6 +117,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 	switch cmd, rest := args[0], args[1:]; cmd {
 	case "init":
 		err = a.cmdInit(ctx, rest)
+	case "key":
+		err = a.cmdKey(ctx, rest)
 	case "run":
 		err = a.cmdRun(ctx, rest)
 	case "explain":
@@ -316,6 +319,66 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	return nil
 }
 
+// --- key set
+
+func (a *app) cmdKey(ctx context.Context, args []string) error {
+	if len(args) == 0 || args[0] != "set" {
+		return fmt.Errorf("usage: beacon key set [--config PATH]")
+	}
+	fs, cfgPath := a.flags("key set")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("key set takes no arguments")
+	}
+	e, err := a.load(*cfgPath)
+	if err != nil {
+		return err
+	}
+	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stderr, "Signal key for %s (input hidden): ", e.cfg.Signal.URL)
+	secret, err := keychain.ReadSecret(ctx, a.stdin)
+	fmt.Fprintln(a.stderr)
+	if err != nil {
+		return err
+	}
+	u, err := config.SignalURL(e.cfg.Signal.URL)
+	if err != nil {
+		return err
+	}
+	client := signal.New(u, a.transport(egress.Addresses(e.egress())), secret)
+	if a.configureClient != nil {
+		a.configureClient(client)
+	}
+	me, err := client.Me(ctx)
+	if err != nil {
+		if errors.Is(err, signal.ErrUnauthorized) {
+			return errors.New("signal refused the key (401); it was not stored")
+		}
+		return errors.New("signal did not accept the key; it was not stored")
+	}
+	if err := store.Set(e.cfg.KeychainAccount(), secret); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.stdout, "Signal key replaced in the keychain as %s/%s\n", keychain.Service, e.cfg.KeychainAccount())
+	if me.Handle != "" {
+		h := me.Handle
+		if !strings.HasPrefix(h, "@") && !strings.HasPrefix(h, "act_") {
+			h = "@" + h
+		}
+		fmt.Fprintf(a.stdout, "Actor: %s\n", h)
+	}
+	if len(me.Scopes) > 0 {
+		sort.Strings(me.Scopes)
+		fmt.Fprintf(a.stdout, "Scopes: %s\n", strings.Join(me.Scopes, ", "))
+	}
+	return nil
+}
+
 // --- run
 
 func (a *app) cmdRun(ctx context.Context, args []string) error {
@@ -375,7 +438,8 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	send := e.cfg.Mode == config.Send && !*dry && !*first
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
 		AfterAppend: a.afterAppend}
-	if err := a.prepare(e, r, send); err != nil {
+	// A dry run may store a Gmail resume cursor. A completed cursor is committed only when sending.
+	if err := a.prepareStore(e, r, true); err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	// SIGTERM finishes the write already in progress and does not start another. SIGINT still cancels work.
@@ -541,7 +605,7 @@ func (f runFailure) Error() string { return f.text }
 func failText(reason logs.Reason, e *env) string {
 	switch reason {
 	case logs.ReasonUnauthorized:
-		return "Signal refused the key (401); store a valid key with beacon init --force"
+		return "Signal refused the key (401); store a valid key with beacon key set"
 	case logs.ReasonUnavailable:
 		return "Signal did not answer; pending bodies are kept and sent by the next pass"
 	case logs.ReasonLeaseRefused:
@@ -569,6 +633,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	}
 	for _, f := range rep.Failed {
 		fmt.Fprintf(w, "source %s: not collected (%s)\n", f.Name, f.Reason)
+	}
+	for _, name := range rep.Partial {
+		fmt.Fprintf(w, "source %s: the read stopped at a rate limit; the next pass continues from where it stopped.\n", name)
 	}
 	for _, g := range rep.Gaps {
 		if g.Expired {

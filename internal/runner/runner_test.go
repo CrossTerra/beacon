@@ -33,6 +33,8 @@ type fakeSource struct {
 	err     error
 	next    []byte
 	cursor  []byte
+	partial bool
+	clear   bool
 }
 
 func (f *fakeSource) Name() string          { return "fx" }
@@ -41,7 +43,7 @@ func (f *fakeSource) StateFields() []string { return nil }
 func (f *fakeSource) Hosts() []string       { return nil }
 func (f *fakeSource) Collect(_ context.Context, cursor []byte) (source.Collected, error) {
 	f.cursor = append([]byte(nil), cursor...)
-	return source.Collected{Items: f.items, Next: f.next, Dropped: f.dropped}, f.err
+	return source.Collected{Items: f.items, Next: f.next, Dropped: f.dropped, Partial: f.partial, ClearResume: f.clear}, f.err
 }
 
 func items() []source.Item {
@@ -284,6 +286,14 @@ func (m *memCursor) Commit(name string, next []byte) error {
 	return nil
 }
 
+func (m *memCursor) Reset(name string) (bool, error) {
+	if _, ok := m.m[name]; !ok {
+		return false, nil
+	}
+	delete(m.m, name)
+	return true, nil
+}
+
 // The cursor moves only after a send pass has decided every item, and not on a dry run or a rate limit.
 func TestCursorCommitsAfterDecide(t *testing.T) {
 	f := newFixture(t)
@@ -320,6 +330,37 @@ func TestCursorCommitsAfterDecide(t *testing.T) {
 	}
 	if r3.Cursors.(*memCursor).commits != 0 {
 		t.Fatal("a rate limit moved the cursor")
+	}
+}
+
+// A read that stops at a rate limit stores a resume cursor even on a dry run, so the next pass continues.
+// Finishing that read on a dry run clears it: a dry run still does not commit a completed cursor.
+func TestResumeCursorOnDryRun(t *testing.T) {
+	f := newFixture(t)
+	f.src.partial = true
+	f.src.next = []byte("resume")
+	cur := &memCursor{}
+	r, done := f.runner(false, nil)
+	r.Cursors = cur
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.commits != 1 || string(cur.m["fx"]) != "resume" || len(rep.Partial) != 1 || rep.Partial[0] != "fx" {
+		t.Fatalf("resume %+v partial %v", cur.m, rep.Partial)
+	}
+	if len(rep.Failed) != 0 {
+		t.Fatal("a paused read failed the collect")
+	}
+	f.src.partial = false
+	f.src.clear = true
+	f.src.next = []byte("done")
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cur.m["fx"]; ok {
+		t.Fatal("a finished dry run left the resume cursor")
 	}
 }
 

@@ -1,5 +1,5 @@
-// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events and reads the
-// restricted subject prefixes with GET /api/restrictions. It reads no log, thread or actor.
+// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events, reads the
+// restricted subject prefixes with GET /api/restrictions, and checks a key with GET /api/me. It reads no log or thread.
 package signal
 
 import (
@@ -223,6 +223,55 @@ func (c *Client) retryAfter(h string) time.Duration {
 		d = time.Until(t)
 	}
 	return max(time.Second, min(d, c.MaxRetryAfter))
+}
+
+// Me is who a key is, from GET /api/me. It holds no secret.
+type Me struct {
+	// Handle is the actor's handle without "@", when it has one.
+	Handle string
+	Scopes []string
+}
+
+// Me checks the key with GET /api/me. A 401 is ErrUnauthorized. Any other failure is ErrUnavailable. It makes one
+// attempt: beacon key set stores the key only when this succeeds.
+func (c *Client) Me(ctx context.Context) (Me, error) {
+	u := c.base.JoinPath("/api/me")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return Me{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	c.secret.Authorize(req.Header)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return Me{}, ctx.Err()
+		}
+		var denied *egress.DeniedError
+		if errors.As(err, &denied) {
+			return Me{}, err
+		}
+		return Me{}, ErrUnavailable
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return Me{}, ErrUnauthorized
+	case http.StatusOK:
+	default:
+		return Me{}, ErrUnavailable
+	}
+	var parsed struct {
+		Actor struct {
+			Handle string `json:"handle"`
+		} `json:"actor"`
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return Me{}, ErrUnavailable
+	}
+	return Me{Handle: parsed.Actor.Handle, Scopes: parsed.Scopes}, nil
 }
 
 // Restrictions returns the restricted subject prefixes (`gmail:*`), from GET /api/restrictions. It makes one attempt:

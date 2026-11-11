@@ -10,6 +10,7 @@ same pull request.
 | --- | --- |
 | Events a rule sent: the projected fields and state fields, plus an event title that describes the change | Source credentials (OAuth clients, refresh and access tokens, API tokens) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
+| `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
 | With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | |

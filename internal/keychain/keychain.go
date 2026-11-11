@@ -175,6 +175,13 @@ func (m *Memory) Put(account, value string) {
 	m.items[account] = []byte(value)
 }
 
+// Contains reports whether account holds value. Tests use it to check a secret was stored without printing it.
+func (m *Memory) Contains(account, value string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return string(m.items[account]) == value
+}
+
 // Get implements Store.
 func (m *Memory) Get(account string) (Secret, error) {
 	m.mu.Lock()
