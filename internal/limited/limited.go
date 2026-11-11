@@ -24,9 +24,6 @@ type Client struct {
 	// MaxAttempts is how many times one request is sent when the answer is a rate limit. Zero means three. A source
 	// that does its own backoff sets one.
 	MaxAttempts int
-	// Before, when set, is called before every attempt, retries included, so a source's quota budget counts each
-	// call the API sees. An error ends the request before it is sent.
-	Before func(ctx context.Context, req *http.Request) error
 	// Reason reads a rate-limit answer's body and returns the API's reason code from a fixed list, or "". It must
 	// not return body text. Nil leaves the reason empty.
 	Reason func(body []byte) string
@@ -101,11 +98,6 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*http.Response, err
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		if c.Before != nil {
-			if err := c.Before(ctx, req); err != nil {
-				return nil, err
-			}
-		}
 		r, err := clone(req, body)
 		if err != nil {
 			return nil, err

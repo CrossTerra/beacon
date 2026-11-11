@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/google/googletest"
+	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -305,9 +306,8 @@ func TestGmailUnits(t *testing.T) {
 			t.Errorf("%s: %d units, want %d", path, got, want)
 		}
 	}
-	req, _ := http.NewRequest(http.MethodGet, "https://gmail.googleapis.com/gmail/v1/users/me/threads/t1?format=metadata", nil)
-	if gmailRequestUnits(req) != 40 {
-		t.Fatalf("request units %d", gmailRequestUnits(req))
+	if n := gmailPathUnits("/gmail/v1/users/me/threads/t1"); n != 40 {
+		t.Fatalf("path units %d", n)
 	}
 }
 
@@ -322,5 +322,39 @@ func TestRateReasonNamesNoText(t *testing.T) {
 		if got := rateReason([]byte(body)); got != want {
 			t.Errorf("%s: %q, want %q", body, got, want)
 		}
+	}
+}
+
+// The quota wait comes before the access token is read. A token that expires while Gmail waits for quota is
+// refreshed before the call, not sent stale (which Google would refuse with a 401, failing the collect).
+func TestGmailReadsTheTokenAfterTheQuotaWait(t *testing.T) {
+	srv := googletest.New(t)
+	clock := &fakeClock{t: testNow}
+	auth, err := NewAuth(AuthOptions{
+		TokenURL: srv.URL + "/token",
+		Client:   func() (keychain.Secret, error) { return keychain.OAuthClient([]byte(googletest.ClientFile)) },
+		Refresh:  func() (keychain.Secret, error) { return keychain.FromString(googletest.Refresh) },
+		HTTP:     srv.Client(),
+		Now:      clock.now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := opts(t, srv)
+	o.Auth, o.Now, o.Sleep = auth, clock.now, clock.sleep
+	g, err := NewGmail(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The grant check reads a token (expires_in 3599). Then every call waits two hours for quota first.
+	if _, err := g.grant(context.Background(), []string{ScopeGmailMetadata}); err != nil {
+		t.Fatal(err)
+	}
+	g.quota.hold(2 * time.Hour)
+	if _, err := g.call(context.Background(), http.MethodGet, g.url("profile", nil), 1<<20, "application/json"); err != nil {
+		t.Fatal(err)
+	}
+	if n := countPath(srv, "/token"); n != 2 {
+		t.Fatalf("token requests %d: the token was read before the wait, not refreshed after it", n)
 	}
 }

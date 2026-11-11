@@ -55,6 +55,8 @@ type common struct {
 	bodies   bool
 	// paths reports whether a URL path, with its query, is one this source calls.
 	paths func(string, url.Values) bool
+	// pace, when set, waits until the source's quota allows the request. It runs before the access token is read.
+	pace func(context.Context, *url.URL) error
 }
 
 func newCommon(o Options, kind, defBase string, paths func(string, url.Values) bool) (common, error) {
@@ -195,6 +197,15 @@ func (c *common) call(ctx context.Context, method, raw string, limit int64, acce
 	}
 	if c.http.HTTP == nil {
 		return nil, errors.New("google: the source has no client")
+	}
+	if c.pace != nil {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return nil, source.ErrScope
+		}
+		if err := c.pace(ctx, u); err != nil {
+			return nil, err
+		}
 	}
 	tok, _, err := c.auth.token(ctx)
 	if err != nil {

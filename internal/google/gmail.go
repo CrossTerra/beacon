@@ -47,11 +47,12 @@ func NewGmail(o Options) (*Gmail, error) {
 		return nil, err
 	}
 	g := &Gmail{common: c, quota: &gmailQuota{now: c.now, sleep: o.Sleep}}
-	// Every request Google sees is counted, a retry included, and Gmail does its own backoff (getJSON). Calls are
-	// made one at a time: a source collects on one goroutine.
+	// Every request Google sees is counted, a retry included: the HTTP client sends each request once, and Gmail
+	// does its own backoff (getJSON). The quota wait comes before the access token is read, so a token that expires
+	// during a wait is refreshed, not sent. Calls are made one at a time: a source collects on one goroutine.
 	g.http.MaxAttempts = 1
-	g.http.Before = func(ctx context.Context, req *http.Request) error {
-		return g.quota.take(ctx, gmailRequestUnits(req))
+	g.pace = func(ctx context.Context, u *url.URL) error {
+		return g.quota.take(ctx, gmailPathUnits(u.Path))
 	}
 	return g, nil
 }
@@ -455,7 +456,7 @@ func (g *Gmail) url(path string, q url.Values) string {
 }
 
 func (g *Gmail) getJSON(ctx context.Context, path string, q url.Values, dest any) error {
-	// The quota paces every attempt before it is sent (NewGmail). A rate limit from Google means something else
+	// The quota paces every attempt before its token is read (NewGmail, call). A rate limit from Google means something else
 	// spent this person's minute too: wait out the Retry-After, or a whole minute when it names none, and try once
 	// more. A second rate limit is returned; an open-state scan turns it into a resume cursor instead of failing.
 	var body []byte

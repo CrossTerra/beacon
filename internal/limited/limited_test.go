@@ -90,7 +90,7 @@ func mustReq(t *testing.T, url string) *http.Request {
 	return req
 }
 
-// A rate limit returns what the API said, and a source's hook sees every attempt, retries included.
+// A rate limit returns what the API said, and the last attempt does not sleep.
 func TestRateLimitErrorCarriesTheAnswer(t *testing.T) {
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -100,11 +100,9 @@ func TestRateLimitErrorCarriesTheAnswer(t *testing.T) {
 		_, _ = io.WriteString(w, `{"reason":"slowDown","message":"private text"}`)
 	}))
 	defer srv.Close()
-	before := 0
 	var slept []time.Duration
 	c := &Client{HTTP: srv.Client(),
-		Sleep:  func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil },
-		Before: func(context.Context, *http.Request) error { before++; return nil },
+		Sleep: func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil },
 		Reason: func(body []byte) string {
 			if strings.Contains(string(body), "slowDown") {
 				return "slowDown"
@@ -120,8 +118,8 @@ func TestRateLimitErrorCarriesTheAnswer(t *testing.T) {
 	if strings.Contains(err.Error(), "private") {
 		t.Fatal("the error carries body text")
 	}
-	if hits != 3 || before != 3 {
-		t.Fatalf("hits %d before %d, want every attempt counted", hits, before)
+	if hits != 3 {
+		t.Fatalf("hits %d", hits)
 	}
 	if len(slept) != 2 {
 		t.Fatalf("slept %v: the last attempt must not sleep", slept)

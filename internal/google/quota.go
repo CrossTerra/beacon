@@ -2,7 +2,6 @@ package google
 
 import (
 	"context"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -53,10 +52,9 @@ func gmailUnits(path string) int {
 	}
 }
 
-// gmailRequestUnits is the cost of a request to the Gmail API, from its URL path.
-func gmailRequestUnits(req *http.Request) int {
+// gmailPathUnits is the cost of a request to the Gmail API, from its URL path.
+func gmailPathUnits(p string) int {
 	const prefix = "/gmail/v1/users/me/"
-	p := req.URL.Path
 	if i := strings.Index(p, prefix); i >= 0 {
 		return gmailUnits(p[i+len(prefix):])
 	}
