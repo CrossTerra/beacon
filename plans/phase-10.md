@@ -27,7 +27,7 @@ Proposed as DEC-30 to DEC-37, recorded in the [`README.md`](README.md#decisions)
 | DEC-34 | A subject never goes down. Beacon keeps, per subject, the highest level it has sent there (a level per subject hash in the state directory, no content), and seals every later item there at least that high. With DEC-33 matching the whole Gmail thread, a colleague's reply in a Remotely thread is `owner` even on a first run. |
 | DEC-35 | Notes and transcripts take their meeting's level: raised to `owner` when the meeting matches `seal.owner`, or when the rules seal the meeting's calendar item at `owner`. |
 | DEC-36 | Sealed rules may `send`; plaintext personal content stays `hold`. A `send` rule with plain fields from a personal source is a warning in `beacon rules check` ("plaintext personal content: start as hold") until its output has been checked. |
-| DEC-37 | Fields the example needs, from what the sources already read. Gmail: `cc`, `participants` (the message's from, to and cc), `thread_participants` (every from, to and cc in the thread, from the thread metadata already read for `subject`), and `bulk` (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, `list` or `junk`, or a category label other than Personal). Calendar: `attendee_addresses`. Drive: `transcript_created` for a Meet transcript document attached to a meeting (English titles ending in `Transcript`, read as notes are), and `meeting_organizer` and `meeting_attendees` on notes and transcripts. |
+| DEC-37 | Fields the example needs, from what the sources already read. Gmail: `cc`, `participants` (the message's from, to and cc), `thread_participants` (every from, to and cc in the thread, from the thread metadata already read for `subject`), and `bulk` (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, `list` or `junk`, or a category label other than Personal). Calendar: `attendee_addresses`. Address lists are lowercased and joined with `, `, as `to` and `labels` are today, so a rule's regex matches `(.*, )?name(, .*)?`. Drive: `transcript_created` for a Meet transcript document attached to a meeting (English titles ending in `Transcript`, read as notes are), and `meeting_organizer` and `meeting_attendees` on notes and transcripts. |
 
 ## Scope
 
@@ -69,13 +69,13 @@ rules:
     match:
       source: gmail
       fields:
-        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(,.*)?'}
+        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
     tier: send
     seal: owner
     fields: [subject, body, actor, from, to]
     ask: me
   - name: owner-label
-    match: {source: gmail, fields: {labels: {regex: '(.*,)?Confidential(,.*)?'}}}
+    match: {source: gmail, fields: {labels: {regex: '(.*, )?Confidential(, .*)?'}}}
     tier: send
     seal: owner
     fields: [subject, body, actor, from, to]
@@ -100,7 +100,7 @@ rules:
 
   # Owner+agents: the CEO, colleagues, direct messages and private channels.
   - name: rahul-mail
-    match: {source: gmail, fields: {participants: {regex: '(.*,)?<rahul-address>(,.*)?'}}}
+    match: {source: gmail, fields: {participants: {regex: '(.*, )?<rahul-address>(, .*)?'}}}
     tier: send
     seal: owner+agents
     fields: [subject, body, actor, from, to]
@@ -164,7 +164,8 @@ DEC-32 and the raise; the classifier (Phase 6), which sees plaintext on the mach
   or an attendee's domain; notes taking their meeting's level; `body_needs_seal`; `sensitive_shared`; logs with counts
   only.
 - `internal/google`, `internal/slack`: the new fields against the fakes.
-- `cmd/beacon`: the worked example on fixtures lands in the levels of the table above.
+- `cmd/beacon`: the worked example on fixtures lands in the levels of the table above, including a `Confidential`
+  label that sorts after a category label, and a matched address that is not first in its list.
 - **End to end against Signal** (`scripts/signal-e2e.sh`, with Signal's local stand-in for KMS): Beacon sends sealed
   fixture mail, DMs, notes and a transcript with canaries in every sealed field; a `pg_dump` of the Signal database
   holds none of them, while a plain public-channel canary is found; an agent key working for the person opens the
