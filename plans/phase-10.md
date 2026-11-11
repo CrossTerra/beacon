@@ -74,6 +74,12 @@ rules:
     seal: owner
     fields: [subject, body, actor, from, to]
     ask: me
+  - name: owner-label
+    match: {source: gmail, fields: {labels: {regex: '(.*,)?Confidential(,.*)?'}}}
+    tier: send
+    seal: owner
+    fields: [subject, body, actor, from, to]
+    ask: me
 
   # Meeting notes and transcripts: owner+agents, raised to owner by their meeting (DEC-35).
   - name: gemini-notes-mail
@@ -126,8 +132,9 @@ rules:
     fields: [body, permalink, references]
 ```
 
-The `Confidential` label and the sensitive words are not rules: `seal.owner` raises any item they match. Rahul's DMs
-fall under `slack-private`, already `owner+agents`.
+The `Confidential` label is both a rule, ahead of `bulk`, so labelled mail with list headers is kept rather than
+dropped (the raise cannot revive `never`), and in `seal.owner`, so it also raises anything a later rule sends. The
+sensitive words are only in `seal.owner`. Rahul's DMs fall under `slack-private`, already `owner+agents`.
 
 | Item | Rule | Level | Plain in Signal |
 | --- | --- | --- | --- |
@@ -135,7 +142,7 @@ fall under `slack-private`, already `owner+agents`.
 | A colleague's reply in that thread | `owner-senders` (thread participants) | `owner` | the same |
 | Rahul's mail about the board deck | `rahul-mail` | `owner+agents` | the same, and the ask |
 | Rahul's mail with "offer" in the subject | `rahul-mail`, raised | `owner` | the same |
-| A mail labelled `Confidential` from a colleague | `employees`, raised | `owner` | the same |
+| A mail labelled `Confidential`, with list headers | `owner-label` | `owner` | the same |
 | Notes by Gemini for a 1:1 with a remotely.works attendee | `notes-and-transcripts`, raised | `owner` | the type |
 | A vendor's personal reply | `other-mail` (held) | `owner+agents` | the mail's subject |
 | A newsletter | `bulk` | `never` | nothing |
