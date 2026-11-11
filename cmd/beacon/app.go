@@ -404,16 +404,19 @@ func actorAllowed(next, prev signal.Me, person string) bool {
 	if next.ID == person || strings.EqualFold(next.Handle, person) {
 		return true
 	}
-	if prev.ID != "" && next.ID == prev.ID {
+	// The stored key was missing or refused, so it cannot name its actor. A replacement Beacon key is an
+	// agent; a different person still needs --force.
+	if prev.ID == "" {
+		return next.Type == "agent"
+	}
+	if next.ID == prev.ID {
 		return true
 	}
 	if prev.Handle != "" && next.Handle != "" && strings.EqualFold(next.Handle, prev.Handle) {
 		return true
 	}
-	if next.WorksFor != "" && next.WorksFor == person {
-		return true
-	}
-	if prev.Type == "human" && next.WorksFor != "" && next.WorksFor == prev.ID {
+	// works_for is an actor id, never a handle.
+	if next.WorksFor != "" && (next.WorksFor == person || (prev.Type == "human" && next.WorksFor == prev.ID) || (prev.WorksFor != "" && next.WorksFor == prev.WorksFor)) {
 		return true
 	}
 	return false
@@ -675,7 +678,11 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 		fmt.Fprintf(w, "source %s: not collected (%s)\n", f.Name, f.Reason)
 	}
 	for _, name := range rep.Partial {
-		fmt.Fprintf(w, "source %s: the read stopped at a rate limit; the next pass continues from where it stopped.\n", name)
+		if rep.Send {
+			fmt.Fprintf(w, "source %s: the read stopped at a rate limit; the next send pass continues from where it stopped.\n", name)
+		} else {
+			fmt.Fprintf(w, "source %s: the read stopped at a rate limit. A dry run does not keep this place; the next pass reads the window from the start.\n", name)
+		}
 	}
 	for _, name := range rep.Continued {
 		fmt.Fprintf(w, "source %s: this pass finished a scan that stopped earlier, so it lists only the remainder and is not a completed first run. Run again; the next pass reads the window from the start.\n", name)

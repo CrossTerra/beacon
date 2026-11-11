@@ -723,6 +723,26 @@ func TestKeySet(t *testing.T) {
 	if !h.store.Contains("test", other) || strings.Contains(h.stdout.String()+h.stderr.String(), other) {
 		t.Fatal("force did not store the key, or printed it")
 	}
+	// The stored key is now other, which this fake refuses. A new agent key is still accepted: the old key
+	// cannot name its actor. A different person is not.
+	h.server.Token = "sig_not_used"
+	h.server.Tokens = map[string]signaltest.MeActor{
+		"sig_replacement_agent": {ID: "act_new_agent", Type: "agent", Handle: "beacon"},
+		"sig_other_person":      {ID: "act_human", Type: "human", Handle: "someone"},
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_replacement_agent\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code != 0 {
+		t.Fatalf("refused stored key blocked an agent rotation: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	if !h.store.Contains("test", "sig_replacement_agent") {
+		t.Fatal("an agent key was not stored after the old key was refused")
+	}
+	a = h.app(allowed)
+	a.stdin = strings.NewReader("sig_other_person\n")
+	if code := h.run(a, "key", "set", "--config", cfg); code == 0 {
+		t.Fatal("stored a different person's key after the old key was refused")
+	}
 }
 
 func TestInit(t *testing.T) {

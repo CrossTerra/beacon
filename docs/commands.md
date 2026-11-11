@@ -23,7 +23,8 @@ beacon key set [--force]
 Replaces the Signal key in the keychain, in the same account `init` used. It reads the new key from standard input,
 with echo off when that is a terminal, and does not print it. Before storing, it checks the key with `GET /api/me`.
 Signal must accept it, and the key's actor must be the configured person or their agent: the handle in
-`person.handle`, or the actor the key already stored is. `--force` stores it anyway. A refusal, a mismatch, or no
+`person.handle`, the actor the stored key already is, or an agent of that person. If the stored key is refused,
+it cannot name its actor, so an agent key is accepted and a different person is not. `--force` stores it anyway. A refusal, a mismatch, or no
 answer stores nothing and leaves the previous key. It prints the actor and the scopes, so a rotation or a wider key
 can be confirmed, and never the key.
 
