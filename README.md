@@ -27,7 +27,8 @@ go build -trimpath -o beacon ./cmd/beacon
 ```
 
 To run it continuously on macOS, build with [`scripts/build-local.sh`](scripts/build-local.sh) so the binary keeps a
-stable code signature, then `beacon service install`. That is a per-user launchd agent, not root. See
+stable code signature (an Apple Development certificate keeps keychain access across rebuilds; see
+[`docs/development.md`](docs/development.md#local-builds-and-the-keychain)), then `beacon service install`. That is a per-user launchd agent, not root. See
 [`docs/commands.md`](docs/commands.md).
 
 | Read | For |

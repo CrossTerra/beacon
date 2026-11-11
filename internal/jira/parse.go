@@ -114,13 +114,18 @@ func itemsFrom(name, person string, iss issue, histories []history, comments []c
 		if assigneeChange != nil {
 			typ := TypeAssigned
 			addressed := assigneeChange.to == person
+			detail := assigneeChange.toString
+			if addressed {
+				// Assigned to the person: the title says "Assigned", not their own name.
+				detail = ""
+			}
 			if assigneeChange.to == "" {
 				typ = TypeUnassigned
 				addressed = false
 			}
 			pending = append(pending, emit{
 				typ: typ, id: h.id, field: "assignee", actor: h.author, at: h.created, addressed: addressed,
-				detail: assigneeChange.toString,
+				detail: detail,
 			})
 		}
 		if statusChange != nil {
@@ -159,7 +164,6 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 	id := "open"
 	actor := ""
 	at := observed
-	nameOf := iss.assignee
 	for i := len(histories) - 1; i >= 0; i-- {
 		h := histories[i]
 		for _, it := range h.items {
@@ -167,9 +171,6 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 				id = h.id
 				actor = h.author
 				at = h.created
-				if it.toString != "" {
-					nameOf = it.toString
-				}
 				break
 			}
 		}
@@ -177,8 +178,9 @@ func firstItems(name, person string, iss issue, histories []history, observed ti
 			break
 		}
 	}
+	// The first run reads only issues assigned to the person, so the title is "Assigned", without their name.
 	return finish(name, person, iss, []emit{{
-		typ: TypeAssigned, id: id, actor: actor, at: at, addressed: true, detail: nameOf,
+		typ: TypeAssigned, id: id, actor: actor, at: at, addressed: true,
 	}}, observed, loc)
 }
 
@@ -249,8 +251,8 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 	return out, nil
 }
 
-// eventTitle describes the change. It uses the type and, when the change has them, the assignee's display name,
-// the status names, and the due date. It does not use the issue summary or any comment text.
+// eventTitle describes the change. It uses the type and, when the change has them, the display name of an assignee
+// who is not the person, the status names, and the due date. It does not use the issue summary or any comment text.
 func eventTitle(e emit) string {
 	switch e.typ {
 	case TypeAssigned:

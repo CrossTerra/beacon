@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -154,7 +155,7 @@ func TestMemory(t *testing.T) {
 // TestSystem writes, reads and deletes an item in the login keychain. It runs only with BEACON_TEST_KEYCHAIN=1,
 // because the keychain may ask for permission.
 func TestSystem(t *testing.T) {
-	if os.Getenv("BEACON_TEST_KEYCHAIN") != "1" {
+	if os.Getenv(TestKeychainEnv) != "1" {
 		t.Skip("set BEACON_TEST_KEYCHAIN=1 to use the login keychain")
 	}
 	store, err := NewSystem()
@@ -175,6 +176,10 @@ func TestSystem(t *testing.T) {
 	got, err := store.Get(account)
 	if err != nil || string(got.value) != value+"2" {
 		t.Fatalf("get: %v", err)
+	}
+	accounts, err := store.(Lister).Accounts()
+	if err != nil || !slices.Contains(accounts, account) {
+		t.Fatalf("accounts: %v", err)
 	}
 	if err := store.Delete(account); err != nil {
 		t.Fatal(err)

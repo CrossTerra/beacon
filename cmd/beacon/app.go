@@ -99,9 +99,11 @@ Commands:
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
   service       install, uninstall, status or logs of the per-user launchd agent
+  keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
 
-Every command but version takes --config PATH (default: $BEACON_CONFIG, else the user config directory).
+Every command but version and keychain repair takes --config PATH (default: $BEACON_CONFIG, else the user config
+directory).
 `
 
 type exitError struct{ code int }
@@ -147,6 +149,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdAcceptFirst(rest)
 	case "service":
 		err = a.cmdService(ctx, rest)
+	case "keychain":
+		err = a.cmdKeychain(rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "help", "-h", "--help":
@@ -316,6 +320,36 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.stdout, "Wrote %s\nRules: %s\nState: %s\nSignal key stored in the keychain as %s/%s\nMode: dry-run. Set mode: send in the config to start sending.\n",
 		path, cfg.RulesPath(), cfg.StatePath(), keychain.Service, cfg.KeychainAccount())
+	return nil
+}
+
+// --- keychain repair
+
+// cmdKeychain re-creates every Beacon item in the keychain, so each one carries the access a new item gets from this
+// build and none of the partitions earlier builds added. It reads each value once and prints only account names.
+func (a *app) cmdKeychain(args []string) error {
+	if len(args) == 0 || args[0] != "repair" {
+		return errors.New("usage: beacon keychain repair")
+	}
+	if len(args) > 1 {
+		return errors.New("keychain repair takes no arguments")
+	}
+	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(a.stderr, "macOS asks once for each Beacon item. Choose Always Allow.")
+	n := 0
+	err = keychain.Repair(store, func(account string) {
+		n++
+		fmt.Fprintf(a.stdout, "Repaired %s/%s\n", keychain.Service, account)
+	})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		fmt.Fprintln(a.stdout, "No Beacon items in the keychain.")
+	}
 	return nil
 }
 

@@ -106,7 +106,7 @@ key keeps the full sha.
 | --- | --- |
 | `opened` | Opened |
 | `ready` | Ready for review |
-| `review_requested` | Review requested from `<login or team>`. A team is `org/slug`. With no login or team, Review requested. |
+| `review_requested` | Review requested from `<login or team>`, when someone else or a team was requested. A team is `org/slug`. When you were requested, or with no login or team, Review requested, so it does not read as if you asked. |
 | `review_request_removed` | Review request removed |
 | `reviewed` | Reviewed: approved, Reviewed: changes requested, or Reviewed: commented. Any other state is that state with underscores as spaces. With no state, Reviewed. |
 | `commented` | Commented |
@@ -180,7 +180,7 @@ a mention was added to. Keys and subjects are unchanged.
 
 | Item | Event title |
 | --- | --- |
-| `assigned` | Assigned to `<name>`. The name is the display name the changelog already returned, or the current assignee's display name on a first run that has none. With no name, Assigned. |
+| `assigned` | Assigned to `<name>`, when the issue was assigned to someone else. The name is the display name the changelog already returned. When it was assigned to you (always, on a first run), or with no name, Assigned. |
 | `unassigned` | Unassigned |
 | `transitioned` | `<from> → <to>`, the status names already on the item. With neither, Transitioned. |
 | `commented` | Commented |
