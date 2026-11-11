@@ -310,7 +310,8 @@ reason is a rate limit, is still honoured (`Retry-After`, then backoff). If the 
 scan after something has been read, the collect does not fail. It keeps the items read so far and stores a resume
 cursor: the history id read before listing, and where in the inbox or starred list it stopped (a page token and the
 ids already fetched, not message content). The next pass, including a dry run, continues from there and does not
-fetch those ids again. It is not a completed first run, and it is not a history cursor: history is read only once
+fetch those ids again. When a rule lists `body`, the body is read before the thread is marked done, so a pause
+cannot record the item without it. It is not a completed first run, and it is not a history cursor: history is read only once
 the scan finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that
 only finishes a scan an earlier pass started lists the remainder, not the whole window, so it is not a completed
 first run. The resume cursor is dropped and the next pass reads the window from the start, paced under the quota.

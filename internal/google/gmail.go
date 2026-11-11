@@ -144,10 +144,12 @@ func (t *gmailThread) live() []*gmailMessage {
 }
 
 // ref is one change the history or the first run found: a message added, or starred.
+// body is set when the open-state scan already read it, before the thread was marked done.
 type ref struct {
 	thread  string
 	message string
 	starred bool
+	body    string
 }
 
 // Collect implements source.Source. The cursor is a Gmail history id. A nil cursor reads inbox threads and starred
@@ -197,7 +199,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			hist = cur.HistoryID
 		}
 		next.HistoryID = hist
-		refs, openCut, scan, err = g.open(ctx, threads, cur.Scan, hist)
+		refs, openCut, scan, err = g.open(ctx, threads, cur.Scan, hist, readBodies(g, scopes))
 	} else {
 		var got string
 		refs, got, err = g.history(ctx, cur.HistoryID)
@@ -207,7 +209,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			// the gap are not lost. Keys make the overlap harmless. The gap is reported.
 			gap = true
 			var gapScan *gmailScan
-			refs, openCut, gapScan, err = g.open(ctx, threads, nil, "")
+			refs, openCut, gapScan, err = g.open(ctx, threads, nil, "", false)
 			if gapScan != nil {
 				// A gap re-read that hits a rate limit fails the pass. The history cursor stays, so the next pass
 				// retries the gap. This is not a first-run resume.
@@ -245,11 +247,13 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			continue
 		}
 		seen[it.Key] = true
-		// Bodies wait until the scan has a resume cursor to return, or has finished. Fetching one now can
-		// rate-limit and would otherwise fail the collect with no cursor, so the next pass starts over.
-		if bodies && scan == nil && it.Type != TypeStarred {
-			// The item is already built from the thread. A body that one message will not give up (gone, or a
-			// permission 403) is left out; the item is still emitted. A rate limit or a refused grant fails the pass.
+		if r.body != "" {
+			it.Fields["body"] = r.body
+		} else if bodies && scan == nil && it.Type != TypeStarred {
+			// History, or a finished open scan that did not read bodies (a gap re-read). A body that one message
+			// will not give up (gone, or a permission 403) is left out; the item is still emitted. A rate limit
+			// or a refused grant fails the pass. An open-state scan reads the body before it marks the thread
+			// done, so a pause cannot record the item without it.
 			body, err := g.body(ctx, r.message)
 			if err != nil && !unavailable(err) {
 				return source.Collected{Items: items}, err
@@ -519,7 +523,13 @@ func (g *Gmail) history(ctx context.Context, start string) ([]ref, string, error
 // had more than gapPages pages inside the window and the rest was not read; the pass still succeeds and says so.
 // start, when set, continues a scan that stopped at a rate limit. A rate limit with progress returns that point
 // instead of an error, so the next pass resumes there.
-func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread, start *gmailScan, historyID string) ([]ref, bool, *gmailScan, error) {
+// readBodies is true when a rule lists body and the grant can read one. gmail.metadata cannot, even beside
+// another Gmail scope.
+func readBodies(g *Gmail, scopes map[string]bool) bool {
+	return g.bodies && scopes[ScopeGmailReadonly] && !scopes[ScopeGmailMetadata]
+}
+
+func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread, start *gmailScan, historyID string, bodies bool) ([]ref, bool, *gmailScan, error) {
 	cutoff := g.now().Add(-gmailLookback)
 	phase := "inbox"
 	page := ""
@@ -552,7 +562,7 @@ func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread, start
 	if phase == "inbox" {
 		var stopped *gmailScan
 		var err error
-		refs, inboxCut, stopped, err = g.scanInbox(ctx, threads, cutoff, cutoffStr, page, skip, historyID, startPages)
+		refs, inboxCut, stopped, err = g.scanInbox(ctx, threads, cutoff, cutoffStr, page, skip, historyID, startPages, bodies)
 		if err != nil || stopped != nil {
 			return refs, false, stopped, err
 		}
@@ -581,7 +591,7 @@ func stopScan(phase, page, cutoff, hist string, pages int, inboxCut bool, skip [
 	}, nil
 }
 
-func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string, startPages int) ([]ref, bool, *gmailScan, error) {
+func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string, startPages int, bodies bool) ([]ref, bool, *gmailScan, error) {
 	var refs []ref
 	cut := true
 	pages := startPages
@@ -618,21 +628,31 @@ func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, 
 			if err != nil {
 				return nil, false, nil, err
 			}
-			fetched = append(fetched, th.ID)
 			// The list is ordered by a thread's newest message of any kind, drafts included. Paging stops only when
 			// that is older than the window; a thread whose newest real message is older is skipped.
 			if t.newest().Before(cutoff) {
 				return refs, false, nil, nil
 			}
 			live := t.live()
-			if len(live) == 0 {
+			if len(live) == 0 || live[len(live)-1].at().Before(cutoff) {
+				fetched = append(fetched, th.ID)
 				continue
 			}
 			last := live[len(live)-1]
-			if last.at().Before(cutoff) {
-				continue
+			// Read the body before the thread is marked done. A rate limit here leaves it out of the resume
+			// cursor, so the next pass collects it again with the body. A send cannot record it without one.
+			var bodyText string
+			if bodies {
+				bodyText, err = g.body(ctx, last.ID)
+				if errors.Is(err, source.ErrRateLimited) {
+					return stopScan("inbox", token, cutoffStr, hist, pages, false, fetched, refs, err)
+				}
+				if err != nil && !unavailable(err) {
+					return nil, false, nil, err
+				}
 			}
-			refs = append(refs, ref{thread: t.ID, message: last.ID})
+			fetched = append(fetched, th.ID)
+			refs = append(refs, ref{thread: t.ID, message: last.ID, body: bodyText})
 		}
 		if page.NextPageToken == "" {
 			return refs, false, nil, nil

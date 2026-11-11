@@ -312,15 +312,12 @@ func TestGmailFirstRunResumesAfterRateLimit(t *testing.T) {
 	}
 }
 
-func TestGmailPartialDoesNotFetchBodies(t *testing.T) {
+func TestGmailPartialReadsBodyBeforeSkip(t *testing.T) {
 	srv := googletest.New(t)
 	srv.Scope = ScopeGmailReadonly
-	srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) {
+	srv.Routes["/gmail/v1/users/me/messages/m3"] = func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusTooManyRequests)
-	}
-	srv.Routes["/gmail/v1/users/me/messages/m5"] = func(w http.ResponseWriter, _ *http.Request) {
-		t.Fatal("fetched a body before returning the resume cursor")
 	}
 	g, err := NewGmail(opts(t, srv))
 	if err != nil {
@@ -330,6 +327,16 @@ func TestGmailPartialDoesNotFetchBodies(t *testing.T) {
 	got, err := g.Collect(context.Background(), nil)
 	if err != nil || !got.Partial {
 		t.Fatalf("err %v partial %v", err, got.Partial)
+	}
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	if m["gmail:t4:m5"].Fields["body"] == "" {
+		t.Fatal("an item returned before the pause had no body")
+	}
+	if _, ok := m["gmail:t2:m3"]; ok {
+		t.Fatal("emitted the message whose body was rate-limited")
+	}
+	if strings.Contains(string(got.Next), `"t2"`) {
+		t.Fatal("the resume cursor skipped the thread whose body was not read")
 	}
 }
 
