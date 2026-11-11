@@ -1,6 +1,6 @@
 # Phase 10 — Sealed rules
 
-Status: pending (proposed). Signal's side is Signal plan 12.08, "Sealed events"
+Status: pending (approved by Winton, 2026-11-11). Signal's side is Signal plan 12.08, "Sealed events"
 ([`plans/phase-12/12.08-sealed.md`](https://github.com/CrossTerra/signal/blob/main/plans/phase-12/12.08-sealed.md),
 Signal DEC-250 to DEC-262). Read [`README.md`](README.md), [`../docs/trust-model.md`](../docs/trust-model.md) and
 [`../docs/rules.md`](../docs/rules.md) first.
@@ -16,12 +16,12 @@ per-item hold, and Winton's mail and Slack bodies can reach Signal.
 
 ## Decisions
 
-Proposed as DEC-30 to DEC-37, recorded in the [`README.md`](README.md#decisions) table when the phase is adopted.
+DEC-30 to DEC-37, recorded in the [`README.md`](README.md#decisions) table.
 
 | # | Decision |
 | --- | --- |
 | DEC-30 | A rule may seal. `seal: owner` or `seal: owner+agents` on a `send` or `hold` rule (never on `never`) puts every field the rule lists in the request's `sealed` part, except those named in `plain`, a subset of `fields` that may not hold `body` or `actor`. A rule without `seal` works as today, subject to DEC-32. |
-| DEC-31 | The envelope is fixed in code. A sealed event carries outside `sealed` only: the subject, the type, the key, `by` on the person's own acts, `to`, `priority`, `due_at`, `closes`, `outcome`, `occurred_at`, `metadata.fields` with the `plain` fields, `metadata.native` with an opaque id, and boolean state fields (`unread`, `starred`). The event title, `open.title` (unless its field is plain), the body, `actor` (who wrote to the person), `references`, every other field and every other state field go in `sealed`, as Signal requires (Signal DEC-252). |
+| DEC-31 | The envelope is fixed in code. A sealed event carries outside `sealed` only: the subject, the type, the key, `by` on the person's own acts, `to`, `priority`, `due_at`, `closes`, `outcome`, `occurred_at`, `metadata.fields` with the `plain` fields, `metadata.native` with the source's opaque id only (a Gmail message id, a Slack channel id and `ts`, a Drive file id; never a Message-ID header or anything that names a domain or a person, Signal DEC-264), and boolean state fields (`unread`, `starred`). The event title, `open.title` (unless its field is plain), the body, `actor` (who wrote to the person), `references`, every other field and every other state field go in `sealed`, as Signal requires (Signal DEC-252). |
 | DEC-32 | Personal bodies leave only sealed. A rule that lists `body` and can match an item under a personal stem (`gmail:`, `calendar:`, `drive:`, `slack:dm:`) needs `seal`: `beacon rules check` reports it as an error, and at run time such an item is held with the reason `body_needs_seal` rather than sent plain. Public Slack channel bodies may stay plain. |
 | DEC-33 | The level can be raised on the machine, never lowered. `seal.owner` in the config lists words, senders (addresses and domains) and labels. After a rule decides `send` or `hold`, an item is sealed at `owner`, from plain or from `owner+agents`, when any of them matches, per source: Gmail's `subject`, `body`, `labels` and `thread_participants`; Calendar's `summary`, `body`, `organizer` and `attendee_addresses`; Drive's `title` and `body`, and for notes and transcripts their meeting's title, organiser and attendees; Slack's `body` and the thread root's text. A field the rule does not send is still matched, on the machine. The raise cannot unseal, lower a level, add a field, or revive `never`. Signal seals only a person's own subjects, so a matching item on a shared subject (a public Slack channel) is held instead, as `sensitive_shared`. The log counts raises and never says why (AGENTS.md). |
 | DEC-34 | A subject never goes down. Beacon keeps, per subject, the highest level it has sent there (a level per subject hash in the state directory, no content), and seals every later item there at least that high. With DEC-33 matching the whole Gmail thread, a colleague's reply in a Remotely thread is `owner` even on a first run. |
@@ -30,6 +30,8 @@ Proposed as DEC-30 to DEC-37, recorded in the [`README.md`](README.md#decisions)
 | DEC-37 | Fields the example needs, from what the sources already read. Gmail: `cc`, `participants` (the message's from, to and cc), `thread_participants` (every from, to and cc in the thread, from the thread metadata already read for `subject`), and `bulk` (`List-Unsubscribe`, `List-Id`, `Precedence: bulk`, `list` or `junk`, or a category label other than Personal). Calendar: `attendee_addresses`. Address lists are lowercased and joined with `, `, as `to` and `labels` are today, so a rule's regex matches `(.*, )?name(, .*)?`. Drive: `transcript_created` for a Meet transcript document attached to a meeting (English titles ending in `Transcript`, read as notes are), and `meeting_organizer` and `meeting_attendees` on notes and transcripts. |
 
 ## Scope
+
+### Part 1 — rules and sources
 
 - `internal/rules`: `seal`, `plain`, and the `rules check` error and warning (DEC-30, DEC-32, DEC-36).
 - `internal/config`: `seal.owner` (`words`, `senders`, `labels`); words match whole words, case-insensitive, unless
@@ -44,9 +46,20 @@ Proposed as DEC-30 to DEC-37, recorded in the [`README.md`](README.md#decisions)
 
 No keys, no new hosts (`beacon egress` is unchanged), no new dependency, no new scope on Beacon's Signal key.
 
+### Part 2 — live
+
+1. A live dry run against Winton's Gmail, Slack and Drive confirms the sender of Gemini notes mail and how Meet
+   transcripts arrive (by mail, as Drive documents attached to the meeting, or both). The worked example is final only
+   after this: the `gemini-notes-mail` rule takes the confirmed sender, a transcript mail rule is added if they arrive by
+   mail, and `examples/rules-sealed.yaml` follows.
+2. Winton reviews that dry run's levels, not its content: which items would go `owner`, `owner+agents`, plain or
+   `never`, and which were raised.
+3. Beacon sends to stage with the final rules.
+
 ## Worked example: Winton's rules
 
-Gmail and Slack bodies are sealed everywhere except public Slack channels. Placeholders in angle brackets are filled in
+Gmail and Slack bodies are sealed everywhere except public Slack channels. The Gemini notes sender below is provisional
+until Part 2's dry run confirms it. Placeholders in angle brackets are filled in
 before the live dry run; `crossterra.co` is the company domain.
 
 `config.yaml`, in part:
@@ -158,7 +171,7 @@ DEC-32 and the raise; the classifier (Phase 6), which sees plaintext on the mach
 - `internal/rules`: `seal`, `plain`, `body` or `actor` in `plain` refused, `seal` on `never` refused, a personal `body`
   without `seal` an error, a plain-personal `send` a warning.
 - `internal/project`: golden sealed bodies; for every subset of fields, no listed field outside `sealed` unless plain;
-  the envelope has exactly DEC-31's keys.
+  the envelope has exactly DEC-31's keys, and `metadata.native` never holds `@` or a domain for any source.
 - `internal/runner`: each kind of raise, never lowering and never reviving `never`; the subject floor across passes and
   restarts; a first run that sees only a colleague's reply in a Remotely thread; a calendar event raised by its summary
   or an attendee's domain; notes taking their meeting's level; `body_needs_seal`; `sensitive_shared`; logs with counts
@@ -174,16 +187,16 @@ DEC-32 and the raise; the classifier (Phase 6), which sees plaintext on the mach
 
 ## Exit gate
 
-The tests above pass and `scripts/gates.sh` is green. `docs/rules.md`, `docs/configuration.md`, `docs/sources.md`,
+**Part 1.** The tests above pass and `scripts/gates.sh` is green. `docs/rules.md`, `docs/configuration.md`, `docs/sources.md`,
 `docs/events.md`, `docs/commands.md` (`explain`) and `docs/trust-model.md` describe sealing as built: what crosses the
 boundary (sealed parts, in plaintext over TLS, encrypted by Signal at rest), properties 3 and 9 (bodies only sealed),
 and the known limits ("Signal cannot delete" becomes true for plaintext only; Signal can still read sealed items, and
-who it opens them for is Signal DEC-261). Winton reviews a live dry run's levels, not its content; then Beacon sends to
-stage, and Signal 12.08's stage check passes with Beacon as the writer. `plans/README.md` gets the decisions and the
-dependency on Signal 12.08.
+who it opens them for is Signal DEC-261).
+
+**Part 2.** The dry run has confirmed the Gemini notes sender and how transcripts arrive, and the worked example and
+`examples/rules-sealed.yaml` say so; Winton has reviewed the levels; Beacon sends to stage, and Signal 12.08's stage
+check passes with Beacon as the writer.
 
 ## Open questions
 
-1. The sender of Gemini notes mail, and whether Meet transcripts arrive by mail or only in Drive; the live dry run
-   confirms both.
-2. Whether `bulk` catches mail no rule names yet; Rippling and Carta come first anyway.
+1. Whether `bulk` catches mail no rule names yet; Rippling and Carta come first anyway.
