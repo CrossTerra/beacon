@@ -25,7 +25,7 @@ identities=$(security find-identity -v -p codesigning)
 
 if [ -n "${BEACON_SIGN_IDENTITY:-}" ]; then
 	name=$BEACON_SIGN_IDENTITY
-elif dev=$(printf '%s\n' "$identities" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -n 1) && [ -n "$dev" ]; then
+elif dev=$(printf '%s\n' "$identities" | awk -F'"' '$2 ~ /^Apple Development: / { print $2; exit }') && [ -n "$dev" ]; then
 	name=$dev
 elif printf '%s\n' "$identities" | grep -q '"Beacon Local Signing"'; then
 	name="Beacon Local Signing"
@@ -35,7 +35,7 @@ else
 	exit 1
 fi
 # Sign by the certificate's hash: two certificates can share a name after a renewal.
-hash=$(printf '%s\n' "$identities" | grep -F "\"$name\"" | head -n 1 | awk '{print $2}')
+hash=$(printf '%s\n' "$identities" | awk -v want="\"$name\"" 'index($0, want) { print $2; exit }')
 if [ -z "$hash" ]; then
 	echo "No valid code-signing identity named \"$name\"." >&2
 	exit 1
