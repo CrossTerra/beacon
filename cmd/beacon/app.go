@@ -685,7 +685,11 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 		}
 	}
 	for _, name := range rep.Continued {
-		fmt.Fprintf(w, "source %s: this pass finished a scan that stopped earlier, so it lists only the remainder and is not a completed first run. Run again; the next pass reads the window from the start.\n", name)
+		if rep.Send {
+			fmt.Fprintf(w, "source %s: this pass finished a scan that stopped earlier, so it lists only the remainder. The next pass reads history from here, not the window again.\n", name)
+		} else {
+			fmt.Fprintf(w, "source %s: this pass finished a scan that stopped earlier, so it lists only the remainder and is not a completed first run.\n", name)
+		}
 	}
 	for _, g := range rep.Gaps {
 		if g.Expired {
