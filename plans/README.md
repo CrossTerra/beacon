@@ -44,6 +44,14 @@ Signal, without handing those services' credentials or unfiltered content to any
 | DEC-27 | Signal resolves `by` only to an identity an actor already holds (otherwise `422 identity_not_found`), reads `me` in `to` as the acting actor (Signal DEC-122), and lets only the addressee or the asker close an ask. So: `to` names the person's Signal handle from the config, never `me`. `by` is set only on the person's own acts, from the identities the config lists for the person. Anyone else who caused a change is recorded in `metadata.actor`, and only when the rule lists `actor`. Beacon writes every ask without `by`, so Beacon is the asker, and an event written for `close_by_others` (also without `by`) closes the ask as the asker. Email identities are `email:`, not `mailto:`. When Signal records external identities (Dependencies on Signal, item 5), attribution can move from `metadata.actor` back to `by`. |
 | DEC-28 | Events carry a state snapshot. When a source returns the object's current state, the event's `state` holds the fields that describe it now (for a pull request: state, head commit, review decision at head, mergeable, checks; for an issue: status, assignee, due date), with `observed_at` and the source's version marker. The fields that may appear in `state` are listed per source like any other field, and a rule names them. |
 | DEC-29 | One authoritative event per act. When an executor or an agent already recorded an act the person's credentials performed (a merge, a comment, a message), Beacon does not record it again. It matches the act by the source's native id in `metadata.native`; when it cannot match, it records a plain observation linked to the authoritative event. |
+| DEC-30 | A rule may seal: `seal: owner` or `seal: owner+agents` on a `send` or `hold` rule puts every listed field in the request's `sealed` part, except those in `plain`, which never holds `body` or `actor`. Signal encrypts sealed parts at rest (Signal 12.08); Beacon handles no keys. |
+| DEC-31 | The envelope outside `sealed` is fixed in code (Signal DEC-252), and `metadata.native` is only the source's opaque id, never a Message-ID or a domain (Signal DEC-264). |
+| DEC-32 | Bodies from personal sources leave only sealed: a `rules check` error, and `body_needs_seal` at run time. |
+| DEC-33 | `seal.owner` (words, senders, labels) raises an item to `owner` on the machine and never lowers one; a matching item on a shared subject is held as `sensitive_shared`. |
+| DEC-34 | A subject never goes down a level. |
+| DEC-35 | Notes and transcripts take their meeting's level. |
+| DEC-36 | Sealed rules may `send`; plaintext personal content stays `hold` until checked. |
+| DEC-37 | Gmail `cc`, `participants`, `thread_participants`, `bulk`; Calendar `attendee_addresses`; Drive `transcript_created` and meeting fields. |
 
 ## Change markers
 
@@ -71,6 +79,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | 7a | [Per-user launchd agent](phase-7a.md) | complete | 2 |
 | 8 | macOS menu-bar shell | pending | 5, 7 |
 | 9 | Local agent sessions as a source (DEC-26) | pending | 1 |
+| 10 | [Sealed rules: personal content sealed at rest by Signal, for the person or also their agents](phase-10.md) (DEC-30 to DEC-37) | pending | 3, 4, Signal 12.08 |
 
 Each phase gets its own plan file with goal, scope, out of scope, design notes, tests and an exit gate before work
 starts. Phase 1 is [`phase-1.md`](phase-1.md).
@@ -96,6 +105,7 @@ starts. Phase 1 is [`phase-1.md`](phase-1.md).
 | Redaction | Recovery from a rule that sent too much. | Designed, not built |
 | An integration actor and key per person, with `relay` prefixes | DEC-11 | Built |
 | External identities | `by` for people who are not Signal actors (DEC-27) | Not designed |
+| Sealed events (KMS at rest, levels, crypto-shredding) | Personal bodies unreadable from the database, backups and admin-minted keys (Phase 10) | Planned (Signal 12.08) |
 
 ## Dependencies on Signal, in order
 
