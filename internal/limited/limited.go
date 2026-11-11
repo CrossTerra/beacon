@@ -21,8 +21,16 @@ type Client struct {
 	// Sleep waits, or returns the context's error. Nil sleeps on a timer.
 	Sleep func(ctx context.Context, d time.Duration) error
 	Now   func() time.Time
+	// MaxAttempts is how many times one request is sent when the answer is a rate limit. Zero means three. A source
+	// that does its own backoff sets one.
+	MaxAttempts int
+	// Reason reads a rate-limit answer's body and returns the API's reason code from a fixed list, or "". It must
+	// not return body text. Nil leaves the reason empty.
+	Reason func(body []byte) string
 
 	waitUntil time.Time
+	// limit is the answer that set waitUntil from a Retry-After, so a later call refused before sending says why.
+	limit *source.RateLimit
 }
 
 // HTTPClient is the client a source uses: no redirects, a bounded timeout. The caller supplies the transport,
@@ -64,8 +72,18 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
+func (c *Client) attempts() int {
+	if c.MaxAttempts > 0 {
+		return c.MaxAttempts
+	}
+	return 3
+}
+
 // Do sends req, retrying a rate-limit response whose wait is within MaxWait. The request body is buffered so a
-// retry sends the same bytes. A longer wait returns source.ErrRateLimited without sleeping it.
+// retry sends the same bytes. A longer wait returns a *source.RateLimitError (errors.Is source.ErrRateLimited)
+// without sleeping it, and later calls on this client are refused without being sent until that wait has passed,
+// so the next pass does not ask again before the API said it may. The last attempt's rate limit is returned
+// without sleeping.
 func (c *Client) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if err := c.wait(ctx); err != nil {
 		return nil, err
@@ -79,7 +97,7 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*http.Response, err
 			return nil, err
 		}
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; ; attempt++ {
 		r, err := clone(req, body)
 		if err != nil {
 			return nil, err
@@ -93,9 +111,20 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*http.Response, err
 			c.note(resp)
 			return resp, nil
 		}
+		limit := source.RateLimit{Status: resp.StatusCode, RetryAfter: retryAfter(resp, c.now())}
+		if c.Reason != nil {
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+			limit.Reason = c.Reason(data)
+		}
 		resp.Body.Close()
 		if wait > c.maxWait() {
-			return nil, source.ErrRateLimited
+			if limit.RetryAfter > 0 {
+				c.waitUntil, c.limit = c.now().Add(limit.RetryAfter), &limit
+			}
+			return nil, &source.RateLimitError{RateLimit: limit}
+		}
+		if attempt+1 >= c.attempts() {
+			return nil, &source.RateLimitError{RateLimit: limit}
 		}
 		if wait < time.Second {
 			wait = time.Second
@@ -104,7 +133,6 @@ func (c *Client) Do(ctx context.Context, req *http.Request) (*http.Response, err
 			return nil, err
 		}
 	}
-	return nil, source.ErrRateLimited
 }
 
 func (c *Client) wait(ctx context.Context) error {
@@ -113,12 +141,35 @@ func (c *Client) wait(ctx context.Context) error {
 	}
 	d := c.waitUntil.Sub(c.now())
 	if d <= 0 {
+		c.waitUntil, c.limit = time.Time{}, nil
 		return nil
 	}
 	if d > c.maxWait() {
-		return source.ErrRateLimited
+		limit := source.RateLimit{RetryAfter: d}
+		if c.limit != nil {
+			limit.Status, limit.Reason = c.limit.Status, c.limit.Reason
+		}
+		return &source.RateLimitError{RateLimit: limit}
 	}
 	return c.sleep(ctx, d)
+}
+
+// retryAfter is the Retry-After an answer named, or -1 when it named none or one that does not parse.
+func retryAfter(resp *http.Response, now time.Time) time.Duration {
+	ra := resp.Header.Get("Retry-After")
+	if ra == "" {
+		return -1
+	}
+	if secs, err := strconv.Atoi(ra); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if when, err := http.ParseTime(ra); err == nil {
+		if d := when.Sub(now); d > 0 {
+			return d
+		}
+		return 0
+	}
+	return -1
 }
 
 func (c *Client) note(resp *http.Response) {

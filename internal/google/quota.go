@@ -9,37 +9,56 @@ import (
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
-// Gmail's per-user quota, for a Cloud project that used the API before May 2026 and kept that quota.
-// messages.get with metadata costs 5 units. The per-user limit is 250 units per second and 15,000 per
-// minute. Beacon stays under both: a first-run scan that spends the budget as fast as the network allows
-// is what returns 429, and the next pass then starts the same scan again.
+// Gmail's per-user quota. Since May 2026 a Cloud project that had not used the Gmail API before then gets 6,000 units
+// per user per minute, per project, and threads.get costs 40 units (it was 10). Beacon cannot tell which quota a
+// project has, so it paces by the newer, smaller one, which is also under the older one (250 units per second and
+// 15,000 per minute, at a quarter of the cost). Every tool that uses the same OAuth client for the same person
+// spends the same per-user minute.
 const (
-	// Published per-user limits. The budgets below stay under them.
-	gmailPerSecond = 250
-	gmailPerMinute = 15000
-	// Headroom, so a window that does not line up with Google's, and the moving average that allows a short
-	// burst, still stay under the limit.
-	gmailSecondBudget = gmailPerSecond * 4 / 5
+	// Published per-user limit on the newer quota. The budget below stays under it.
+	gmailPerMinute = 6000
+	// Headroom, so a window that does not line up with Google's, and another tool on the same OAuth client, still
+	// stay under the limit.
 	gmailMinuteBudget = gmailPerMinute * 4 / 5
+	// A burst cap, under the older quota's 250 units per second.
+	gmailSecondBudget = 200
+	// gmailLimitWait is how long a call waits after Google answers with a rate limit that names no Retry-After: a
+	// whole per-minute window.
+	gmailLimitWait = time.Minute
+	// gmailMaxLimitWait is the longest Retry-After a pass waits out before it pauses instead.
+	gmailMaxLimitWait = 2 * time.Minute
 )
 
-// gmailUnits is the quota cost of one Gmail call, on that older per-user quota. A path is the part after
-// /gmail/v1/users/me/, without the query.
+// gmailUnits is the quota cost of one Gmail call, on the newer quota. A path is the part after /gmail/v1/users/me/,
+// without the query. Beacon reads threads only with format=metadata and messages only with format=full.
 func gmailUnits(path string) int {
 	switch {
 	case path == "profile" || path == "labels":
 		return 1
-	case path == "history" || strings.HasPrefix(path, "history"):
+	case path == "history":
 		return 2
-	case path == "messages" || strings.HasPrefix(path, "messages"):
+	case path == "messages":
 		return 5
-	case path == "threads" || strings.HasPrefix(path, "threads?"):
+	case strings.HasPrefix(path, "messages/"):
+		// messages.get with format=full: 60 (20 for metadata, which Beacon does not ask for).
+		return 60
+	case path == "threads":
 		return 10
 	case strings.HasPrefix(path, "threads/"):
-		return 10
+		// threads.get with format=metadata: 40 (120 for full, which Beacon does not ask for).
+		return 40
 	default:
-		return 5
+		return 60
 	}
+}
+
+// gmailPathUnits is the cost of a request to the Gmail API, from its URL path.
+func gmailPathUnits(p string) int {
+	const prefix = "/gmail/v1/users/me/"
+	if i := strings.Index(p, prefix); i >= 0 {
+		return gmailUnits(p[i+len(prefix):])
+	}
+	return gmailUnits("")
 }
 
 type quotaSpend struct {
@@ -48,14 +67,16 @@ type quotaSpend struct {
 }
 
 // gmailQuota is a token bucket for one Gmail source: at most gmailSecondBudget units in any second and
-// gmailMinuteBudget in any minute. It uses the source's clock and sleep, so a test clock that does not move
-// still advances by the wait the sleep was asked for.
+// gmailMinuteBudget in any minute. Every call is counted when it is sent, retries included. It uses the source's
+// clock and sleep, so a test clock that does not move still advances by the wait the sleep was asked for.
 type gmailQuota struct {
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) error
 	last   time.Time
 	offset time.Duration
 	spent  []quotaSpend
+	// until is when Google said, by a rate limit, that the next call may go. Zero means no hold.
+	until time.Time
 }
 
 func (q *gmailQuota) clock() time.Time {
@@ -102,8 +123,8 @@ func (q *gmailQuota) wait(ctx context.Context, d time.Duration) error {
 	return nil
 }
 
-// take waits until spending units would stay under both budgets, then records the spend. A cancelled wait
-// returns the context's error and spends nothing.
+// take waits until spending units would stay under both budgets, and until any hold a rate limit set has passed,
+// then records the spend. A cancelled wait returns the context's error and spends nothing.
 func (q *gmailQuota) take(ctx context.Context, units int) error {
 	if q == nil || units <= 0 {
 		return nil
@@ -124,9 +145,38 @@ func (q *gmailQuota) take(ctx context.Context, units int) error {
 	}
 }
 
+// hold makes the next call wait d from now. Google answered with a rate limit, so the units Beacon counted are not
+// the whole story (another tool on the same OAuth client, or a window that does not line up with this one).
+func (q *gmailQuota) hold(d time.Duration) {
+	if q == nil || d <= 0 {
+		return
+	}
+	if t := q.clock().Add(d); t.After(q.until) {
+		q.until = t
+	}
+}
+
+// recent is the units spent in the last minute.
+func (q *gmailQuota) recent() int {
+	if q == nil {
+		return 0
+	}
+	now := q.clock()
+	n := 0
+	for _, s := range q.spent {
+		if age := now.Sub(s.at); age >= 0 && age < time.Minute {
+			n += s.units
+		}
+	}
+	return n
+}
+
 // delay is how long to wait before spending units fits both windows. Zero means it fits now.
 func (q *gmailQuota) delay(units int) time.Duration {
 	now := q.clock()
+	if q.until.After(now) {
+		return q.until.Sub(now)
+	}
 	if q.fits(now, units) {
 		return 0
 	}

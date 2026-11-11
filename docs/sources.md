@@ -45,12 +45,20 @@ file still decides, and the default remains deny. The format is in [commands](co
 ## Rate limits
 
 Each source honours `Retry-After` and, when present, `X-RateLimit-Remaining` and `X-RateLimit-Reset`. A wait of at
-most two minutes is slept, then the request is retried. A longer wait ends the pass. The cursor is not moved, so
-the next pass resumes from it. Google answers a rate limit with `429`, or with a `403` whose reason is
-`rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded` or `RESOURCE_EXHAUSTED`; both end the pass the same
-way. Slack answers with `429` and `Retry-After`, or `"error":"ratelimited"`, which ends the pass; Beacon also spaces
-its own Slack calls by each method's tier ([Slack](#slack)). Gmail also paces its own calls, and a first-run scan
-that still hits the limit resumes instead of failing the collect; see [Gmail](#gmail).
+most two minutes is slept, then the request is retried, up to three attempts. A longer wait ends the pass. The
+cursor is not moved, so the next pass resumes from it, and that source's later requests are not sent until the
+wait the API named has passed: a pass before then fails at once with `rate_limited`, without calling the API.
+There is no other backoff between passes. Google answers a rate limit with `429`, or with a `403` whose reason is
+`rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`, `dailyLimitExceeded`, `RATE_LIMIT_EXCEEDED` or
+`RESOURCE_EXHAUSTED`; both end the pass the same way. Slack answers with `429` and `Retry-After`, or
+`"error":"ratelimited"`, which ends the pass; Beacon also spaces its own Slack calls by each method's tier
+([Slack](#slack)). Gmail also paces its own calls, and a first-run scan that still hits the limit resumes instead of
+failing the collect; see [Gmail](#gmail).
+
+A rate limit that stops a source is logged as `rate_limited`: the HTTP status, the API's reason code
+(`limit_reason`, from the list above, `concurrentRequests` when Google says the person has too many requests in
+flight, `other` for anything else, or empty when the answer named none), the `Retry-After` in seconds (`-1` when
+none was named) and, for Gmail, the units Beacon spent in the last minute. The answer's body is never logged.
 
 ## GitHub
 
@@ -302,12 +310,31 @@ with a recent draft and older mail is skipped and paging goes on. Each list read
 it stops, `beacon run` says so, and the log has `read_cut`: older mail in the 14 days is not read unless it changes. The cursor is the profile's
 history id, read before listing, so nothing that arrives during the pass is missed.
 
-Gmail paces every call under the per-user quota a Cloud project that used the API before May 2026 still has: 250
-units per second and 15,000 per minute. `messages.get` with metadata costs 5 units, `messages.list` 5, `threads.get`
-10, `threads.list` 10, `history.list` 2, and profile and labels 1. Beacon spends at most 200 units in any second and
-12,000 in any minute, under those limits, so a 14-day scan does not burst into a 429. A `429`, or a `403` whose
-reason is a rate limit, is still honoured (`Retry-After`, then backoff). If the limit still stops an open-state
-scan after something has been read, the collect does not fail. On a send pass, after those items are recorded, it
+**Quota.** Gmail limits each person per OAuth client's Cloud project. A project that first used the Gmail API on or
+after 1 May 2026 gets [6,000 units per user per minute](https://developers.google.com/workspace/gmail/api/reference/quota),
+and `threads.get` costs 40 units (120 with `format=full`), `messages.get` 20 (60 with `format=full`),
+`threads.list` 10, `messages.list` 5, `history.list` 2, and profile and labels 1. A project that used it between
+November 2025 and April 2026 kept the older quota: 250 units per second and 15,000 per minute, at a quarter of
+those costs. Beacon cannot tell which one a project has, so it paces by the newer one, which is also under the
+older: it counts each call at the newer cost (a thread's headers 40, a body, which it reads with `format=full`,
+60), and spends at most 4,800 units in any minute and 200 in any second. That is about 120 threads a minute, so a
+14-day scan of a few hundred inbox threads takes a few minutes and waits inside the pass rather than running into
+a `429`. A project on the older quota is paced more slowly than it needs to be. Every call is counted when it is
+sent, a retry included, as are the profile, label and history calls. Calls are made one at a time, never in
+parallel, so Gmail's per-user limit on concurrent requests is not reached by Beacon alone.
+
+The per-user minute is per project, not per tool: another tool that uses the same OAuth client for the same person
+(for example `gog`, if it was given the same client file) spends the same 6,000 units. The 1,200 units Beacon
+leaves free are for that, and for a minute window that does not line up with Google's. When Google still answers a
+`429`, or a `403` whose reason is a rate limit, Beacon waits the `Retry-After`, or a whole minute when none is
+named, and tries that call once more, counted in the budget. A `Retry-After` over two minutes is not waited out:
+the call fails, and later passes do not call Gmail until it is over (see [Rate limits](#rate-limits)). Beacon does
+not otherwise back off between passes: the limit is a one-minute window, which is refilled before the next pass of
+the agent's two-minute poll, and waiting longer would only delay mail. A pass that waits for quota can be stopped
+by launchd's kill after SIGTERM; nothing of an unfinished collect is recorded, so the next pass reads it again.
+
+**Pause and resume.** If a rate limit still stops an open-state scan after something has been read, the collect
+does not fail. On a send pass, after those items are recorded, it
 stores a resume cursor: the history id read before listing, and where in the inbox or starred list it stopped (a
 page token and the ids already fetched, not message content), marked as written by a send pass. The next send pass
 continues from there and does not fetch those ids again. A dry run writes no cursor and takes no lock. A resume
@@ -317,7 +344,10 @@ so a pause cannot record the item without it. It is not a history cursor: histor
 finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that only
 finishes a scan an earlier pass started lists the remainder, not the whole window, so it is not a completed first
 run. The page cap (5000 per list) is counted across those passes, not restarted, and a cap already hit is not
-forgotten if a later pass pauses.
+forgotten if a later pass pauses. Until `beacon accept-first`, a send pass records nothing for the source, so it
+stores no resume and no cursor, and every pass reads the whole window again. A running agent reads the acceptance
+and the cursors before every pass, so `accept-first` and `beacon cursor reset` apply from its next pass, without a
+restart.
 
 A page token is not a stable offset. Archiving or deleting threads between passes can move an unchanged thread
 onto a page the resume cursor already finished, and that thread is not read. Gmail history does not name it: the

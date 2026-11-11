@@ -8,6 +8,7 @@ package logs
 import (
 	"io"
 	"log/slog"
+	"regexp"
 	"time"
 )
 
@@ -44,6 +45,9 @@ const (
 	ReadCut Event = "read_cut"
 	// ReadPaused is a source whose read stopped at a rate limit and will continue next pass. Not a failure.
 	ReadPaused Event = "read_paused"
+	// RateLimited is what an API said when its rate limit stopped a source: the status, the API's reason code, the
+	// Retry-After it named, and the units the source had spent in the last minute when it keeps a budget.
+	RateLimited Event = "rate_limited"
 	// RestrictionsUnread is a send pass that could not read Signal's restricted prefixes.
 	RestrictionsUnread Event = "restrictions_unread"
 )
@@ -112,6 +116,26 @@ func Until(t time.Time) Attr { return Attr{slog.Time("until", t)} }
 
 // Kind is an outbox kind.
 func Kind(k string) Attr { return Attr{slog.String("kind", k)} }
+
+// LimitReason is an API's own rate-limit reason code. Anything but a short identifier is logged as "other", so a
+// source cannot put text in the log through it.
+func LimitReason(r string) Attr {
+	if !limitReason.MatchString(r) {
+		r = "other"
+	}
+	return Attr{slog.String("limit_reason", r)}
+}
+
+var limitReason = regexp.MustCompile(`^[A-Za-z_]{0,40}$`)
+
+// RetryAfter is a Retry-After in whole seconds, rounded up; -1 when the answer named none.
+func RetryAfter(d time.Duration) Attr {
+	s := int64(-1)
+	if d >= 0 {
+		s = int64((d + time.Second - 1) / time.Second)
+	}
+	return Attr{slog.Int64("retry_after", s)}
+}
 
 // Why is a failure's reason code.
 func Why(r Reason) Attr { return Attr{slog.String("reason", string(r))} }

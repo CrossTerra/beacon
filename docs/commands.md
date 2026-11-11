@@ -185,7 +185,8 @@ beacon accept-first [source...]
 Records that the named sources' first runs were accepted. With no names, every source but a fixture. Each named
 source must have a completed `beacon run --first` for that source; accepting without that summary is an error. A
 collect that failed is not a completed summary. The next send pass may send their open-state items and then commit
-a cursor. It does not send by itself.
+a cursor. It does not send by itself. A running agent (`beacon service`) reads the acceptance before each pass, so
+it does not need a restart.
 
 ## `beacon service`
 
@@ -203,7 +204,7 @@ beacon service logs [--stdout]
 `install` writes the plist and bootstraps it. The job runs the signed binary with `run` and `--config` set to the
 absolute config path: the poll loop, not `--once`. It starts at load. The process reads the config when it starts
 and does not reload it: there is no SIGHUP handler and no watch on the file. Restart the agent after a config
-change. An invalid config is not applied over a running one; the process exits, and launchd restarts it only when it exits
+change. The cursors and the first-run acceptance are state, not config: they are read again before every pass. An invalid config is not applied over a running one; the process exits, and launchd restarts it only when it exits
 non-zero, and not more than once every 10 seconds. A clean exit after SIGTERM stays stopped. launchd waits 180
 seconds after SIGTERM before killing the process, which covers one send. The plist sets no environment variables
 and no credential; the agent reads keys from the keychain when a pass sends, the same as a terminal `beacon run`.
@@ -251,7 +252,8 @@ the build flags Go recorded (`-trimpath`, `-ldflags`, `-tags`, `CGO_ENABLED`, `-
 ## The log
 
 JSON lines on standard error. Each line has `time`, `level`, `msg` (the event name) and attributes that are counts,
-source names, the mode, outcomes, HTTP statuses, Signal error codes, lease periods and a fixed `reason` code. A log
+source names, the mode, outcomes, HTTP statuses, Signal error codes, lease periods, a fixed `reason` code, and on
+`rate_limited` the source API's own rate-limit reason code from a fixed list and the `Retry-After` it named. A log
 line never holds item content, a rule's match, an item key, a request body, a credential or an error's text.
 
 | Event | When |
@@ -269,6 +271,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
 | `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search); older items in its window were not read. The source only. |
 | `read_paused` | A Gmail open-state scan stopped at a rate limit and will continue next pass. Not a failure. The source, and `reason` `rate_limited`. |
+| `rate_limited` | A source's API answered with its rate limit and that stopped the source, before its `read_paused` or `collect_failed`. The source, the HTTP `status`, the API's `limit_reason` (a reason code from a fixed list, `other`, or empty), `retry_after` in seconds (`-1` when none was named), and `units`, the quota units the source spent in the last minute (Gmail; 0 for the others). See [sources](sources.md#rate-limits). |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
 

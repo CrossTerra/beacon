@@ -641,3 +641,80 @@ func TestPendingPersonalBodiesWaitForTheRestriction(t *testing.T) {
 		t.Fatal("drive, still restricted, was not sent")
 	}
 }
+
+// TestRunLoopSeesAcceptFirst: a running agent reads the first-run acceptance before every pass. accept-first while
+// it runs lets its next pass record Gmail's items and store a cursor. Before, the loop kept the acceptance it read
+// at start, never stored a Gmail cursor or a resume, and read the whole 14-day window on every pass until restarted.
+func TestRunLoopSeesAcceptFirst(t *testing.T) {
+	srv := googletest.New(t)
+	sig := signaltest.New("sig-key")
+	t.Cleanup(sig.Close)
+	sig.Restrict("gmail:*", "calendar:*", "drive:*")
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	conf := strings.Replace(googleConfig, "https://signal.example.com", sig.URL+"\n  keychain_account: test", 1)
+	conf = strings.Replace(conf, "mode: dry-run", "mode: send", 1)
+	must(t, os.WriteFile(cfg, []byte(conf+googleSources+"poll_interval: 50ms\nlease:\n  period: 1m\n"), 0o600))
+	rulesFile, err := os.ReadFile(filepath.Join("..", "..", "examples", "rules.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, os.WriteFile(filepath.Join(dir, "rules.yaml"), rulesFile, 0o600))
+	store := keychain.NewMemory()
+	store.Put("test", "sig-key")
+	store.Put(keychain.GoogleClientAccount(googletest.Email), `{"client_id":"`+googletest.ClientID+`","client_secret":"`+googletest.ClientSecret+`"}`)
+	store.Put(keychain.GoogleRefreshAccount(googletest.Email), googletest.Refresh)
+	var out, errOut strings.Builder
+	var rec *egresstest.Recorder
+	a := googleApp(t, srv, store, &rec, &out, &errOut)
+	run := func(args ...string) {
+		t.Helper()
+		out.Reset()
+		errOut.Reset()
+		if code := a.main(context.Background(), append(args, "--config", cfg)); code != 0 {
+			t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
+		}
+	}
+	state := filepath.Join(dir, "state")
+	gmailCursor := func() bool {
+		st, err := cursor.Read(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, ok := st.Get("gmail")
+		return ok
+	}
+	run("run", "--first", "--once")
+
+	var loopOut, loopErr strings.Builder
+	var loopRec *egresstest.Recorder
+	loop := googleApp(t, srv, store, &loopRec, &loopOut, &loopErr)
+	loop.configureClient = func(c *signal.Client) { c.Attempts = 1 }
+	term, stop := context.WithCancel(context.Background())
+	defer stop()
+	loop.term = term
+	done := make(chan int, 1)
+	go func() { done <- loop.main(context.Background(), []string{"run", "--config", cfg}) }()
+	waitFor := func(what string, ok func() bool) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for !ok() {
+			if time.Now().After(deadline) {
+				stop()
+				<-done
+				t.Fatalf("%s\n%s", what, loopErr.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitFor("the loop made no pass", func() bool { _, err := service.ReadPass(state); return err == nil })
+	if gmailCursor() {
+		t.Fatal("a pass before accept-first stored a Gmail cursor")
+	}
+	run("accept-first")
+	waitFor("the running loop did not see accept-first", gmailCursor)
+	stop()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d\n%s", code, loopErr.String())
+	}
+}

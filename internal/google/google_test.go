@@ -414,30 +414,43 @@ func countPath(srv *googletest.Server, path string) int {
 }
 
 func TestGmailQuotaStaysUnderTheBudget(t *testing.T) {
-	var slept []time.Duration
-	q := &gmailQuota{
-		now: func() time.Time { return testNow },
-		sleep: func(_ context.Context, d time.Duration) error {
-			slept = append(slept, d)
-			return nil
-		},
-	}
-	for i := 0; i < gmailSecondBudget/10; i++ {
-		if err := q.take(context.Background(), 10); err != nil {
+	clock := &fakeClock{t: testNow}
+	q := &gmailQuota{now: clock.now, sleep: clock.sleep}
+	ctx := context.Background()
+	// The per-second cap: five threads at 40 units fit in a second, the sixth waits.
+	for i := 0; i < gmailSecondBudget/40; i++ {
+		if err := q.take(ctx, gmailUnits("threads/t1")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(slept) != 0 {
-		t.Fatalf("waited before the second budget was spent: %v", slept)
+	if len(clock.slept) != 0 {
+		t.Fatalf("waited before the second budget was spent: %v", clock.slept)
 	}
-	if err := q.take(context.Background(), gmailUnits("threads/t1")); err != nil {
+	if err := q.take(ctx, gmailUnits("threads/t1")); err != nil {
 		t.Fatal(err)
 	}
-	if len(slept) != 1 || slept[0] < time.Second {
-		t.Fatalf("did not wait out the per-second budget: %v", slept)
+	if len(clock.slept) != 1 || clock.slept[0] < time.Second {
+		t.Fatalf("did not wait out the per-second budget: %v", clock.slept)
 	}
-	if gmailUnits("messages/m1") != 5 || gmailUnits("threads") != 10 || gmailUnits("history") != 2 {
-		t.Fatalf("units messages %d threads %d history %d", gmailUnits("messages/m1"), gmailUnits("threads"), gmailUnits("history"))
+	// The per-minute budget: no minute holds more than gmailMinuteBudget, under Gmail's 6,000.
+	for i := 0; i < 1000; i++ {
+		if err := q.take(ctx, gmailUnits("threads/t1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, s := range q.spent {
+		sum := 0
+		for _, o := range q.spent[i:] {
+			if o.at.Sub(s.at) < time.Minute {
+				sum += o.units
+			}
+		}
+		if sum > gmailMinuteBudget || sum > gmailPerMinute {
+			t.Fatalf("%d units in the minute from %s", sum, s.at)
+		}
+	}
+	if gmailMinuteBudget >= gmailPerMinute {
+		t.Fatalf("budget %d leaves no headroom under %d", gmailMinuteBudget, gmailPerMinute)
 	}
 }
 

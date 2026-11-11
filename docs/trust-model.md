@@ -77,7 +77,8 @@ same pull request.
    with read scopes only. `beacon source add slack` refuses anything that is not a user token (`xoxp-`) and a token
    missing a read scope, and stores it under the workspace and user (`slack:<workspace>:<user>`).
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
-   Signal error codes and fixed reason codes: no item content, no rule matches, no keys, no bodies, no tokens, and no
+   Signal error codes and fixed reason codes (a source API's rate-limit reason only from a fixed list, anything else
+   logged as `other`): no item content, no rule matches, no keys, no bodies, no tokens, and no
    error text, which can name any of those. `beacon run` prints a fixed message for each reason.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
    person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and

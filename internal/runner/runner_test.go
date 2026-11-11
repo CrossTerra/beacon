@@ -791,3 +791,38 @@ func TestRestrictingStem(t *testing.T) {
 		t.Fatal("unread restrictions must withhold")
 	}
 }
+
+// A rate limit is logged with what the API said: the status, its reason code, the Retry-After and the source's
+// own spend. A pause and a failed collect both log it. Nothing else from the answer reaches the log.
+func TestRateLimitIsLogged(t *testing.T) {
+	f := newFixture(t)
+	f.src.collect = func([]byte) (source.Collected, error) {
+		return source.Collected{Items: items()[:1], Next: []byte("resume"), Partial: true,
+			Limit: &source.RateLimit{Status: 429, Reason: "rateLimitExceeded", RetryAfter: 1500 * time.Millisecond, Units: 4800}}, nil
+	}
+	r, done := f.runner(false, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	want := `"msg":"rate_limited","source":"fx","status":429,"limit_reason":"rateLimitExceeded","retry_after":2,"units":4800`
+	if !strings.Contains(f.log.String(), want) || !strings.Contains(f.log.String(), `"msg":"read_paused"`) {
+		t.Fatalf("log:\n%s", f.log.String())
+	}
+	f.log.Reset()
+	f.src.collect = func([]byte) (source.Collected, error) {
+		return source.Collected{}, fmt.Errorf("wrapped: %w", &source.RateLimitError{RateLimit: source.RateLimit{Status: 403, Reason: "a reason with text", RetryAfter: -1}})
+	}
+	r, done = f.runner(false, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	want = `"msg":"rate_limited","source":"fx","status":403,"limit_reason":"other","retry_after":-1,"units":0`
+	if !strings.Contains(f.log.String(), want) || !strings.Contains(f.log.String(), `"msg":"collect_failed","source":"fx","reason":"rate_limited"`) {
+		t.Fatalf("log:\n%s", f.log.String())
+	}
+	if strings.Contains(f.log.String(), "with text") {
+		t.Fatal("free text reached the log")
+	}
+}
