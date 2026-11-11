@@ -279,7 +279,7 @@ func build(in buildInput) ([]source.Item, error) {
 			if e.RequestedTeam != nil {
 				team = e.RequestedTeam.key()
 			}
-			err = add(in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), requestedName(who, team)))
+			err = add(in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), in.requestedName(who, team)))
 		case "review_request_removed":
 			actor := loginOf(e.Actor)
 			if actor == "" {
@@ -365,7 +365,7 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 			at = obs
 		}
 		actor := loginOf(e.ReviewRequester)
-		it, err := in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), requestedName(who, team))
+		it, err := in.itemRequested(TypeReviewRequested, "timeline:"+e.ID.String(), actor, at, "", "", in.addressedRequest(who, team), in.requestedName(who, team))
 		if err != nil {
 			return nil, err
 		}
@@ -518,8 +518,13 @@ func eventTitle(typ, reviewState, changeID, requested string) string {
 }
 
 // requestedName is the login, or the team as org/slug when the request names a team. A login wins when both are set.
-func requestedName(login, team string) string {
+// It is empty when the person was requested, so the title reads "Review requested" and not as if the person had
+// asked someone. A team keeps its name: the team was requested, not the person.
+func (in buildInput) requestedName(login, team string) string {
 	if login != "" {
+		if strings.EqualFold(login, in.Login) {
+			return ""
+		}
 		return login
 	}
 	return team

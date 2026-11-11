@@ -29,8 +29,8 @@ same pull request.
    state fields a rule lists (DEC-28). Who caused a change leaves only when a rule lists `actor`; your own identity
    leaves as `by` on your own acts (DEC-27). An event's title is a description of that change, not a source field
    and not the object's title. It leaves with the event so a thread's events do not all read as the pull request,
-   issue, mail or file title. It is built only from the change the source already recorded (who was requested, the
-   review state, a short commit sha, the check conclusion, the assignee's display name, the status names, the due
+   issue, mail or file title. It is built only from the change the source already recorded (who was requested when
+   it is not you, the review state, a short commit sha, the check conclusion, the assignee's display name when it is not you, the status names, the due
    date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
    comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
    `title`, `summary` or `subject`, as the thread title. A Google source does not even read a mail body, an event
@@ -64,7 +64,13 @@ same pull request.
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
-   never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. The
+   never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. A new
+   item lets code read it without asking only when it meets the designated requirement of the build that created
+   it (identifier `dev.beacon.cli` and that signing certificate) and its partition is on the item's list: the
+   team, for an Apple-issued certificate, otherwise that build's hash. Any other program, an older build or a
+   rebuild signed with a self-signed certificate included, makes macOS ask. A build that is not signed with a
+   certificate (`go build`, `go run`, test binaries) does not use the keychain at all, so it cannot prompt or add
+   itself to an item. `beacon keychain repair` re-creates each item with this access. The
    Signal URL must be `https`, except to a loopback address. The per-user agent is a LaunchAgent in the user's GUI
    session, never a LaunchDaemon. `beacon run` and `beacon service` refuse to start as root, so a plist copied into
    `/Library/LaunchDaemons` exits instead of running as root. The plist names the signed binary, the config path and

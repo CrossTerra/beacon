@@ -1290,3 +1290,40 @@ func TestCursorReset(t *testing.T) {
 		t.Fatal("reset of an unknown source succeeded")
 	}
 }
+
+// keychain repair re-creates every item, keeps each value, prints account names and never a value.
+func TestKeychainRepair(t *testing.T) {
+	store := keychain.NewMemory()
+	store.Put("signal:signal.example.com:443", "sig_repairsecret")
+	store.Put("source:github", "gho_repairsecret")
+	var out, errOut bytes.Buffer
+	a := &app{stdout: &out, stderr: &errOut, now: time.Now, keychain: func() (keychain.Store, error) { return store, nil }}
+	if code := a.main(context.Background(), []string{"keychain", "repair"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	want := "Repaired beacon/signal:signal.example.com:443\nRepaired beacon/source:github\n"
+	if out.String() != want {
+		t.Fatalf("stdout %q", out.String())
+	}
+	if strings.Contains(out.String()+errOut.String(), "repairsecret") {
+		t.Fatal("a value was printed")
+	}
+	if !store.Contains("signal:signal.example.com:443", "sig_repairsecret") || !store.Contains("source:github", "gho_repairsecret") {
+		t.Fatal("a value changed")
+	}
+	if code := a.main(context.Background(), []string{"keychain", "repair", "extra"}); code == 0 {
+		t.Fatal("took an argument")
+	}
+	if code := a.main(context.Background(), []string{"keychain"}); code == 0 {
+		t.Fatal("ran without repair")
+	}
+}
+
+// A build the keychain refuses (an ad-hoc one) repairs nothing and says why.
+func TestKeychainRepairAdHoc(t *testing.T) {
+	var out, errOut bytes.Buffer
+	a := &app{stdout: &out, stderr: &errOut, now: time.Now, keychain: func() (keychain.Store, error) { return nil, keychain.ErrAdHocBuild }}
+	if code := a.main(context.Background(), []string{"keychain", "repair"}); code != 1 || !strings.Contains(errOut.String(), "scripts/build-local.sh") {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+}

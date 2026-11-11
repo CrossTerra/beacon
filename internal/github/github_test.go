@@ -142,7 +142,7 @@ func TestCollectEveryItem(t *testing.T) {
 		"github:acme/app#7:push:abc111":        "Pushed abc111",
 		"github:acme/app#7:timeline:15":        "Merged",
 		"github:acme/app#8:opened:800":         "Opened",
-		"github:acme/app#8:timeline:21":        "Review requested from winton",
+		"github:acme/app#8:timeline:21":        "Review requested",
 		"github:acme/app#8:timeline:22":        "Review request removed",
 		"github:acme/app#8:review:23":          "Reviewed: changes requested",
 		"github:acme/app#8:timeline:24":        "Ready for review",
@@ -244,7 +244,7 @@ func TestCollectEveryItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBody := `{"subject":"github:pr:acme/app#8","type":"github.review_requested","key":"github:acme/app#8:timeline:21","occurred_at":"2026-11-02T02:00:00.000Z","title":"Review requested from winton","open":{"title":"Fix login"},"metadata":{"fields":{"url":"https://github.com/acme/app/pull/8"}}}`
+	wantBody := `{"subject":"github:pr:acme/app#8","type":"github.review_requested","key":"github:acme/app#8:timeline:21","occurred_at":"2026-11-02T02:00:00.000Z","title":"Review requested","open":{"title":"Fix login"},"metadata":{"fields":{"url":"https://github.com/acme/app/pull/8"}}}`
 	if string(body) != wantBody {
 		t.Fatalf("got  %s\nwant %s", body, wantBody)
 	}
@@ -312,7 +312,7 @@ func TestFirstRunIsOpenState(t *testing.T) {
 				t.Fatalf("checks %q", it.EventTitle)
 			}
 		case "github:acme/app#8:timeline:21":
-			if it.EventTitle != "Review requested from winton" {
+			if it.EventTitle != "Review requested" {
 				t.Fatalf("request %q", it.EventTitle)
 			}
 		}

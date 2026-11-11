@@ -711,3 +711,43 @@ func githubSends(t *testing.T, sig *signaltest.Server) int {
 	}
 	return n
 }
+
+// A request for the person reads "Review requested", not "from <their login>", which would read as if they had
+// asked. A request for someone else, or for a team, names who was requested.
+func TestReviewRequestTitleNamesOnlyOthers(t *testing.T) {
+	in := buildInput{
+		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+		PR: pull{ID: 1, Number: 1, owner: "acme", name: "app", Title: "Keep the key", HTMLURL: "https://github.com/acme/app/pull/1",
+			User: &ghUser{Login: "dana"}},
+		Timeline: []timelineEvent{
+			{ID: "1", Event: "review_requested", CreatedAt: "2026-11-01T00:00:00Z", ReviewRequester: &ghUser{Login: "dana"}, RequestedReviewer: &ghUser{Login: "Winton"}},
+			{ID: "2", Event: "review_requested", CreatedAt: "2026-11-01T00:01:00Z", ReviewRequester: &ghUser{Login: "winton"}, RequestedReviewer: &ghUser{Login: "erin"}},
+			{ID: "3", Event: "review_requested", CreatedAt: "2026-11-01T00:02:00Z", ReviewRequester: &ghUser{Login: "dana"}, RequestedTeam: &ghTeam{Slug: "eng", Organization: &struct {
+				Login string `json:"login"`
+			}{Login: "acme"}}},
+		},
+	}
+	items, err := build(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"github:acme/app#1:timeline:1": "Review requested",
+		"github:acme/app#1:timeline:2": "Review requested from erin",
+		"github:acme/app#1:timeline:3": "Review requested from acme/eng",
+	}
+	got := map[string]string{}
+	for _, it := range items {
+		if it.Type == TypeReviewRequested {
+			got[it.Key] = it.EventTitle
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s title %q, want %q", k, got[k], w)
+		}
+	}
+}

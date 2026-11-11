@@ -60,7 +60,7 @@ repeats every `poll_interval`, and it still writes nothing.
 | `internal/seed` | The seed file (DEC-24). |
 | `internal/limited` | Rate-limit backoff for source HTTP. |
 | `internal/config` | Reads and validates the config file. Holds no secrets. |
-| `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, and an in-memory store for tests. It also builds OAuth token requests and reads token responses, so a token's bytes stay in it. |
+| `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, refused to a build not signed with a certificate, with items that trust the creating build's designated requirement and `Repair` to re-create them; and an in-memory store for tests. It also builds OAuth token requests and reads token responses, so a token's bytes stay in it. |
 | `internal/rules` | Parses the rules file, decides tiers, and checks for rules that can never match. |
 | `internal/project` | Builds the request body from an item and its rule. |
 | `internal/outbox` | The append-only record of every body, and each key's state. |

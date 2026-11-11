@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# One-time setup on a developer's Mac: a self-signed code-signing identity, so local builds of beacon keep the same
-# code signature across rebuilds and the keychain's "Always Allow" survives them.
+# One-time setup on a developer's Mac without an Apple Development certificate: a self-signed code-signing
+# identity, so local builds of beacon have a certificate and `beacon service install` accepts them.
 #
-# Why: `go build` signs the binary ad hoc, so every rebuild is a different program to the keychain and every read of
-# a Beacon secret asks for the login password again. Release builds are signed with a Developer ID (Phase 7).
+# It does not stop keychain prompts across rebuilds. macOS files a build signed with a certificate Apple did not issue
+# under that build's hash (the item's partition list), so every rebuild asks once per Beacon item. An Apple
+# Development certificate does not have that problem; scripts/build-local.sh prefers one. See docs/development.md.
+# Release builds are signed with a Developer ID (Phase 7).
 #
 # This creates "Beacon Local Signing" in the login keychain and trusts it for code signing for this user only.
 # macOS asks for your login password twice: to let codesign use the key, and to add the trust setting. The private key never leaves the keychain afterwards.
@@ -46,4 +48,4 @@ security set-key-partition-list -S apple-tool:,apple: -s -l "$name" "$keychain" 
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$tmp/cert.pem"
 
 security find-identity -v -p codesigning "$keychain" | grep "\"$name\""
-echo "Done. Build with scripts/build-local.sh."
+echo "Done. Build with scripts/build-local.sh. Each rebuild still asks once per Beacon item; see docs/development.md."

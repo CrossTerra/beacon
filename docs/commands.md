@@ -219,9 +219,10 @@ truncated in place rather than renamed.
 
 The binary must be code-signed with a stable identity. An ad-hoc signature, which is what `go build` produces, is
 refused and nothing is written: each rebuild would be a different program to the keychain.
-[`scripts/build-local.sh`](../scripts/build-local.sh) signs with the identity from
-[`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh) and the identifier `dev.beacon.cli`. A Developer
-ID signature is also a stable identity. `--binary` names a binary other than the one running the command. The path
+[`scripts/build-local.sh`](../scripts/build-local.sh) signs with your Apple Development identity, or the self-signed
+one from [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh), and the identifier `dev.beacon.cli`. A
+Developer ID signature is also a stable identity. Only an Apple-issued certificate keeps keychain access across
+rebuilds; see [Local builds and the keychain](development.md#local-builds-and-the-keychain). `--binary` names a binary other than the one running the command. The path
 in the plist is absolute and symlink-resolved, and it is the path that was checked. Install records the SHA-256 of
 that certificate's leaf in the state directory. A later `beacon run` refuses a binary whose leaf does not match, and
 does not contact Signal. `status` prints `identity: mismatch` when that is so, and does not print the hash.
@@ -243,6 +244,20 @@ follows.
 
 On a system that is not macOS, install, uninstall and status report that the agent is a launchd job and do nothing
 else.
+
+## `beacon keychain repair`
+
+Re-creates every keychain item under the service `beacon`, so each one has the access a new item gets from the
+running build and none of what earlier builds added to it: only code with this build's identifier and signing
+certificate reads it without asking, and the item's partition list holds only this build's partition. Run it once
+after switching the signing certificate, with the build you will keep (see
+[Local builds and the keychain](development.md#local-builds-and-the-keychain)).
+
+It lists the items by attributes, which does not prompt, then for each one reads the value once (macOS asks once per
+item; choose Always Allow), stores a copy as `repair:<account>`, deletes the item, writes it back, reads it back to
+check the bytes, and deletes the copy. If it stops part way, the copy keeps the value and the next run restores it.
+It prints the account names it repaired and never a value. It takes no `--config`: it repairs every Beacon item. A
+build that is not signed with a certificate refuses it, as it refuses every keychain read.
 
 ## `beacon version`
 

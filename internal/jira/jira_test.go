@@ -91,7 +91,7 @@ func TestCollectEveryItem(t *testing.T) {
 		t.Fatalf("got %v", keys)
 	}
 	titles := map[string]string{
-		"jira:ENG-1:501":          "Assigned to Winton",
+		"jira:ENG-1:501":          "Assigned",
 		"jira:ENG-1:503":          "To Do → In Progress",
 		"jira:ENG-1:510":          "In Progress → In Review",
 		"jira:ENG-1:504":          "Mentioned",
@@ -215,7 +215,7 @@ func TestFirstRunAndScope(t *testing.T) {
 	if comments {
 		t.Fatal("first run read comments")
 	}
-	if len(got.Items) != 1 || got.Items[0].Key != "jira:ENG-3:900" || got.Items[0].Type != TypeAssigned || !got.Items[0].Addressed || got.Items[0].EventTitle != "Assigned to Winton" {
+	if len(got.Items) != 1 || got.Items[0].Key != "jira:ENG-3:900" || got.Items[0].Type != TypeAssigned || !got.Items[0].Addressed || got.Items[0].EventTitle != "Assigned" {
 		t.Fatalf("%+v", got.Items)
 	}
 	sc, err := newScope("acme.atlassian.net", []string{"ENG"})
@@ -402,3 +402,24 @@ const comments = `{
     {"id": "602", "created": "2026-11-07T23:55:00.000+0000", "author": {"accountId": "acc-winton"}, "body": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "done"}]}]}}
   ]
 }`
+
+// An assignment to the person reads "Assigned"; one to someone else names them.
+func TestAssignedTitleNamesOnlyOthers(t *testing.T) {
+	at := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+	iss := issue{key: "ENG-1", project: "ENG", account: "acc-dana", assignee: "Dana", status: "In Progress"}
+	histories := []history{
+		{id: "700", author: "acc-erin", created: at, items: []change{{field: "assignee", to: "acc-winton", toString: "Winton"}}},
+		{id: "701", author: "acc-winton", created: at.Add(time.Minute), items: []change{{field: "assignee", from: "acc-winton", to: "acc-dana", toString: "Dana"}}},
+	}
+	items, err := itemsFrom("jira", "acc-winton", iss, histories, nil, at.Add(-time.Hour), false, at.Add(time.Hour), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, it := range items {
+		got[it.Key] = it.EventTitle
+	}
+	if got["jira:ENG-1:700"] != "Assigned" || got["jira:ENG-1:701"] != "Assigned to Dana" || len(got) != 2 {
+		t.Fatalf("%v", got)
+	}
+}
