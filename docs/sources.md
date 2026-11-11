@@ -312,8 +312,10 @@ cursor: the history id read before listing, and where in the inbox or starred li
 ids already fetched, not message content). The next pass, including a dry run, continues from there and does not
 fetch those ids again. It is not a completed first run, and it is not a history cursor: history is read only once
 the scan finishes. `beacon run` says the read stopped and will continue. The log has `read_paused`. A pass that
-finishes the scan is a completed first run. A dry run does not keep that as a history cursor, so the send pass
-after `accept-first` reads the window again before anything is sent.
+only finishes a scan an earlier pass started lists the remainder, not the whole window, so it is not a completed
+first run. The resume cursor is dropped and the next pass reads the window from the start, paced under the quota.
+That pass is the summary `accept-first` requires. The page cap (5000 per list) is counted across those passes, not
+restarted, and a cap already hit is not forgotten if a later pass pauses.
 
 **Items.** `received` (a new message from someone else), `sent` (the person's own message: the `SENT` label, and
 only that), `starred` (`STARRED` added). A From header is the sender's claim: mail that says it is from the person

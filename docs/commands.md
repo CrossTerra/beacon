@@ -47,8 +47,8 @@ Signal …` and which prefix to ask Signal's admin to restrict. If the restricti
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
 lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
 `run` says so and what was re-read, and when a read stopped at its limit, it says that too. When a Gmail open-state
-scan stops at a rate limit, `run` says the next pass continues from where it stopped; that source is not a completed
-`--first` until a pass finishes the scan. See [`sources.md`](sources.md#google).
+scan stops at a rate limit, `run` says the next pass continues from where it stopped. A pass that only finishes
+that scan is not a completed `--first`: it lists the remainder. Run again for the summary. See [`sources.md`](sources.md#google).
 
 It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
 the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,

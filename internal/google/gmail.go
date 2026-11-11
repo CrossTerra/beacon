@@ -230,6 +230,10 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	seen := map[string]bool{}
 	for _, r := range refs {
 		t, err := g.thread(ctx, threads, r.thread)
+		if errors.Is(err, source.ErrRateLimited) && scan != nil {
+			// The resume point is already known. Do not fail the collect and drop it.
+			break
+		}
 		if gone(err) {
 			continue
 		}
@@ -241,7 +245,9 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			continue
 		}
 		seen[it.Key] = true
-		if bodies && it.Type != TypeStarred {
+		// Bodies wait until the scan has a resume cursor to return, or has finished. Fetching one now can
+		// rate-limit and would otherwise fail the collect with no cursor, so the next pass starts over.
+		if bodies && scan == nil && it.Type != TypeStarred {
 			// The item is already built from the thread. A body that one message will not give up (gone, or a
 			// permission 403) is left out; the item is still emitted. A rate limit or a refused grant fails the pass.
 			body, err := g.body(ctx, r.message)
@@ -256,17 +262,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Key < items[j].Key })
 	if scan != nil {
-		// The scan stopped at a rate limit. Next is where to continue, not a history cursor. The pass does not fail.
-		if scan.HistoryID == "" {
-			scan.HistoryID = next.HistoryID
-		}
-		next.HistoryID = scan.HistoryID
-		next.Scan = scan
-		data, err := json.Marshal(next)
-		if err != nil {
-			return source.Collected{Items: items}, err
-		}
-		return source.Collected{Items: items, Next: data, Partial: true}, nil
+		return g.partial(next, scan, items)
 	}
 	// The time of this pass bounds a later gap read. It is the server's Date, else the newest message seen.
 	if t := g.clock.First(); !t.IsZero() {
@@ -289,6 +285,20 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 	return source.Collected{Items: items, Next: data, Gap: gap, Cut: cut || openCut, ClearResume: cur.Scan != nil}, nil
 }
 
+// partial is a collect that stopped at a rate limit. Next is where to continue, not a history cursor.
+func (g *Gmail) partial(next gmailCursor, scan *gmailScan, items []source.Item) (source.Collected, error) {
+	if scan.HistoryID == "" {
+		scan.HistoryID = next.HistoryID
+	}
+	next.HistoryID = scan.HistoryID
+	next.Scan = scan
+	data, err := json.Marshal(next)
+	if err != nil {
+		return source.Collected{Items: items}, err
+	}
+	return source.Collected{Items: items, Next: data, Partial: true, Cut: scan.InboxCut}, nil
+}
+
 // gmailCursor is the history id to read from, and when the pass that stored it ran. The time bounds what a pass
 // re-reads when the history id has expired. Scan, when set, is an open-state read that stopped at a rate limit.
 // It is not a history cursor: the next pass continues the scan, and history is read only once the scan finishes.
@@ -309,6 +319,11 @@ type gmailScan struct {
 	Page string `json:"page,omitempty"`
 	// Skip are ids already fetched on Page, so the next pass does not spend quota on them again.
 	Skip []string `json:"skip,omitempty"`
+	// Pages is how many list pages of Phase were already finished. A resume continues the same cap
+	// (gapPages), it does not start the count again.
+	Pages int `json:"pages,omitempty"`
+	// InboxCut is true when the inbox list already hit its cap, so a later pause does not forget read_cut.
+	InboxCut bool `json:"inbox_cut,omitempty"`
 }
 
 func parseGmailCursor(b []byte) (gmailCursor, error) {
@@ -525,43 +540,55 @@ func (g *Gmail) open(ctx context.Context, threads map[string]*gmailThread, start
 		}
 	}
 	cutoffStr := cutoff.UTC().Format(time.RFC3339)
+	inboxCut := false
+	startPages := 0
+	if start != nil {
+		inboxCut = start.InboxCut
+		if start.Phase == phase {
+			startPages = start.Pages
+		}
+	}
 	var refs []ref
-	cut := false
 	if phase == "inbox" {
-		var inboxCut bool
 		var stopped *gmailScan
 		var err error
-		refs, inboxCut, stopped, err = g.scanInbox(ctx, threads, cutoff, cutoffStr, page, skip, historyID)
+		refs, inboxCut, stopped, err = g.scanInbox(ctx, threads, cutoff, cutoffStr, page, skip, historyID, startPages)
 		if err != nil || stopped != nil {
 			return refs, false, stopped, err
 		}
-		cut = inboxCut
 		page = ""
 		skip = map[string]bool{}
+		startPages = 0
 	}
-	starRefs, starCut, stopped, err := g.scanStarred(ctx, threads, cutoff, cutoffStr, page, skip, historyID)
+	starRefs, starCut, stopped, err := g.scanStarred(ctx, threads, cutoff, cutoffStr, page, skip, historyID, startPages, inboxCut)
 	if err != nil || stopped != nil {
 		return append(refs, starRefs...), false, stopped, err
 	}
-	return append(refs, starRefs...), cut || starCut, nil, nil
+	return append(refs, starRefs...), inboxCut || starCut, nil, nil
 }
 
 // stopScan turns a rate limit into a resume point when the scan has read something. With no progress it is the
-// error, so the next pass starts the scan again.
-func stopScan(phase, page, cutoff, hist string, skip []string, refs []ref, err error) ([]ref, bool, *gmailScan, error) {
+// error, so the next pass starts the scan again. pages is how many list pages of this phase were already finished.
+func stopScan(phase, page, cutoff, hist string, pages int, inboxCut bool, skip []string, refs []ref, err error) ([]ref, bool, *gmailScan, error) {
 	if !errors.Is(err, source.ErrRateLimited) {
 		return nil, false, nil, err
 	}
-	if phase == "inbox" && page == "" && len(skip) == 0 && len(refs) == 0 {
+	if phase == "inbox" && page == "" && pages == 0 && len(skip) == 0 && len(refs) == 0 && !inboxCut {
 		return nil, false, nil, err
 	}
-	return refs, false, &gmailScan{HistoryID: hist, Cutoff: cutoff, Phase: phase, Page: page, Skip: skip}, nil
+	return refs, false, &gmailScan{
+		HistoryID: hist, Cutoff: cutoff, Phase: phase, Page: page, Skip: skip, Pages: pages, InboxCut: inboxCut,
+	}, nil
 }
 
-func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string) ([]ref, bool, *gmailScan, error) {
+func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string, startPages int) ([]ref, bool, *gmailScan, error) {
 	var refs []ref
 	cut := true
-	for pages := 0; pages < gapPages; pages++ {
+	pages := startPages
+	if pages < 0 {
+		pages = 0
+	}
+	for ; pages < gapPages; pages++ {
 		q := url.Values{"labelIds": {"INBOX"}, "maxResults": {"100"}}
 		if token != "" {
 			q.Set("pageToken", token)
@@ -573,7 +600,7 @@ func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, 
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := g.getJSON(ctx, "threads", q, &page); err != nil {
-			return stopScan("inbox", token, cutoffStr, hist, skipIDs(skip), refs, err)
+			return stopScan("inbox", token, cutoffStr, hist, pages, false, skipIDs(skip), refs, err)
 		}
 		fetched := skipIDs(skip)
 		for _, th := range page.Threads {
@@ -582,7 +609,7 @@ func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, 
 			}
 			t, err := g.thread(ctx, threads, th.ID)
 			if errors.Is(err, source.ErrRateLimited) {
-				return stopScan("inbox", token, cutoffStr, hist, fetched, refs, err)
+				return stopScan("inbox", token, cutoffStr, hist, pages, false, fetched, refs, err)
 			}
 			if gone(err) {
 				fetched = append(fetched, th.ID)
@@ -616,10 +643,14 @@ func (g *Gmail) scanInbox(ctx context.Context, threads map[string]*gmailThread, 
 	return refs, cut, nil, nil
 }
 
-func (g *Gmail) scanStarred(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string) ([]ref, bool, *gmailScan, error) {
+func (g *Gmail) scanStarred(ctx context.Context, threads map[string]*gmailThread, cutoff time.Time, cutoffStr, token string, skip map[string]bool, hist string, startPages int, inboxCut bool) ([]ref, bool, *gmailScan, error) {
 	var refs []ref
 	cut := true
-	for pages := 0; pages < gapPages; pages++ {
+	pages := startPages
+	if pages < 0 {
+		pages = 0
+	}
+	for ; pages < gapPages; pages++ {
 		q := url.Values{"labelIds": {"STARRED"}, "maxResults": {"100"}}
 		if token != "" {
 			q.Set("pageToken", token)
@@ -632,7 +663,7 @@ func (g *Gmail) scanStarred(ctx context.Context, threads map[string]*gmailThread
 			NextPageToken string `json:"nextPageToken"`
 		}
 		if err := g.getJSON(ctx, "messages", q, &page); err != nil {
-			return stopScan("starred", token, cutoffStr, hist, skipIDs(skip), refs, err)
+			return stopScan("starred", token, cutoffStr, hist, pages, inboxCut, skipIDs(skip), refs, err)
 		}
 		fetched := skipIDs(skip)
 		for _, m := range page.Messages {
@@ -641,7 +672,7 @@ func (g *Gmail) scanStarred(ctx context.Context, threads map[string]*gmailThread
 			}
 			t, err := g.thread(ctx, threads, m.ThreadID)
 			if errors.Is(err, source.ErrRateLimited) {
-				return stopScan("starred", token, cutoffStr, hist, fetched, refs, err)
+				return stopScan("starred", token, cutoffStr, hist, pages, inboxCut, fetched, refs, err)
 			}
 			if gone(err) {
 				fetched = append(fetched, m.ID)

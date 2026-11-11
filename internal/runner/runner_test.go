@@ -356,11 +356,15 @@ func TestResumeCursorOnDryRun(t *testing.T) {
 	f.src.partial = false
 	f.src.clear = true
 	f.src.next = []byte("done")
-	if _, err := r.Run(context.Background()); err != nil {
+	rep, err = r.Run(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := cur.m["fx"]; ok {
 		t.Fatal("a finished dry run left the resume cursor")
+	}
+	if len(rep.Continued) != 1 || rep.Continued[0] != "fx" {
+		t.Fatalf("a finished resume was not reported: %v", rep.Continued)
 	}
 }
 

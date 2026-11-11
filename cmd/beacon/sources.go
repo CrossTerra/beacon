@@ -696,12 +696,13 @@ func (a *app) recordFirst(e *env, rep *runner.Report) error {
 		failed[f.Name] = true
 	}
 	partial := map[string]bool{}
-	for _, n := range rep.Partial {
+	for _, n := range append(rep.Partial, rep.Continued...) {
 		partial[n] = true
 	}
 	var names []string
 	for _, s := range e.sources {
-		// A read that stopped at a rate limit is not a completed summary.
+		// A read that stopped at a rate limit, or that only finished a scan an earlier pass started, is not a
+		// completed summary: the items are not the whole window.
 		if live(s) && !failed[s.Name()] && !partial[s.Name()] {
 			names = append(names, s.Name())
 		}

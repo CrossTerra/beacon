@@ -2,6 +2,7 @@ package google
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -308,6 +309,63 @@ func TestGmailFirstRunResumesAfterRateLimit(t *testing.T) {
 				t.Fatalf("did not continue: %v", keys(got2))
 			}
 		})
+	}
+}
+
+func TestGmailPartialDoesNotFetchBodies(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Scope = ScopeGmailReadonly
+	srv.Routes["/gmail/v1/users/me/threads/t2"] = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	srv.Routes["/gmail/v1/users/me/messages/m5"] = func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("fetched a body before returning the resume cursor")
+	}
+	g, err := NewGmail(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.SetBodies(true)
+	got, err := g.Collect(context.Background(), nil)
+	if err != nil || !got.Partial {
+		t.Fatalf("err %v partial %v", err, got.Partial)
+	}
+}
+
+func TestGmailResumeKeepsThePageCap(t *testing.T) {
+	srv := googletest.New(t)
+	pages := 0
+	srv.Routes["/gmail/v1/users/me/threads"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("labelIds") != "INBOX" {
+			io.WriteString(w, `{"threads":[]}`)
+			return
+		}
+		pages++
+		io.WriteString(w, `{"threads":[{"id":"t2"}],"nextPageToken":"more"}`)
+	}
+	g, err := NewGmail(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One page already counted. This pass may list one more, then the cap (gapPages) is reached only if Pages
+	// is just under it. Start at the last slot so a resume cannot list another gapPages.
+	start, err := json.Marshal(gmailCursor{
+		HistoryID: "300",
+		Scan:      &gmailScan{HistoryID: "300", Cutoff: "2026-10-25T12:00:00Z", Phase: "inbox", Page: "p", Pages: gapPages - 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.Collect(context.Background(), start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages != 1 {
+		t.Fatalf("listed %d inbox pages; a resume must not restart the cap", pages)
+	}
+	if !got.Cut || got.Partial {
+		t.Fatalf("cut %v partial %v", got.Cut, got.Partial)
 	}
 }
 

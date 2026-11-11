@@ -73,6 +73,7 @@ type Runner struct {
 	deferred     map[string]bool
 	gaps         []Gap
 	partial      []string
+	continued    []string
 }
 
 // Gap is a source that could not read its whole window: its change history expired (Expired), or a read stopped at
@@ -169,6 +170,9 @@ type Report struct {
 	// Partial are sources whose read stopped at a rate limit. The next pass continues; they are not failed, and
 	// not a completed first run.
 	Partial []string
+	// Continued are sources that finished a scan an earlier pass had stopped. The items are only the remainder,
+	// so this is not a completed first-run summary.
+	Continued []string
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -212,6 +216,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 	var failed []SourceFailure
 	r.gaps = nil
 	r.partial = nil
+	r.continued = nil
 	for _, s := range r.Sources {
 		var cursor []byte
 		if r.Cursors != nil {
@@ -226,6 +231,9 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		if resume {
 			r.Log.Log(logs.ReadPaused, logs.Source(s.Name()), logs.Why(logs.ReasonRateLimit))
 			r.partial = append(r.partial, s.Name())
+		}
+		if clear {
+			r.continued = append(r.continued, s.Name())
 		}
 		if err != nil {
 			reason := Classify(err)
@@ -369,7 +377,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
 
 	items, passes, failed := r.collect(ctx)
-	rep.Failed, rep.Gaps, rep.Partial = failed, r.gaps, r.partial
+	rep.Failed, rep.Gaps, rep.Partial, rep.Continued = failed, r.gaps, r.partial, r.continued
 	if err := r.readRestrictions(ctx, r.Send); err != nil {
 		return rep, err
 	}

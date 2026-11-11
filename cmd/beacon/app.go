@@ -637,6 +637,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 	for _, name := range rep.Partial {
 		fmt.Fprintf(w, "source %s: the read stopped at a rate limit; the next pass continues from where it stopped.\n", name)
 	}
+	for _, name := range rep.Continued {
+		fmt.Fprintf(w, "source %s: this pass finished a scan that stopped earlier, so it lists only the remainder and is not a completed first run. Run again; the next pass reads the window from the start.\n", name)
+	}
 	for _, g := range rep.Gaps {
 		if g.Expired {
 			fmt.Fprintf(w, "source %s: its change history expired before this pass. Beacon re-read inbox and sent mail since the last pass and starred mail from the last 14 days; a change in the gap to other mail (archived, deleted, or starred long ago) is not recovered.\n", g.Source)
