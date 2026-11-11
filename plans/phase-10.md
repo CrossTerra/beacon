@@ -34,15 +34,15 @@ Proposed as DEC-30 to DEC-41, recorded in the [`README.md`](README.md#decisions)
 | DEC-30 | A rule may seal. `seal: owner` or `seal: owner+agents` on a `send` or `hold` rule (never on `never`) seals every field the rule lists, except those named in `plain`, a subset of `fields` that may never hold `body` or `actor`. The envelope is fixed in code (DEC-31), not by the rule. A rule without `seal` works as today, subject to DEC-32. |
 | DEC-31 | The envelope is fixed. A sealed event carries in plaintext only: the subject, the type, the event key, the event title (the change description from the source's fixed vocabulary, which already never holds content), `by` on the person's own acts, `to`, `priority`, `due_at`, `closes`, `outcome`, `occurred_at`, the `sealed` header, `metadata.fields` with the `plain` fields, `metadata.native` with an opaque id only, and boolean state fields (`unread`, `starred`). Everything else a rule lists goes in the ciphertext: `body`, `actor` (who wrote to the person, Signal DEC-253), `references`, every other field, every other state field. The thread title is a plain field or nothing. |
 | DEC-32 | Personal bodies leave only sealed. A rule that lists `body` and can match an item under a personal stem (`gmail:`, `calendar:`, `drive:`, `slack:dm:`) needs `seal`: `beacon rules check` reports it as an error, and at run time such an item is held with the reason `body_needs_seal` rather than sent plain. Public Slack channel bodies (`channel_type: channel`) may stay plain. |
-| DEC-33 | Sealing can be raised on the machine, never lowered. `seal.owner` in the config lists words, senders (addresses and domains) and labels. After a rule decides `send` or `hold`, an item whose subject, title, body, sender, recipients or labels (and, for notes and transcripts, its meeting's title, organiser and attendees) match any of them is sealed at `owner`, from plaintext or from `owner+agents`. It cannot unseal, lower a level, or turn `never` into anything. Signal seals only a person's own subjects (Signal DEC-250), so a matching item on a shared subject (a public Slack channel) cannot be sealed: it is held locally instead, with the reason `sensitive_shared`, and the person decides. Raising is counted in the log, never explained there (AGENTS.md: no rule matches on content). |
-| DEC-34 | A subject never goes down. Beacon keeps, per subject, the highest level it has sent there, and seals every later item on that subject at least at that level, so a reply in a Remotely thread from a colleague is still `owner`. Kept in the state directory beside the cursors (a level per subject hash, no content). |
+| DEC-33 | Sealing can be raised on the machine, never lowered. `seal.owner` in the config lists words, senders (addresses and domains) and labels. After a rule decides `send` or `hold`, an item is sealed at `owner` when any of them matches its text or its people, field by field per source: Gmail's `subject`, `body`, `labels`, and the addresses of `thread_participants` (every From, To and Cc in the thread, DEC-41); Calendar's `summary`, `body`, `organizer` and `attendee_addresses`; Drive's `title` and `body`, and for notes and transcripts their meeting's title, organiser and attendees; Slack's `body` and the text of the thread's root message, which Beacon reads with the thread anyway. A field the rule does not send is still matched, on the machine, from plaintext or from `owner+agents`. It cannot unseal, lower a level, or turn `never` into anything. Signal seals only a person's own subjects (Signal DEC-250), so a matching item on a shared subject (a public Slack channel) cannot be sealed: it is held locally instead, with the reason `sensitive_shared`, and the person decides. Raising is counted in the log, never explained there (AGENTS.md: no rule matches on content). |
+| DEC-34 | A subject never goes down. Beacon keeps, per subject, the highest level it has sent there, and seals every later item on that subject at least at that level, so a reply in a Remotely thread from a colleague is still `owner`. Kept in the state directory beside the cursors (a level per subject hash, no content). The floor covers what Beacon has sent; what it never saw is covered by the raise matching the whole thread, not the one message (DEC-33), so a first run that reads only a thread's latest message, a colleague's reply, still finds Remotely among the thread's participants. |
 | DEC-35 | Notes and transcripts take their meeting's level. A `notes_created` or `transcript_created` item is raised to `owner` when its meeting matches `seal.owner` (DEC-33), and to the level of the meeting's calendar item when the rules seal that item higher. |
-| DEC-36 | Recipients come from Signal and are verified on the machine. Beacon reads the person's keys with `GET /api/seal/keys`, checks every signature against the identity key it pinned (trust on first use; `beacon keys show` prints the fingerprint the website shows), drops agent keys Signal says have lapsed, and wraps for the current person key and, at `owner+agents`, each current agent key. A changed identity key, a bad signature, an unreadable key list, or no current person key holds the source's sealed items (as Signal's restrictions do today, property 9): never plaintext, never fewer recipients than the level needs. |
+| DEC-36 | Recipients come from Signal and are verified on the machine. Beacon reads the person's keys with `GET /api/seal/keys`, checks every signature against the identity key it pinned (trust on first use; `beacon keys show` prints the fingerprint the website shows), drops agent keys Signal says have lapsed, and wraps for the current person key and, at `owner+agents`, each current agent key. A failure is not a decision, as when Signal's restrictions cannot be read (property 9): the source's sealed items are not recorded and its cursor stays, so a later pass decides them again, and nothing waits in the hold queue for a review that only Phase 5 could give. Two kinds are told apart in the log and in `beacon run`: keys that cannot be read (Signal unreachable, `401`, `5xx`; `withheld` with `seal_keys_unknown`), which pass on their own, and keys Signal returned that cannot be used (a changed identity key, a bad signature, no current person key; `withheld` with `seal_keys_unusable`), for which `beacon run` and `beacon service status` name the command to run (`beacon keys trust`, `beacon keys init`). Never plaintext, never fewer recipients than the level needs. |
 | DEC-37 | The cryptography is the standard library. Go 1.26 (from 1.24) for `crypto/hpke`; `crypto/aes` and `crypto/cipher` for AES-256-GCM, `crypto/ecdh` for X25519, `crypto/ed25519`, `crypto/sha256`, `crypto/rand`. No new module. The construction is Signal DEC-254's, and the test vectors are shared with Signal's `examples/sealed/`. |
-| DEC-38 | Beacon is the person's device for keys. The identity key, every generation of the person key, and nothing of any agent's, are generic passwords in the login keychain under the service `beacon`, accounts `seal:<handle>:identity` and `seal:<handle>:person:<kid>`, readable only by Beacon's signed binary and on this device only (not synced). Only the keychain package reads them. Beacon never decrypts an item in a pass; it holds the private keys to sign key events, to enrol agents, to recover, to rotate and to open an item on request (`beacon keys open`). |
+| DEC-38 | Beacon is the person's device for keys. The identity key, every generation of the person key, and nothing of any agent's, are generic passwords in the login keychain under the service `beacon`, accounts `seal:<handle>:identity` and `seal:<handle>:person:<kid>`, readable only by Beacon's signed binary and on this device only (not synced). Only the keychain package reads them. Beacon never decrypts an item in a pass; it holds the private keys to sign key events, to enrol agents, to recover, to rotate and to open an item on request (`beacon keys open`). Signal takes an identity key and re-wraps only from the person's own key (Signal DEC-256, DEC-259); for those two acts Beacon reads a short-lived key of the person's from standard input, uses it for that command, and never stores or logs it. |
 | DEC-39 | Encrypt once; the outbox keeps the sealed bytes. The request body appended and synced to the outbox (DEC-8) is the sealed one, so a retry resends the same ciphertext Signal compares by key. The stored decision keeps listed fields locally as today, so `beacon outbox retry --rejected` re-seals from it with a new content key. |
 | DEC-40 | Sealed rules may `send`; plaintext personal content stays `hold`. A `send` rule with plain fields from a personal source is a warning in `beacon rules check` ("plaintext personal content: start as hold") until its output has been checked. |
-| DEC-41 | Fields the worked example needs. Gmail: `cc`, `participants` (from, to and cc, for matching), and `bulk` (`true` with `List-Unsubscribe`, `List-Id`, `Precedence: bulk`, `list` or `junk`, or a Gmail category label other than Personal), all from headers `gmail.metadata` already reads. Drive: `transcript_created` for a meeting's Google Meet transcript document, found as notes are, and `meeting_organizer` and `meeting_attendees` on notes and transcripts. Fields may be used in `match` without being listed in `fields`, as today. |
+| DEC-41 | Fields the worked example needs. Gmail: `cc`, `participants` (from, to and cc of the message), `thread_participants` (every from, to and cc in the thread, from the thread metadata Beacon already reads for `subject` and the thread state), and `bulk` (`true` with `List-Unsubscribe`, `List-Id`, `Precedence: bulk`, `list` or `junk`, or a Gmail category label other than Personal), all from headers `gmail.metadata` already reads. Drive: `transcript_created` for a meeting's Google Meet transcript document, found as notes are, and `meeting_organizer` and `meeting_attendees` on notes and transcripts. Calendar: `attendee_addresses`, the listed attendees' addresses (today `attendees` is only a count). Fields may be used in `match` without being listed in `fields`, as today. |
 
 ## Scope
 
@@ -56,7 +56,11 @@ Proposed as DEC-30 to DEC-41, recorded in the [`README.md`](README.md#decisions)
 - `internal/signal`: `GET /api/seal/keys`, `GET`/`PUT /api/seal/secrets`, `POST /api/events` for `seal.` key events.
 - Commands ([`docs/commands.md`](../docs/commands.md)):
   - `beacon keys init`: generate the identity and person keys, publish them, print the recovery key once (and refuse to
-    print it again), store the recovery blob. Refused when Signal already lists an identity key for the person: then
+    print it again), store the recovery blob. Signal takes an identity key only from the person's own key (Signal
+    DEC-256), which Beacon does not hold, so `init` reads a short-lived key of the person's (from the website's _Keys_
+    page or `signal admin create-key --expires-in 10m`) from standard input with echo off, uses it for the identity
+    event alone, and never stores or logs it; the person key and later events go with Beacon's own key. `--rewrap` in
+    `rotate` reads one the same way, since only the person's own key writes re-wraps. Refused when Signal already lists an identity key for the person: then
     `beacon keys recover`, or `beacon keys trust` for one made in the browser.
   - `beacon keys show`: the person's fingerprint, current and retired person keys, agent keys and whether each is
     current; pinned fingerprints of others.
@@ -77,14 +81,16 @@ Proposed as DEC-30 to DEC-41, recorded in the [`README.md`](README.md#decisions)
 - `internal/project`: the sealed body (DEC-31): the envelope from the item and the rule, the plaintext from the listed
   fields that are not plain, sealed once, before the outbox append.
 - `internal/runner`: the raise (DEC-33, DEC-35), the subject floor (DEC-34), recipients (DEC-36), `body_needs_seal`,
-  and holding on any key failure. Log events: `sealed` and `raised` with counts and levels only, `seal_keys_unread`,
-  `seal_identity_changed`, `withheld` with `seal_keys_unknown`.
+  and the two kinds of key failure, neither recorded, both keeping the cursor (DEC-36). Log events: `sealed` and
+  `raised` with counts and levels only, `seal_keys_unread`, `seal_identity_changed`, `withheld` with
+  `seal_keys_unknown` or `seal_keys_unusable`.
 - `beacon explain` shows the level, which part of the config raised it (locally only), the envelope, and the
   plaintext only with `--bodies`.
 
 ### 10.3 Source fields
 
-- Gmail: `cc`, `participants`, `bulk` (DEC-41).
+- Gmail: `cc`, `participants`, `thread_participants`, `bulk` (DEC-41).
+- Calendar: `attendee_addresses` (DEC-41).
 - Drive: `transcript_created`, `meeting_organizer`, `meeting_attendees`. Meet saves a transcript as a Google Doc
   attached to the event; English titles ending in `Transcript`, the same 32 KiB text export as notes, read only when a
   rule lists `body`.
@@ -124,7 +130,7 @@ rules:
     match:
       source: gmail
       fields:
-        participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(,.*)?'}
+        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(,.*)?'}
     tier: send
     seal: owner
     fields: [subject, body, actor, from, to]
@@ -240,9 +246,12 @@ What it does with a few items:
 - `internal/project`: golden sealed bodies with a fixed random source; no listed, non-plain field in the plaintext
   part of the bytes, for every subset of fields; the envelope has exactly DEC-31's keys.
 - `internal/runner`: the raise (each kind, never lowering, never reviving `never`), the subject floor across passes and
-  restarts, notes taking their meeting's level, every key failure holding, `body_needs_seal`, and a public-channel
+  restarts, a first run that sees only a colleague's latest reply in a Remotely thread raised by the thread's
+  participants, a calendar event raised by its summary or an attendee's domain, notes taking their meeting's level, keys
+  that cannot be read and keys that cannot be used each leaving the items unrecorded and the cursor in place, then
+  sending on the first pass after `beacon keys trust`, `body_needs_seal`, and a public-channel
   item that matches `seal.owner` held as `sensitive_shared`.
-- `internal/google`: `cc`, `participants`, `bulk` from headers; `transcript_created` and meeting fields against
+- `internal/google`: `cc`, `participants`, `thread_participants`, `bulk` from headers; `attendee_addresses`; `transcript_created` and meeting fields against
   `googletest`.
 - `cmd/beacon`: `beacon keys` commands against a fake Signal and a fake keychain, the recovery key printed once and
   never logged; a retry resends the same sealed bytes; the worked example's rules on fixtures land in the levels of the
