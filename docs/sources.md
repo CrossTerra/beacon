@@ -564,7 +564,7 @@ and the cursor stays.
 - When a rule lists `title`, `channel_name` or `author_name`: `conversations.info` for each conversation an item is
   in (and `conversations.members` for a group direct message), and `users.info` for each name a title or field
   needs, through the name cache. A lookup that fails (a rate limit, an error) stops lookups for the pass; the items
-  it could not name carry no names, and `run` says so (`names_unavailable`, reason `names_failed`). It never fails
+  after it carry no title and no group name (a fallback would open a thread no retitle replaces), and `run` says so (`names_unavailable`, reason `names_failed`). It never fails
   the pass.
 
 A thread or group direct message with a message in the last hour is read every pass; a quieter one every 15 minutes;

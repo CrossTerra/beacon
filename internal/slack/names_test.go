@@ -175,6 +175,44 @@ func TestNameLookupFails(t *testing.T) {
 	if n := len(srv.Queries("/api/users.info")); n != 1 {
 		t.Fatalf("users.info called %d times after it failed", n)
 	}
+	// No fallback title: "#eng thread" for a mention would open the thread with a title no retitle replaces.
+	// A title that needs no name ("#eng thread" for a thread Carol started) is complete and stands.
+	for _, it := range got.Items {
+		title, ok := it.Fields[FieldTitle]
+		switch kind := it.Fields["channel_type"]; {
+		case ok && (kind == kindIM || kind == kindMPIM):
+			t.Errorf("%s: title %q after a failed lookup", it.Key, title)
+		case ok && it.Subject == "slack:C0ENG:1794133800.000400":
+			t.Errorf("%s: fallback title %q for a mention's thread", it.Key, title)
+		case !ok && it.Subject == "slack:C0ENG:1794120000.000500":
+			t.Errorf("%s: a title that needs no name was dropped", it.Key)
+		}
+		if n := it.Fields[FieldChannelName]; it.Fields["channel_type"] == kindMPIM && n != "" {
+			t.Errorf("%s: a partial group name %q", it.Key, n)
+		}
+	}
+	// A lookup that fails part way: titles built before it stand, none after it.
+	srv1 := slacktest.New(t)
+	calls := 0
+	srv1.Routes["/api/users.info"] = func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls > 2 {
+			io.WriteString(w, `{"ok":false,"error":"ratelimited"}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true,"user":{"real_name":"Somebody Known"}}`)
+	}
+	s1, _ := namedSource(t, srv1, nil)
+	got1, err := s1.Collect(context.Background(), nil)
+	if err != nil || got1.Warning != source.WarnNamesFailed {
+		t.Fatalf("%v %q", err, got1.Warning)
+	}
+	for _, it := range got1.Items {
+		title := it.Fields[FieldTitle]
+		if strings.HasSuffix(title, " thread") && it.Type == TypeMentioned {
+			t.Errorf("%s: fallback title %q for a mention", it.Key, title)
+		}
+	}
 	// A missing_scope from a token whose scopes auth.test did not list is the scope warning.
 	srv2 := slacktest.New(t)
 	srv2.Scopes = ""

@@ -435,7 +435,10 @@ func (s *Source) nameItems(ctx context.Context, p *pass, id Identity, items []so
 		if c == nil {
 			continue
 		}
-		if n := r.conversationName(ctx, c); n != "" {
+		// After a failed lookup a name may be missing, and what is built from it would be a fallback ("#eng
+		// thread") or a partial list. A thread opened with that title would never be retitled, so it is left out:
+		// the thread is named by its event, and a later pass can retitle it.
+		if n := r.conversationName(ctx, c); n != "" && r.failed == nil {
 			it.Fields[FieldChannelName] = n
 		}
 		if !it.Own {
@@ -447,6 +450,9 @@ func (s *Source) nameItems(ctx context.Context, p *pass, id Identity, items []so
 		if !ok {
 			root := p.msgs[channel+"/"+rootOf(it)]
 			t = s.titleFor(ctx, r, c, root)
+			if r.failed != nil {
+				t = ""
+			}
 			titles[it.Subject] = t
 		}
 		if t != "" {
