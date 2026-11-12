@@ -55,6 +55,11 @@ renamed threads Beacon opened earlier, it prints how many. When Gmail's change h
 scan stops at a rate limit, `run` says the next pass continues from where it stopped. Only a send pass stores that
 place. A dry run does not, so the next send reads the window again. See [`sources.md`](sources.md#google).
 
+A sealed item is printed with `sealed at owner` or `sealed at owner+agents`, and `(raised; beacon explain shows why)`
+when something raised it; never what. An item held for sealing says so: `body_needs_seal` (its rule would send a
+personal body plain) or `sensitive_shared` (it would be sealed on a shared subject, which Signal cannot seal). A rules
+error, a DEC-32 personal body without `seal` included, stops `run`.
+
 It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
 the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,
 or the config, rules or a source cannot be loaded. The message names the
@@ -78,9 +83,13 @@ send starts after it. SIGINT still cancels the in-flight request. `beacon run` r
 ## `beacon explain KEY`
 
 Shows, for one item key: its source, subject and type; the rule that matched and its line, or the default; the
-tier; the classifier's answer (`not configured` until Phase 6); whether it is held; and the body. For a key in the
-outbox the body is the exact stored bytes, with the state and Signal's event id or refusal. Otherwise it is the body
-the item would be sent as now.
+tier; for a send or hold item its level (`plain`, `owner+agents` or `owner`), the rule's own level, and what raised it
+(the `seal.owner` word, sender or label and where it matched, its meeting's level, or the subject's floor) and whether
+it is held as `body_needs_seal` or `sensitive_shared`; the classifier's answer (`not configured` until Phase 6);
+whether it is held; and the body. For a key in the outbox the body is the exact stored bytes, with the state and
+Signal's event id or refusal. Otherwise it is the body the item would be sent as now. A sealed body is shown with each
+sealed part replaced by its size unless `--bodies` is given. What raised an item is read on this machine and shown
+only here: `run` prints "raised" and the log a count.
 
 ## `beacon outbox`
 
@@ -133,7 +142,9 @@ refuses every other host.
 
 ## `beacon rules check`
 
-Validates the rules file and reports rules that can never match. See [`rules.md`](rules.md#beacon-rules-check).
+Validates the rules file and reports rules that can never match, personal bodies without `seal` (DEC-32), seals no
+personal subject can take, and, as warnings, plaintext personal content in `send` rules (DEC-36). See
+[`rules.md`](rules.md#beacon-rules-check).
 
 ## `beacon source add`
 
@@ -288,6 +299,9 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
 | `names_unavailable` | A source collected without display names: `names_scope` (the token lacks the scopes) or `names_failed` (a lookup failed this pass). Its items are complete; they carry no names or titles. The source and the reason. |
 | `retitled` | A send pass checked threads Beacon opened for a new title. Counts only: checked, titled, left. |
+| `sealed` | Items a pass decided to seal, by level: `owner` and `owner_agents` counts. |
+| `raised` | Items the local check, a meeting's level or the subject floor raised: a count. Never why. |
+| `seal_held` | Items held instead of sent, with the reason `body_needs_seal` or `sensitive_shared`, and a count. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
 | `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search); older items in its window were not read. The source only. |
 | `read_paused` | A Gmail open-state scan stopped at a rate limit and will continue next pass. Not a failure. The source, and `reason` `rate_limited`. |
@@ -298,5 +312,6 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
 `egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,
 `source_unauthorized`, `scope_denied`, `identity_mismatch`, `signing_mismatch`, `item_invalid`, `project_failed`,
-`prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`, `names_scope`, `names_failed`. A source that was not collected is also printed by
+`prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`, `names_scope`, `names_failed`, `body_needs_seal`,
+`sensitive_shared`. A source that was not collected is also printed by
 `run`, with the reason and not the error text.

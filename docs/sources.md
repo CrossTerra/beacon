@@ -281,9 +281,15 @@ A dry run does not contact Signal and does not check.
 address. Gmail checks them against the profile, Drive against `about`, Calendar against the attendee, organizer or
 creator marked `self`. A mismatch is `identity_mismatch`, so a grant for another account reads nothing.
 
-**Bodies.** A Google source reads a body only when a `send` or `hold` rule that can match it lists `body`. Without
-one, Gmail does not fetch a message, Calendar does not ask for descriptions, and Drive asks for neither comment text
-nor notes text.
+**Bodies.** A Google source reads a body only when a sealed `send` or `hold` rule that can match it lists `body`: a
+personal body leaves only sealed (DEC-32). Without one, Gmail does not fetch a message, Calendar does not ask for
+descriptions, and Drive asks for neither comment text nor notes or transcript text.
+
+**Sealing.** Each Google item carries its opaque `native` id (a Gmail message id, a calendar event id, a Drive file id)
+and, on the machine only, what the raise to `owner` reads (DEC-33, [`rules.md`](rules.md#sealed-rules)): Gmail's
+subject, body (when read), every label on the thread and every from, to and cc in the thread; Calendar's summary,
+description (when read), organiser and attendees; Drive's title and body, and for notes and transcripts their
+meeting's title, organiser, attendees and calendar event, whose level they take (DEC-35).
 
 ### Gmail
 
@@ -374,8 +380,14 @@ own: starring is a note to oneself, not an answer, and must not close an ask.
 **Fields.** `from` (the address), `to` (addresses, comma-separated), `subject` (the thread's subject, its first
 message's), `date` (RFC 3339, UTC), `labels` (label names, sorted, comma-separated; system labels by id, such as
 `INBOX` and `CATEGORY_PROMOTIONS`), `link` (`https://mail.google.com/mail/u/0/#all/<thread id>`), `body`
-(the `text/plain` part, only with `gmail.readonly` and a rule that lists `body`). `subject` is the thread title when
-a rule lists it and lists neither `title` nor `summary`.
+(the `text/plain` part, only with `gmail.readonly` and a sealed rule that lists `body`). `subject` is the thread title when
+a rule lists it and lists neither `title` nor `summary`. DEC-37 adds `cc` (addresses), `participants` (the message's
+from, to and cc) and `thread_participants` (every from, to and cc in the thread, from the thread's headers already
+read), each lowercased, once, sorted and joined with `, ` (so a rule's regex is `(.*, )?name(, .*)?`); `cc`,
+`participants` and `thread_participants` are absent when empty. `bulk` is `true` for a message with a
+`List-Unsubscribe` or `List-Id` header, `Precedence: bulk`, `list` or `junk`, or a category label other than
+`CATEGORY_PERSONAL`, else `false`. The thread read asks only for the `From`, `To`, `Cc`, `Subject`,
+`List-Unsubscribe`, `List-Id` and `Precedence` headers.
 
 **State.** Over the whole thread: `unread` and `starred` (`true` or `false`), `labels`, `last_from` (the newest
 message's sender).
@@ -428,8 +440,9 @@ includes the summary, a name or the description.
 event's etag.
 
 **Fields.** `summary`, `start` and `end` (RFC 3339 in UTC, or a date for an all-day event), `organizer` (address),
-`attendees` (how many are listed), `response` (the person's: `needsAction`, `accepted`, `declined`, `tentative`;
-`accepted` when they organise it and are not listed), `link`, `body` (the description, only when a rule lists it).
+`attendees` (how many are listed), `attendee_addresses` (their addresses, lowercased, sorted, joined with `, `;
+DEC-37), `response` (the person's: `needsAction`, `accepted`, `declined`, `tentative`; `accepted` when they organise
+it and are not listed), `link`, `body` (the description, only when a sealed rule lists it).
 
 **State.** `status` (`confirmed`, `tentative`, `cancelled`), `start`, `end`, `response`.
 
@@ -458,8 +471,9 @@ A file or comment list that cannot be read (`404`, or a permission `403`) is ski
 **Meeting notes.** Events on the primary calendar that ended since the window began, or ended in the last 7 days
 and were updated since the window began, that the person organised or accepted, with a Google Doc attachment whose title contains
 `Notes by Gemini` (English titles only). One `notes_created` item per notes file, titled Meeting notes created,
-with a link. The file is read with `files.get` for its name, link and creation time. Its text is read
-(`files.export` as plain text, the first 32 KiB) only when a rule lists `body`. "Attended" is "organised or
+with a link. A Google Doc attachment whose title ends in `Transcript` (a Meet transcript, English titles only) is a
+`transcript_created` item, titled Transcript created, read the same way (DEC-37). The file is read with `files.get` for its name, link and creation time. Its text is read
+(`files.export` as plain text, the first 32 KiB) only when a sealed rule lists `body`. "Attended" is "organised or
 accepted": Google does not say who joined. Notes are usually attached while the meeting runs, which is the event's
 last update, so a pass reads the meetings that ended since the last one without an `updatedMin`, and a meeting with
 notes is found the pass after it ends.
@@ -468,12 +482,14 @@ notes is found the pass after it ends.
 meeting notes. No own acts.
 
 **Subject.** `drive:<person>:<file id>`, for comments and for notes. **Key.**
-`drive:<file id>:comment:<comment id>`, `drive:<file id>:reply:<comment id>:<reply id>`, `drive:notes:<file id>`.
+`drive:<file id>:comment:<comment id>`, `drive:<file id>:reply:<comment id>:<reply id>`, `drive:notes:<file id>`,
+`drive:transcript:<file id>`.
 The version is the comment, reply or file id.
 
 **Fields.** `title` (file name), `link` (a comment's links to the comment), `file_type` (`document`,
-`spreadsheet`, `presentation`), `author`, `meeting` and `meeting_start` (notes), `body` (comment or reply text, or
-notes text; only when a rule lists it). **State.** For comments: `resolved` (`true` or `false`), `assignee` (address).
+`spreadsheet`, `presentation`), `author`, `meeting`, `meeting_start`, `meeting_organizer` and `meeting_attendees`
+(notes and transcripts; the addresses lowercased, sorted, joined with `, `; DEC-37), `body` (comment or reply text,
+or notes or transcript text; only when a sealed rule lists it). **State.** For comments: `resolved` (`true` or `false`), `assignee` (address).
 
 DEC-29 (one authoritative event per act) needs Signal phase 12 and is not built. Beacon records every change it is
 sent.
@@ -660,7 +676,10 @@ the message is a reply), `author` (user or bot id), `permalink` (Slack's, or bui
 Beacon reads.
 
 **Text is read on the machine.** Slack returns a message's text with the message, whatever the scope. Beacon reads it
-to find mentions, review wording and links, and it leaves only as `body`, when a rule lists it.
+to find mentions, review wording and links, and to match `seal.owner` words, with the thread root's text when the pass
+read it (DEC-33); it leaves only as `body`, when a rule lists it. A body from a direct message, group direct message
+or private channel leaves only sealed (DEC-32); a public channel's may leave plain, and an item there that matches
+`seal.owner` is held as `sensitive_shared`. Each item's `native` id is `<channel>:<ts>`.
 
 **References (DEC-17).** A GitHub pull request link becomes `github:pr:<owner>/<repo>#<n>`, and a Jira link
 `https://<site>.atlassian.net/browse/KEY-1` becomes `jira:KEY-1`. They come from the text, and leave only when a rule

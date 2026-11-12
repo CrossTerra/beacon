@@ -23,6 +23,11 @@ mode: dry-run                        # dry-run or send
 lease:
   period: 5m                         # optional; at least 1m
 poll_interval: 1m                    # optional; at most half the lease period
+seal:                                # optional: raise items to owner on this machine (DEC-33)
+  owner:
+    words: [salary, offer, "background check", {exact: PIP}]
+    senders: [rippling.com, counsel@law.example]
+    labels: [Confidential]
 sources:
   - kind: fixture
     path: fixture.json
@@ -39,7 +44,22 @@ sources:
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25). Default `5m`. |
 | `poll_interval` | How often `beacon run` makes a pass. Default `1m`. The launchd agent runs this loop. |
+| `seal.owner` | Words, senders and labels that seal an item at `owner`. See [Seal](#seal). |
 | `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`, `slack`. See [Sources](#sources). |
+
+## Seal
+
+`seal.owner` raises an item to `owner` on the machine, after a rule decided `send` or `hold` (DEC-33,
+[`rules.md`](rules.md#sealed-rules)). It never lowers a level, unseals, adds a field, or sends an item a rule dropped.
+
+| Key | Matches |
+| --- | --- |
+| `words` | Whole words or phrases, case-insensitive (`salary` matches "Salary review", not "salaryman"; words in a phrase may be separated by any whitespace). `{exact: PIP}` is case-sensitive. Matched against mail subjects and bodies, calendar summaries and descriptions, Drive titles, bodies and meeting titles, and Slack text and thread roots. A body is matched only when the source read it (Google reads bodies only for a sealed rule that lists `body`). |
+| `senders` | A lowercase address (`counsel@law.example`) or domain (`rippling.com`, which also covers `eu.rippling.com`). Matched against every from, to and cc in a Gmail thread, a calendar event's organiser and attendees, and a note's or transcript's meeting organiser and attendees. |
+| `labels` | Gmail label names, compared without case, against every label on the thread. |
+
+A blank word or label, or a sender that is not a lowercase address or domain, is an error. The lists never leave the
+machine and are never logged; `beacon explain` shows which one raised an item.
 
 ## The Signal key
 
