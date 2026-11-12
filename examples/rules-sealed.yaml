@@ -25,7 +25,7 @@ rules:
     match:
       source: gmail
       fields:
-        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
+        thread_participants: {regex: '.*@([a-z0-9-]+\.)*(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
     tier: send
     seal: owner
     fields: [subject, body, actor, from, to]

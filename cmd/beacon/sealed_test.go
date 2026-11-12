@@ -89,9 +89,9 @@ func TestWorkedExampleLevels(t *testing.T) {
 			Actor: "email:" + fields["from"], Native: "m" + string(rune('a'+n)), Fields: fields, Local: local}
 	}
 	gmail := []sealedFixture{
-		mail(0, "stub", map[string]string{"from": "payroll@rippling.com", "bulk": "true", "labels": "CATEGORY_UPDATES, INBOX"}, nil),
+		mail(0, "stub", map[string]string{"from": "payroll@eu.rippling.com", "bulk": "true", "labels": "CATEGORY_UPDATES, INBOX"}, nil),
 		// A colleague's reply in that thread: the Rippling address is not first in the thread's list.
-		mail(1, "stub", map[string]string{"from": "lee@crossterra.co", "thread_participants": "lee@crossterra.co, payroll@rippling.com, winton@crossterra.co"}, nil),
+		mail(1, "stub", map[string]string{"from": "lee@crossterra.co", "thread_participants": "lee@crossterra.co, payroll@eu.rippling.com, winton@crossterra.co"}, nil),
 		mail(2, "deck", map[string]string{"from": "rahul@crossterra.co", "subject": "Board deck"}, nil),
 		mail(3, "offer", map[string]string{"from": "rahul@crossterra.co", "subject": "The offer for Sam"}, nil),
 		// Confidential sorts after a category label, and the list headers would make it bulk.
