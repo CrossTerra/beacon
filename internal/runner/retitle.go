@@ -161,6 +161,11 @@ func (r *Runner) retitleRule(e outbox.Entry) (*rules.Rule, bool) {
 	if !slices.Contains(decided.Rule.Fields, project.FieldTitle) {
 		return nil, false
 	}
+	// A thread title is plain. A sealed decision, or a sealed rule that does not leave title plain, keeps it sealed.
+	if d.Seal != "" || (decided.Rule.Seal != "" && !slices.Contains(decided.Rule.Plain, project.FieldTitle)) ||
+		r.Floor.Get(d.Item.Subject) != "" {
+		return nil, false
+	}
 	return decided.Rule, true
 }
 

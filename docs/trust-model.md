@@ -41,6 +41,8 @@ same pull request.
    lists them. Slack names are read only when a rule lists one of those three fields. A thread Beacon opened before
    its rule listed `title` is renamed (`thread.titled`) only when the current rule for the stored item still sends it
    and lists `title`, Signal shows that Beacon's own event opened that thread, and nobody renamed or merged it since.
+   A thread title is plain, so a stored event that was sealed, a sealed rule that does not leave `title` plain, or a
+   subject Beacon has sent sealed is never retitled.
    A thread someone else opened or renamed is not touched. A Google source does not even read a mail body, an event
    description, comment text, meeting notes or a transcript unless a sealed rule that can match it lists `body`.
    Slack returns a message's text with the message, so the Slack source reads it on the machine to find mentions,
