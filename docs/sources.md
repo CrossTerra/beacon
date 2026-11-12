@@ -496,15 +496,21 @@ token. The token is stored in the keychain as `slack:<workspace id>:<user id>`, 
 | `channels:history`, `groups:history` | `conversations.replies` and `conversations.history` in public and private channels |
 | `im:history`, `mpim:history` | The same in direct and group direct messages |
 | `channels:read`, `groups:read` | `conversations.info` on a configured channel: is it private |
-| `mpim:read` | `users.conversations`: the group direct messages the person is in |
+| `mpim:read` | `users.conversations`: the group direct messages the person is in; `conversations.info` and `conversations.members` on one, for its members' names |
 | `usergroups:read` | `usergroups.list`: the user groups the person is in, so a group mention is a mention |
+| `users:read` | `users.info`: a person's display name, for titles and `author_name` |
+| `im:read` | `conversations.info` on a direct message: who the other person is, for titles and `channel_name` |
 
-`auth.test` reports the token's scopes. A token missing one is refused by `source add`, and fails a pass with
-`source_unauthorized`. A token that also holds other scopes (say, a write scope from an app the person already had)
+`auth.test` reports the token's scopes. A token missing one is refused by `source add`. A pass fails with
+`source_unauthorized` when the token lacks one of the first nine. Without `users:read` or `im:read` a pass still
+collects and sends: items carry no names and no `title`, so threads are named by their first event as before, and
+`run` says so once a pass (`names_unavailable`, reason `names_scope`). Add the scopes as *User Token Scopes* and
+reinstall the app: with token rotation off (the default) the token stays the same, so the one in the keychain gains
+them and nothing needs storing again. A token that also holds other scopes (say, a write scope from an app the person already had)
 is accepted, and `source add` names them; Beacon never calls a method that uses them. `conversations.unreads` is not
 used: with a user token it is slow and ignores its filters.
 
-**Host and methods.** `slack.com` only, listed by `beacon egress`. Every request is a `GET` to one of seven methods,
+**Host and methods.** `slack.com` only, listed by `beacon egress`. Every request is a `GET` to one of nine methods,
 each with only the query keys Beacon sends:
 
 | Method | Keys | Limited to |
@@ -513,7 +519,9 @@ each with only the query keys Beacon sends:
 | `search.messages` | `query`, `count`, `page`, `sort`, `sort_dir` | the three queries below, naming only the token's user |
 | `conversations.replies` | `channel`, `ts`, `oldest`, `inclusive`, `limit`, `cursor` | |
 | `conversations.history` | `channel`, `oldest`, `latest`, `limit`, `cursor` | configured channels, and group direct messages the person is in |
-| `conversations.info` | `channel` | configured channels |
+| `conversations.info` | `channel` | configured channels, and conversations this pass made an item from (or a thread being retitled) |
+| `conversations.members` | `channel`, `limit` | conversations this pass made an item from (or a thread being retitled) |
+| `users.info` | `user` | a user id (`U…`, `W…`) |
 | `users.conversations` | `types` (`mpim` only), `exclude_archived`, `limit`, `cursor` | |
 | `usergroups.list` | `include_users` | |
 
@@ -521,8 +529,9 @@ Anything else is refused before it is sent (`source_scope`), so a request cannot
 channels, or read the history of a channel the config does not name.
 
 **Rate limits.** Slack limits each method per workspace by tier. Beacon spaces its own calls: `search.messages` and
-`usergroups.list` (Tier 2, 20 a minute) at most one every 3 seconds, the `conversations.*` methods and
-`users.conversations` (Tier 3, 50 a minute for an app built for one workspace) at most one every 1.2 seconds. A `429`
+`usergroups.list` (Tier 2, 20 a minute) at most one every 3 seconds, `conversations.history`, `.replies` and `.info`
+and `users.conversations` (Tier 3, 50 a minute for an app built for one workspace) at most one every 1.2 seconds, and
+`users.info` and `conversations.members` (Tier 4, 100 a minute) at most one every 0.6 seconds. A `429`
 honours `Retry-After` as above; `"error":"ratelimited"` ends the pass. An app distributed to other workspaces outside
 the Slack Marketplace gets one `conversations.*` call a minute; create the app for your own workspace.
 
@@ -552,6 +561,11 @@ and the cursor stays.
   pass that followed it, so a reply is not lost if the thread waits for a later pass.
 - `conversations.replies` with `inclusive` and the message's own `ts`, for messages that addressed the person, to
   notice a deletion: each at most every 15 minutes, at most 20 a pass, for 7 days.
+- When a rule lists `title`, `channel_name` or `author_name`: `conversations.info` for each conversation an item is
+  in (and `conversations.members` for a group direct message), and `users.info` for each name a title or field
+  needs, through the name cache. A lookup that fails (a rate limit, an error) stops lookups for the pass; the items
+  it could not name carry no names, and `run` says so (`names_unavailable`, reason `names_failed`). It never fails
+  the pass.
 
 A thread or group direct message with a message in the last hour is read every pass; a quieter one every 15 minutes;
 the longest unread first. Each keeps its own watermark, so one that waits loses nothing. History is returned newest
@@ -581,8 +595,43 @@ threads they posted or were mentioned in, and the configured channels (DEC-23).
 Joins, edits, other message subtypes and reactions are not events (DEC-18); an edit that adds a mention is found by
 the mention search. A top-level message of the person's in a public channel that is not configured is not an item:
 it answers no ask Beacon recorded. The thread it starts is still followed. An app's message has a `bot_id`: its
-`author` is that id and its actor `slack:bot:<id>`, and it is never own. The title never includes message text or a
-name.
+`author` is that id and its actor `slack:bot:<id>`, and it is never own. The event title never includes message text
+or a name.
+
+**Thread titles.** The `title` field is the conversation's title, from who and where, never what was said. It is the
+same for every item on one subject, and a rule that lists it makes it the thread title (`open.title`); the event
+title stays the short one above.
+
+| Conversation | Thread title |
+| --- | --- |
+| One-to-one direct message | `DM with Dana Scully`; the person's own top-level message there, `You to Dana Scully` |
+| Group direct message | `Group DM: Carol Danvers, Dana Scully` (up to three others, then `+N`); the person's own, `You to Carol Danvers, Dana Scully` |
+| Channel, the thread's root a mention of the person | `#eng: Bob Ross mentioned you` |
+| Configured channel, the root a review request | `#review: Erin Burnett asked for a review` |
+| Channel, the root the person's own | `You in #eng` |
+| Channel, any other thread (a reply in a thread someone else started, an app's root, a root this pass did not read) | `#eng thread` |
+
+A name is the person's full name in Slack, else their display name, else their handle; control and formatting
+characters are dropped and each name is cut at 64 characters. A conversation or person Slack will not describe (an
+app's direct message) gets no title.
+
+**Names.** `channel_name` is the conversation's name as Slack shows it: a channel's name (without `#`), the other
+person in a direct message, the others in a group direct message. `author_name` is the author's name; it is not set
+on the person's own messages or an app's. Names are read only when a rule lists `title`, `channel_name` or
+`author_name`, and kept in `slack-names-<source>.json` in the state directory (`0600`) for a day (an id Slack would
+not describe, an hour). A dry run reads the cache and does not write it.
+
+**Retitling threads Beacon opened.** A thread Beacon opened before its rule listed `title` is named for its first
+event ("Direct message", "Mentioned"). Once a rule lists `title`, each send pass, after its pending bodies, checks up
+to 20 such threads and renames each with Signal's `thread.titled`, only when all of these hold: the subject's first
+sent event is in the outbox with its decided item and opened no thread with a title of its own; the current rules
+still send that item, with a rule that lists `title` (a rule above it the stored item cannot be shown to miss stops
+it, as for a retry); a personal subject's prefix is restricted; Signal says that event opened the thread
+(`open.number`), the thread was not merged since, and its title is still the one Beacon opened it with; and the new
+title differs. The change is appended to the outbox before it is sent, under the key
+`<source>:retitle:<thread number>:<title hash>`. A thread someone else opened, renamed, merged or that Slack can no
+longer describe is recorded in `retitled.json` (subject and a fixed reason, no title) and not read again. Without the
+name scopes, threads wait and nothing is recorded.
 
 **Answered (DEC-19, DEC-20).** An own message in a thread is on the thread's subject, so it closes the open asks
 there. A one-to-one direct message has no thread for its top-level messages: each is its own subject. An own
@@ -606,8 +655,9 @@ channels are held until Signal restricts `slack:dm:*`, exactly as Gmail's are he
 
 **Fields.** `channel` (id), `channel_type` (`im`, `mpim`, `private` or `channel`), `ts`, `thread_ts` (the root, when
 the message is a reply), `author` (user or bot id), `permalink` (Slack's, or built from the workspace address
-`auth.test` reports), `body` (the message text, only when a rule lists `body`). No state fields: Slack has no object
-state Beacon reads.
+`auth.test` reports), `body` (the message text, only when a rule lists `body`), `title`, `channel_name` and
+`author_name` (above). Rules match on the ids; the names are for reading. No state fields: Slack has no object state
+Beacon reads.
 
 **Text is read on the machine.** Slack returns a message's text with the message, whatever the scope. Beacon reads it
 to find mentions, review wording and links, and it leaves only as `body`, when a rule lists it.
@@ -617,4 +667,4 @@ to find mentions, review wording and links, and it leaves only as `body`, when a
 lists `references`; the starter rules list them only for one-to-one direct messages.
 
 **Identity.** `person.identities.<name>` is `slack:user:<user id>`. Own messages carry it as `by`. Others are
-`slack:user:<id>` in `metadata.actor` when a rule lists `actor`. Display names need `users:read` and are not read.
+`slack:user:<id>` in `metadata.actor` when a rule lists `actor`, and their name in `author_name` when a rule lists it.

@@ -1,5 +1,7 @@
 // Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events, reads the
-// restricted subject prefixes with GET /api/restrictions, and checks a key with GET /api/me. It reads no log or thread.
+// restricted subject prefixes with GET /api/restrictions, and checks a key with GET /api/me. To retitle a thread its
+// own event opened, it reads that event (GET /api/events/{id}) and that thread (GET /api/threads/{id}). It reads no
+// log.
 package signal
 
 import (
@@ -11,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -278,6 +281,115 @@ func (c *Client) Me(ctx context.Context) (Me, error) {
 		return Me{}, ErrUnavailable
 	}
 	return Me{ID: parsed.Actor.ID, Type: parsed.Actor.Type, Handle: parsed.Actor.Handle, WorksFor: parsed.Actor.WorksFor, Scopes: parsed.Scopes}, nil
+}
+
+// ErrNotFound is a 404: Signal has no such event or thread, or the key may not see it.
+var ErrNotFound = errors.New("signal: not found (404)")
+
+var idPattern = regexp.MustCompile(`^(evt|thr)_[A-Za-z0-9]{1,64}$`)
+
+// Opened is where one of Beacon's events landed, as Signal recorded it.
+type Opened struct {
+	// ThreadID is the thread the event is in now (thr_…), or "" when it is in none.
+	ThreadID string
+	// Number is the number of the thread this event opened, or 0 when it opened none: it landed in a thread that
+	// already covered its subject, which someone else may have opened.
+	Number int64
+	// Title is the title this event opened that thread with.
+	Title string
+}
+
+// Thread is a thread as Signal reads it now.
+type Thread struct {
+	ID     string
+	Number int64
+	Title  string
+	// MergedInto is the thread this one was merged into, or "".
+	MergedInto string
+}
+
+// EventOpened reads one event, GET /api/events/{id}, for whether it opened a thread. It makes one attempt.
+func (c *Client) EventOpened(ctx context.Context, id string) (Opened, error) {
+	var parsed struct {
+		ThreadID *string `json:"thread_id"`
+		Open     *struct {
+			Number *int64  `json:"number"`
+			Title  *string `json:"title"`
+		} `json:"open"`
+	}
+	if err := c.get(ctx, "/api/events/", id, &parsed); err != nil {
+		return Opened{}, err
+	}
+	var o Opened
+	if parsed.ThreadID != nil {
+		o.ThreadID = *parsed.ThreadID
+	}
+	if parsed.Open != nil && parsed.Open.Number != nil && parsed.Open.Title != nil {
+		o.Number, o.Title = *parsed.Open.Number, *parsed.Open.Title
+	}
+	return o, nil
+}
+
+// Thread reads one thread, GET /api/threads/{id}. It makes one attempt.
+func (c *Client) Thread(ctx context.Context, id string) (Thread, error) {
+	var parsed struct {
+		ID         string  `json:"id"`
+		Number     int64   `json:"number"`
+		Title      string  `json:"title"`
+		MergedInto *string `json:"merged_into"`
+	}
+	if err := c.get(ctx, "/api/threads/", id, &parsed); err != nil {
+		return Thread{}, err
+	}
+	if parsed.ID == "" || parsed.Number <= 0 {
+		return Thread{}, ErrUnavailable
+	}
+	t := Thread{ID: parsed.ID, Number: parsed.Number, Title: parsed.Title}
+	if parsed.MergedInto != nil {
+		t.MergedInto = *parsed.MergedInto
+	}
+	return t, nil
+}
+
+// get reads one record by id. A 401 is ErrUnauthorized, a 404 ErrNotFound, anything else that is not a 200 with JSON
+// ErrUnavailable.
+func (c *Client) get(ctx context.Context, path, id string, dest any) error {
+	if !idPattern.MatchString(id) {
+		return ErrNotFound
+	}
+	u := c.base.JoinPath(path + id)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	c.secret.Authorize(req.Header)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var denied *egress.DeniedError
+		if errors.As(err, &denied) {
+			return err
+		}
+		return ErrUnavailable
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusNotFound:
+		return ErrNotFound
+	default:
+		return ErrUnavailable
+	}
+	if json.Unmarshal(data, dest) != nil {
+		return ErrUnavailable
+	}
+	return nil
 }
 
 // Restrictions returns the restricted subject prefixes (`gmail:*`), from GET /api/restrictions. It makes one attempt:

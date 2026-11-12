@@ -244,13 +244,19 @@ rules:
 
   # --- Slack
 
+  # Slack's title is the conversation's, who and where, never what was said: "DM with Dana Scully",
+  # "Group DM: Carol Danvers, Dana Scully", "#eng: Bob Ross mentioned you", "#eng thread", "You in
+  # #eng", "You to Dana Scully". It names the thread in Signal. It needs the users:read and im:read
+  # scopes; without them the thread is named by its first event ("Direct message", "Mentioned").
+  # channel_name and author_name are the same names as fields of their own.
+
   # Your own messages close your open asks: a reply in the thread, or a top-level message in a
   # one-to-one direct message (it answers the earlier top-level messages there). They leave as a
-  # link only: no text, no channel name.
+  # link and the conversation's title: no text.
   - name: slack-own-messages
     match: {source: slack, own: true}
     tier: send
-    fields: [permalink]
+    fields: [title, permalink]
 
   # Apps and bots (an author id starting with B) are never sent, even in a direct message.
   - name: slack-bots
@@ -277,7 +283,7 @@ rules:
     tier: send
     ask: me
     priority: high
-    fields: [channel, channel_type, permalink, author, actor, references]
+    fields: [title, channel, channel_type, permalink, author, actor, references]
 
   # A message in a group direct message you are in.
   - name: slack-group-messages
@@ -289,7 +295,7 @@ rules:
     tier: send
     ask: me
     priority: medium
-    fields: [channel, channel_type, permalink, author, actor]
+    fields: [title, channel, channel_type, permalink, author, actor]
 
   # A message that mentions you, or a user group you are in, or @here/@channel in a configured
   # channel. No references: links in a channel message are its content.
@@ -298,7 +304,7 @@ rules:
     tier: send
     ask: me
     priority: medium
-    fields: [channel, channel_type, permalink, author, actor]
+    fields: [title, channel, channel_type, permalink, author, actor]
 
   # Replies in threads you posted in or were mentioned in (thread_reply) and review requests in
   # your configured channels (review_request) are not sent. To let someone else's answer close a

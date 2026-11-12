@@ -1,8 +1,10 @@
-// Package slacktest is a fake Slack Web API for tests: auth.test, search.messages, conversations.replies and
-// conversations.history, with recorded answers for one person, U0WINTON in workspace T0ACME, at 2026-11-08T12:00:00Z.
+// Package slacktest is a fake Slack Web API for tests: auth.test, search.messages, conversations.replies,
+// conversations.history, conversations.info, conversations.members and users.info, with recorded answers for one
+// person, U0WINTON in workspace T0ACME, at 2026-11-08T12:00:00Z.
 package slacktest
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +20,9 @@ const (
 	Token     = "xoxp-1111-2222-3333-tokenvalue"
 	Workspace = "T0ACME"
 	User      = "U0WINTON"
-	// AllScopes are the read scopes Beacon needs.
-	AllScopes = "search:read,channels:history,groups:history,im:history,mpim:history,channels:read,groups:read,mpim:read,usergroups:read"
+	// PassScopes are the read scopes a pass needs; AllScopes adds the ones display names need.
+	PassScopes = "search:read,channels:history,groups:history,im:history,mpim:history,channels:read,groups:read,mpim:read,usergroups:read"
+	AllScopes  = PassScopes + ",users:read,im:read"
 	// Review is the configured channel.
 	Review = "C0REVIEW"
 )
@@ -47,7 +50,9 @@ func New(t testing.TB) *Server {
 		"/api/search.messages":       s.search,
 		"/api/conversations.replies": s.replies,
 		"/api/conversations.history": s.history,
-		"/api/conversations.info":    Text(`{"ok":true,"channel":{"id":"C0REVIEW","is_channel":true,"is_private":false}}`),
+		"/api/conversations.info":    s.info,
+		"/api/conversations.members": s.members,
+		"/api/users.info":            s.user,
 		"/api/users.conversations":   Text(`{"ok":true,"channels":[{"id":"G0GROUP","is_mpim":true}],"response_metadata":{"next_cursor":""}}`),
 		"/api/usergroups.list":       Text(UserGroups),
 	}
@@ -128,6 +133,50 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Users are the people users.info describes: the full name a title uses.
+var Users = map[string]string{
+	"U0WINTON": "Winton Welsh", "U0DANA": "Dana Scully", "U0BOB": "Bob Ross", "U0CAROL": "Carol Danvers",
+	"U0HR": "Hana Reyes", "U0ERIN": "Erin Burnett", "U0FRANK": "Frank Ocean",
+}
+
+// Conversations are what conversations.info answers, by id.
+var Conversations = map[string]string{
+	"C0ENG":    `{"id":"C0ENG","name":"eng","is_channel":true,"is_private":false}`,
+	"C0RANDOM": `{"id":"C0RANDOM","name":"random","is_channel":true,"is_private":false}`,
+	"C0REVIEW": `{"id":"C0REVIEW","name":"review","is_channel":true,"is_private":false}`,
+	"C0SECRET": `{"id":"C0SECRET","name":"secret","is_channel":true,"is_private":true}`,
+	"D0DANA":   `{"id":"D0DANA","is_im":true,"user":"U0DANA"}`,
+	"D0BOT":    `{"id":"D0BOT","is_im":true,"user":"USLACKBOT"}`,
+	"G0GROUP":  `{"id":"G0GROUP","name":"mpdm-winton--dana--carol-1","is_mpim":true,"is_private":true}`,
+}
+
+func (s *Server) info(w http.ResponseWriter, r *http.Request) {
+	if c, ok := Conversations[r.URL.Query().Get("channel")]; ok {
+		io.WriteString(w, `{"ok":true,"channel":`+c+`}`)
+		return
+	}
+	io.WriteString(w, `{"ok":false,"error":"channel_not_found"}`)
+}
+
+func (s *Server) members(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("channel") == "G0GROUP" {
+		io.WriteString(w, `{"ok":true,"members":["U0WINTON","U0DANA","U0CAROL"],"response_metadata":{"next_cursor":""}}`)
+		return
+	}
+	io.WriteString(w, `{"ok":false,"error":"channel_not_found"}`)
+}
+
+func (s *Server) user(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("user")
+	name, ok := Users[id]
+	if !ok {
+		io.WriteString(w, `{"ok":false,"error":"user_not_found"}`)
+		return
+	}
+	first, _, _ := strings.Cut(name, " ")
+	io.WriteString(w, `{"ok":true,"user":{"id":"`+id+`","name":"`+strings.ToLower(first)+`","real_name":"`+name+`","profile":{"real_name":"`+name+`","display_name":"`+strings.ToLower(first)+`"}}}`)
+}
+
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Query().Get("channel") {
 	case Review:
@@ -150,6 +199,10 @@ func (s *Server) replies(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, `{"ok":false,"error":"thread_not_found"}`)
 			return
 		}
+		if m, ok := known()[q.Get("channel")+"/"+q.Get("oldest")]; ok {
+			io.WriteString(w, `{"ok":true,"messages":[`+m+`]}`)
+			return
+		}
 		io.WriteString(w, `{"ok":true,"messages":[{"type":"message","user":"U0X","text":"x","ts":"`+q.Get("oldest")+`"}]}`)
 		return
 	}
@@ -165,6 +218,57 @@ func (s *Server) replies(w http.ResponseWriter, r *http.Request) {
 	default:
 		io.WriteString(w, `{"ok":true,"messages":[]}`)
 	}
+}
+
+var (
+	knownOnce sync.Once
+	knownMsgs map[string]string
+)
+
+// known is every fixture message by "<channel>/<ts>", as conversations.replies returns one.
+func known() map[string]string {
+	knownOnce.Do(func() {
+		knownMsgs = map[string]string{}
+		type msg struct {
+			Channel struct {
+				ID string `json:"id"`
+			} `json:"channel"`
+			User     string `json:"user,omitempty"`
+			BotID    string `json:"bot_id,omitempty"`
+			Text     string `json:"text"`
+			TS       string `json:"ts"`
+			ThreadTS string `json:"thread_ts,omitempty"`
+		}
+		add := func(channel string, m msg) {
+			if channel == "" {
+				channel = m.Channel.ID
+			}
+			out, _ := json.Marshal(map[string]string{"type": "message", "user": m.User, "bot_id": m.BotID, "text": m.Text, "ts": m.TS, "thread_ts": m.ThreadTS})
+			knownMsgs[channel+"/"+m.TS] = string(out)
+		}
+		for _, page := range []string{SearchDMPage1, SearchDMPage2, SearchMentions, SearchOwn} {
+			var r struct {
+				Messages struct {
+					Matches []msg `json:"matches"`
+				} `json:"messages"`
+			}
+			_ = json.Unmarshal([]byte(page), &r)
+			for _, m := range r.Messages.Matches {
+				add("", m)
+			}
+		}
+		for channel, list := range map[string]string{"C0ENG": RepliesEng, "C0ENG ": RepliesMention, "G0GROUP": HistoryGroup,
+			"C0RANDOM": RepliesRandom, "C0REVIEW": HistoryReview} {
+			var r struct {
+				Messages []msg `json:"messages"`
+			}
+			_ = json.Unmarshal([]byte(list), &r)
+			for _, m := range r.Messages {
+				add(strings.TrimSpace(channel), m)
+			}
+		}
+	})
+	return knownMsgs
 }
 
 // Messages. 2026-11-08: 1794132000 is 10:00 UTC, 1794139200 is 12:00.

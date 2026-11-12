@@ -65,6 +65,10 @@ type Runner struct {
 	Personal map[string]string
 	// Restrictions reads Signal's restricted prefixes. A send pass with Personal set needs it.
 	Restrictions RestrictionReader
+	// Threads reads back Beacon's events and their threads, and Retitled records the threads left alone. With both,
+	// a send pass renames threads Beacon opened before its source could name them (retitle.go). Nil skips that.
+	Threads  ThreadReader
+	Retitled RetitleRecord
 
 	// restricted is this pass's restricted prefixes; restrictErr is why they could not be read.
 	restricted   []string
@@ -74,6 +78,14 @@ type Runner struct {
 	gaps         []Gap
 	partial      []string
 	continued    []string
+	warnings     []Warning
+}
+
+// Warning is a source that collected without something it would have used: display names (source.WarnNamesScope,
+// source.WarnNamesFailed). Its items are complete and its cursor moves.
+type Warning struct {
+	Source string
+	Code   string
 }
 
 // Gap is a source that could not read its whole window: its change history expired (Expired), or a read stopped at
@@ -173,6 +185,10 @@ type Report struct {
 	// Continued are sources that finished a scan an earlier pass had stopped. The items are only the remainder,
 	// so this is not a completed first-run summary.
 	Continued []string
+	// Warnings are sources that collected without display names, once each.
+	Warnings []Warning
+	// Retitled is how many thread titles this pass wrote.
+	Retitled int
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -217,6 +233,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 	r.gaps = nil
 	r.partial = nil
 	r.continued = nil
+	r.warnings = nil
 	for _, s := range r.Sources {
 		var cursor []byte
 		if r.Cursors != nil {
@@ -244,6 +261,14 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		}
 		if err == nil && got.ClearResume {
 			r.continued = append(r.continued, s.Name())
+		}
+		if err == nil && got.Warning != "" {
+			code := got.Warning
+			if code != source.WarnNamesScope && code != source.WarnNamesFailed {
+				code = source.WarnNamesFailed
+			}
+			r.Log.Log(logs.NamesUnavailable, logs.Source(s.Name()), logs.Why(logs.Reason(code)))
+			r.warnings = append(r.warnings, Warning{Source: s.Name(), Code: code})
 		}
 		if err != nil {
 			reason := Classify(err)
@@ -387,7 +412,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
 
 	items, passes, failed := r.collect(ctx)
-	rep.Failed, rep.Gaps, rep.Partial, rep.Continued = failed, r.gaps, r.partial, r.continued
+	rep.Failed, rep.Gaps, rep.Partial, rep.Continued, rep.Warnings = failed, r.gaps, r.partial, r.continued, r.warnings
 	if err := r.readRestrictions(ctx, r.Send); err != nil {
 		return rep, err
 	}
@@ -797,7 +822,8 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 		r.Log.Log(logs.SendResult, logs.Kind(string(e.Kind)), logs.Outcome(string(res.Outcome)), logs.Status(res.Status), logs.Code(res.Code))
 		rep.Results = append(rep.Results, Sent{Key: e.Key, Outcome: res.Outcome, Status: res.Status, Code: res.Code, EventID: res.EventID})
 	}
-	return nil
+	// Only after every pending body: a thread title waits behind the events.
+	return r.retitle(ctx, st, rep)
 }
 
 // Explanation is what `beacon explain` shows for one key.

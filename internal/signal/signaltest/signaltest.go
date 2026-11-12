@@ -1,5 +1,7 @@
 // Package signaltest is a fake Signal for tests. It implements POST /api/events with Signal's key rules: the same
-// key and the same bytes replay (200), the same key and other bytes are 409 idempotency_conflict.
+// key and the same bytes replay (200), the same key and other bytes are 409 idempotency_conflict. Writes with `open`
+// open threads as Signal does, thread.titled renames one, and GET /api/events/{id} and GET /api/threads/{id} read
+// them back.
 package signaltest
 
 import (
@@ -55,6 +57,20 @@ type Server struct {
 	Actor MeActor
 	// Tokens are further bearer tokens the fake accepts, each with its own actor.
 	Tokens map[string]MeActor
+
+	// threads by number; subjects maps a subject to the thread number covering it; opened maps an event id to the
+	// thread it opened.
+	threads  map[int64]*Thread
+	subjects map[string]int64
+	opened   map[string]int64
+	landed   map[string]int64
+}
+
+// Thread is a thread the fake holds.
+type Thread struct {
+	Number     int64
+	Title      string
+	MergedInto string
 }
 
 // MeActor is the actor GET /api/me returns for a token.
@@ -64,7 +80,8 @@ type MeActor struct {
 
 // New starts a fake that accepts the bearer token.
 func New(token string) *Server {
-	s := &Server{Token: token, byKey: map[string]int{}}
+	s := &Server{Token: token, byKey: map[string]int{}, threads: map[int64]*Thread{}, subjects: map[string]int64{},
+		opened: map[string]int64{}, landed: map[string]int64{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	return s
 }
@@ -136,6 +153,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, string(out), nil)
 		return
 	}
+	if id, ok := strings.CutPrefix(r.URL.Path, "/api/events/"); ok && r.Method == http.MethodGet {
+		s.readEvent(w, id)
+		return
+	}
+	if id, ok := strings.CutPrefix(r.URL.Path, "/api/threads/"); ok && r.Method == http.MethodGet {
+		s.readThread(w, id)
+		return
+	}
 	if r.URL.Path != "/api/events" || r.Method != http.MethodPost {
 		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"Not found."}}`, nil)
 		return
@@ -171,7 +196,147 @@ func (s *Server) write(key string, body []byte) (int, string) {
 	}
 	ev := Event{ID: fmt.Sprintf("evt_%04d", len(s.events)+1), Key: key, Body: append([]byte(nil), body...)}
 	s.events = append(s.events, ev)
+	s.place(ev)
 	return http.StatusCreated, fmt.Sprintf(`{"event":{"id":%q},"replayed":false}`, ev.ID)
+}
+
+// place opens or finds the event's thread, and applies thread.titled. Called with mu held.
+func (s *Server) place(ev Event) {
+	var b struct {
+		Subject string `json:"subject"`
+		Type    string `json:"type"`
+		Title   string `json:"title"`
+		Open    *struct {
+			Title string `json:"title"`
+		} `json:"open"`
+		Metadata struct {
+			Title string `json:"title"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal(ev.Body, &b) != nil {
+		return
+	}
+	if n, ok := strings.CutPrefix(b.Subject, "signal:thread:"); ok {
+		var num int64
+		fmt.Sscan(n, &num)
+		if t := s.threads[num]; t != nil && b.Type == "thread.titled" {
+			t.Title = b.Metadata.Title
+			s.landed[ev.ID] = num
+		}
+		return
+	}
+	if num, ok := s.subjects[b.Subject]; ok {
+		s.landed[ev.ID] = num
+		return
+	}
+	if b.Open == nil {
+		return
+	}
+	title := b.Open.Title
+	if title == "" {
+		title = b.Title
+	}
+	num := int64(len(s.threads) + 1)
+	s.threads[num] = &Thread{Number: num, Title: title}
+	s.subjects[b.Subject] = num
+	s.opened[ev.ID] = num
+	s.landed[ev.ID] = num
+}
+
+func threadID(n int64) string { return fmt.Sprintf("thr_%04d", n) }
+
+func (s *Server) readEvent(w http.ResponseWriter, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for _, e := range s.events {
+		found = found || e.ID == id
+	}
+	if !found {
+		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"Not found."}}`, nil)
+		return
+	}
+	out := map[string]any{"id": id, "thread_id": nil, "open": nil}
+	if n, ok := s.landed[id]; ok {
+		t := s.threads[n]
+		for t.MergedInto != "" {
+			fmt.Sscanf(t.MergedInto, "thr_%d", &n)
+			t = s.threads[n]
+		}
+		out["thread_id"] = threadID(n)
+	}
+	if n, ok := s.opened[id]; ok {
+		out["open"] = map[string]any{"number": n, "title": s.firstTitle(id)}
+	}
+	data, _ := json.Marshal(out)
+	reply(w, http.StatusOK, string(data), nil)
+}
+
+// firstTitle is the title an event opened its thread with.
+func (s *Server) firstTitle(id string) string {
+	for _, e := range s.events {
+		if e.ID != id {
+			continue
+		}
+		var b struct {
+			Title string `json:"title"`
+			Open  struct {
+				Title string `json:"title"`
+			} `json:"open"`
+		}
+		_ = json.Unmarshal(e.Body, &b)
+		if b.Open.Title != "" {
+			return b.Open.Title
+		}
+		return b.Title
+	}
+	return ""
+}
+
+func (s *Server) readThread(w http.ResponseWriter, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	if _, err := fmt.Sscanf(id, "thr_%d", &n); err != nil || s.threads[n] == nil {
+		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"Not found."}}`, nil)
+		return
+	}
+	t := s.threads[n]
+	out := map[string]any{"id": id, "number": t.Number, "title": t.Title, "merged_into": nil}
+	if t.MergedInto != "" {
+		out["merged_into"] = t.MergedInto
+	}
+	data, _ := json.Marshal(out)
+	reply(w, http.StatusOK, string(data), nil)
+}
+
+// ThreadFor returns the thread covering subject.
+func (s *Server) ThreadFor(subject string) (Thread, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.subjects[subject]
+	if !ok {
+		return Thread{}, false
+	}
+	return *s.threads[n], true
+}
+
+// Rename sets a thread's title, as a person renaming it would.
+func (s *Server) Rename(subject, title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n, ok := s.subjects[subject]; ok {
+		s.threads[n].Title = title
+	}
+}
+
+// OpenAs opens a thread for subject as another writer would, so Beacon's events land in it.
+func (s *Server) OpenAs(subject, title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	num := int64(len(s.threads) + 1)
+	s.threads[num] = &Thread{Number: num, Title: title}
+	s.subjects[subject] = num
 }
 
 func reply(w http.ResponseWriter, status int, body string, headers map[string]string) {

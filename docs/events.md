@@ -49,7 +49,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | --- | --- |
 | `subject`, `key`, `occurred_at` | Always, from the item. `occurred_at` is UTC with milliseconds. |
 | `type` | Always: `<source>.<item type>`. |
-| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, else the `summary` field when the rule lists `summary`, else the `subject` field (a mail thread's subject) when the rule lists `subject`. It is not a description of this change. |
+| `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, else the `summary` field when the rule lists `summary`, else the `subject` field (a mail thread's subject) when the rule lists `subject`. It is not a description of this change. Slack's `title` is the conversation's (`DM with Dana Scully`, `#eng: Bob Ross mentioned you`; [`sources.md`](sources.md#slack)). Signal uses it only when the write opens the thread. |
 | `title` | For GitHub, Jira, Gmail, Calendar, Drive and Slack, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment, review, mail or message text. For a fixture without one, the `title` field when the rule lists it. |
 | `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
@@ -72,6 +72,22 @@ those any such body closes. Beacon writes every ask without `by`, so its integra
 act closes as the addressee (through `by`), and a `close_by_others` event closes as the asker (DEC-27).
 
 A body over Signal's 64 KB request limit, or with a body over 64 KB, is not appended; the pass reports the item.
+
+### Thread titles
+
+A send pass may rename a thread Beacon opened before its source could name it (Slack, once a rule lists `title`;
+see [`sources.md`](sources.md#slack) for when). The body is Signal's thread change, about the thread's own subject,
+with the title and nothing else:
+
+```json
+{"subject": "signal:thread:812", "type": "thread.titled", "key": "slack:retitle:812:3f9c0a1b22de", "metadata": {"title": "DM with Dana Scully"}}
+```
+
+The key is `<source>:retitle:<thread number>:<first 12 hex of the title's SHA-256>`. It is appended to the outbox,
+under the item's subject (so a personal one waits for its restriction like any pending body), before it is sent,
+and a pending one is resent with its stored bytes. Before writing, Beacon reads its first event on the subject
+(`GET /api/events/{id}`) and the thread (`GET /api/threads/{id}`): the event must have opened the thread, the thread
+must not have been merged, and its title must still be the one Beacon opened it with.
 
 ## The outbox
 

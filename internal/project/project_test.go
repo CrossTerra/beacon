@@ -393,3 +393,27 @@ func TestSubjectIsTheThreadTitle(t *testing.T) {
 		t.Fatalf("summary before subject: %q", b.Open.Title)
 	}
 }
+
+func TestThreadTitled(t *testing.T) {
+	b, err := ThreadTitled(42, "slack:retitle:42:abc", "  DM with Dana Scully  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"subject":"signal:thread:42","type":"thread.titled","key":"slack:retitle:42:abc","metadata":{"title":"DM with Dana Scully"}}` {
+		t.Fatalf("%s", b)
+	}
+	long, _ := ThreadTitled(1, "k", strings.Repeat("é", 400))
+	var parsed ThreadTitle
+	if err := json.Unmarshal(long, &parsed); err != nil || len([]rune(parsed.Metadata.Title)) != 300 {
+		t.Fatalf("%d", len([]rune(parsed.Metadata.Title)))
+	}
+	for _, bad := range []struct {
+		n     int64
+		key   string
+		title string
+	}{{0, "k", "t"}, {1, "", "t"}, {1, "k", "   "}} {
+		if _, err := ThreadTitled(bad.n, bad.key, bad.title); err == nil {
+			t.Errorf("%+v accepted", bad)
+		}
+	}
+}

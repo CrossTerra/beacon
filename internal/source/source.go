@@ -161,7 +161,22 @@ type Collected struct {
 	ClearResume bool
 	// Limit is the rate-limit answer that paused a Partial read, when the source knows it. The runner logs it.
 	Limit *RateLimit
+	// Warning is a fixed code for something the pass did without (WarnNamesScope, WarnNamesFailed). The items are
+	// still complete and the cursor moves; the runner logs and prints it once.
+	Warning string
 }
+
+// ErrNoTitle is a thread a source cannot name: its conversation is gone or unreadable. Asking again will not help.
+var ErrNoTitle = errors.New("source: that conversation cannot be named")
+
+// Warnings a collect may carry. Fixed codes, never text.
+const (
+	// WarnNamesScope is a token without the scopes display names need, so items carry no names or titles.
+	WarnNamesScope = "names_scope"
+	// WarnNamesFailed is a name lookup that failed this pass (a rate limit, an error), so some items carry no names
+	// or titles.
+	WarnNamesFailed = "names_failed"
+)
 
 // RateLimit is what an API said when it refused a call for its rate limit. It holds no body, no URL and no item
 // data: a status, the API's own reason code from a fixed list (or ""), and the wait it asked for.

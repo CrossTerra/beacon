@@ -22,24 +22,30 @@ import (
 // Base is the Slack Web API's base URL. Every method is under /api/.
 const Base = "https://slack.com"
 
-// Scopes are the user scopes the token must hold. All are read-only.
+// Scopes are the user scopes a pass needs. All are read-only. A token missing one fails the pass.
 var Scopes = []string{
 	"search:read", "channels:history", "groups:history", "im:history", "mpim:history",
 	"channels:read", "groups:read", "mpim:read", "usergroups:read",
 }
 
+// NameScopes are the user scopes display names need: users.info, and conversations.info on a direct message. A
+// token missing one still collects; titles and names stay out of the items, and the pass says so once.
+var NameScopes = []string{"users:read", "im:read"}
+
 // The methods Beacon calls, and how far apart it spaces calls to each. Slack limits each method per workspace by tier:
 // search.messages and usergroups.list are Tier 2 (20 a minute); conversations.history, conversations.replies,
-// conversations.info and users.conversations are Tier 3 (50 a minute for an internal app). auth.test is called once a
-// pass.
+// conversations.info and users.conversations are Tier 3 (50 a minute for an internal app); users.info and
+// conversations.members are Tier 4 (100 a minute). auth.test is called once a pass.
 const (
 	methodAuth       = "auth.test"
 	methodSearch     = "search.messages"
 	methodReplies    = "conversations.replies"
 	methodHistory    = "conversations.history"
 	methodInfo       = "conversations.info"
+	methodMembers    = "conversations.members"
 	methodGroupDMs   = "users.conversations"
 	methodUserGroups = "usergroups.list"
+	methodUser       = "users.info"
 )
 
 var spacing = map[string]time.Duration{
@@ -49,10 +55,13 @@ var spacing = map[string]time.Duration{
 	methodHistory:    1200 * time.Millisecond,
 	methodInfo:       1200 * time.Millisecond,
 	methodGroupDMs:   1200 * time.Millisecond,
+	methodUser:       600 * time.Millisecond,
+	methodMembers:    600 * time.Millisecond,
 }
 
 var (
 	idPattern      = regexp.MustCompile(`^[A-Z][A-Z0-9]{2,30}$`)
+	userPattern    = regexp.MustCompile(`^[UW][A-Z0-9]{2,30}$`)
 	channelPattern = regexp.MustCompile(`^[CDG][A-Z0-9]{2,30}$`)
 	tsPattern      = regexp.MustCompile(`^[0-9]{9,11}\.[0-9]{6}$`)
 	cursorPattern  = regexp.MustCompile(`^[A-Za-z0-9=_:-]{1,200}$`)
@@ -111,9 +120,12 @@ type api struct {
 	sleep    func(context.Context, time.Duration) error
 	clock    source.Clock
 	// configured reports whether a channel is one the config names; groupDM whether it is a group direct message
-	// the person is in. conversations.history reads only those, and conversations.info only configured ones.
+	// the person is in. conversations.history reads only those. named reports whether a conversation holds a message
+	// this pass made an item of, or a thread Beacon is retitling: conversations.info reads configured and named ones,
+	// conversations.members only named ones.
 	configured func(string) bool
 	groupDM    func(string) bool
+	named      func(string) bool
 	// user is the token's user. Search queries may name only this user.
 	user string
 	last map[string]time.Time
@@ -136,6 +148,7 @@ func newAPI(base string, o Options, now func() time.Time) (*api, error) {
 		base: base, host: strings.ToLower(u.Hostname()), hostPort: hostPort(u), now: now, sleep: sleep,
 		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now}, last: map[string]time.Time{},
 		configured: func(string) bool { return false }, groupDM: func(string) bool { return false },
+		named: func(string) bool { return false },
 	}, nil
 }
 
@@ -192,7 +205,16 @@ func (a *api) allow(raw string) error {
 			return nil
 		}
 	case methodInfo:
-		if onlyKeys(q, "channel") && a.configured(q.Get("channel")) {
+		c := q.Get("channel")
+		if onlyKeys(q, "channel") && (a.configured(c) || a.named(c)) {
+			return nil
+		}
+	case methodMembers:
+		if onlyKeys(q, "channel", "limit") && a.named(q.Get("channel")) {
+			return nil
+		}
+	case methodUser:
+		if onlyKeys(q, "user") && userPattern.MatchString(q.Get("user")) {
 			return nil
 		}
 	case methodGroupDMs:
@@ -320,7 +342,8 @@ func classify(code string) error {
 		return source.ErrRateLimited
 	case "thread_not_found", "message_not_found":
 		return errMessageGone
-	case "channel_not_found", "not_in_channel", "is_archived":
+	case "channel_not_found", "not_in_channel", "is_archived", "user_not_found", "user_not_visible",
+		"method_not_supported_for_channel_type":
 		return errGone
 	}
 	if !codePattern.MatchString(code) {
@@ -343,10 +366,12 @@ type Identity struct {
 	User      string
 	// URL is the workspace's web address, https://<name>.slack.com/, used to build permalinks. Beacon never requests it.
 	URL string
-	// Scopes are the token's scopes; Missing are the required ones it lacks; Extra are the ones Beacon does not need.
-	Scopes  []string
-	Missing []string
-	Extra   []string
+	// Scopes are the token's scopes; Missing are the ones a pass needs that it lacks; MissingNames are the NameScopes
+	// it lacks; Extra are the ones Beacon does not use. Missing and MissingNames are empty when Slack did not say.
+	Scopes       []string
+	Missing      []string
+	MissingNames []string
+	Extra        []string
 }
 
 func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, error) {
@@ -379,6 +404,12 @@ func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, er
 			id.Missing = append(id.Missing, s)
 		}
 	}
+	for _, s := range NameScopes {
+		need[s] = true
+		if !have[s] {
+			id.MissingNames = append(id.MissingNames, s)
+		}
+	}
 	for _, s := range id.Scopes {
 		if !need[s] {
 			id.Extra = append(id.Extra, s)
@@ -386,7 +417,7 @@ func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, er
 	}
 	if h.Get("X-OAuth-Scopes") == "" {
 		// Slack did not say. A missing scope then shows up as missing_scope on the method that needs it.
-		id.Missing = nil
+		id.Missing, id.MissingNames = nil, nil
 	}
 	return id, nil
 }

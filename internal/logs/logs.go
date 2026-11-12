@@ -50,6 +50,11 @@ const (
 	RateLimited Event = "rate_limited"
 	// RestrictionsUnread is a send pass that could not read Signal's restricted prefixes.
 	RestrictionsUnread Event = "restrictions_unread"
+	// NamesUnavailable is a source that collected without display names: its token lacks the scopes
+	// (names_scope), or a lookup failed (names_failed). Items carry no names or titles; nothing else changes.
+	NamesUnavailable Event = "names_unavailable"
+	// Retitled is a send pass's retitle of threads Beacon opened: counts only.
+	Retitled Event = "retitled"
 )
 
 // Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths
@@ -85,6 +90,10 @@ const (
 	ReasonRestrictionsUnknown Reason = "restrictions_unknown"
 	// ReasonNoRead is a Signal key without the read scope, which listing the restrictions needs.
 	ReasonNoRead Reason = "no_read_scope"
+	// ReasonNamesScope is a source token without the scopes display names need.
+	ReasonNamesScope Reason = "names_scope"
+	// ReasonNamesFailed is a display name lookup that failed this pass.
+	ReasonNamesFailed Reason = "names_failed"
 )
 
 // Attr is a log attribute built by one of the helpers below.

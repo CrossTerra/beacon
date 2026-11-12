@@ -138,7 +138,8 @@ without `references`; thread replies and review requests fall to `never`. No rul
 
 ## Out of scope
 
-Slack Connect specifics, user display names (`users:read`), files and attachments, reactions, unreads, posting or
+Slack Connect specifics, user display names (`users:read`; added later, with thread titles from the conversation and
+the retitle of threads Beacon opened: see [`docs/sources.md`](../docs/sources.md#slack)), files and attachments, reactions, unreads, posting or
 marking read, edits seen only through history or replies, Enterprise Grid org-wide search, Socket Mode or the Events API, a live run in this pull request.
 
 ## Tests

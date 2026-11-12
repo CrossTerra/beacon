@@ -33,7 +33,9 @@ import (
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/signal"
+	"github.com/CrossTerra/beacon/internal/slack"
 	"github.com/CrossTerra/beacon/internal/source"
+	"github.com/CrossTerra/beacon/internal/titled"
 )
 
 // Set by the linker: -X main.version=… -X main.commit=….
@@ -227,10 +229,14 @@ func (a *app) load(p string) (*env, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A source that can skip reading bodies is told whether any rule could send one.
+	// A source that can skip reading bodies, or names, is told whether any rule could send them.
 	for _, s := range e.sources {
 		if b, ok := s.(interface{ SetBodies(bool) }); ok {
 			b.SetBodies(e.rules.Lists(s.Name(), project.FieldBody))
+		}
+		if n, ok := s.(interface{ SetNames(bool) }); ok {
+			n.SetNames(e.rules.Lists(s.Name(), slack.FieldTitle) || e.rules.Lists(s.Name(), slack.FieldChannelName) ||
+				e.rules.Lists(s.Name(), slack.FieldAuthorName))
 		}
 	}
 	return e, nil
@@ -513,6 +519,12 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		return fail(logs.ReasonConfig, fmt.Sprintf("the rules file has %d errors; beacon rules check shows them", problems))
 	}
 	send := e.cfg.Mode == config.Send && !*dry && !*first
+	// A dry run writes nothing to the state directory, a name cache included.
+	for _, s := range e.sources {
+		if p, ok := s.(interface{ SetPersist(bool) }); ok {
+			p.SetPersist(send)
+		}
+	}
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
 		AfterAppend: a.afterAppend}
 	// A dry run reads cursors and does not write them. No lock: it must not leave a resume a send pass trusts.
@@ -604,6 +616,11 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 	r.Outbox, r.Queue, r.Writer = ob, q, client
 	r.Personal, r.Restrictions = personal(e.sources), client
+	retitled, err := titled.Read(e.cfg.StatePath())
+	if err != nil {
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
+	}
+	r.Threads, r.Retitled = client, retitled
 	r.Lease = &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 		Period: e.cfg.LeasePeriod(), Now: a.now}
 
@@ -748,6 +765,14 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			fmt.Fprintf(w, "source %s: a read stopped at its limit (Gmail: 5000 per list; Slack: 2000 per search); older items in its window were not read and will not be, unless they change.\n", g.Source)
 		}
 	}
+	for _, wr := range rep.Warnings {
+		switch wr.Code {
+		case source.WarnNamesScope:
+			fmt.Fprintf(w, "source %s: thread titles stay generic and items carry no names: the token lacks %s. Add them as User Token Scopes and reinstall the Slack app; the stored token gains them.\n", wr.Source, strings.Join(slack.NameScopes, ", "))
+		default:
+			fmt.Fprintf(w, "source %s: some display names could not be read this pass; those items carry no names or titles.\n", wr.Source)
+		}
+	}
 	for _, p := range rep.Items {
 		rule := p.Rule
 		if rule == "" {
@@ -812,6 +837,9 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 		fmt.Fprintf(w, "%-9s %s  %d %s %s\n", res.Outcome, res.Key, res.Status, res.EventID, res.Code)
 	}
 	fmt.Fprintf(w, "Sent: %d. Pending: %d.\n", len(rep.Results), rep.Pending)
+	if rep.Retitled > 0 {
+		fmt.Fprintf(w, "Retitled: %d threads Beacon opened.\n", rep.Retitled)
+	}
 }
 
 func (a *app) printFirst(rep *runner.Report) {
