@@ -20,6 +20,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/project"
 	"github.com/CrossTerra/beacon/internal/queue"
 	"github.com/CrossTerra/beacon/internal/rules"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/source"
@@ -70,6 +71,11 @@ type Runner struct {
 	Threads  ThreadReader
 	Retitled RetitleRecord
 
+	// SealOwner raises an item to owner on the machine (DEC-33). Nil raises nothing.
+	SealOwner *seal.OwnerList
+	// Floor is the highest level sent per subject (DEC-34). Nil keeps none.
+	Floor *seal.Floor
+
 	// restricted is this pass's restricted prefixes; restrictErr is why they could not be read.
 	restricted   []string
 	restrictErr  error
@@ -79,6 +85,13 @@ type Runner struct {
 	partial      []string
 	continued    []string
 	warnings     []Warning
+	sealCounts   sealCounts
+}
+
+// sealCounts is what a pass sealed, raised and held for sealing, for the log. Counts only.
+type sealCounts struct {
+	owner, agents, raised int
+	held                  map[logs.Reason]int
 }
 
 // Warning is a source that collected without something it would have used: display names (source.WarnNamesScope,
@@ -142,6 +155,12 @@ type Planned struct {
 	Withheld logs.Reason
 	// Err is a projection error; such an item is neither appended nor sent.
 	Err error
+	// Level is the level a send or hold item is sealed at (DEC-30), None for a plain one. Raised is true when the
+	// local check, its meeting or the subject floor raised it above its rule's; why is shown by explain only.
+	Level  seal.Level
+	Raised bool
+	// SealHeld says why a send or hold item was held for sealing: body_needs_seal or sensitive_shared.
+	SealHeld logs.Reason
 }
 
 // SourceFailure is a source that could not be collected. Reason is a fixed code; the error text is not kept.
@@ -421,6 +440,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	}
 	projected := map[string]int{}
 	withheld := map[string]*Withheld{}
+	r.sealCounts = sealCounts{held: map[logs.Reason]int{}}
 	for _, it := range items {
 		p, err := r.decide(it, view)
 		if err != nil {
@@ -439,6 +459,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		}
 		rep.Items = append(rep.Items, p)
 	}
+	r.logSeal()
 	for _, name := range sortedKeys(withheld) {
 		w := withheld[name]
 		rep.Withheld = append(rep.Withheld, *w)
@@ -513,18 +534,44 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	if r.Unaccepted[it.Source] {
 		p.Unaccepted = true
 	}
+	var level seal.Level
+	rule := d.Rule
+	if d.Tier == rules.Send || d.Tier == rules.Hold {
+		sl := r.sealing(it, d.Rule)
+		rule = sl.rule(d.Rule)
+		level = sl.Level
+		p.Level, p.Raised = sl.Level, len(sl.Raised) > 0
+		if sl.Held != "" {
+			// Held, and not projected: it would leave plain, or sealed where Signal cannot seal it.
+			p.Tier, p.SealHeld = rules.Hold, sl.Held
+			r.sealCounts.held[sl.Held]++
+			if r.record(it) {
+				return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it, Reason: string(sl.Held), Level: string(sl.Level)})
+			}
+			return p, nil
+		}
+		if p.Raised {
+			r.sealCounts.raised++
+		}
+		switch level {
+		case seal.Owner:
+			r.sealCounts.owner++
+		case seal.Agents:
+			r.sealCounts.agents++
+		}
+	}
 	if d.Tier == rules.Send && r.record(it) {
 		switch p.Withheld = r.withholds(it.Subject); p.Withheld {
 		case logs.ReasonUnrestricted:
 			// Signal would show it to every reader. Hold it locally instead.
 			p.Tier = rules.Hold
-			_, body, _, err := r.project(it, d.Rule, view)
+			_, body, _, err := r.project(it, rule, view, level)
 			p.Body, p.Err = body, err
-			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
+			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it, Level: string(level)})
 		case logs.ReasonRestrictionsUnknown:
 			// Not recorded, and the cursor stays: a later pass that can read the restrictions decides it again.
 			r.deferred[it.Source] = true
-			_, body, _, err := r.project(it, d.Rule, view)
+			_, body, _, err := r.project(it, rule, view, level)
 			p.Body, p.Err = body, err
 			return p, nil
 		}
@@ -537,32 +584,33 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		return r.finishNever(p)
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
-		_, body, _, err := r.project(it, d.Rule, view)
+		_, body, _, err := r.project(it, rule, view, level)
 		p.Body = body
 		if err != nil {
 			p.Err = err
 		}
 		if r.record(it) {
-			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
+			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it, Level: string(level)})
 		}
 		return p, nil
 	}
-	b, body, truncated, err := r.project(it, d.Rule, view)
+	b, body, truncated, err := r.project(it, rule, view, level)
 	if err != nil {
 		// A body or request over Signal's limit is not dropped. Hold it so the person can still see it.
 		p.Err = err
 		p.Tier = rules.Hold
 		if r.record(it) && r.Queue != nil {
-			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it})
+			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it, Level: string(level)})
 		}
 		return p, nil
 	}
 	p.Body = body
 	if !r.record(it) {
 		view.record(it.Subject, it.Key, b)
-		return p, nil
+		// Later items in this pass see the level, as they would after a send. Nothing is written.
+		return p, r.Floor.Raise(it.Subject, level, false)
 	}
-	decided, err := json.Marshal(project.Decide(it, d.Rule, truncated))
+	decided, err := json.Marshal(project.Decide(it, rule, truncated, level))
 	if err != nil {
 		return p, err
 	}
@@ -575,6 +623,10 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 	if err != nil {
 		return p, err
 	}
+	// The body is in the outbox, so it will leave at this level: every later item on the subject is at least as high.
+	if err := r.Floor.Raise(it.Subject, level, true); err != nil {
+		return p, err
+	}
 	if r.AfterAppend != nil {
 		r.AfterAppend(it.Key)
 	}
@@ -583,11 +635,15 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 
 // project builds the body. If the body or the request is over Signal's limit, it tries again without the body and
 // marks the event truncated. The marker is a fixed flag, not item content.
-func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks) (*project.Body, []byte, bool, error) {
-	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.forItem(it)}
+func (r *Runner) project(it source.Item, rule *rules.Rule, view *asks, level seal.Level) (*project.Body, []byte, bool, error) {
+	in := project.Input{Item: it, Rule: rule, Person: r.Person, OpenAsks: view.forItem(it), Level: level}
 	b, body, err := project.Project(in)
 	if err == nil {
 		return b, body, false, nil
+	}
+	if errors.Is(err, project.ErrBodyNeedsSeal) || errors.Is(err, project.ErrSealShared) {
+		// Not a size problem: leaving the body out would not make it right.
+		return nil, nil, false, err
 	}
 	stripped := it
 	if it.Fields != nil {
@@ -843,6 +899,12 @@ type Explanation struct {
 	// Seed is true when a seed file dropped the subject before the rules file.
 	Seed bool
 	Err  error
+	// Level is the level a send or hold item is sealed at, and RuleLevel its rule's own. Raised says what raised it,
+	// read on the machine; explain shows it and nothing logs it. SealHeld is why it is held for sealing.
+	Level     seal.Level
+	RuleLevel seal.Level
+	Raised    []string
+	SealHeld  logs.Reason
 }
 
 // Explain finds a key among the collected items and the outbox and says what Beacon does with it, and why.
@@ -869,9 +931,17 @@ func (r *Runner) Explain(ctx context.Context, key string) (*Explanation, error) 
 		}
 		d := r.Rules.Decide(it)
 		ex.Tier, ex.Rule = d.Tier, d.Rule
-		if ex.Entry == nil && d.Tier != rules.Never {
+		if d.Tier == rules.Never {
+			break
+		}
+		sl := r.sealing(it, d.Rule)
+		ex.Level, ex.RuleLevel, ex.Raised, ex.SealHeld = sl.Level, sl.Rule, sl.Raised, sl.Held
+		if sl.Held != "" {
+			ex.Tier = rules.Hold
+		}
+		if ex.Entry == nil && sl.Held == "" {
 			open := (&asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}).forItem(it)
-			_, ex.Body, ex.Err = project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: open})
+			_, ex.Body, ex.Err = project.Project(project.Input{Item: it, Rule: sl.rule(d.Rule), Person: r.Person, OpenAsks: open, Level: sl.Level})
 		}
 		break
 	}

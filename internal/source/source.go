@@ -52,6 +52,26 @@ type Item struct {
 	// CloseOnly, when set, narrows what this item may close to these ask keys on its subject. A Slack deletion names the
 	// ask the deleted message opened, so a close_by_others rule closes that ask and not the others in its thread.
 	CloseOnly []string `json:"close_only,omitempty"`
+	// Native is the source's own opaque id for the message or object: a Gmail message id, a Slack channel id and ts,
+	// a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person. A
+	// sealed event carries it as metadata.native (DEC-31, Signal DEC-264).
+	Native string `json:"native,omitempty"`
+	// Local is what the item gives the raise to owner (DEC-33, DEC-35). It is matched on the machine only: it is not
+	// a field, it is never projected, stored or logged.
+	Local *Local `json:"-"`
+}
+
+// Local is text, addresses and labels a source read for an item, matched against seal.owner on the machine. A field
+// a rule does not send is still matched. Nothing in it leaves the machine or is written to the state directory.
+type Local struct {
+	// Text is matched against seal.owner words, by where it came from ("subject", "body", "thread_root").
+	Text map[string]string `json:"text,omitempty"`
+	// Addresses are lowercased addresses matched against seal.owner senders, by where they came from.
+	Addresses map[string][]string `json:"addresses,omitempty"`
+	// Labels are label names matched against seal.owner labels.
+	Labels []string `json:"labels,omitempty"`
+	// Meeting is the calendar subject of the meeting a note or transcript belongs to (DEC-35).
+	Meeting string `json:"meeting,omitempty"`
 }
 
 var decimalPattern = regexp.MustCompile(`^[0-9]{1,20}(\.[0-9]{1,20})?$`)
@@ -311,6 +331,9 @@ func Validate(it Item, fields, stateFields []string) error {
 		if !printable.MatchString(k) || !strings.HasPrefix(k, it.Source+":") {
 			return fmt.Errorf("close_only names a key that is not this source's")
 		}
+	}
+	if it.Native != "" && (!printable.MatchString(it.Native) || strings.Contains(it.Native, "@")) {
+		return fmt.Errorf("native is not an opaque id of 1 to 200 printable characters without @")
 	}
 	if len(it.CloseOnly) > 0 && it.CloseSiblingsBefore != "" {
 		return fmt.Errorf("close_only and close_siblings_before do not combine")

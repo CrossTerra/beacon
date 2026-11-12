@@ -1,6 +1,9 @@
 # Phase 10 — Sealed rules
 
-Status: pending (approved by Winton, 2026-11-11). Signal's side is Signal plan 12.08, "Sealed events"
+Status: Part 1 built (its durable content is in [`../docs/rules.md`](../docs/rules.md#sealed-rules),
+[`../docs/configuration.md`](../docs/configuration.md#seal), [`../docs/events.md`](../docs/events.md#sealed-events),
+[`../docs/sources.md`](../docs/sources.md), [`../docs/commands.md`](../docs/commands.md) and
+[`../docs/trust-model.md`](../docs/trust-model.md)); Part 2, live, pending. Approved by Winton, 2026-11-11. Signal's side is Signal plan 12.08, "Sealed events"
 ([`plans/phase-12/12.08-sealed.md`](https://github.com/CrossTerra/signal/blob/main/plans/phase-12/12.08-sealed.md),
 Signal DEC-250 to DEC-262). Read [`README.md`](README.md), [`../docs/trust-model.md`](../docs/trust-model.md) and
 [`../docs/rules.md`](../docs/rules.md) first.
@@ -82,7 +85,7 @@ rules:
     match:
       source: gmail
       fields:
-        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
+        thread_participants: {regex: '.*@([a-z0-9-]+\.)*(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
     tier: send
     seal: owner
     fields: [subject, body, actor, from, to]

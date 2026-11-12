@@ -12,6 +12,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/CrossTerra/beacon/internal/rules"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -54,14 +55,27 @@ type Body struct {
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	// State is the object's state snapshot (DEC-28), in the shape Signal stores.
 	State *Snapshot `json:"state,omitempty"`
+	// Sealed is what Signal encrypts at rest (DEC-30, Signal DEC-250). With it, the rest of the body is the envelope
+	// (DEC-31).
+	Sealed *Sealed `json:"sealed,omitempty"`
+}
+
+// Sealed is a request's sealed part: { level, title?, body?, metadata?, state? } (Signal DEC-250, DEC-252).
+type Sealed struct {
+	Level    string            `json:"level"`
+	Title    string            `json:"title,omitempty"`
+	Body     string            `json:"body,omitempty"`
+	Metadata map[string]any    `json:"metadata,omitempty"`
+	State    map[string]string `json:"state,omitempty"`
 }
 
 // Snapshot is a state snapshot (DEC-28, Signal plan 12.01). The listed state fields are nested under Fields.
 // ObservedAt and Version stay beside Fields; any other key is refused by Signal.
 type Snapshot struct {
-	Fields     map[string]string `json:"fields"`
-	ObservedAt string            `json:"observed_at"`
-	Version    string            `json:"version"`
+	// Fields are strings on a plain event. On a sealed one they are only the boolean flags (DEC-31).
+	Fields     map[string]any `json:"fields"`
+	ObservedAt string         `json:"observed_at"`
+	Version    string         `json:"version"`
 }
 
 // Open makes sure the subject has a thread (DEC-17).
@@ -89,6 +103,8 @@ type Input struct {
 	OpenAsks []string
 	// Truncated omits the body and marks the event truncated. The marker is a fixed flag, not item content.
 	Truncated bool
+	// Level seals the event (DEC-30): the rule's seal, raised on the machine (DEC-33 to DEC-35). None is plain.
+	Level seal.Level
 }
 
 // Decision is what a later pass needs to decide the item again and project it. It keeps the ids, times, and the
@@ -101,13 +117,21 @@ type Decision struct {
 	Priority      string      `json:"priority,omitempty"`
 	CloseByOthers bool        `json:"close_by_others,omitempty"`
 	Truncated     bool        `json:"truncated,omitempty"`
+	// Seal is the level the event was sealed at, after any raise, and Plain the fields it left outside sealed. A retry
+	// never seals lower or leaves more plain.
+	Seal  seal.Level `json:"seal,omitempty"`
+	Plain []string   `json:"plain,omitempty"`
 }
 
-// Decide records the ids, times, and listed fields a send used. An unlisted field is not copied.
-func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
+// Decide records the ids, times, and listed fields a send used, and the level it was sealed at. An unlisted field is
+// not copied.
+func Decide(it source.Item, rule *rules.Rule, truncated bool, level seal.Level) Decision {
 	d := Decision{
 		Truncated: truncated,
+		Seal:      level,
 		Item: source.Item{
+			// The source's opaque id, so a sealed retry carries the same envelope.
+			Native: it.Native,
 			Source: it.Source, Subject: it.Subject, Key: it.Key, Type: it.Type,
 			// The change description is not a source field. A retry must project the same event title, and it
 			// never carries comment or body text.
@@ -123,6 +147,9 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool) Decision {
 	}
 	d.Fields = append([]string(nil), rule.Fields...)
 	d.State = append([]string(nil), rule.State...)
+	if level != seal.None {
+		d.Plain = append([]string(nil), rule.Plain...)
+	}
 	d.Ask = rule.Ask
 	d.Priority = rule.Priority
 	d.CloseByOthers = rule.CloseByOthers
@@ -178,6 +205,17 @@ func (d Decision) Narrow(current *rules.Rule) *rules.Rule {
 		r.Priority = current.Priority
 	}
 	r.CloseByOthers = d.CloseByOthers && current.CloseByOthers
+	// Never lower: the stored level, or the current rule's, whichever is higher. What stays plain is what both left
+	// plain; a decision that was sent plain left every listed field plain.
+	level := seal.Max(d.Seal, seal.Level(current.Seal))
+	if level != seal.None {
+		r.Seal = string(level)
+		if d.Seal == seal.None {
+			r.Plain = intersect(current.Plain, r.Fields)
+		} else {
+			r.Plain = intersect(intersect(d.Plain, current.Plain), r.Fields)
+		}
+	}
 	return r
 }
 
@@ -201,6 +239,12 @@ func Project(in Input) (*Body, []byte, error) {
 	r, it := in.Rule, in.Item
 	if r == nil || (r.Tier != rules.Send && r.Tier != rules.Hold) {
 		return nil, nil, errors.New("project: only items a send or hold rule matched are projected")
+	}
+	if in.Level != seal.None {
+		return projectSealed(in)
+	}
+	if !in.Truncated && NeedsSeal(it, r) {
+		return nil, nil, ErrBodyNeedsSeal
 	}
 	b := &Body{
 		Subject:    it.Subject,
@@ -271,7 +315,7 @@ func Project(in Input) (*Body, []byte, error) {
 		b.Metadata = meta
 	}
 	if len(it.State) > 0 && it.ObservedAt != nil && it.Version != "" {
-		fields := map[string]string{}
+		fields := map[string]any{}
 		for _, name := range r.State {
 			if name == source.StateObservedAt || name == source.StateVersion {
 				continue
@@ -284,6 +328,23 @@ func Project(in Input) (*Body, []byte, error) {
 			b.State = &Snapshot{Fields: fields, ObservedAt: Instant(*it.ObservedAt), Version: it.Version}
 		}
 	}
+	envelope(b, in)
+	if len(b.Body) > bodyMaxBytes {
+		return nil, nil, fmt.Errorf("project: body is %d bytes, over Signal's %d", len(b.Body), bodyMaxBytes)
+	}
+	data, err := Marshal(b)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(data) > requestMaxSize {
+		return nil, nil, fmt.Errorf("project: request is %d bytes, over Signal's %d", len(data), requestMaxSize)
+	}
+	return b, data, nil
+}
+
+// envelope sets who the event is by, whom it asks, and what it closes. They stay plain on a sealed event (DEC-31).
+func envelope(b *Body, in Input) {
+	r, it := in.Rule, in.Item
 	if it.Own {
 		if id := in.Person.Identities[it.Source]; id != "" {
 			b.By = &By{Identity: id}
@@ -303,17 +364,6 @@ func Project(in Input) (*Body, []byte, error) {
 			b.Closes = append(b.Closes, Ref{Key: k})
 		}
 	}
-	if len(b.Body) > bodyMaxBytes {
-		return nil, nil, fmt.Errorf("project: body is %d bytes, over Signal's %d", len(b.Body), bodyMaxBytes)
-	}
-	data, err := Marshal(b)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(data) > requestMaxSize {
-		return nil, nil, fmt.Errorf("project: request is %d bytes, over Signal's %d", len(data), requestMaxSize)
-	}
-	return b, data, nil
 }
 
 // ThreadTitle is a thread change, Signal's thread.titled: it renames the thread whose own subject is

@@ -22,6 +22,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/limited"
 	"github.com/CrossTerra/beacon/internal/runner"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/slack"
 	"github.com/CrossTerra/beacon/internal/source"
@@ -202,6 +203,17 @@ func (a *app) prepareStore(e *env, r *runner.Runner, writable bool) error {
 		return err
 	}
 	r.Seed = sf
+	// The subject floor (DEC-34). A send pass writes it; a dry run and explain read it and raise in memory only.
+	var floor *seal.Floor
+	if writable {
+		floor, err = seal.OpenFloor(e.cfg.StatePath())
+	} else {
+		floor, err = seal.ReadFloor(e.cfg.StatePath())
+	}
+	if err != nil {
+		return err
+	}
+	r.Floor = floor
 	return nil
 }
 

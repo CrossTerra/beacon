@@ -169,6 +169,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, `{"error":{"code":"invalid","message":"Body is not JSON."}}`, nil)
 		return
 	}
+	// A sealed write is checked as Signal checks it, before anything else answers (Signal DEC-250 to DEC-264).
+	if field := SealedProblem(body); field != "" {
+		out, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "invalid", "message": "Invalid sealed write.", "details": map[string]string{"field": field}}})
+		reply(w, http.StatusBadRequest, string(out), nil)
+		return
+	}
 	if script != nil {
 		if rp := script(n, req); rp.Status != 0 {
 			if rp.Apply {

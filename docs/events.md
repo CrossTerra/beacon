@@ -22,6 +22,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `observed_at` | When the source returned `state`. Required with `state`. |
 | `version` | The source's version marker for this change: the last part of `key` (DEC-9). Required with `state`. |
 | `close_only` | Ask keys on the item's subject. When set, the item closes only those of them that are open, however its rule or own act would otherwise close. A Slack deletion names the ask the deleted message opened, so other asks in its thread stay open. Kept in the stored decision. |
+| `native` | The source's own opaque id for the message or object: a Gmail message id, a Slack channel id and `ts` (`C0ENG:1794133800.000400`), a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person; an item whose `native` holds `@` is refused. A sealed event carries it as `metadata.native` (DEC-31). Kept in the stored decision. |
 | `close_siblings_before` | On an own act only, a decimal bound: it also closes an open ask on a sibling subject (one that differs from its own only in the last part) when that ask opened the subject (its key ends in that last part, so it is not a reply inside it) and that last part is less than the bound. Slack sets it to the `ts` of a top-level message in a one-to-one direct message, whose earlier top-level messages are each their own subject (DEC-10). The subject must have at least four parts before the last, so the siblings are one conversation. It is kept in the stored decision, so a retry closes the same asks. |
 
 ## The request body
@@ -71,7 +72,50 @@ Open asks are read from the outbox: bodies on the subject with `to` that are pen
 those any such body closes. Beacon writes every ask without `by`, so its integration actor is the asker; an own
 act closes as the addressee (through `by`), and a `close_by_others` event closes as the asker (DEC-27).
 
-A body over Signal's 64 KB request limit, or with a body over 64 KB, is not appended; the pass reports the item.
+A body over Signal's 64 KB request limit, or with a body over 64 KB, is sent without the body and marked truncated;
+if it still does not fit, it is held and the pass reports the item.
+
+### Sealed events
+
+A rule with `seal` ([`rules.md`](rules.md#sealed-rules)) builds a sealed write (Signal DEC-250 to DEC-264). Signal
+encrypts `sealed` at rest; the rest is the envelope, fixed in code (DEC-31):
+
+```json
+{
+  "subject": "gmail:winton:thread:18c2",
+  "type": "gmail.received",
+  "key": "gmail:18c2:18c9",
+  "occurred_at": "2026-11-11T17:00:00.000Z",
+  "open": {"title": "Q4 planning"},
+  "to": ["@winton"],
+  "priority": "high",
+  "metadata": {"fields": {"subject": "Q4 planning"}, "native": "18c9"},
+  "state": {"fields": {"starred": false, "unread": true}, "observed_at": "2026-11-11T18:00:00.000Z", "version": "18c9"},
+  "sealed": {
+    "level": "owner+agents",
+    "title": "Reply received",
+    "body": "…",
+    "metadata": {"actor": "email:rahul@example.com", "fields": {"from": "rahul@example.com"}, "references": ["jira:EN-12"]},
+    "state": {"labels": "INBOX", "last_from": "rahul@example.com"}
+  }
+}
+```
+
+| Part | Holds |
+| --- | --- |
+| Outside `sealed` | `subject`, `type`, `key`, `occurred_at`, `open`, `by` (own acts), `to`, `priority`, `due_at`, `closes`. No top-level `title` or `body`. `open.title` only from a field in `plain`, by the same order as a plain event (title, summary, subject); otherwise Signal titles a new thread "Sealed item". `metadata` holds only `fields` (the `plain` fields) and `native`. `state.fields` holds only `unread` and `starred`, as booleans, with `observed_at` and `version`; it is sent, possibly empty, whenever the rule lists a state field the item has. |
+| `sealed.level` | `owner` or `owner+agents`: the rule's level, raised on the machine (DEC-33 to DEC-35). |
+| `sealed.title` | The event title (the change's description), else the `title` field. |
+| `sealed.body` | The body, when the rule lists it. Cut to fit 64 KiB of sealed parts, with `sealed.metadata.truncated: true`. |
+| `sealed.metadata` | `actor`, `references`, `fields` with every listed field not in `plain` (a sealed `title` included), and `truncated`. |
+| `sealed.state` | Every listed state field other than the flags. |
+
+The key never holds `@` (Signal refuses one). A sealed write is up to 128 KB (Signal's `SEALED_REQUEST_MAX_BYTES`),
+its sealed parts up to 64 KiB, and its metadata up to 32 KB. It is appended to the outbox and resent byte for byte
+like any body (DEC-8); Signal compares a retry by decrypting what it stored (Signal DEC-260). `beacon outbox retry
+--rejected` never seals a refusal lower than it was decided, nor leaves more plain: it uses the higher of the stored
+level, the current rule's and the subject's floor, and only the fields both left plain. Signal answers `503
+unavailable` when it cannot reach KMS; the body stays pending.
 
 ### Thread titles
 

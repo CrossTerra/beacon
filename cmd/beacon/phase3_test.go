@@ -241,6 +241,7 @@ func TestGoogleStarterRules(t *testing.T) {
 		"drive:f1:comment:c2":               "send",
 		"drive:f2:comment:c7":               "send",
 		"drive:notes:n1":                    "send",
+		"drive:transcript:n5":               "never",
 	})
 	for _, line := range strings.Split(first, "\n") {
 		if strings.Contains(line, `"key":"gmail:t1:m2"`) && (strings.Contains(line, "Budget") || strings.Contains(line, "dana@") || !strings.Contains(line, `"link"`)) {
@@ -289,6 +290,7 @@ func TestGoogleStarterRules(t *testing.T) {
 		"drive:f1:reply:c1:r2":              "send",
 		"drive:f2:comment:c7":               "send",
 		"drive:notes:n1":                    "send",
+		"drive:transcript:n5":               "never",
 		"gmail:t5:m6":                       "hold",
 	})
 	if !strings.Contains(later, `"by":{"identity":"email:winton@example.com"}`) {

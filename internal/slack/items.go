@@ -44,6 +44,12 @@ func (s *Source) items(msgs pool, web string) ([]source.Item, int) {
 			dropped++
 			continue
 		}
+		// The thread root's text is matched for the raise too, when this pass read it (DEC-33).
+		if m.inThread() {
+			if root := msgs[m.channel+"/"+m.threadTS]; root != nil && root.text != "" {
+				it.Local.Text["thread_root"] = root.text
+			}
+		}
 		out = append(out, it)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
@@ -131,6 +137,12 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 		Fields:     fields,
 		References: references(m.text),
 		Version:    version,
+		Native:     m.channel + ":" + m.ts,
+		// The text is read on the machine whether or not a rule sends it, and matched for the raise (DEC-33).
+		Local: &source.Local{Text: map[string]string{}},
+	}
+	if m.text != "" {
+		it.Local.Text["body"] = m.text
 	}
 	switch typ {
 	case TypeOwn:
@@ -225,7 +237,7 @@ func (s *Source) checkDeleted(ctx context.Context, p *pass) ([]source.Item, erro
 		askKey, _ := source.FitKey(s.name+":"+channel+":"+ts, ts)
 		out = append(out, source.Item{
 			Source: s.name, Subject: a.Subject, Key: key, Type: TypeDeleted, EventTitle: "Deleted",
-			OccurredAt: obs, Fields: fields, Version: version, CloseOnly: []string{askKey},
+			OccurredAt: obs, Fields: fields, Version: version, CloseOnly: []string{askKey}, Native: channel + ":" + ts,
 		})
 	}
 	return out, nil

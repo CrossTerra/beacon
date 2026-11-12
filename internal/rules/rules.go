@@ -13,6 +13,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -32,6 +33,8 @@ const (
 const (
 	FieldActor      = "actor"
 	FieldReferences = "references"
+	// FieldBody is the body: it leaves from a personal source only sealed (DEC-32).
+	FieldBody = "body"
 )
 
 var priorities = map[string]bool{"low": true, "medium": true, "high": true, "urgent": true}
@@ -51,6 +54,10 @@ type Rule struct {
 	Ask           string   `yaml:"ask,omitempty"`
 	Priority      string   `yaml:"priority,omitempty"`
 	CloseByOthers bool     `yaml:"close_by_others,omitempty"`
+	// Seal is owner or owner+agents: the listed fields go in the request's sealed part, except Plain (DEC-30).
+	Seal string `yaml:"seal,omitempty"`
+	// Plain names listed fields that stay outside sealed. Never body, actor or references.
+	Plain []string `yaml:"plain,omitempty"`
 
 	// Index is the rule's position in the file, from 1.
 	Index int `yaml:"-"`
@@ -254,8 +261,8 @@ func (f *File) validate() error {
 		switch r.Tier {
 		case Send, Hold:
 		case Never:
-			if len(r.Fields) > 0 || len(r.State) > 0 || r.Ask != "" || r.Priority != "" || r.CloseByOthers {
-				errs = append(errs, fmt.Errorf("%s: a never rule takes no fields, state, ask, priority or close_by_others", at))
+			if len(r.Fields) > 0 || len(r.State) > 0 || r.Ask != "" || r.Priority != "" || r.CloseByOthers || r.Seal != "" || len(r.Plain) > 0 {
+				errs = append(errs, fmt.Errorf("%s: a never rule takes no fields, state, ask, priority, close_by_others, seal or plain", at))
 			}
 		case "":
 			errs = append(errs, fmt.Errorf("%s: tier is required: send, hold or never", at))
@@ -273,10 +280,28 @@ func (f *File) validate() error {
 				errs = append(errs, fmt.Errorf("%s: priority applies to an ask: set ask: me", at))
 			}
 		}
+		if r.Seal != "" && !seal.Valid(r.Seal) {
+			errs = append(errs, fmt.Errorf("%s: seal %q is not owner or owner+agents", at, r.Seal))
+		}
+		if len(r.Plain) > 0 && r.Seal == "" {
+			errs = append(errs, fmt.Errorf("%s: plain names what a sealed rule leaves outside sealed: set seal", at))
+		}
+		listed := map[string]bool{}
+		for _, name := range r.Fields {
+			listed[name] = true
+		}
+		for _, name := range r.Plain {
+			switch {
+			case name == FieldBody || name == FieldActor || name == FieldReferences:
+				errs = append(errs, fmt.Errorf("%s: plain may not hold %s: it leaves only sealed (DEC-30, DEC-31)", at, name))
+			case name != "" && !listed[name]:
+				errs = append(errs, fmt.Errorf("%s: plain names %q, which fields does not list", at, name))
+			}
+		}
 		for _, list := range []struct {
 			key   string
 			names []string
-		}{{"fields", r.Fields}, {"state", r.State}} {
+		}{{"fields", r.Fields}, {"state", r.State}, {"plain", r.Plain}} {
 			seen := map[string]bool{}
 			for _, name := range list.names {
 				if name == "" {
@@ -380,9 +405,28 @@ func (f *File) Decide(it source.Item) Decision {
 
 // Lists reports whether a send or hold rule that can match the source names field in its fields. A source uses it
 // to skip reading what no rule could send.
-func (f *File) Lists(sourceName, field string) bool {
+func (f *File) Lists(sourceName, field string) bool { return f.lists(sourceName, field, false) }
+
+// ListsSealed reports whether a sealed send or hold rule that can match the source names field. A Google source reads
+// bodies only then (DEC-32).
+func (f *File) ListsSealed(sourceName, field string) bool { return f.lists(sourceName, field, true) }
+
+// ListsBody reports whether the rule names body.
+func (r *Rule) ListsBody() bool {
+	for _, name := range r.Fields {
+		if name == FieldBody {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *File) lists(sourceName, field string, sealed bool) bool {
 	for _, r := range f.Rules {
 		if r.Tier != Send && r.Tier != Hold {
+			continue
+		}
+		if sealed && r.Seal == "" {
 			continue
 		}
 		if r.Match.Source != nil && !r.Match.Source.Matches(sourceName) {

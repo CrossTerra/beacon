@@ -15,6 +15,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -44,6 +45,8 @@ type Config struct {
 	Lease   Lease    `yaml:"lease,omitempty"`
 	Poll    Duration `yaml:"poll_interval,omitempty"`
 	Sources []Source `yaml:"sources"`
+	// Seal raises items to owner on the machine (DEC-33).
+	Seal Seal `yaml:"seal,omitempty"`
 
 	// Path is the file the config was read from.
 	Path string `yaml:"-"`
@@ -61,6 +64,11 @@ type Person struct {
 	Handle string `yaml:"handle"`
 	// Identities maps a source name to the person's own identity there. `by` is set from it on own acts (DEC-27).
 	Identities map[string]string `yaml:"identities,omitempty"`
+}
+
+// Seal configures the local raise (DEC-33). owner lists words, senders and labels that seal an item at owner.
+type Seal struct {
+	Owner seal.OwnerList `yaml:"owner,omitempty"`
 }
 
 // Lease configures the send lease (DEC-25).
@@ -215,6 +223,9 @@ func (c *Config) validate() error {
 	}
 	if c.PollInterval() <= 0 || c.PollInterval() > c.LeasePeriod()/2 {
 		errs = append(errs, errors.New("poll_interval must be positive and at most half of lease.period, so the lease is renewed in time"))
+	}
+	if err := c.Seal.Owner.Validate(); err != nil {
+		errs = append(errs, err)
 	}
 	names := map[string]int{}
 	for i, s := range c.Sources {

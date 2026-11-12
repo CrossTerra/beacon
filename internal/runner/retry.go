@@ -10,7 +10,9 @@ import (
 	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/project"
 	"github.com/CrossTerra/beacon/internal/rules"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/signal"
+	"github.com/CrossTerra/beacon/internal/source"
 )
 
 // RetryReport is what an explicit retry of refused events did. The counts are the only thing logged.
@@ -168,8 +170,26 @@ func (r *Runner) reproject(raw []byte, view *asks) (*project.Body, []byte, rules
 	if rule == nil {
 		return nil, nil, rules.Never, nil
 	}
-	b, body, _, err := r.project(d.Item, rule, view)
+	// Never lower than the stored level, the current rule's or the subject's floor. The stored item keeps no text to
+	// match seal.owner again, so the stored level carries the earlier raise.
+	level := seal.Max(seal.Level(rule.Seal), r.Floor.Get(d.Item.Subject))
+	personal := source.PersonalStem(d.Item.Subject) != ""
+	if level != seal.None && !personal {
+		return nil, nil, rules.Hold, nil
+	}
+	if level == seal.None && project.NeedsSeal(d.Item, rule) {
+		return nil, nil, rules.Hold, nil
+	}
+	if level != seal.Level(rule.Seal) {
+		// Raised by the floor: as on a first decision, a raised item leaves nothing plain.
+		rule.Plain = nil
+	}
+	rule.Seal = string(level)
+	b, body, _, err := r.project(d.Item, rule, view, level)
 	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := r.Floor.Raise(d.Item.Subject, level, true); err != nil {
 		return nil, nil, "", err
 	}
 	return b, body, rules.Send, nil

@@ -9,6 +9,7 @@ same pull request.
 | Leaves the machine | Never leaves the machine |
 | --- | --- |
 | Events a rule sent: the projected fields and state fields, plus an event title that describes the change | Source credentials (OAuth clients, refresh and access tokens, API tokens) |
+| A sealed event's `sealed` part (DEC-30): in plaintext over TLS, like any write; Signal encrypts it at rest with KMS and opens it only for the callers its level allows. Beacon holds no keys. Its envelope (subject, type, key, the ask, `unread` and `starred`, the fields a rule leaves `plain`, the source's opaque `native` id) is plaintext in Signal | `seal.owner`'s words, senders and labels, what matched them, and the subject floor (`seal-floor.json`: a level per subject hash) |
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
@@ -40,10 +41,19 @@ same pull request.
    lists them. Slack names are read only when a rule lists one of those three fields. A thread Beacon opened before
    its rule listed `title` is renamed (`thread.titled`) only when the current rule for the stored item still sends it
    and lists `title`, Signal shows that Beacon's own event opened that thread, and nobody renamed or merged it since.
+   A thread title is plain, so a stored event that was sealed, a sealed rule that does not leave `title` plain, or a
+   subject Beacon has sent sealed is never retitled.
    A thread someone else opened or renamed is not touched. A Google source does not even read a mail body, an event
-   description, comment text or meeting notes unless a rule that can match it lists `body`. Slack returns a message's
-   text with the message, so the Slack source reads it on the machine to find mentions, review wording and links; it
-   leaves only as `body`, when a rule lists it.
+   description, comment text, meeting notes or a transcript unless a sealed rule that can match it lists `body`.
+   Slack returns a message's text with the message, so the Slack source reads it on the machine to find mentions,
+   review wording and links, and to match `seal.owner`; it leaves only as `body`, when a rule lists it. **A body from a
+   personal subject leaves only sealed (DEC-32)**: `beacon rules check` refuses a rule that would send one plain, and
+   at run time such an item is held as `body_needs_seal`. On a sealed event the envelope is fixed in code (DEC-31):
+   the event title, the body, who caused it (`actor`), `references`, and every field and state field the rule does
+   not leave `plain` go in `sealed`; `metadata.native` is the source's opaque id, never a Message-ID or anything
+   with `@`. The local check (`seal.owner`, DEC-33), a meeting's level (DEC-35) and the subject floor (DEC-34) can
+   only raise a level: they never lower or unseal one, add a field, or send an item a rule dropped. The log counts
+   raises and never says why.
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit
    setting, shown by `beacon egress`, because it sends item content to that model's vendor before the filter
    decides.
@@ -98,7 +108,9 @@ same pull request.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
    person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and
    private channels; a Slack channel is public only when Slack says so (`is_private: false`), and any other is
-   treated as private. Those stems are fixed, not taken from the enabled sources, so a body
+   treated as private. Bodies from these subjects leave only sealed (property 3). Signal seals only a person's own
+   subjects, so an item on a shared subject that would be sealed (a public channel message matching `seal.owner`) is
+   held as `sensitive_shared`, not sent plain. Those stems are fixed, not taken from the enabled sources, so a body
    already in the outbox stays personal after its source is removed. A send pass reads Signal's restricted prefixes
    when a personal source is enabled or the outbox holds a pending or rejected event under one of those stems, and
    again immediately before pending bodies are sent, so a restriction lifted during the pass is honoured. It sends
@@ -118,8 +130,18 @@ same pull request.
 
 ## Known limits
 
-- **Signal cannot delete.** Events are immutable and redaction is not built. A rule that sends too much cannot be
-  undone after the send. New rules should start as `hold` until their output has been checked.
+- **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in
+  plain cannot be undone after the send. New plain rules should start as `hold` until their output has been checked
+  (`beacon rules check` warns on a `send` rule with plaintext personal content, DEC-36). A sealed item's sealed part
+  can be removed by the person (`sealed.removed`, Signal DEC-256); its envelope stays, and a backup restored from
+  before the removal brings it back.
+- **Signal can read sealed items.** Sealing protects content at rest: a database dump, a backup or an admin-minted key
+  for `owner` items sees ciphertext. Signal itself decrypts through KMS to answer reads; who can make it do so, and
+  how each is recorded, is Signal DEC-261. `owner+agents` items open for the person's agents, which may pass the text
+  to model providers.
+- **The raise is only as good as its lists.** `seal.owner` matches whole words, senders and labels the source read
+  on the machine. A Google body is matched only when a sealed rule made the source read it, and a Slack thread root
+  only when the pass read it. Content that does not use the listed words leaves at its rule's level.
 - **Signal has no per-event visibility yet.** Until it does, any key that can read the store can read every event
   Beacon sends, including full bodies a rule allowed. Rules that send bodies from personal sources (direct mail,
   direct messages, private files) should wait for visibility, or be limited to content the whole organization may

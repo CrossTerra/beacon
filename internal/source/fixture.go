@@ -20,10 +20,16 @@ type Fixture struct {
 }
 
 type fixtureFile struct {
-	Source      string   `json:"source"`
-	Fields      []string `json:"fields"`
-	StateFields []string `json:"state_fields"`
-	Items       []Item   `json:"items"`
+	Source      string        `json:"source"`
+	Fields      []string      `json:"fields"`
+	StateFields []string      `json:"state_fields"`
+	Items       []fixtureItem `json:"items"`
+}
+
+// fixtureItem is an item with what it gives the raise (Local), which an Item never serialises.
+type fixtureItem struct {
+	Item
+	Local *Local `json:"local,omitempty"`
 }
 
 // LoadFixture reads a fixture file. Unknown keys are errors, and every item must validate.
@@ -47,23 +53,28 @@ func LoadFixture(path string) (*Fixture, error) {
 	if dec.More() {
 		return nil, fmt.Errorf("%s: more than one JSON value", path)
 	}
-	seen := map[string]bool{}
+	items := make([]Item, len(f.Items))
 	for i := range f.Items {
-		if f.Items[i].Source == "" {
-			f.Items[i].Source = f.Source
+		items[i] = f.Items[i].Item
+		items[i].Local = f.Items[i].Local
+	}
+	seen := map[string]bool{}
+	for i := range items {
+		if items[i].Source == "" {
+			items[i].Source = f.Source
 		}
-		if f.Items[i].Source != f.Source {
-			return nil, fmt.Errorf("%s: item %d names source %q, not %q", path, i, f.Items[i].Source, f.Source)
+		if items[i].Source != f.Source {
+			return nil, fmt.Errorf("%s: item %d names source %q, not %q", path, i, items[i].Source, f.Source)
 		}
-		if err := Validate(f.Items[i], f.Fields, f.StateFields); err != nil {
+		if err := Validate(items[i], f.Fields, f.StateFields); err != nil {
 			return nil, fmt.Errorf("%s: item %d: %w", path, i, err)
 		}
-		if seen[f.Items[i].Key] {
-			return nil, fmt.Errorf("%s: item %d repeats key %q", path, i, f.Items[i].Key)
+		if seen[items[i].Key] {
+			return nil, fmt.Errorf("%s: item %d repeats key %q", path, i, items[i].Key)
 		}
-		seen[f.Items[i].Key] = true
+		seen[items[i].Key] = true
 	}
-	return &Fixture{name: f.Source, fields: f.Fields, stateFields: f.StateFields, items: f.Items}, nil
+	return &Fixture{name: f.Source, fields: f.Fields, stateFields: f.StateFields, items: items}, nil
 }
 
 // Name implements Source.
