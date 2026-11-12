@@ -1,0 +1,88 @@
+# Sealed rules: Winton's worked example from plans/phase-10.md. Gmail and Slack bodies are sealed everywhere except
+# public Slack channels. Check it with: beacon rules check
+#
+# seal: owner opens only for you, signed in to Signal's website; seal: owner+agents also for the agents that work for
+# you. Signal encrypts the sealed part at rest; Beacon holds no keys. Outside it only the envelope stays plain: the
+# subject id, the type, the key, the ask, unread and starred, and the fields a rule names in plain.
+#
+# Placeholders in angle brackets are filled in before use. The Gemini notes sender is provisional until a live dry
+# run confirms it, and how Meet transcripts arrive (by mail, or as Drive documents attached to the meeting, which
+# notes-and-transcripts reads).
+#
+# The config's seal.owner raises anything a rule sends to owner when a word, a sender or a label matches, on this
+# machine; it never lowers a level or revives never:
+#
+#   seal:
+#     owner:
+#       words: [salary, comp, compensation, offer, termination, "background check", incident, intrusion, legal,
+#               confidential, payroll, equity, vesting, {exact: PIP}]
+#       senders: [remotely.works, rippling.com, carta.com, <counsel-domain>, <accounting-domain>, <payroll-domain>]
+#       labels: [Confidential]
+
+rules:
+  # Owner only. Before the bulk rule, so their automated mail is kept.
+  - name: owner-senders
+    match:
+      source: gmail
+      fields:
+        thread_participants: {regex: '.*@(remotely\.works|rippling\.com|carta\.com|<counsel>|<accounting>|<payroll>)(, .*)?'}
+    tier: send
+    seal: owner
+    fields: [subject, body, actor, from, to]
+    ask: me
+  - name: owner-label
+    match: {source: gmail, fields: {labels: {regex: '(.*, )?Confidential(, .*)?'}}}
+    tier: send
+    seal: owner
+    fields: [subject, body, actor, from, to]
+    ask: me
+
+  # Meeting notes and transcripts: owner+agents, raised to owner by their meeting (DEC-35).
+  - name: gemini-notes-mail
+    match: {source: gmail, fields: {from: gemini-notes@google.com}}
+    tier: send
+    seal: owner+agents
+    fields: [subject, body]
+  - name: notes-and-transcripts
+    match: {source: drive, type: {regex: '(notes|transcript)_created'}}
+    tier: send
+    seal: owner+agents
+    fields: [title, meeting, meeting_start, body]
+
+  # Never: bulk mail.
+  - name: bulk
+    match: {source: gmail, fields: {bulk: "true"}}
+    tier: never
+
+  # Owner+agents: the CEO, colleagues, direct messages and private channels.
+  - name: rahul-mail
+    match: {source: gmail, fields: {participants: {regex: '(.*, )?<rahul-address>(, .*)?'}}}
+    tier: send
+    seal: owner+agents
+    fields: [subject, body, actor, from, to]
+    ask: me
+  - name: employees
+    match: {source: gmail, fields: {from: {regex: '.*@crossterra\.co'}}}
+    tier: send
+    seal: owner+agents
+    fields: [subject, body, actor, from, to]
+  - name: slack-private
+    match: {source: slack, fields: {channel_type: {regex: 'im|mpim|private'}}}
+    tier: send
+    seal: owner+agents
+    fields: [body, actor, permalink, references]
+    ask: me
+
+  # Other mail from real people: the body sealed, the subject plain, so held until checked (DEC-36).
+  - name: other-mail
+    match: {source: gmail, type: received}
+    tier: hold
+    seal: owner+agents
+    plain: [subject]
+    fields: [subject, body, actor, from]
+
+  # Plain: public Slack channels.
+  - name: public-channels
+    match: {source: slack, fields: {channel_type: channel}}
+    tier: send
+    fields: [body, permalink, references]

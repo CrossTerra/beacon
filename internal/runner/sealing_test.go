@@ -327,7 +327,9 @@ func TestCalendarAndNotesTakeTheirLevel(t *testing.T) {
 		return it
 	}
 	bySummary := event(0, "e1", func(l *source.Local) { l.Text["summary"] = "Offer discussion" })
-	byAttendee := event(1, "e2", func(l *source.Local) { l.Addresses["attendee_addresses"] = []string{"a@remotely.works", "lee@crossterra.co"} })
+	byAttendee := event(1, "e2", func(l *source.Local) {
+		l.Addresses["attendee_addresses"] = []string{"a@remotely.works", "lee@crossterra.co"}
+	})
 	quiet := event(2, "e3", func(*source.Local) {})
 	note := func(n int, id, meeting string, mod func(*source.Local)) source.Item {
 		it := mail(n, id, nil)

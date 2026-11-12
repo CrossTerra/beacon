@@ -55,6 +55,9 @@ const (
 	PersonalNone Personal = iota
 	PersonalAll
 	PersonalSome
+	// PersonalMaybe is a source whose subjects check cannot know (a fixture): a seal there is not an error, and the
+	// run still holds a personal body that would leave plain.
+	PersonalMaybe
 )
 
 // Check reports rules that can never match under the enabled sources, fields and state fields a rule sends that no
@@ -139,17 +142,19 @@ func (f *File) Check(sources map[string]Source) []Problem {
 // person's own subjects), and, as a warning, a send rule with plaintext personal content (DEC-36).
 func (r *Rule) checkSeal(srcs []string, sources map[string]Source) []Problem {
 	var personal []string
+	maybe := false
 	for _, n := range srcs {
 		if r.canBePersonal(sources[n]) {
 			personal = append(personal, n)
 		}
+		maybe = maybe || sources[n].Personal == PersonalMaybe
 	}
 	var out []Problem
 	switch {
 	case r.Seal == "" && r.ListsBody() && len(personal) > 0:
 		out = append(out, Problem{Rule: r, Message: fmt.Sprintf(
 			"lists body and can match personal items from %s: a personal body leaves only sealed; add seal: owner or seal: owner+agents (DEC-32)", strings.Join(personal, ", "))})
-	case r.Seal != "" && len(personal) == 0:
+	case r.Seal != "" && len(personal) == 0 && !maybe:
 		out = append(out, Problem{Rule: r, Message: fmt.Sprintf(
 			"seal: Signal seals only a person's own subjects, and %s items here are shared", strings.Join(srcs, ", "))})
 	}

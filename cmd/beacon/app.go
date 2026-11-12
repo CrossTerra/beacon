@@ -259,6 +259,9 @@ func (e *env) checkSources() map[string]rules.Source {
 		if _, ok := s.(*slack.Source); ok {
 			rs.Personal, rs.PersonalField, rs.PersonalValues = rules.PersonalSome, "channel_type", slack.PersonalKinds
 		}
+		if !live(s) {
+			rs.Personal = rules.PersonalMaybe
+		}
 		out[s.Name()] = rs
 	}
 	return out
