@@ -138,13 +138,14 @@ the callers the level allows (Signal DEC-250 to DEC-254). Beacon handles no keys
   source read on the machine, whether or not the rule sends it: Gmail's subject, body, labels and thread
   participants; Calendar's summary, description, organiser and attendees; Drive's title and body, and for notes and
   transcripts their meeting's title, organiser and attendees; Slack's text and its thread root's text. The raise
-  cannot lower a level, unseal, add a field or revive `never`. A match on a shared subject (a public Slack channel) is
-  held as `sensitive_shared`, since Signal could not seal it.
+  cannot lower a level, unseal, add a field or revive `never`. A raised item leaves nothing plain: its rule's `plain`
+  fields are sealed too, since a plain subject could hold the word that raised it. A match on a shared subject (a
+  public Slack channel) is held as `sensitive_shared`, since Signal could not seal it.
 - **Notes take their meeting's level (DEC-35).** A note or transcript is `owner` when its meeting matches
   `seal.owner`, or when Beacon sent the meeting's calendar event at `owner`.
 - **A subject never goes down (DEC-34).** Beacon keeps the highest level it sent per subject (as a hash, in
   `seal-floor.json` in the state directory) and seals every later item there at least that high, a rule that sends
-  plain included.
+  plain included; an item the floor raises leaves nothing plain either.
 - A body over Signal's limits is cut to fit the 64 KiB of sealed parts and marked `truncated` inside `sealed`.
 
 `beacon explain` shows an item's level and what raised it. The log counts sealed and raised items and never says why.

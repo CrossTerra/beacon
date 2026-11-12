@@ -55,6 +55,17 @@ func (r *Runner) sealing(it source.Item, rule *rules.Rule) sealing {
 	return s
 }
 
+// rule is the rule the item is projected with: the rule itself, or, when something raised the item above the rule's
+// level, a copy that leaves nothing plain. A raised item's plain subject could hold the very word that raised it.
+func (s sealing) rule(r *rules.Rule) *rules.Rule {
+	if len(s.Raised) == 0 || len(r.Plain) == 0 {
+		return r
+	}
+	cp := *r
+	cp.Plain = nil
+	return &cp
+}
+
 // logSeal logs what this pass sealed, raised and held for sealing: counts and levels only, never why (AGENTS.md).
 func (r *Runner) logSeal() {
 	c := r.sealCounts

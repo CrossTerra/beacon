@@ -535,8 +535,10 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		p.Unaccepted = true
 	}
 	var level seal.Level
+	rule := d.Rule
 	if d.Tier == rules.Send || d.Tier == rules.Hold {
 		sl := r.sealing(it, d.Rule)
+		rule = sl.rule(d.Rule)
 		level = sl.Level
 		p.Level, p.Raised = sl.Level, len(sl.Raised) > 0
 		if sl.Held != "" {
@@ -563,13 +565,13 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		case logs.ReasonUnrestricted:
 			// Signal would show it to every reader. Hold it locally instead.
 			p.Tier = rules.Hold
-			_, body, _, err := r.project(it, d.Rule, view, level)
+			_, body, _, err := r.project(it, rule, view, level)
 			p.Body, p.Err = body, err
 			return p, r.Queue.Hold(queue.Held{Key: it.Key, Rule: p.Rule, HeldAt: r.Now().UTC(), Item: it, Level: string(level)})
 		case logs.ReasonRestrictionsUnknown:
 			// Not recorded, and the cursor stays: a later pass that can read the restrictions decides it again.
 			r.deferred[it.Source] = true
-			_, body, _, err := r.project(it, d.Rule, view, level)
+			_, body, _, err := r.project(it, rule, view, level)
 			p.Body, p.Err = body, err
 			return p, nil
 		}
@@ -582,7 +584,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		return r.finishNever(p)
 	case rules.Hold:
 		// The body shown for a held item is a preview; it is built again when the person approves it.
-		_, body, _, err := r.project(it, d.Rule, view, level)
+		_, body, _, err := r.project(it, rule, view, level)
 		p.Body = body
 		if err != nil {
 			p.Err = err
@@ -592,7 +594,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		}
 		return p, nil
 	}
-	b, body, truncated, err := r.project(it, d.Rule, view, level)
+	b, body, truncated, err := r.project(it, rule, view, level)
 	if err != nil {
 		// A body or request over Signal's limit is not dropped. Hold it so the person can still see it.
 		p.Err = err
@@ -608,7 +610,7 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		// Later items in this pass see the level, as they would after a send. Nothing is written.
 		return p, r.Floor.Raise(it.Subject, level, false)
 	}
-	decided, err := json.Marshal(project.Decide(it, d.Rule, truncated, level))
+	decided, err := json.Marshal(project.Decide(it, rule, truncated, level))
 	if err != nil {
 		return p, err
 	}
@@ -939,7 +941,7 @@ func (r *Runner) Explain(ctx context.Context, key string) (*Explanation, error) 
 		}
 		if ex.Entry == nil && sl.Held == "" {
 			open := (&asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}).forItem(it)
-			_, ex.Body, ex.Err = project.Project(project.Input{Item: it, Rule: d.Rule, Person: r.Person, OpenAsks: open, Level: sl.Level})
+			_, ex.Body, ex.Err = project.Project(project.Input{Item: it, Rule: sl.rule(d.Rule), Person: r.Person, OpenAsks: open, Level: sl.Level})
 		}
 		break
 	}

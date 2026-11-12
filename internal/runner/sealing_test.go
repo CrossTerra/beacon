@@ -49,6 +49,12 @@ const sealRules = `rules:
     match: {fields: {labels: plainbody}}
     tier: send
     fields: [subject, body]
+  - name: plain-subject
+    match: {fields: {labels: plainsubject}}
+    tier: send
+    seal: owner+agents
+    plain: [subject]
+    fields: [subject, from]
   - name: public
     match: {fields: {channel_type: channel}}
     tier: send
@@ -388,5 +394,28 @@ func TestRetryNeverSealsLower(t *testing.T) {
 	ev, _ := f.server.Event(it.Key)
 	if strings.Contains(string(ev.Body), "CANARY-BODY") || strings.Contains(string(ev.Body[:strings.Index(string(ev.Body), `"sealed"`)]), "CANARY-SUBJECT") {
 		t.Fatalf("retry widened: %s", ev.Body)
+	}
+}
+
+// A raised item leaves nothing plain: its plain subject could hold the word that raised it.
+func TestRaisedItemLeavesNothingPlain(t *testing.T) {
+	quiet := mail(0, "q", func(it *source.Item) { it.Fields["labels"] = "plainsubject" })
+	loud := mail(1, "l", func(it *source.Item) {
+		it.Fields["labels"] = "plainsubject"
+		it.Fields["subject"] = "CANARY salary review"
+		it.Local.Text["subject"] = it.Fields["subject"]
+	})
+	f := newSealFixture(t, quiet, loud)
+	f.pass(true)
+	outside := func(key string) string {
+		ev, _ := f.server.Event(key)
+		b := string(ev.Body)
+		return b[:strings.Index(b, `"sealed"`)]
+	}
+	if f.level(quiet.Key) != "owner+agents" || !strings.Contains(outside(quiet.Key), "CANARY-SUBJECT-q") {
+		t.Fatalf("quiet: %s", outside(quiet.Key))
+	}
+	if f.level(loud.Key) != "owner" || strings.Contains(outside(loud.Key), "salary") {
+		t.Fatalf("loud: %s", outside(loud.Key))
 	}
 }

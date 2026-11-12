@@ -180,6 +180,10 @@ func (r *Runner) reproject(raw []byte, view *asks) (*project.Body, []byte, rules
 	if level == seal.None && project.NeedsSeal(d.Item, rule) {
 		return nil, nil, rules.Hold, nil
 	}
+	if level != seal.Level(rule.Seal) {
+		// Raised by the floor: as on a first decision, a raised item leaves nothing plain.
+		rule.Plain = nil
+	}
 	rule.Seal = string(level)
 	b, body, _, err := r.project(d.Item, rule, view, level)
 	if err != nil {
