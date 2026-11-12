@@ -1143,7 +1143,7 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 	r := &runner.Runner{
 		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf, Floor: floor,
 		SealOwner: &e.cfg.Seal.Owner,
-		Personal: personal(e.sources), Restrictions: client,
+		Personal:  personal(e.sources), Restrictions: client,
 		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 			Period: e.cfg.LeasePeriod(), Now: a.now},
 	}

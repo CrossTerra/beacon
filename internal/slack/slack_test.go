@@ -791,3 +791,29 @@ func TestBroadcastOnlyInConfiguredChannels(t *testing.T) {
 		t.Fatal("@everyone in a configured channel is not a mention")
 	}
 }
+
+// The raise reads a message's text, and its thread root's, whether or not a rule sends them; the native id is the
+// channel and ts (DEC-31, DEC-33).
+func TestLocalTextAndNative(t *testing.T) {
+	srv := slacktest.New(t)
+	s, _ := newSource(t, srv)
+	got, err := s.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items)
+	dm := m["slack:D0DANA:1794132000.000100"]
+	if _, ok := dm.Fields["body"]; ok {
+		t.Fatal("a body without a rule listing it")
+	}
+	if dm.Local == nil || dm.Local.Text["body"] != "Can you check the deploy?" || dm.Native != "D0DANA:1794132000.000100" {
+		t.Fatalf("dm %q %+v", dm.Native, dm.Local)
+	}
+	reply := m["slack:C0ENG:1794134500.000750"]
+	if reply.Local.Text["body"] != "I'll handle it" || reply.Local.Text["thread_root"] != "<@U0WINTON> can you look at the alerts?" {
+		t.Fatalf("reply local %+v", reply.Local)
+	}
+	if strings.Contains(reply.Native, "@") {
+		t.Fatal("native holds @")
+	}
+}

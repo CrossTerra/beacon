@@ -74,6 +74,8 @@ func New(t testing.TB) *Server {
 		"/drive/v3/files/f1/comments":           text(CommentsF1),
 		"/drive/v3/files/n1":                    text(NotesN1),
 		"/drive/v3/files/n1/export":             text("Weekly sync\nDecisions: ship on Friday.\n"),
+		"/drive/v3/files/n5":                    text(TranscriptN5),
+		"/drive/v3/files/n5/export":             text("Dana: the offer goes out Monday.\n"),
 	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
@@ -233,14 +235,14 @@ const (
 
 	ThreadT1 = `{"id":"t1","messages":[
   {"id":"m1","threadId":"t1","labelIds":["INBOX","UNREAD","STARRED","Label_1"],"internalDate":"1794132000000","payload":{"headers":[
-    {"name":"From","value":"Dana Lee <dana@example.com>"},{"name":"To","value":"Winton <winton@example.com>, ops@example.com"},{"name":"Subject","value":"Budget review"}]}},
+    {"name":"From","value":"Dana Lee <dana@example.com>"},{"name":"To","value":"Winton <winton@example.com>, ops@example.com"},{"name":"Cc","value":"Lee <LEE@example.com>"},{"name":"Subject","value":"Budget review"}]}},
   {"id":"m2","threadId":"t1","labelIds":["SENT"],"internalDate":"1794133800000","payload":{"headers":[
     {"name":"From","value":"Winton <winton@example.com>"},{"name":"To","value":"dana@example.com"},{"name":"Subject","value":"Re: Budget review"}]}}
 ]}`
 
 	ThreadT2 = `{"id":"t2","messages":[
   {"id":"m3","threadId":"t2","labelIds":["INBOX","UNREAD","Label_1"],"internalDate":"1794135600000","payload":{"headers":[
-    {"name":"From","value":"bob@example.com"},{"name":"To","value":"team@example.com"},{"name":"Subject","value":"FYI"}]}}
+    {"name":"From","value":"bob@example.com"},{"name":"To","value":"team@example.com"},{"name":"Subject","value":"FYI"},{"name":"List-Id","value":"Team <team.example.com>"}]}}
 ]}`
 
 	ThreadT3 = `{"id":"t3","messages":[
@@ -359,8 +361,9 @@ const (
 
 	NotesEvents = `{"timeZone":"America/Los_Angeles","items":[
   {"id":"evA","status":"confirmed","summary":"Weekly sync","start":{"dateTime":"2026-11-07T15:00:00Z"},"end":{"dateTime":"2026-11-07T16:00:00Z"},"updated":"2026-11-08T11:00:00Z",
-   "organizer":{"self":false},"attendees":[{"self":true,"responseStatus":"accepted"}],
-   "attachments":[{"fileId":"n1","title":"Weekly sync - 2026/11/07 15:00 GMT - Notes by Gemini","mimeType":"application/vnd.google-apps.document"}]},
+   "organizer":{"email":"Dana@example.com","self":false},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"},{"email":"pay@remotely.works","responseStatus":"accepted"}],
+   "attachments":[{"fileId":"n1","title":"Weekly sync - 2026/11/07 15:00 GMT - Notes by Gemini","mimeType":"application/vnd.google-apps.document"},
+     {"fileId":"n5","title":"Weekly sync - 2026/11/07 15:00 GMT - Transcript","mimeType":"application/vnd.google-apps.document"}]},
   {"id":"evB","status":"confirmed","summary":"Skipped","start":{"dateTime":"2026-11-07T17:00:00Z"},"end":{"dateTime":"2026-11-07T18:00:00Z"},"updated":"2026-11-08T11:00:00Z",
    "organizer":{"self":false},"attendees":[{"self":true,"responseStatus":"declined"}],
    "attachments":[{"fileId":"n2","title":"Skipped - Notes by Gemini","mimeType":"application/vnd.google-apps.document"}]},
@@ -371,6 +374,8 @@ const (
    "organizer":{"self":true},
    "attachments":[{"fileId":"n4","title":"Later today - Notes by Gemini","mimeType":"application/vnd.google-apps.document"}]}
 ]}`
+
+	TranscriptN5 = `{"id":"n5","name":"Weekly sync - 2026/11/07 15:00 GMT - Transcript","mimeType":"application/vnd.google-apps.document","webViewLink":"https://docs.google.com/document/d/n5/edit","createdTime":"2026-11-07T16:06:00Z"}`
 
 	NotesN1 = `{"id":"n1","name":"Weekly sync - 2026/11/07 15:00 GMT - Notes by Gemini","mimeType":"application/vnd.google-apps.document","webViewLink":"https://docs.google.com/document/d/n1/edit","createdTime":"2026-11-07T16:05:00Z"}`
 )

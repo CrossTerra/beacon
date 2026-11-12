@@ -802,6 +802,7 @@ func TestDriveEveryItem(t *testing.T) {
 		"drive:f1:reply:c1:r2 mentioned",
 		"drive:f2:comment:c7 mentioned",
 		"drive:notes:n1 notes_created",
+		"drive:transcript:n5 transcript_created",
 	}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v (f2 was not modified; it was opened recently)", keys(m))
@@ -831,6 +832,20 @@ func TestDriveEveryItem(t *testing.T) {
 	if _, ok := notes.Fields["body"]; ok {
 		t.Fatal("notes carried content")
 	}
+	// DEC-37: the meeting's organiser and attendees; DEC-35: the meeting's calendar subject, for its level.
+	if notes.Fields["meeting_organizer"] != "dana@example.com" || notes.Fields["meeting_attendees"] != "pay@remotely.works, winton@example.com" ||
+		notes.Native != "n1" || notes.Local == nil || notes.Local.Meeting != "calendar:winton:evA" ||
+		strings.Join(notes.Local.Addresses["meeting_attendees"], ",") != "pay@remotely.works,winton@example.com" || notes.Local.Text["meeting"] != "Weekly sync" {
+		t.Fatalf("notes meeting %+v %+v", notes.Fields, notes.Local)
+	}
+	tr := m["drive:transcript:n5"]
+	if tr.Type != TypeTranscriptCreated || tr.Subject != "drive:winton:n5" || tr.EventTitle != "Transcript created" || tr.Fields["meeting"] != "Weekly sync" ||
+		tr.Fields["meeting_organizer"] != "dana@example.com" || tr.Local.Meeting != "calendar:winton:evA" {
+		t.Fatalf("transcript %+v", tr)
+	}
+	if assigned.Native != "f1" || assigned.Local.Text["title"] != "Q4 plan" {
+		t.Fatalf("comment native and local %q %+v", assigned.Native, assigned.Local)
+	}
 	for _, it := range got.Items {
 		if _, ok := it.Fields["body"]; ok {
 			t.Fatalf("%s carried a body", it.Key)
@@ -842,6 +857,9 @@ func TestDriveEveryItem(t *testing.T) {
 		t.Fatal(err)
 	}
 	m = byKey(t, withBody.Items, DriveFields, DriveStateFields)
+	if m["drive:transcript:n5"].Fields["body"] != "Dana: the offer goes out Monday.\n" || m["drive:transcript:n5"].Local.Text["body"] == "" {
+		t.Fatalf("transcript body %q", m["drive:transcript:n5"].Fields["body"])
+	}
 	if m["drive:notes:n1"].Fields["body"] != "Weekly sync\nDecisions: ship on Friday.\n" || m["drive:f1:comment:c2"].Fields["body"] != "Assign: update the forecast" {
 		t.Fatalf("bodies %q %q", m["drive:notes:n1"].Fields["body"], m["drive:f1:comment:c2"].Fields["body"])
 	}
@@ -862,7 +880,7 @@ func TestDriveFirstRun(t *testing.T) {
 	}
 	m := byKey(t, got.Items, DriveFields, DriveStateFields)
 	// c1 is resolved and c3 and r1 are own acts; c5 is older than 7 days.
-	want := []string{"drive:f1:comment:c2 assigned", "drive:f2:comment:c7 mentioned", "drive:notes:n1 notes_created"}
+	want := []string{"drive:f1:comment:c2 assigned", "drive:f2:comment:c7 mentioned", "drive:notes:n1 notes_created", "drive:transcript:n5 transcript_created"}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v", keys(m))
 	}
@@ -1181,5 +1199,84 @@ func TestDriveNotesWindowSurvivesASkewedCursor(t *testing.T) {
 	// The stored cursor is the server's Date, 40 minutes ahead of the local clock.
 	if _, err := d.Collect(context.Background(), []byte("2026-11-08T12:40:00Z")); err != nil {
 		t.Fatalf("a cursor ahead of the local clock broke the notes query: %v", err)
+	}
+}
+
+// DEC-37's fields, the opaque native id, and what the raise reads (DEC-33).
+func TestSealFields(t *testing.T) {
+	srv := googletest.New(t)
+	g, err := NewGmail(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.Collect(context.Background(), []byte("100"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	recv := m["gmail:t1:m1"]
+	want := map[string]string{
+		"cc": "lee@example.com", "participants": "dana@example.com, lee@example.com, ops@example.com, winton@example.com",
+		"thread_participants": "dana@example.com, lee@example.com, ops@example.com, winton@example.com", "bulk": "false",
+	}
+	for k, v := range want {
+		if recv.Fields[k] != v {
+			t.Errorf("%s = %q, want %q", k, recv.Fields[k], v)
+		}
+	}
+	// The reply's own participants are two; the thread's are everyone in it.
+	sent := m["gmail:t1:m2"]
+	if sent.Fields["participants"] != "dana@example.com, winton@example.com" || sent.Fields["thread_participants"] != want["thread_participants"] {
+		t.Errorf("reply participants %q / %q", sent.Fields["participants"], sent.Fields["thread_participants"])
+	}
+	if _, ok := sent.Fields["cc"]; ok {
+		t.Error("a message without Cc carries cc")
+	}
+	if m["gmail:t2:m3"].Fields["bulk"] != "true" || m["gmail:t4:m5"].Fields["bulk"] != "true" {
+		t.Errorf("bulk: list header %q, category %q", m["gmail:t2:m3"].Fields["bulk"], m["gmail:t4:m5"].Fields["bulk"])
+	}
+	if recv.Native != "m1" || recv.Local == nil || recv.Local.Text["subject"] != "Budget review" ||
+		strings.Join(recv.Local.Addresses["thread_participants"], ",") != "dana@example.com,lee@example.com,ops@example.com,winton@example.com" ||
+		strings.Join(recv.Local.Labels, ",") != "INBOX,Projects,SENT,STARRED,UNREAD" {
+		t.Errorf("native and local %q %+v", recv.Native, recv.Local)
+	}
+	q := srv.Query("/gmail/v1/users/me/threads/t1")
+	if strings.Join(q["metadataHeaders"], ",") != "From,To,Cc,Subject,List-Unsubscribe,List-Id,Precedence" {
+		t.Errorf("headers asked for %v", q["metadataHeaders"])
+	}
+
+	c, err := NewCalendar(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := c.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := byKey(t, first.Items, CalendarFields, CalendarStateFields)
+	rn := cm["calendar:ev1:response_needed:3001"]
+	if rn.Fields["attendee_addresses"] != "bob@example.com, dana@example.com, winton@example.com" || rn.Native != "ev1" ||
+		rn.Local.Text["summary"] != "Design review" || strings.Join(rn.Local.Addresses["organizer"], ",") != "dana@example.com" {
+		t.Errorf("calendar %q %q %+v", rn.Fields["attendee_addresses"], rn.Native, rn.Local)
+	}
+}
+
+func TestGoogleReadsBodiesOnlyForSealedRules(t *testing.T) {
+	f, err := rules.Parse([]byte(`rules:
+  - name: plain
+    match: {source: gmail}
+    tier: hold
+    fields: [subject, body]
+  - name: sealed
+    match: {source: drive}
+    tier: send
+    seal: owner+agents
+    fields: [body]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.ListsSealed("gmail", "body") || !f.ListsSealed("drive", "body") || f.ListsSealed("calendar", "body") {
+		t.Fatal("ListsSealed")
 	}
 }

@@ -20,9 +20,9 @@ type Fixture struct {
 }
 
 type fixtureFile struct {
-	Source      string   `json:"source"`
-	Fields      []string `json:"fields"`
-	StateFields []string `json:"state_fields"`
+	Source      string        `json:"source"`
+	Fields      []string      `json:"fields"`
+	StateFields []string      `json:"state_fields"`
 	Items       []fixtureItem `json:"items"`
 }
 
