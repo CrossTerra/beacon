@@ -14,9 +14,10 @@ import (
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
-// DriveFields is Drive's fixed field list (DEC-6). title is the file name. body is comment text or meeting notes
-// text, read only when a rule lists it.
-var DriveFields = []string{"title", "link", "file_type", "author", "meeting", "meeting_start", "body"}
+// DriveFields is Drive's fixed field list (DEC-6). title is the file name. body is comment text, or meeting notes or
+// transcript text, read only when a sealed rule lists it. meeting_organizer and meeting_attendees are the meeting's
+// addresses, on notes and transcripts (DEC-37).
+var DriveFields = []string{"title", "link", "file_type", "author", "meeting", "meeting_start", "meeting_organizer", "meeting_attendees", "body"}
 
 // DriveStateFields is Drive's state field list (DEC-28), for comments.
 var DriveStateFields = []string{"resolved", "assignee"}
@@ -28,6 +29,8 @@ const (
 	TypeCommented    = "commented"
 	TypeResolved     = "resolved"
 	TypeNotesCreated = "notes_created"
+	// TypeTranscriptCreated is a Meet transcript attached to a meeting (DEC-37).
+	TypeTranscriptCreated = "transcript_created"
 )
 
 const (
@@ -358,8 +361,10 @@ func (d *Drive) commentItems(f driveFile, c driveComment, me string, floor time.
 			"file_type": fileType(f.MimeType),
 			"author":    oneLine(r.Author.DisplayName),
 		}
+		local := &source.Local{Text: map[string]string{"title": fields["title"]}}
 		if d.bodies && r.Content != "" {
 			fields["body"] = r.Content
+			local.Text["body"] = r.Content
 		}
 		for k, v := range fields {
 			if v == "" {
@@ -381,6 +386,8 @@ func (d *Drive) commentItems(f driveFile, c driveComment, me string, floor time.
 			State:      state,
 			ObservedAt: &obs,
 			Version:    version,
+			Native:     opaque(f.ID),
+			Local:      local,
 		}
 		if r.Author.Me {
 			it.Own = true
@@ -400,7 +407,7 @@ func (d *Drive) commentItems(f driveFile, c driveComment, me string, floor time.
 // notes finds meeting notes: events on the primary calendar that ended in the last 7 days, changed since floor, that
 // the person organised or accepted, with a Google Doc attachment titled Notes by Gemini.
 func (d *Drive) notes(ctx context.Context, now, floor time.Time, first bool, me string, obs time.Time) ([]source.Item, error) {
-	fields := "items(id,status,summary,start,end,updated,organizer(self),attendees(self,responseStatus),attachments(fileId,title,mimeType)),nextPageToken,timeZone"
+	fields := "items(id,status,summary,start,end,updated,organizer(email,self),attendees(email,self,responseStatus),attachments(fileId,title,mimeType)),nextPageToken,timeZone"
 	list := func(timeMin time.Time, updatedMin time.Time) ([]calEvent, *time.Location, error) {
 		q := url.Values{
 			"singleEvents": {"true"},
@@ -458,14 +465,15 @@ func (d *Drive) notes(ctx context.Context, now, floor time.Time, first bool, me 
 			continue
 		}
 		for _, a := range e.Attachments {
-			if a.MimeType != "application/vnd.google-apps.document" || !strings.Contains(strings.ToLower(a.Title), geminiNotes) {
+			if a.MimeType != "application/vnd.google-apps.document" {
 				continue
 			}
-			if !idPattern.MatchString(a.FileID) || seen[a.FileID] {
+			typ := attachmentType(a.Title)
+			if typ == "" || !idPattern.MatchString(a.FileID) || seen[a.FileID] {
 				continue
 			}
 			seen[a.FileID] = true
-			it, ok, err := d.notesItem(ctx, a.FileID, e, obs)
+			it, ok, err := d.notesItem(ctx, a.FileID, typ, e, obs)
 			if err != nil {
 				return nil, err
 			}
@@ -477,7 +485,20 @@ func (d *Drive) notes(ctx context.Context, now, floor time.Time, first bool, me 
 	return out, nil
 }
 
-func (d *Drive) notesItem(ctx context.Context, fileID string, e *calEvent, obs time.Time) (source.Item, bool, error) {
+// attachmentType is notes_created for a Notes by Gemini document, transcript_created for a Meet transcript (an
+// English title ending in Transcript), and "" for anything else.
+func attachmentType(title string) string {
+	t := strings.ToLower(strings.TrimSpace(title))
+	switch {
+	case strings.Contains(t, geminiNotes):
+		return TypeNotesCreated
+	case strings.HasSuffix(t, "transcript"):
+		return TypeTranscriptCreated
+	}
+	return ""
+}
+
+func (d *Drive) notesItem(ctx context.Context, fileID, typ string, e *calEvent, obs time.Time) (source.Item, bool, error) {
 	var f driveFile
 	q := url.Values{"fields": {"id,name,mimeType,webViewLink,createdTime,trashed"}, "supportsAllDrives": {"true"}}
 	err := d.getJSON(ctx, d.base+"/drive/v3/files/"+fileID+"?"+q.Encode(), &f)
@@ -494,12 +515,25 @@ func (d *Drive) notesItem(ctx context.Context, fileID string, e *calEvent, obs t
 	if err != nil {
 		return source.Item{}, false, nil
 	}
+	attendees := attendeeAddresses(e)
+	organizer := strings.ToLower(strings.TrimSpace(e.Organizer.Email))
 	fields := map[string]string{
-		"title":         oneLine(f.Name),
-		"link":          f.WebViewLink,
-		"file_type":     fileType(f.MimeType),
-		"meeting":       oneLine(e.Summary),
-		"meeting_start": e.Start.String(),
+		"title":             oneLine(f.Name),
+		"link":              f.WebViewLink,
+		"file_type":         fileType(f.MimeType),
+		"meeting":           oneLine(e.Summary),
+		"meeting_start":     e.Start.String(),
+		"meeting_organizer": organizer,
+		"meeting_attendees": strings.Join(attendees, ", "),
+	}
+	// A note or transcript takes its meeting's level: its title, organiser and attendees are matched, and so is the
+	// level its calendar event was sent at (DEC-35).
+	local := &source.Local{
+		Text:      map[string]string{"title": fields["title"], "meeting": fields["meeting"]},
+		Addresses: map[string][]string{"meeting_organizer": {organizer}, "meeting_attendees": attendees},
+	}
+	if e.ID != "" {
+		local.Meeting = "calendar:" + d.person + ":" + e.ID
 	}
 	if d.bodies {
 		text, err := d.export(ctx, fileID)
@@ -508,6 +542,7 @@ func (d *Drive) notesItem(ctx context.Context, fileID string, e *calEvent, obs t
 		}
 		if text != "" {
 			fields["body"] = text
+			local.Text["body"] = text
 		}
 	}
 	for k, v := range fields {
@@ -515,16 +550,22 @@ func (d *Drive) notesItem(ctx context.Context, fileID string, e *calEvent, obs t
 			delete(fields, k)
 		}
 	}
-	key, version := source.FitKey(d.name+":notes:"+fileID, fileID)
+	kind := "notes"
+	if typ == TypeTranscriptCreated {
+		kind = "transcript"
+	}
+	key, version := source.FitKey(d.name+":"+kind+":"+fileID, fileID)
 	return source.Item{
 		Source:     d.name,
 		Subject:    "drive:" + d.person + ":" + fileID,
 		Key:        key,
-		Type:       TypeNotesCreated,
-		EventTitle: driveTitle(TypeNotesCreated, false),
+		Type:       typ,
+		EventTitle: driveTitle(typ, false),
 		OccurredAt: at,
 		Fields:     fields,
 		Version:    version,
+		Native:     opaque(fileID),
+		Local:      local,
 	}, true, nil
 }
 
@@ -555,6 +596,8 @@ func driveTitle(typ string, reply bool) string {
 		return "Resolved"
 	case TypeNotesCreated:
 		return "Meeting notes created"
+	case TypeTranscriptCreated:
+		return "Transcript created"
 	}
 	return ""
 }

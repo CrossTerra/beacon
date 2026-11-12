@@ -16,8 +16,10 @@ import (
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
-// GmailFields is Gmail's fixed field list (DEC-6). body is read only when a rule lists it.
-var GmailFields = []string{"from", "to", "subject", "date", "labels", "link", "body"}
+// GmailFields is Gmail's fixed field list (DEC-6). body is read only when a sealed rule lists it. participants is
+// the message's from, to and cc; thread_participants every from, to and cc in the thread; bulk is "true" for list
+// and bulk mail (DEC-37).
+var GmailFields = []string{"from", "to", "cc", "participants", "thread_participants", "bulk", "subject", "date", "labels", "link", "body"}
 
 // GmailStateFields is Gmail's state field list (DEC-28), over the whole thread.
 var GmailStateFields = []string{"unread", "starred", "labels", "last_from"}
@@ -266,6 +268,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 		seen[it.Key] = true
 		if r.body != "" {
 			it.Fields["body"] = r.body
+			it.Local.Text["body"] = r.body
 		} else if bodies && scan == nil && it.Type != TypeStarred {
 			// History, or a finished open scan that did not read bodies (a gap re-read). A body that one message
 			// will not give up (gone, or a permission 403) is left out; the item is still emitted. A rate limit
@@ -277,6 +280,7 @@ func (g *Gmail) Collect(ctx context.Context, cursor []byte) (source.Collected, e
 			}
 			if body != "" {
 				it.Fields["body"] = body
+				it.Local.Text["body"] = body
 			}
 		}
 		items = append(items, it)
@@ -804,7 +808,10 @@ func (t *gmailThread) find(id string) *gmailMessage {
 	return nil
 }
 
-// thread reads a thread's headers once per pass. Only From, To and Subject are asked for.
+// gmailHeaders are the only headers a thread read asks for: who, the subject, and the list headers bulk reads.
+var gmailHeaders = []string{"From", "To", "Cc", "Subject", "List-Unsubscribe", "List-Id", "Precedence"}
+
+// thread reads a thread's headers once per pass. Only gmailHeaders are asked for.
 func (g *Gmail) thread(ctx context.Context, cache map[string]*gmailThread, id string) (*gmailThread, error) {
 	if t, ok := cache[id]; ok {
 		return t, nil
@@ -812,7 +819,7 @@ func (g *Gmail) thread(ctx context.Context, cache map[string]*gmailThread, id st
 	if !idPattern.MatchString(id) {
 		return nil, &statusError{http.StatusNotFound}
 	}
-	q := url.Values{"format": {"metadata"}, "metadataHeaders": {"From", "To", "Subject"}}
+	q := url.Values{"format": {"metadata"}, "metadataHeaders": gmailHeaders}
 	var t gmailThread
 	if err := g.getJSON(ctx, "threads/"+id, q, &t); err != nil {
 		return nil, err
@@ -859,13 +866,25 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 	if at.IsZero() {
 		return source.Item{}, false
 	}
+	cc := addresses(m.header("Cc"))
+	subject := oneLine(live[0].header("Subject"))
+	thread := threadParticipants(live)
 	fields := map[string]string{
-		"from":    from,
-		"to":      strings.Join(to, ", "),
-		"subject": oneLine(live[0].header("Subject")),
-		"date":    at.Format(time.RFC3339),
-		"labels":  labelNames(m.LabelIDs, labels),
-		"link":    "https://mail.google.com/mail/u/0/#all/" + t.ID,
+		"from":                from,
+		"to":                  strings.Join(to, ", "),
+		"cc":                  strings.Join(cc, ", "),
+		"participants":        strings.Join(participants(m), ", "),
+		"thread_participants": strings.Join(thread, ", "),
+		"bulk":                strconv.FormatBool(bulk(m)),
+		"subject":             subject,
+		"date":                at.Format(time.RFC3339),
+		"labels":              labelNames(m.LabelIDs, labels),
+		"link":                "https://mail.google.com/mail/u/0/#all/" + t.ID,
+	}
+	for k, v := range fields {
+		if v == "" && (k == "cc" || k == "participants" || k == "thread_participants") {
+			delete(fields, k)
+		}
 	}
 	state := g.threadState(live, labels)
 	keyID := t.ID + ":" + m.ID
@@ -885,6 +904,13 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 		State:      state,
 		ObservedAt: &obs,
 		Version:    version,
+		Native:     opaque(m.ID),
+		// The raise matches the whole thread: its subject, who is in it, and its labels (DEC-33).
+		Local: &source.Local{
+			Text:      map[string]string{"subject": subject},
+			Addresses: map[string][]string{"thread_participants": thread},
+			Labels:    threadLabels(live, labels),
+		},
 	}
 	switch typ {
 	case TypeSent:
@@ -943,6 +969,63 @@ func gmailTitle(typ string, reply bool) string {
 		return "Starred"
 	}
 	return ""
+}
+
+// participants is a message's from, to and cc, lowercased, each once, sorted.
+func participants(m *gmailMessage) []string {
+	return uniqueSorted(addresses(m.header("From")), addresses(m.header("To")), addresses(m.header("Cc")))
+}
+
+// threadParticipants is every from, to and cc in the thread, lowercased, each once, sorted.
+func threadParticipants(live []*gmailMessage) []string {
+	var all [][]string
+	for _, m := range live {
+		all = append(all, addresses(m.header("From")), addresses(m.header("To")), addresses(m.header("Cc")))
+	}
+	return uniqueSorted(all...)
+}
+
+func uniqueSorted(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range lists {
+		for _, a := range l {
+			if a != "" && !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bulk reports list and bulk mail: a List-Unsubscribe or List-Id header, Precedence bulk, list or junk, or a
+// category label other than Personal (DEC-37).
+func bulk(m *gmailMessage) bool {
+	if strings.TrimSpace(m.header("List-Unsubscribe")) != "" || strings.TrimSpace(m.header("List-Id")) != "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(m.header("Precedence"))) {
+	case "bulk", "list", "junk":
+		return true
+	}
+	for _, l := range m.LabelIDs {
+		if strings.HasPrefix(l, "CATEGORY_") && l != "CATEGORY_PERSONAL" {
+			return true
+		}
+	}
+	return false
+}
+
+// threadLabels are the names of every label on the thread's messages.
+func threadLabels(live []*gmailMessage, names map[string]string) []string {
+	var ids []string
+	for _, m := range live {
+		ids = append(ids, m.LabelIDs...)
+	}
+	out := strings.Split(labelNames(ids, names), ", ")
+	return uniqueSorted(out)
 }
 
 func labelNames(ids []string, names map[string]string) string {

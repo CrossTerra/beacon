@@ -346,7 +346,7 @@ func TestEventTitles(t *testing.T) {
 func TestEventTitleSurvivesDecision(t *testing.T) {
 	it := baseItem()
 	it.EventTitle = "Review requested from dana"
-	d := Decide(it, rule("url"), false)
+	d := Decide(it, rule("url"), false, "")
 	if d.Item.EventTitle != it.EventTitle || d.Item.Fields["title"] != "" || d.Item.Fields["body"] != "" {
 		t.Fatalf("decision kept the wrong fields: %+v", d.Item)
 	}

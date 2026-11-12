@@ -16,9 +16,9 @@ import (
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
-// CalendarFields is Calendar's fixed field list (DEC-6). attendees is a count. body is the description, read only
-// when a rule lists it.
-var CalendarFields = []string{"summary", "start", "end", "organizer", "attendees", "response", "link", "body"}
+// CalendarFields is Calendar's fixed field list (DEC-6). attendees is a count; attendee_addresses the attendees'
+// addresses (DEC-37). body is the description, read only when a sealed rule lists it.
+var CalendarFields = []string{"summary", "start", "end", "organizer", "attendees", "attendee_addresses", "response", "link", "body"}
 
 // CalendarStateFields is Calendar's state field list (DEC-28).
 var CalendarStateFields = []string{"status", "start", "end", "response"}
@@ -545,17 +545,24 @@ func listEvents(ctx context.Context, c *common, q url.Values) ([]calEvent, *time
 
 func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next calSeen, tz *time.Location, obs time.Time) source.Item {
 	resp := e.response()
+	attendees := attendeeAddresses(e)
 	fields := map[string]string{
-		"summary":   oneLine(e.Summary),
-		"start":     e.Start.String(),
-		"end":       e.End.String(),
-		"organizer": strings.ToLower(e.Organizer.Email),
-		"attendees": attendeeCount(e),
-		"response":  resp,
-		"link":      e.HTMLLink,
+		"summary":            oneLine(e.Summary),
+		"start":              e.Start.String(),
+		"end":                e.End.String(),
+		"organizer":          strings.ToLower(e.Organizer.Email),
+		"attendees":          attendeeCount(e),
+		"attendee_addresses": strings.Join(attendees, ", "),
+		"response":           resp,
+		"link":               e.HTMLLink,
+	}
+	local := &source.Local{
+		Text:      map[string]string{"summary": fields["summary"]},
+		Addresses: map[string][]string{"organizer": {fields["organizer"]}, "attendee_addresses": attendees},
 	}
 	if c.bodies && e.Description != "" {
 		fields["body"] = e.Description
+		local.Text["body"] = e.Description
 	}
 	for k, v := range fields {
 		if v == "" {
@@ -585,6 +592,8 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 		EventTitle: calendarTitle(typ, resp, known && prev.T != next.T),
 		OccurredAt: at,
 		Fields:     fields,
+		Native:     opaque(e.ID),
+		Local:      local,
 		State:      state,
 		ObservedAt: &obs,
 		Version:    version,
@@ -656,6 +665,28 @@ func calendarTitle(typ, resp string, moved bool) string {
 		return "Upcoming"
 	}
 	return ""
+}
+
+// attendeeAddresses are the attendees' addresses, lowercased, each once, sorted (DEC-37).
+func attendeeAddresses(e *calEvent) []string {
+	var out []string
+	for _, a := range e.Attendees {
+		out = append(out, strings.ToLower(strings.TrimSpace(a.Email)))
+	}
+	return uniqueSorted(out)
+}
+
+// opaque is id when it can be a sealed event's native id: printable, without @ (Signal DEC-264). Otherwise "".
+func opaque(id string) string {
+	if id == "" || strings.Contains(id, "@") || len(id) > 200 {
+		return ""
+	}
+	for _, r := range id {
+		if r < 0x21 || r > 0x7e {
+			return ""
+		}
+	}
+	return id
 }
 
 // attendeeCount is how many attendees the event lists, or "" for an event with none listed, which is the person's

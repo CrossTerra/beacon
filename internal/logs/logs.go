@@ -55,6 +55,13 @@ const (
 	NamesUnavailable Event = "names_unavailable"
 	// Retitled is a send pass's retitle of threads Beacon opened: counts only.
 	Retitled Event = "retitled"
+	// Sealed is how many items a pass decided to seal, by level: counts only (DEC-30).
+	Sealed Event = "sealed"
+	// Raised is how many items the local check or the subject floor raised: a count, never why (DEC-33, DEC-34).
+	Raised Event = "raised"
+	// SealHeld is how many items a pass held instead of sending, for body_needs_seal (DEC-32) or sensitive_shared
+	// (DEC-33).
+	SealHeld Event = "seal_held"
 )
 
 // Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths
@@ -94,6 +101,11 @@ const (
 	ReasonNamesScope Reason = "names_scope"
 	// ReasonNamesFailed is a display name lookup that failed this pass.
 	ReasonNamesFailed Reason = "names_failed"
+	// ReasonBodyNeedsSeal is a personal body a rule would send plain: held instead (DEC-32).
+	ReasonBodyNeedsSeal Reason = "body_needs_seal"
+	// ReasonSensitiveShared is an item on a shared subject that would be sealed: Signal seals only a person's own
+	// subjects, so it is held instead (DEC-33).
+	ReasonSensitiveShared Reason = "sensitive_shared"
 )
 
 // Attr is a log attribute built by one of the helpers below.

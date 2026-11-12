@@ -28,6 +28,10 @@ type Held struct {
 	Rule   string      `json:"rule"`
 	HeldAt time.Time   `json:"held_at"`
 	Item   source.Item `json:"item"`
+	// Reason is why a send or hold was held for sealing: body_needs_seal or sensitive_shared. Empty for a hold rule.
+	Reason string `json:"reason,omitempty"`
+	// Level is the level the item would be sealed at, when it would be.
+	Level string `json:"level,omitempty"`
 }
 
 // Dropped records that an item was dropped, and by which rule; an empty rule is the default. It holds no content.

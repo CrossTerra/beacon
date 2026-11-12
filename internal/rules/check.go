@@ -39,7 +39,23 @@ type Source struct {
 	StateFields []string
 	// Identity is true when the config names the person's own identity in this source.
 	Identity bool
+	// Personal says whether the source's items are under a personal stem (DEC-10): every item, some, or none.
+	Personal Personal
+	// PersonalField and PersonalValues, for PersonalSome, say which items are personal: those whose field holds one of
+	// the values (Slack: channel_type im, mpim or private).
+	PersonalField  string
+	PersonalValues []string
 }
+
+// Personal is how many of a source's items are under a personal stem.
+type Personal int
+
+// Personal kinds.
+const (
+	PersonalNone Personal = iota
+	PersonalAll
+	PersonalSome
+)
 
 // Check reports rules that can never match under the enabled sources, fields and state fields a rule sends that no
 // source it can match has, and own-act rules for sources where the person has no identity, whose events therefore
@@ -94,6 +110,9 @@ func (f *File) Check(sources map[string]Source) []Problem {
 					Message: fmt.Sprintf("state: %q is not a state field of %s", name, strings.Join(srcs, ", "))})
 			}
 		}
+		if r.Tier != Never {
+			out = append(out, r.checkSeal(srcs, sources)...)
+		}
 		if r.Tier != Never && r.Match.Own != nil && *r.Match.Own {
 			for _, n := range srcs {
 				if !sources[n].Identity {
@@ -114,6 +133,56 @@ func (f *File) Check(sources map[string]Source) []Problem {
 		}
 	}
 	return out
+}
+
+// checkSeal reports a personal body without seal (DEC-32), a seal no personal subject can take (Signal seals only a
+// person's own subjects), and, as a warning, a send rule with plaintext personal content (DEC-36).
+func (r *Rule) checkSeal(srcs []string, sources map[string]Source) []Problem {
+	var personal []string
+	for _, n := range srcs {
+		if r.canBePersonal(sources[n]) {
+			personal = append(personal, n)
+		}
+	}
+	var out []Problem
+	switch {
+	case r.Seal == "" && r.ListsBody() && len(personal) > 0:
+		out = append(out, Problem{Rule: r, Message: fmt.Sprintf(
+			"lists body and can match personal items from %s: a personal body leaves only sealed; add seal: owner or seal: owner+agents (DEC-32)", strings.Join(personal, ", "))})
+	case r.Seal != "" && len(personal) == 0:
+		out = append(out, Problem{Rule: r, Message: fmt.Sprintf(
+			"seal: Signal seals only a person's own subjects, and %s items here are shared", strings.Join(srcs, ", "))})
+	}
+	plaintext := len(r.Plain) > 0
+	if r.Seal == "" {
+		plaintext = len(r.Fields) > 0 || len(r.State) > 0
+	}
+	if r.Tier == Send && plaintext && len(personal) > 0 {
+		out = append(out, Problem{Rule: r, Warning: true, Message: fmt.Sprintf(
+			"plaintext personal content from %s: start as hold until its output has been checked (DEC-36)", strings.Join(personal, ", "))})
+	}
+	return out
+}
+
+// canBePersonal reports whether the rule can match an item of s under a personal stem. For a source where only some
+// items are, a condition on the deciding field that matches none of the personal values proves it cannot.
+func (r *Rule) canBePersonal(s Source) bool {
+	switch s.Personal {
+	case PersonalAll:
+		return true
+	case PersonalSome:
+		m := r.Match.Fields[s.PersonalField]
+		if m == nil {
+			return true
+		}
+		for _, v := range s.PersonalValues {
+			if m.Matches(v) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func sortedKeys(m map[string]*Matcher) []string {

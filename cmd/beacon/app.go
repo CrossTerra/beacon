@@ -30,6 +30,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/queue"
 	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/runner"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/signal"
@@ -232,7 +233,13 @@ func (a *app) load(p string) (*env, error) {
 	// A source that can skip reading bodies, or names, is told whether any rule could send them.
 	for _, s := range e.sources {
 		if b, ok := s.(interface{ SetBodies(bool) }); ok {
-			b.SetBodies(e.rules.Lists(s.Name(), project.FieldBody))
+			// Slack reads message text with the message anyway, and a public channel's body may leave plain. A Google
+			// source reads a body only for a sealed rule, since a personal body leaves only sealed (DEC-32).
+			if _, isSlack := s.(*slack.Source); isSlack {
+				b.SetBodies(e.rules.Lists(s.Name(), project.FieldBody))
+			} else {
+				b.SetBodies(e.rules.ListsSealed(s.Name(), project.FieldBody))
+			}
 		}
 		if n, ok := s.(interface{ SetNames(bool) }); ok {
 			n.SetNames(e.rules.Lists(s.Name(), slack.FieldTitle) || e.rules.Lists(s.Name(), slack.FieldChannelName) ||
@@ -245,7 +252,14 @@ func (a *app) load(p string) (*env, error) {
 func (e *env) checkSources() map[string]rules.Source {
 	out := map[string]rules.Source{}
 	for _, s := range e.sources {
-		out[s.Name()] = rules.Source{Fields: s.Fields(), StateFields: s.StateFields(), Identity: e.cfg.Person.Identities[s.Name()] != ""}
+		rs := rules.Source{Fields: s.Fields(), StateFields: s.StateFields(), Identity: e.cfg.Person.Identities[s.Name()] != ""}
+		if _, ok := s.(interface{ PersonalStem() string }); ok {
+			rs.Personal = rules.PersonalAll
+		}
+		if _, ok := s.(*slack.Source); ok {
+			rs.Personal, rs.PersonalField, rs.PersonalValues = rules.PersonalSome, "channel_type", slack.PersonalKinds
+		}
+		out[s.Name()] = rs
 	}
 	return out
 }
@@ -526,7 +540,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		}
 	}
 	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Send: send, Log: log, Now: a.now,
-		AfterAppend: a.afterAppend}
+		AfterAppend: a.afterAppend, SealOwner: &e.cfg.Seal.Owner}
 	// A dry run reads cursors and does not write them. No lock: it must not leave a resume a send pass trusts.
 	if err := a.prepare(e, r, send); err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
@@ -788,6 +802,19 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			continue
 		}
 		fmt.Fprintf(w, "%-6s %s  %s\n", p.Tier, p.Item.Key, rule)
+		if p.Level != "" {
+			raised := ""
+			if p.Raised {
+				raised = " (raised; beacon explain shows why)"
+			}
+			fmt.Fprintf(w, "       sealed at %s%s\n", p.Level, raised)
+		}
+		switch p.SealHeld {
+		case logs.ReasonBodyNeedsSeal:
+			fmt.Fprintln(w, "       held, not sent: its rule would send a personal body plain; a personal body leaves only sealed (body_needs_seal)")
+		case logs.ReasonSensitiveShared:
+			fmt.Fprintln(w, "       held, not sent: it would be sealed, and Signal seals only your own subjects (sensitive_shared)")
+		}
 		if p.Unaccepted {
 			fmt.Fprintln(w, "       first run not accepted; not recorded. Review, then beacon accept-first")
 		}
@@ -873,11 +900,12 @@ func (a *app) printFirst(rep *runner.Report) {
 
 func (a *app) cmdExplain(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("explain")
+	bodies := fs.Bool("bodies", false, "show a sealed event's sealed parts in plaintext")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: beacon explain [--config PATH] KEY")
+		return fmt.Errorf("usage: beacon explain [--config PATH] [--bodies] KEY")
 	}
 	key := fs.Arg(0)
 	e, err := a.load(*cfgPath)
@@ -892,7 +920,8 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Outbox: ob, Queue: q, Log: logs.Discard(), Now: a.now}
+	r := &runner.Runner{Sources: e.sources, Rules: e.rules, Person: e.person, Outbox: ob, Queue: q, Log: logs.Discard(), Now: a.now,
+		SealOwner: &e.cfg.Seal.Owner}
 	if err := a.prepare(e, r, false); err != nil {
 		return err
 	}
@@ -913,6 +942,29 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 			fmt.Fprintln(w, "Rule:       none matched; default never")
 		}
 		fmt.Fprintf(w, "Tier:       %s\n", ex.Tier)
+		if ex.Tier != rules.Never {
+			level := "plain"
+			if ex.Level != "" {
+				level = string(ex.Level)
+			}
+			fmt.Fprintf(w, "Level:      %s\n", level)
+			if ex.Level != ex.RuleLevel || len(ex.Raised) > 0 {
+				rl := "plain"
+				if ex.RuleLevel != "" {
+					rl = string(ex.RuleLevel)
+				}
+				fmt.Fprintf(w, "            the rule says %s; raised on this machine by:\n", rl)
+				for _, why := range ex.Raised {
+					fmt.Fprintf(w, "            - %s\n", why)
+				}
+			}
+			switch ex.SealHeld {
+			case logs.ReasonBodyNeedsSeal:
+				fmt.Fprintln(w, "Held:       body_needs_seal: the rule would send a personal body plain; add seal to the rule")
+			case logs.ReasonSensitiveShared:
+				fmt.Fprintln(w, "Held:       sensitive_shared: it would be sealed on a shared subject, which Signal cannot seal")
+			}
+		}
 	} else {
 		fmt.Fprintln(w, "Item:       no source yields this key now")
 	}
@@ -929,18 +981,53 @@ func (a *app) cmdExplain(ctx context.Context, args []string) error {
 			fmt.Fprintf(w, ", %d %s: %s", ex.Entry.Status, ex.Entry.Code, ex.Entry.Message)
 		}
 		fmt.Fprintln(w)
+		if !*bodies && sealedBody(ex.Body) {
+			fmt.Fprintf(w, "Body (in the outbox; sealed parts hidden, --bodies shows them):\n%s\n", hideSealed(ex.Body))
+			return nil
+		}
 		fmt.Fprintf(w, "Body (exact bytes in the outbox):\n%s\n", ex.Body)
 		return nil
 	}
 	switch {
 	case ex.Err != nil:
 		fmt.Fprintf(w, "Body:       cannot be built: %v\n", ex.Err)
+	case ex.Body != nil && !*bodies && sealedBody(ex.Body):
+		fmt.Fprintf(w, "Body (would be sent as; sealed parts hidden, --bodies shows them):\n%s\n", hideSealed(ex.Body))
 	case ex.Body != nil:
 		fmt.Fprintf(w, "Body (would be sent as):\n%s\n", ex.Body)
 	default:
 		fmt.Fprintln(w, "Body:       none; nothing about this item leaves the machine")
 	}
 	return nil
+}
+
+// sealedBody reports whether a request body has a sealed part.
+func sealedBody(body []byte) bool {
+	var b struct {
+		Sealed json.RawMessage `json:"sealed"`
+	}
+	return json.Unmarshal(body, &b) == nil && len(b.Sealed) > 0 && string(b.Sealed) != "null"
+}
+
+// hideSealed is a request body with each sealed part replaced by its size, so explain shows the envelope and the level
+// without the plaintext.
+func hideSealed(body []byte) []byte {
+	var b map[string]json.RawMessage
+	if json.Unmarshal(body, &b) != nil {
+		return nil
+	}
+	var parts map[string]json.RawMessage
+	if json.Unmarshal(b["sealed"], &parts) != nil {
+		return nil
+	}
+	for k, v := range parts {
+		if k != "level" {
+			parts[k], _ = json.Marshal(fmt.Sprintf("[sealed: %d bytes]", len(v)))
+		}
+	}
+	b["sealed"], _ = json.Marshal(parts)
+	out, _ := json.Marshal(b)
+	return out
 }
 
 // --- outbox
@@ -1049,8 +1136,13 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(logs.ReasonState, failText(logs.ReasonState, e))
 	}
+	floor, err := seal.OpenFloor(e.cfg.StatePath())
+	if err != nil {
+		return fail(logs.ReasonState, failText(logs.ReasonState, e))
+	}
 	r := &runner.Runner{
-		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf,
+		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf, Floor: floor,
+		SealOwner: &e.cfg.Seal.Owner,
 		Personal: personal(e.sources), Restrictions: client,
 		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 			Period: e.cfg.LeasePeriod(), Now: a.now},

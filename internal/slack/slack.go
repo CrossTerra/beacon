@@ -45,6 +45,9 @@ const (
 	kindChannel = "channel"
 )
 
+// PersonalKinds are the channel_type values whose items are under PersonalStem.
+var PersonalKinds = []string{kindIM, kindMPIM, kindPrivate}
+
 // PersonalStem is the stem of personal subjects (DEC-10): direct messages, group direct messages and private
 // channels. Public channel subjects are not personal.
 const PersonalStem = "slack:dm:"
