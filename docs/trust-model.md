@@ -13,7 +13,8 @@ same pull request.
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
-| With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | |
+| With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | The Slack name cache (display names and channel names by id) and the record of threads checked for a retitle |
+| With a rule that lists Slack's `title`: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
 ## Properties
@@ -33,7 +34,13 @@ same pull request.
    it is not you, the review state, a short commit sha, the check conclusion, the assignee's display name when it is not you, the status names, the due
    date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
    comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
-   `title`, `summary` or `subject`, as the thread title. A Google source does not even read a mail body, an event
+   `title`, `summary` or `subject`, as the thread title. Slack's `title` is the conversation's: who and where, built
+   only from display names and the channel's name ("DM with Dana Scully", "#eng: Bob Ross mentioned you"), never
+   message text. Display names (`channel_name`, `author_name`) are fields like any other and leave only when a rule
+   lists them. Slack names are read only when a rule lists one of those three fields. A thread Beacon opened before
+   its rule listed `title` is renamed (`thread.titled`) only when the current rule for the stored item still sends it
+   and lists `title`, Signal shows that Beacon's own event opened that thread, and nobody renamed or merged it since.
+   A thread someone else opened or renamed is not touched. A Google source does not even read a mail body, an event
    description, comment text or meeting notes unless a rule that can match it lists `body`. Slack returns a message's
    text with the message, so the Slack source reads it on the machine to find mentions, review wording and links; it
    leaves only as `body`, when a rule lists it.
@@ -57,10 +64,12 @@ same pull request.
    a transport that refuses any other host before connecting. Proxy settings from the environment are ignored and
    redirects are not followed. Each Google source also refuses any URL outside the API paths it uses, because
    `www.googleapis.com` serves other APIs too. The Slack source refuses any method but `auth.test`,
-   `search.messages`, `conversations.replies`, `conversations.history`, `conversations.info`, `users.conversations`
-   (group direct messages only) and `usergroups.list`, any query key those calls do not use, a search that is not one
-   of its three, and the history of a channel the config does not name or a group direct message the person is not
-   in, so its token cannot post, mark read or list the workspace's people or channels through Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
+   `search.messages`, `conversations.replies`, `conversations.history`, `conversations.info`, `conversations.members`,
+   `users.info`, `users.conversations` (group direct messages only) and `usergroups.list`, any query key those calls
+   do not use, a search that is not one of its three, the history of a channel the config does not name or a group
+   direct message the person is not in, and `conversations.info` or `conversations.members` on a conversation the
+   pass made no item from, so its token cannot post, mark read or list the workspace's people or channels through
+   Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
@@ -131,7 +140,7 @@ same pull request.
   lists `body`, but the grant itself is not narrower. Revoke it at
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 - **Slack read scopes are broad, and the token is the person's.** `channels:history` can read every public channel,
-  and `search:read` everything the person can find. Beacon calls seven read methods and reads the conversations its
+  `search:read` everything the person can find, and `users:read` every member's profile. Beacon calls nine read methods and reads the conversations its
   collection names, but the token itself is not narrower, and a token the person reuses may hold write scopes Beacon
   never calls. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
   [api.slack.com/apps](https://api.slack.com/apps).
@@ -157,6 +166,13 @@ same pull request.
   again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
+- **A public channel's thread title is public.** With a rule that lists Slack's `title`, a public channel thread is
+  named for its channel and who started it ("#eng: Bob Ross mentioned you"), and every reader of Signal sees that
+  name, as they see the event. Direct message, group direct message and private channel threads are personal and
+  wait for `slack:dm:*` to be restricted, title included.
+- **The Slack name cache holds names at rest.** Display names and channel names, by id, are kept in the state
+  directory (`slack-names-<source>.json`, `0600`) for a day, so a pass does not ask Slack again. A dry run does not
+  write it.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the

@@ -245,3 +245,43 @@ func TestRestrictions(t *testing.T) {
 		srv.Close()
 	}
 }
+
+func TestEventOpenedAndThread(t *testing.T) {
+	s := signaltest.New(token)
+	defer s.Close()
+	c, _ := client(t, s)
+	ctx := context.Background()
+	res, err := c.Write(ctx, []byte(`{"subject":"slack:C1:1.000001","type":"slack.mentioned","key":"k1","title":"Mentioned","open":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := c.EventOpened(ctx, res.EventID)
+	if err != nil || opened.Number != 1 || opened.Title != "Mentioned" || opened.ThreadID == "" {
+		t.Fatalf("%+v %v", opened, err)
+	}
+	// A later event on the subject lands in that thread and opens none.
+	again, _ := c.Write(ctx, []byte(`{"subject":"slack:C1:1.000001","type":"slack.thread_reply","key":"k2","title":"Thread reply","open":{}}`))
+	if o, err := c.EventOpened(ctx, again.EventID); err != nil || o.Number != 0 || o.ThreadID != opened.ThreadID {
+		t.Fatalf("%+v %v", o, err)
+	}
+	th, err := c.Thread(ctx, opened.ThreadID)
+	if err != nil || th.Number != 1 || th.Title != "Mentioned" || th.MergedInto != "" {
+		t.Fatalf("%+v %v", th, err)
+	}
+	if _, err := c.EventOpened(ctx, "evt_9999"); !errors.Is(err, signal.ErrNotFound) {
+		t.Fatalf("unknown event: %v", err)
+	}
+	// An id that is not one is never put in a path.
+	if _, err := c.Thread(ctx, "../api/me"); !errors.Is(err, signal.ErrNotFound) {
+		t.Fatalf("bad id: %v", err)
+	}
+	for _, r := range s.Requests() {
+		if strings.Contains(r.Path, "..") || r.Path == "/api/me" {
+			t.Fatalf("requested %s", r.Path)
+		}
+	}
+	s.Token = "other"
+	if _, err := c.Thread(ctx, opened.ThreadID); !errors.Is(err, signal.ErrUnauthorized) {
+		t.Fatalf("refused key: %v", err)
+	}
+}

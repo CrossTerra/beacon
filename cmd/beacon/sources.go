@@ -84,6 +84,7 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 				Workspace: s.Workspace, User: s.User, Channels: s.Channels,
 				Identity: cfg.Person.Identities[s.SourceName()],
 				Token:    a.secretFunc(keychain.SlackAccount(s.Workspace, s.User)),
+				Cache:    filepath.Join(cfg.StatePath(), slack.CacheFile(s.SourceName())),
 				Base:     a.slackBase, Now: a.now, Sleep: a.sleep,
 			})
 			if err != nil {
@@ -266,8 +267,8 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	if len(id.Missing) > 0 {
-		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(id.Missing, ", "))
+	if missing := append(append([]string(nil), id.Missing...), id.MissingNames...); len(missing) > 0 {
+		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(missing, ", "))
 	}
 	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: channels}
 	if src.Name == "slack" {

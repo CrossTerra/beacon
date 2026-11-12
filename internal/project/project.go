@@ -316,6 +316,29 @@ func Project(in Input) (*Body, []byte, error) {
 	return b, data, nil
 }
 
+// ThreadTitle is a thread change, Signal's thread.titled: it renames the thread whose own subject is
+// signal:thread:<number>. It carries the title and nothing else; Signal refuses any other metadata, and `open`.
+type ThreadTitle struct {
+	Subject  string `json:"subject"`
+	Type     string `json:"type"`
+	Key      string `json:"key"`
+	Metadata struct {
+		Title string `json:"title"`
+	} `json:"metadata"`
+}
+
+// ThreadTitled builds the body that renames thread number to t, under key. The title is trimmed and shortened to
+// Signal's limit, as an open.title is.
+func ThreadTitled(number int64, key, t string) ([]byte, error) {
+	t = title(t)
+	if number <= 0 || t == "" || key == "" {
+		return nil, errors.New("project: a thread title needs a thread number, a title and a key")
+	}
+	b := ThreadTitle{Subject: fmt.Sprintf("signal:thread:%d", number), Type: "thread.titled", Key: key}
+	b.Metadata.Title = t
+	return json.Marshal(b)
+}
+
 // Marshal encodes a body. Map keys are sorted by encoding/json, so the bytes are stable.
 func Marshal(b *Body) ([]byte, error) { return json.Marshal(b) }
 

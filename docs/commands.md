@@ -48,7 +48,9 @@ With a Google or Slack source, a send pass first reads Signal's restricted prefi
 has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
 Signal …` and which prefix to ask Signal's admin to restrict. If the restrictions cannot be read, those items are
 printed as not sent and not recorded, the source's cursor stays, and `run` says why (`no_read_scope` when the key
-lacks `read`). Pending bodies on such subjects stay pending and are counted. When Gmail's change history has expired,
+lacks `read`). Pending bodies on such subjects stay pending and are counted. A Slack source whose token lacks
+`users:read` or `im:read` says so once a pass: its threads keep generic titles until the app has them. When a pass
+renamed threads Beacon opened earlier, it prints how many. When Gmail's change history has expired,
 `run` says so and what was re-read, and when a read stopped at its limit, it says that too. When a Gmail open-state
 scan stops at a rate limit, `run` says the next pass continues from where it stopped. Only a send pass stores that
 place. A dry run does not, so the next send reads the window again. See [`sources.md`](sources.md#google).
@@ -164,7 +166,8 @@ through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, op
 `slack` reads the person's user token (`xoxp-…`) with echo off, and refuses any other kind of token. It calls
 `auth.test` through the egress guard to `slack.com`, and nothing else. If the token lacks one of the read scopes
 (`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`,
-`mpim:read`, `usergroups:read`), it names them and stores nothing. Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
+`mpim:read`, `usergroups:read`, `users:read`, `im:read`), it names them and stores nothing. A token already stored
+without `users:read` and `im:read` still collects; see [`sources.md`](sources.md#slack). Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
 and `user` and each `--channel`, names any other scopes the token holds (Beacon never uses them), and, when
 `person.identities` has no entry for the source, prints the one to add. See [`sources.md`](sources.md#slack).
 
@@ -283,6 +286,8 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `retry` | `beacon outbox retry --rejected` finished. Counts only: sent, replayed, refused, conflict, missing, failed, hold, never, withheld, pending. |
 | `withheld` | A personal source's send items were held (`prefix_unrestricted`) or not recorded (`restrictions_unknown`). A count and the source. |
 | `restrictions_unread` | A send pass could not read Signal's restricted prefixes, with the reason. |
+| `names_unavailable` | A source collected without display names: `names_scope` (the token lacks the scopes) or `names_failed` (a lookup failed this pass). Its items are complete; they carry no names or titles. The source and the reason. |
+| `retitled` | A send pass checked threads Beacon opened for a new title. Counts only: checked, titled, left. |
 | `history_gap` | A source's change history expired; it re-read what it could. The source, and `cut` 1 when the re-read stopped at its limit. |
 | `read_cut` | A source's read stopped at its limit (Gmail's first run, a Slack search); older items in its window were not read. The source only. |
 | `read_paused` | A Gmail open-state scan stopped at a rate limit and will continue next pass. Not a failure. The source, and `reason` `rate_limited`. |
@@ -293,5 +298,5 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
 `egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,
 `source_unauthorized`, `scope_denied`, `identity_mismatch`, `signing_mismatch`, `item_invalid`, `project_failed`,
-`prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`. A source that was not collected is also printed by
+`prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`, `names_scope`, `names_failed`. A source that was not collected is also printed by
 `run`, with the reason and not the error text.

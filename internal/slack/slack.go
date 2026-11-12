@@ -19,8 +19,10 @@ import (
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
-// Fields is Slack's fixed field list (DEC-6). body is set only when a rule lists it.
-var Fields = []string{"channel", "channel_type", "ts", "thread_ts", "author", "permalink", "body"}
+// Fields is Slack's fixed field list (DEC-6). body is set only when a rule lists it. title, channel_name and
+// author_name are display names, read only when a rule lists one of them and the token holds NameScopes.
+var Fields = []string{"channel", "channel_type", "ts", "thread_ts", "author", "permalink", "body",
+	FieldTitle, FieldChannelName, FieldAuthorName}
 
 // StateFields is empty: Slack has no object state Beacon reads.
 var StateFields = []string{}
@@ -88,6 +90,8 @@ type Options struct {
 	// Identity is person.identities for this source, slack:user:<id>. Empty skips that check.
 	Identity string
 	Token    func() (keychain.Secret, error)
+	// Cache is the name cache's path, in the state directory. Empty keeps names in memory only.
+	Cache string
 	// Base replaces https://slack.com (tests).
 	Base  string
 	HTTP  *http.Client
@@ -112,6 +116,13 @@ type Source struct {
 	groupsAt time.Time
 	// groupDMs are the group direct messages the person is in, as of this pass.
 	groupDMs map[string]bool
+	// names is set when a rule lists title, channel_name or author_name. persist is set when a pass may write the
+	// name cache (a send pass). cache is read from cachePath on the first collect.
+	names     bool
+	persist   bool
+	cachePath string
+	cache     *nameCache
+	titling   *titling
 }
 
 // New builds a Slack source. It reads no credential.
@@ -151,7 +162,7 @@ func New(o Options) (*Source, error) {
 	sort.Strings(channels)
 	s := &Source{
 		name: name, person: o.Person, workspace: o.Workspace, user: o.User, identity: o.Identity,
-		channels: channels, token: o.Token, api: a, now: now, groupDMs: map[string]bool{},
+		channels: channels, token: o.Token, api: a, now: now, groupDMs: map[string]bool{}, cachePath: o.Cache,
 	}
 	a.configured = func(c string) bool { return allowed[c] }
 	a.groupDM = func(c string) bool { return s.groupDMs[c] }
@@ -176,6 +187,12 @@ func (s *Source) SetHTTP(c *http.Client) { s.api.http.HTTP = c }
 
 // SetBodies says whether a rule lists body for this source. Message text leaves only then.
 func (s *Source) SetBodies(b bool) { s.bodies = b }
+
+// SetNames says whether a rule lists title, channel_name or author_name for this source. Names are read only then.
+func (s *Source) SetNames(b bool) { s.names = b }
+
+// SetPersist says whether a pass may write the name cache to the state directory. A dry run does not.
+func (s *Source) SetPersist(b bool) { s.persist = b }
 
 // PersonalStem is slack:dm:. A send pass holds personal items until Signal restricts slack:dm:*.
 func (s *Source) PersonalStem() string { return PersonalStem }
@@ -281,6 +298,10 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 		return source.Collected{}, err
 	}
 	s.api.clock.Reset()
+	s.titling = nil
+	if s.cache == nil {
+		s.cache = loadCache(s.cachePath, s.now().UTC())
+	}
 	first := len(raw) == 0
 	cur := cursorData{}
 	if !first {
@@ -313,6 +334,11 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 		return source.Collected{}, err
 	}
 	items, dropped := s.items(p.msgs, id.URL)
+	warning := s.nameItems(ctx, p, id, items)
+	if ctx.Err() != nil {
+		return source.Collected{}, ctx.Err()
+	}
+	s.flush()
 	s.track(p, items)
 	deleted, err := s.checkDeleted(ctx, p)
 	if err != nil {
@@ -334,7 +360,9 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 	if err != nil {
 		return source.Collected{}, err
 	}
-	return source.Collected{Items: items, Next: data, Cut: p.cut, Dropped: dropped}, nil
+	// A retitle after this pass reads with the same token, and only when names may be read.
+	s.titling = &titling{tok: tok, names: s.names && len(id.MissingNames) == 0}
+	return source.Collected{Items: items, Next: data, Cut: p.cut, Dropped: dropped, Warning: warning}, nil
 }
 
 // collect runs every read of a pass into p.msgs and moves p.cur's watermarks.

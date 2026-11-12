@@ -86,7 +86,7 @@ A matcher is a plain string (exact), or a mapping with exactly one of the forms 
 
 | Name | Goes to |
 | --- | --- |
-| `title` | The thread title (`open.title`): the object's title. Trimmed, and shortened to Signal's 300 characters. The service sources do not use this field as the event title. A source that sets no event title still uses it for both. |
+| `title` | The thread title (`open.title`): the object's title. Trimmed, and shortened to Signal's 300 characters. The service sources do not use this field as the event title. A source that sets no event title still uses it for both. For Slack it is the conversation's title, built from display names and the channel's name, never message text, and listing it also lets a send pass rename threads Beacon opened before ([`sources.md`](sources.md#slack)). |
 | `summary` | `metadata.fields.summary`. When the rule lists it and did not list `title`, it is also the thread title. An issue's or a calendar event's summary is its title. |
 | `subject` | `metadata.fields.subject`. When the rule lists it and lists neither `title` nor `summary`, it is also the thread title. A mail thread's subject is its title. |
 | `body` | The event body. Full bodies leave only when a rule lists `body` (DEC-6). A body is never copied into a title. A Google source does not read a body unless a `send` or `hold` rule that can match it lists `body`; a Slack source reads message text on the machine and sets `body` only then. |
