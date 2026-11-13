@@ -43,7 +43,7 @@ func SealedProblem(body []byte) string {
 	}
 	for k := range sealed {
 		switch k {
-		case "level", "title", "body", "metadata", "state":
+		case "level", "title", "body", "metadata", "state", "open":
 		default:
 			return "/sealed"
 		}
@@ -79,12 +79,27 @@ func SealedProblem(body []byte) string {
 			return "/" + name
 		}
 	}
+	var open map[string]json.RawMessage
 	if raw, ok := b["open"]; ok {
-		var open map[string]json.RawMessage
 		if json.Unmarshal(raw, &open) == nil {
 			if _, ok := open["description"]; ok {
 				return "/open/description"
 			}
+		}
+	}
+	// sealed.open is { title }, the title of the thread the write opens, with a plain open and no plain open.title
+	// (Signal DEC-281).
+	if raw, ok := sealed["open"]; ok {
+		var so map[string]json.RawMessage
+		var t string
+		if json.Unmarshal(raw, &so) != nil || len(so) != 1 || json.Unmarshal(so["title"], &t) != nil || strings.TrimSpace(t) == "" || utf8.RuneCountInString(t) > 300 {
+			return "/sealed/open"
+		}
+		if open == nil {
+			return "/open"
+		}
+		if _, ok := open["title"]; ok {
+			return "/open/title"
 		}
 	}
 	if raw, ok := b["metadata"]; ok {

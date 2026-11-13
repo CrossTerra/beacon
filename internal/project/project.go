@@ -67,6 +67,8 @@ type Sealed struct {
 	Body     string            `json:"body,omitempty"`
 	Metadata map[string]any    `json:"metadata,omitempty"`
 	State    map[string]string `json:"state,omitempty"`
+	// Open is the title of the thread the write opens, when the object's title is sealed (Signal DEC-281).
+	Open *Open `json:"open,omitempty"`
 }
 
 // Snapshot is a state snapshot (DEC-28, Signal plan 12.01). The listed state fields are nested under Fields.

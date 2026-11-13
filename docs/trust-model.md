@@ -53,7 +53,8 @@ same pull request.
    review wording and links, and to match `seal.owner`; it leaves only as `body`, when a rule lists it. **A body from a
    personal subject leaves only sealed (DEC-32)**: `beacon rules check` refuses a rule that would send one plain, and
    at run time such an item is held as `body_needs_seal`. On a sealed event the envelope is fixed in code (DEC-31):
-   the event title, the body, who caused it (`actor`), and every field, state field and `references` the rule does
+   the event title, the thread title when its field is not plain (`sealed.open.title`, Signal DEC-281), the body, who
+   caused it (`actor`), and every field, state field and `references` the rule does
    not leave `plain` go in `sealed` (references are subjects; left plain, Signal relates threads through them, Signal
    DEC-284); `metadata.native` is the source's opaque id, never a Message-ID or anything
    with `@`. The local check (`seal.owner`, DEC-33), a meeting's level (DEC-35) and the subject floor (DEC-34) can

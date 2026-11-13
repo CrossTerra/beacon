@@ -412,6 +412,24 @@ func (s *Server) OpenAs(subject, title string) {
 	s.subjects[subject] = num
 }
 
+// Merge merges the thread covering subject into the one covering into, as a filer does: later events about subject
+// land in the survivor, and reads of an event in the merged thread lead there.
+func (s *Server) Merge(subject, into string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	from, ok1 := s.subjects[subject]
+	to, ok2 := s.subjects[into]
+	if !ok1 || !ok2 || from == to {
+		return
+	}
+	s.threads[from].MergedInto = threadID(to)
+	for subj, n := range s.subjects {
+		if n == from {
+			s.subjects[subj] = to
+		}
+	}
+}
+
 func reply(w http.ResponseWriter, status int, body string, headers map[string]string) {
 	for k, v := range headers {
 		w.Header().Set(k, v)

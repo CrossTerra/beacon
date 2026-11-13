@@ -42,7 +42,7 @@ sources:
 | `rules` | The rules file. Its grammar is in [`rules.md`](rules.md). |
 | `state` | The state directory: outbox, hold queue, dropped record, instance id. |
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
-| `lease.period` | The lease period (DEC-25): how often the holder renews. It holds the lease for two periods, so another instance takes over within two periods of the holder stopping. Default `15m`. |
+| `lease.period` | The lease period (DEC-25): how often the holder renews. It holds the lease for three periods in Signal's lease API (two with claim events), so another instance takes over within three periods of the holder stopping. Default `15m`. |
 | `poll_interval` | How often `beacon run` makes a pass. Default `1m`. The launchd agent runs this loop. |
 | `seal.owner` | Words, senders and labels that seal an item at `owner`. See [Seal](#seal). |
 | `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`, `slack`. See [Sources](#sources). |
