@@ -1409,3 +1409,23 @@ func TestCalendarSummaryHashBackfill(t *testing.T) {
 		t.Fatalf("cursor %s", got.Next)
 	}
 }
+
+// A sealed thread's neutral title names the kind of thing, never the thing: mail from the account's own domain is
+// from a colleague.
+func TestSealedTitles(t *testing.T) {
+	srv := googletest.New(t)
+	g, _ := NewGmail(opts(t, srv))
+	if got := g.SealedTitle(source.Item{Fields: map[string]string{"from": "Dana@Example.com"}}); got != "Mail from a colleague" {
+		t.Fatalf("colleague: %q", got)
+	}
+	for _, from := range []string{"dana@other.example", "", "example.com"} {
+		if got := g.SealedTitle(source.Item{Fields: map[string]string{"from": from}}); got != "Mail" {
+			t.Fatalf("%q: %q", from, got)
+		}
+	}
+	d, _ := NewDrive(opts(t, srv))
+	c, _ := NewCalendar(opts(t, srv))
+	if d.SealedTitle(source.Item{Type: TypeNotesCreated}) != "Meeting notes" || d.SealedTitle(source.Item{Type: TypeMentioned}) != "Document" || c.SealedTitle(source.Item{}) != "Meeting" {
+		t.Fatal("drive and calendar titles")
+	}
+}

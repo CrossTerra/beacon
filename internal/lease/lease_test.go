@@ -102,12 +102,216 @@ func TestClaimShape(t *testing.T) {
 	if err := json.Unmarshal(evs[2].Body, &last); err != nil {
 		t.Fatal(err)
 	}
+	// A claim is bookkeeping: it asks no one, so there is nothing to close.
 	if last.Subject != "beacon:lease:winton" || !strings.HasPrefix(last.Key, "claim:beacon:lease:winton:") ||
-		len(last.To) != 1 || last.To[0] != "me" || last.Metadata["run"] != "a:lease" || last.Open["title"] == "" {
+		last.To != nil || last.Metadata["run"] != "a:lease" || last.Open["title"] == "" || last.Closes != nil {
 		t.Fatalf("claim: %s", evs[2].Body)
 	}
-	if len(last.Closes) != 1 || last.Closes[0]["key"] != evs[1].Key {
-		t.Fatalf("claim does not close the previous one: %s", evs[2].Body)
+	if strings.Contains(string(evs[2].Body), `"to"`) {
+		t.Fatalf("a claim asks: %s", evs[2].Body)
+	}
+}
+
+// legacyClaim is a sent claim from a version whose claims were asks to Beacon itself.
+func legacyClaim(t *testing.T, ob *outbox.Outbox, key string) {
+	t.Helper()
+	body := `{"subject":"beacon:lease:winton","type":"beacon.lease_claimed","key":"` + key + `","open":{"title":"Beacon lease for @winton"},"to":["me"],"metadata":{"run":"a:lease"}}`
+	if err := ob.Append(outbox.Lease, key, "beacon:lease:winton", "", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ob.Mark(key, outbox.Sent, "evt_legacy", 201, "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Once the lease is held after an upgrade, one event closes the asks earlier claims left open; claims themselves
+// close nothing. A close Signal does not answer stays pending and is resent as the same bytes; one it refuses is
+// recorded, does not cost the lease, and is not written again.
+func TestClaimsCloseLegacyAsks(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	a.Writer.(*signal.Client).Attempts = 1
+	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
+	legacyClaim(t, ob, "claim:beacon:lease:winton:101")
+	// The close is not answered the first time.
+	s.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.Contains(string(r.Body), "lease_moved") {
+			return signaltest.Reply{Status: 503, Body: `{}`}
+		}
+		return signaltest.Reply{}
+	}
+	if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	var closing string
+	for _, e := range ob.Pending() {
+		closing = e.Key
+	}
+	if !strings.HasPrefix(closing, "beacon:lease:winton:closed:") {
+		t.Fatalf("pending %v", ob.Pending())
+	}
+	s.Script = nil
+	c.t = c.t.Add(5 * time.Minute)
+	if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	var claims, closes int
+	for _, e := range s.Events() {
+		switch {
+		case strings.Contains(string(e.Body), "lease_moved"):
+			closes++
+			if e.Key != closing || !strings.Contains(string(e.Body), `"closes":[{"key":"claim:beacon:lease:winton:100"},{"key":"claim:beacon:lease:winton:101"}]`) {
+				t.Fatalf("close %s", e.Body)
+			}
+		case strings.Contains(string(e.Body), "closes"):
+			t.Fatalf("a claim closes: %s", e.Body)
+		default:
+			claims++
+		}
+	}
+	if closes != 1 || claims != 3 {
+		t.Fatalf("%d closes, %d claims", closes, claims)
+	}
+	// A refused close (the asks were closed in Signal some other way) does not cost the lease and is not retried.
+	b, ob2 := instance(t, s, t.TempDir(), "a:lease", c)
+	legacyClaim(t, ob2, "claim:beacon:lease:winton:200")
+	s.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.Contains(string(r.Body), "lease_moved") {
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"x"}}`}
+		}
+		return signaltest.Reply{}
+	}
+	for i := 0; i < 2; i++ {
+		if st, err := b.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("refused close: %+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	n := 0
+	for _, r := range s.Requests() {
+		if strings.Contains(string(r.Body), "claim:beacon:lease:winton:200") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("a refused close was sent %d times", n)
+	}
+}
+
+// With Signal's lease API the lease is a row: renewed once a period for two, no event and no ask. Another instance
+// is refused until the holder stops renewing, then takes it within two periods. The open asks earlier claims left are
+// closed once, by one event.
+func TestLeaseRow(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	s.Leases, s.LeaseNow = true, c.now
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	b, _ := instance(t, s, t.TempDir(), "b:lease", c)
+	a.API, b.API = a.Writer.(*signal.Client), b.Writer.(*signal.Client)
+	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
+
+	st, err := a.Ensure(context.Background())
+	if err != nil || !st.Held || !st.Until.Equal(c.t.Add(10*time.Minute)) {
+		t.Fatalf("a: %+v %v", st, err)
+	}
+	if st, err := b.Ensure(context.Background()); err != nil || st.Held {
+		t.Fatalf("b took a held lease: %+v %v", st, err)
+	}
+	// Within a period the holder does not call Signal again.
+	claims := s.LeaseClaims()
+	for i := 0; i < 4; i++ {
+		c.t = c.t.Add(time.Minute)
+		if st, _ := a.Ensure(context.Background()); !st.Held {
+			t.Fatal("a lost the lease within its period")
+		}
+	}
+	if s.LeaseClaims() != claims {
+		t.Fatalf("renewed %d times within one period", s.LeaseClaims()-claims)
+	}
+	for i := 0; i < 4; i++ {
+		c.t = c.t.Add(5 * time.Minute)
+		if st, _ := a.Ensure(context.Background()); !st.Held {
+			t.Fatalf("period %d: a lost the lease", i)
+		}
+		if st, _ := b.Ensure(context.Background()); st.Held {
+			t.Fatalf("period %d: b took the lease", i)
+		}
+	}
+	// Only the event that closes the earlier claim's ask was written, once.
+	evs := s.Events()
+	if len(evs) != 1 || !strings.Contains(string(evs[0].Body), `"type":"beacon.lease_moved"`) ||
+		!strings.Contains(string(evs[0].Body), `"closes":[{"key":"claim:beacon:lease:winton:100"}]`) || strings.Contains(string(evs[0].Body), `"to"`) {
+		t.Fatalf("events: %v", evs)
+	}
+	// The holder stops. Within two periods the other takes over.
+	c.t = c.t.Add(5 * time.Minute)
+	if st, _ := b.Ensure(context.Background()); st.Held {
+		t.Fatal("b took the lease before it expired")
+	}
+	c.t = c.t.Add(5 * time.Minute)
+	if st, _ := b.Ensure(context.Background()); !st.Held {
+		t.Fatal("b did not take the lease after a stopped")
+	}
+	// The old holder comes back and is refused.
+	if st, _ := a.Ensure(context.Background()); st.Held {
+		t.Fatal("a held the lease b took")
+	}
+}
+
+// A Signal without leases answers 404: the lease is claimed by event, and the API is not asked again for an hour.
+// Once Signal offers leases, the instance moves to them and claims no more.
+func TestLeaseRowFallsBackToClaims(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, _ := instance(t, s, t.TempDir(), "a:lease", c)
+	a.API = a.Writer.(*signal.Client)
+	for i := 0; i < 3; i++ {
+		if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("%+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	n := 0
+	for _, r := range s.Requests() {
+		if r.Path == "/api/leases" {
+			n++
+		}
+	}
+	if n != 1 || len(s.Events()) != 4 {
+		t.Fatalf("%d lease API calls, %d claims", n, len(s.Events()))
+	}
+	s.Leases, s.LeaseNow = true, c.now
+	c.t = c.t.Add(time.Hour)
+	for i := 0; i < 4; i++ {
+		if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("%+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	if s.LeaseClaims() == 0 || len(s.Events()) > 6 {
+		t.Fatalf("%d lease claims, %d events", s.LeaseClaims(), len(s.Events()))
+	}
+}
+
+// A lease refusal other than another holder is an error naming Signal's status and code.
+func TestLeaseRowRefused(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	s.Leases = true
+	s.LeaseScript = func(int) signaltest.Reply {
+		return signaltest.Reply{Status: 403, Body: `{"error":{"code":"forbidden","message":"x"}}`}
+	}
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, _ := instance(t, s, t.TempDir(), "a:lease", c)
+	a.API = a.Writer.(*signal.Client)
+	st, err := a.Ensure(context.Background())
+	var refused *lease.RefusedError
+	if st.Held || !errors.As(err, &refused) || refused.Status != 403 || refused.Code != "forbidden" || len(s.Events()) != 0 {
+		t.Fatalf("%+v %v", st, err)
 	}
 }
 

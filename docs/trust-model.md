@@ -13,9 +13,9 @@ same pull request.
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
-| Lease claims: your Signal handle, a random instance id and the lease period | Rule names, and why an item matched |
+| The lease: your Signal handle, a random instance id and the lease period, as a lease in Signal's lease API (not an event) or, where Signal does not offer one, as a claim event | Rule names, and why an item matched |
 | With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | The Slack name cache (display names and channel names by id) and the record of threads checked for a retitle |
-| With a rule that lists Slack's `title`: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
+| With a rule that lists Slack's `title`, or a Google thread Beacon opened with a title that is now sealed: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
 
 ## Properties
@@ -43,7 +43,10 @@ same pull request.
    its rule listed `title` is renamed (`thread.titled`) only when the current rule for the stored item still sends it
    and lists `title`, Signal shows that Beacon's own event opened that thread, and nobody renamed or merged it since.
    A thread title is plain, so a stored event that was sealed, a sealed rule that does not leave `title` plain, or a
-   subject Beacon has sent sealed is never retitled.
+   subject Beacon has sent sealed is never retitled from names. The reverse holds for a Google thread Beacon opened with
+   a plain object title that is now sealed (its current rule seals it, or Beacon has since sent the subject with its
+   title sealed): it is renamed, under the same checks, to a fixed neutral title that names only the kind of thing
+   ("Mail from a colleague", "Meeting", "Document"), never its subject, summary or file name.
    A thread someone else opened or renamed is not touched. A Google source does not even read a mail body, an event
    description, comment text, meeting notes or a transcript unless a sealed rule that can match it lists `body`.
    Slack returns a message's text with the message, so the Slack source reads it on the machine to find mentions,
@@ -198,6 +201,9 @@ same pull request.
 - **The Slack name cache holds names at rest.** Display names and channel names, by id, are kept in the state
   directory (`slack-names-<source>.json`, `0600`) for a day, so a pass does not ask Slack again. A dry run does not
   write it.
+- **A lease in Signal's lease API is not in the outbox.** It is not an event: renewing it sends the same name, run and
+  period each time, and nothing is replayed. Every event body, the claims and the event that closes old claims
+  included, is still appended first.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the

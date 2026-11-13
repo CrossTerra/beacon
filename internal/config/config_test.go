@@ -30,7 +30,7 @@ func TestValid(t *testing.T) {
 	if c.SignalHost() != "signal.example.com:443" || c.KeychainAccount() != "signal:signal.example.com:443" {
 		t.Fatalf("%s %s", c.SignalHost(), c.KeychainAccount())
 	}
-	if c.LeasePeriod() != 5*time.Minute || c.PollInterval() != time.Minute {
+	if c.LeasePeriod() != 15*time.Minute || c.PollInterval() != time.Minute {
 		t.Fatal("defaults")
 	}
 	c.Path = "/home/w/.config/beacon/config.yaml"
@@ -58,7 +58,7 @@ func TestRejected(t *testing.T) {
 		"bad mode":         {"mode: dry-run", "mode: live"},
 		"unknown source":   {"kind: fixture", "kind: teams"},
 		"lease too short":  {"mode: dry-run", "mode: dry-run\nlease:\n  period: 30s"},
-		"poll too slow":    {"mode: dry-run", "mode: dry-run\npoll_interval: 4m"},
+		"poll too slow":    {"mode: dry-run", "mode: dry-run\npoll_interval: 8m"},
 		"secret in config": {"mode: dry-run", "mode: dry-run\ntoken: sig_x"},
 	}
 	for name, c := range cases {

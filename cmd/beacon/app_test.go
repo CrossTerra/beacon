@@ -145,7 +145,7 @@ func (e exitAfterEvent) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	_ = json.NewDecoder(body).Decode(&b)
 	resp, err := e.next.RoundTrip(req)
-	if err == nil && !strings.HasPrefix(b.Key, "claim:") {
+	if err == nil && !strings.HasPrefix(b.Key, "claim:") && req.URL.Path != "/api/leases" {
 		os.Exit(87)
 	}
 	return resp, err
@@ -230,7 +230,7 @@ func (h *harness) egressList(cfg string) []string {
 func eventRequests(s *signaltest.Server) []signaltest.Request {
 	var out []signaltest.Request
 	for _, r := range s.Requests() {
-		if !strings.HasPrefix(r.Key, "claim:") {
+		if !strings.HasPrefix(r.Key, "claim:") && r.Path != "/api/leases" {
 			out = append(out, r)
 		}
 	}

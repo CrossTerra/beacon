@@ -30,6 +30,12 @@ type Titler interface {
 	ThreadTitle(ctx context.Context, subject string) (string, error)
 }
 
+// SealedTitler is a source that names, without content, a thread whose object title its current rules would seal
+// ("Mail from a colleague"). It reads only the stored decided item.
+type SealedTitler interface {
+	SealedTitle(it source.Item) string
+}
+
 // ThreadReader reads back where one of Beacon's events landed, and a thread as it is now.
 type ThreadReader interface {
 	EventOpened(ctx context.Context, id string) (signal.Opened, error)
@@ -57,25 +63,48 @@ const RetitleKeyPart = ":retitle:"
 //
 // The thread change is appended to the outbox before it is sent, like any body, under a key for that thread and that
 // title. A thread left alone is recorded, so it is not read again.
+//
+// A thread Beacon opened with a plain object title (a mail's subject) that its current rules would seal is renamed to
+// a neutral title its source gives ("Mail from a colleague"), under the same checks of Signal: Beacon's event opened
+// it, it was not merged, and nobody renamed it. "Would seal" is the current rule for the stored item sealing it
+// without leaving its title plain, or Beacon having since sent an event on the subject with its title sealed.
 func (r *Runner) retitle(ctx context.Context, st lease.Status, rep *Report) error {
 	if r.Threads == nil || r.Retitled == nil || r.Rules == nil {
 		return nil
 	}
 	titlers := map[string]Titler{}
+	sealers := map[string]SealedTitler{}
 	for _, s := range r.Sources {
-		if t, ok := s.(Titler); ok && !r.Unaccepted[s.Name()] && r.Rules.Lists(s.Name(), project.FieldTitle) {
+		if r.Unaccepted[s.Name()] {
+			continue
+		}
+		if t, ok := s.(Titler); ok && r.Rules.Lists(s.Name(), project.FieldTitle) {
 			titlers[s.Name()] = t
 		}
+		if t, ok := s.(SealedTitler); ok {
+			sealers[s.Name()] = t
+		}
 	}
-	if len(titlers) == 0 {
+	if len(titlers) == 0 && len(sealers) == 0 {
 		return nil
 	}
 	first := map[string]outbox.Entry{}
 	var order []string
 	done := map[string]bool{}
+	// Subjects on which Beacon has since sent an event with its title sealed.
+	sealedSince := map[string]bool{}
+	for _, e := range r.Outbox.Entries() {
+		if len(sealers) > 0 && e.Kind == outbox.Event && len(e.Decision) > 0 && !sealedSince[e.Subject] &&
+			e.State != outbox.Rejected && e.State != outbox.Superseded {
+			var d project.Decision
+			if json.Unmarshal(e.Decision, &d) == nil && d.Seal != "" && sealsTitle(d.Fields, d.Plain) {
+				sealedSince[e.Subject] = true
+			}
+		}
+	}
 	for _, e := range r.Outbox.Entries() {
 		name, _, _ := strings.Cut(e.Key, ":")
-		if e.Kind != outbox.Event || titlers[name] == nil {
+		if e.Kind != outbox.Event || (titlers[name] == nil && sealers[name] == nil) {
 			continue
 		}
 		if strings.Contains(e.Key, RetitleKeyPart) {
@@ -96,11 +125,31 @@ func (r *Runner) retitle(ctx context.Context, st lease.Status, rep *Report) erro
 	for _, subject := range order {
 		e := first[subject]
 		name, _, _ := strings.Cut(e.Key, ":")
-		if done[subject] || unnamed[name] || r.Retitled.Checked(subject) || openedWithTitle(e.Body) {
+		if done[subject] || r.Retitled.Checked(subject) {
 			continue
 		}
-		rule, ok := r.retitleRule(e)
-		if !ok || r.withholds(subject) != "" {
+		var title func(context.Context) (string, error)
+		var ruleName string
+		if openedWithTitle(e.Body) {
+			neutral, rn, ok := r.sealedRetitle(e, sealers[name], sealedSince[subject])
+			if !ok {
+				continue
+			}
+			title = func(context.Context) (string, error) { return neutral, nil }
+			ruleName = rn
+		} else {
+			if titlers[name] == nil || unnamed[name] {
+				continue
+			}
+			rule, ok := r.retitleRule(e)
+			if !ok {
+				continue
+			}
+			t := titlers[name]
+			title = func(ctx context.Context) (string, error) { return t.ThreadTitle(ctx, e.Subject) }
+			ruleName = rule.Name
+		}
+		if r.withholds(subject) != "" {
 			continue
 		}
 		if checked == retitlePerPass || r.stopped() {
@@ -113,7 +162,7 @@ func (r *Runner) retitle(ctx context.Context, st lease.Status, rep *Report) erro
 		checked++
 		// The lease bounds every read and the write: none outlasts it.
 		wctx, cancel := context.WithTimeout(ctx, st.Until.Sub(r.Now()))
-		outcome, err := r.retitleOne(wctx, titlers[name], e, rule, rep)
+		outcome, err := r.retitleOne(wctx, title, e, ruleName, rep)
 		cancel()
 		switch {
 		case err != nil && ctx.Err() == nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, signal.ErrUnavailable)):
@@ -169,9 +218,49 @@ func (r *Runner) retitleRule(e outbox.Entry) (*rules.Rule, bool) {
 	return decided.Rule, true
 }
 
+// sealsTitle reports whether a sealed rule with these fields and plain fields seals the thread title: the first of
+// title, summary and subject it lists is not plain, or it lists none.
+func sealsTitle(fields, plain []string) bool {
+	for _, f := range []string{project.FieldTitle, "summary", "subject"} {
+		if slices.Contains(fields, f) {
+			return !slices.Contains(plain, f)
+		}
+	}
+	return true
+}
+
+// sealedRetitle is the neutral title for a thread Beacon opened with a plain object title, and the current rule's
+// name, when that title is now sealed: the current rule for the stored item seals it, or Beacon has since sent an
+// event on the subject with its title sealed (a raise leaves nothing plain). ok is false otherwise, or when the source
+// names none.
+func (r *Runner) sealedRetitle(e outbox.Entry, t SealedTitler, sealedSince bool) (string, string, bool) {
+	if t == nil || len(e.Decision) == 0 {
+		return "", "", false
+	}
+	var d project.Decision
+	if json.Unmarshal(e.Decision, &d) != nil {
+		return "", "", false
+	}
+	if r.Seed != nil && r.Seed.Drops(d.Item.Subject) {
+		return "", "", false
+	}
+	decided := r.Rules.Decide(d.Item)
+	if decided.Rule == nil || (decided.Tier != rules.Send && decided.Tier != rules.Hold) {
+		return "", "", false
+	}
+	if !sealedSince && (decided.Rule.Seal == "" || !sealsTitle(decided.Rule.Fields, decided.Rule.Plain)) {
+		return "", "", false
+	}
+	neutral := t.SealedTitle(d.Item)
+	if neutral == "" {
+		return "", "", false
+	}
+	return neutral, decided.Rule.Name, true
+}
+
 // retitleOne checks one thread and renames it when it may. It returns outcomeWritten, outcomeLater, a titled outcome
 // code to record, or "" when nothing is recorded (the thread change was appended and refused, or is pending).
-func (r *Runner) retitleOne(ctx context.Context, t Titler, e outbox.Entry, rule *rules.Rule, rep *Report) (string, error) {
+func (r *Runner) retitleOne(ctx context.Context, title func(context.Context) (string, error), e outbox.Entry, ruleName string, rep *Report) (string, error) {
 	opened, err := r.Threads.EventOpened(ctx, e.EventID)
 	switch {
 	case errors.Is(err, signal.ErrNotFound):
@@ -194,7 +283,7 @@ func (r *Runner) retitleOne(ctx context.Context, t Titler, e outbox.Entry, rule 
 	case th.Title != opened.Title:
 		return titled.Renamed, nil
 	}
-	name, err := t.ThreadTitle(ctx, e.Subject)
+	name, err := title(ctx)
 	switch {
 	case errors.Is(err, source.ErrNoTitle):
 		return titled.Unreadable, nil
@@ -218,7 +307,7 @@ func (r *Runner) retitleOne(ctx context.Context, t Titler, e outbox.Entry, rule 
 		return "", nil
 	}
 	// Recorded under the item's subject, so a personal one waits for its restriction like any pending body.
-	if err := r.Outbox.Append(outbox.Event, key, e.Subject, rule.Name, body); err != nil {
+	if err := r.Outbox.Append(outbox.Event, key, e.Subject, ruleName, body); err != nil {
 		return "", err
 	}
 	if r.AfterAppend != nil {

@@ -66,7 +66,7 @@ repeats every `poll_interval`, and it still writes nothing.
 | `internal/outbox` | The append-only record of every body, and each key's state. |
 | `internal/queue` | The hold queue and the record of dropped keys. |
 | `internal/signal` | The Signal client: `POST /api/events`, `GET /api/restrictions` when a personal source is enabled, and `GET /api/me` when `beacon key set` checks a key. Nothing else. |
-| `internal/lease` | The send lease. |
+| `internal/lease` | The send lease: a lease in Signal's lease API, else a claim event per period. |
 | `internal/runner` | One pass: collect, decide, record, send. The only code that hands item content to the client. |
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
@@ -84,7 +84,7 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `outbox.jsonl` | Every request body, exactly as sent, Signal's answers, and the decided item for each event append | The bodies, once each. The decided item stays |
 | `held.jsonl` | Held items, in full | No |
 | `dropped.jsonl` | Keys of dropped items and the rule that dropped them; one line per key, again only if another rule drops it | No |
-| `instance` | This instance's random id, used in lease claims | Inside lease claims |
+| `instance` | This instance's random id, used in the lease | As the lease's run |
 | `cursors.json` | Each source's committed cursor, opaque. A Gmail resume cursor, while a send pass's open-state scan is unfinished, is stored here too. A dry run does not write it | No |
 | `first.json` | Sources whose `beacon run --first` completed. `accept-first` requires it | No |
 | `accepted.json` | Sources whose first run was accepted (DEC-23) | No |
