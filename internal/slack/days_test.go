@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -91,5 +93,46 @@ func TestDayThreadTitle(t *testing.T) {
 	}
 	if _, err := s.ThreadTitle(context.Background(), "slack:C0ENG:2026-11-08"); err == nil {
 		t.Fatal("a channel subject with a day")
+	}
+}
+
+// An ask recorded before day subjects keeps its subject when its message is read again, so its deletion closes it on
+// the subject it was sent on.
+func TestAskKeepsItsSubject(t *testing.T) {
+	srv := slacktest.New(t)
+	s, sl := newSource(t, srv)
+	first, err := s.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := "slack:dm:winton:D0DANA:1794132000.000100"
+	cur, err := parseCursor(first.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur.Asked["D0DANA/1794132000.000100"].Subject = old
+	cur.Since = "2026-11-08T10:05:00Z"
+	raw, _ := json.Marshal(cur)
+	// Read again within the lookback: the message is collected again, and the ask keeps its subject.
+	again, err := s.Collect(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fmt.Sprint(again.Items), "slack:D0DANA:1794132000.000100") {
+		t.Fatal("the message was not read again")
+	}
+	srv.Deleted["D0DANA/1794132000.000100"] = true
+	_ = sl.sleep(context.Background(), 16*time.Minute)
+	got, err := s.Collect(context.Background(), again.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range got.Items {
+		if it.Type == TypeDeleted && it.Subject != old {
+			t.Fatalf("deleted on %s", it.Subject)
+		}
+	}
+	if !strings.Contains(fmt.Sprint(got.Items), "1794132000.000100:deleted") {
+		t.Fatalf("no deletion: %v", got.Items)
 	}
 }

@@ -189,7 +189,14 @@ func (s *Source) track(p *pass, items []source.Item) {
 			continue
 		}
 		root := it.Fields["thread_ts"]
-		p.cur.Asked[it.Fields["channel"]+"/"+it.Fields["ts"]] = &asked{Subject: it.Subject, Root: root, Kind: it.Fields["channel_type"], Checked: p.observed}
+		k := it.Fields["channel"] + "/" + it.Fields["ts"]
+		subject := it.Subject
+		if a := p.cur.Asked[k]; a != nil && a.Subject != "" {
+			// The ask is on the subject it was sent on. A message read again after DEC-38 gave direct messages day
+			// subjects keeps its old one, so its deletion and the replies that answer it still name that ask's subject.
+			subject = a.Subject
+		}
+		p.cur.Asked[k] = &asked{Subject: subject, Root: root, Kind: it.Fields["channel_type"], Checked: p.observed}
 	}
 	for k, a := range p.cur.Asked {
 		if p.msgs[k] != nil {
