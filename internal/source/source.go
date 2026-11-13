@@ -37,6 +37,9 @@ type Item struct {
 	References []string `json:"references,omitempty"`
 	// DueAt is the source's own due time, when it has one (DEC-21).
 	DueAt *time.Time `json:"due_at,omitempty"`
+	// Priority is the source's own priority for the object, mapped to low, medium or high, when it has one. An ask
+	// takes it when its rule sets no priority (DEC-21).
+	Priority string `json:"priority,omitempty"`
 	// State is the object's current state, when the source returned it (DEC-28). Only names in the source's state
 	// field list.
 	State map[string]string `json:"state,omitempty"`
@@ -331,6 +334,11 @@ func Validate(it Item, fields, stateFields []string) error {
 		if !printable.MatchString(k) || !strings.HasPrefix(k, it.Source+":") {
 			return fmt.Errorf("close_only names a key that is not this source's")
 		}
+	}
+	switch it.Priority {
+	case "", "low", "medium", "high":
+	default:
+		return fmt.Errorf("priority is not low, medium or high")
 	}
 	if it.Native != "" && (!printable.MatchString(it.Native) || strings.Contains(it.Native, "@")) {
 		return fmt.Errorf("native is not an opaque id of 1 to 200 printable characters without @")

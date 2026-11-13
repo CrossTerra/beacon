@@ -56,7 +56,8 @@ type Rule struct {
 	CloseByOthers bool     `yaml:"close_by_others,omitempty"`
 	// Seal is owner or owner+agents: the listed fields go in the request's sealed part, except Plain (DEC-30).
 	Seal string `yaml:"seal,omitempty"`
-	// Plain names listed fields that stay outside sealed. Never body, actor or references.
+	// Plain names listed fields that stay outside sealed. Never body or actor. references may stay plain: they are
+	// subjects, as plain as the event's own, and Signal relates threads only through plain ones (Signal DEC-284).
 	Plain []string `yaml:"plain,omitempty"`
 
 	// Index is the rule's position in the file, from 1.
@@ -292,7 +293,7 @@ func (f *File) validate() error {
 		}
 		for _, name := range r.Plain {
 			switch {
-			case name == FieldBody || name == FieldActor || name == FieldReferences:
+			case name == FieldBody || name == FieldActor:
 				errs = append(errs, fmt.Errorf("%s: plain may not hold %s: it leaves only sealed (DEC-30, DEC-31)", at, name))
 			case name != "" && !listed[name]:
 				errs = append(errs, fmt.Errorf("%s: plain names %q, which fields does not list", at, name))

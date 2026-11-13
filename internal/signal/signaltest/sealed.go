@@ -93,8 +93,15 @@ func SealedProblem(body []byte) string {
 			return "/metadata"
 		}
 		for name := range meta {
-			if name != "fields" && name != "native" {
+			// references may stay in the envelope: subjects, as plain as the event's own (Signal DEC-284).
+			if name != "fields" && name != "native" && name != "references" {
 				return "/metadata/" + name
+			}
+		}
+		if r, ok := meta["references"]; ok {
+			var refs []string
+			if json.Unmarshal(r, &refs) != nil || len(refs) == 0 || len(refs) > 50 {
+				return "/metadata/references"
 			}
 		}
 		if n, ok := meta["native"]; ok {

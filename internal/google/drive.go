@@ -532,8 +532,12 @@ func (d *Drive) notesItem(ctx context.Context, fileID, typ string, e *calEvent, 
 		Text:      map[string]string{"title": fields["title"], "meeting": fields["meeting"]},
 		Addresses: map[string][]string{"meeting_organizer": {organizer}, "meeting_attendees": attendees},
 	}
-	if e.ID != "" {
+	// The meeting the document is attached to, by its own event id: an instance of a recurring meeting, not the
+	// series. It is an explicit reference (DEC-17), so Signal can relate the notes to the meeting's thread.
+	var refs []string
+	if e.ID != "" && idPattern.MatchString(e.ID) {
 		local.Meeting = "calendar:" + d.person + ":" + e.ID
+		refs = []string{local.Meeting}
 	}
 	if d.bodies {
 		text, err := d.export(ctx, fileID)
@@ -566,6 +570,7 @@ func (d *Drive) notesItem(ctx context.Context, fileID, typ string, e *calEvent, 
 		Version:    version,
 		Native:     opaque(fileID),
 		Local:      local,
+		References: refs,
 	}, true, nil
 }
 

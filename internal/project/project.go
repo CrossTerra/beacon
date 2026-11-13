@@ -136,7 +136,7 @@ func Decide(it source.Item, rule *rules.Rule, truncated bool, level seal.Level) 
 			// The change description is not a source field. A retry must project the same event title, and it
 			// never carries comment or body text.
 			EventTitle: it.EventTitle,
-			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt,
+			OccurredAt: it.OccurredAt, Own: it.Own, Addressed: it.Addressed, DueAt: it.DueAt, Priority: it.Priority,
 			// A retry closes the same asks the first attempt did.
 			CloseSiblingsBefore: it.CloseSiblingsBefore,
 			CloseOnly:           append([]string(nil), it.CloseOnly...),
@@ -351,7 +351,11 @@ func envelope(b *Body, in Input) {
 		}
 	} else if r.Ask == "me" {
 		b.To = []string{in.Person.Handle}
+		// The rule's priority, else the source's own (a Jira issue's).
 		b.Priority = r.Priority
+		if b.Priority == "" {
+			b.Priority = it.Priority
+		}
 		if it.DueAt != nil {
 			b.DueAt = Instant(*it.DueAt)
 		}

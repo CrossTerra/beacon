@@ -375,8 +375,10 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 }
 
 func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
+	// Only a conclusion is a change: checks starting or still running are not events. The snapshot still says
+	// pending (state.checks), on every other item of the pull request.
 	conclusion := aggregateChecks(in.Checks)
-	if conclusion == "none" && len(in.Checks) == 0 {
+	if conclusion != "pass" && conclusion != "fail" {
 		return source.Item{}, false
 	}
 	sha := in.PR.headSHA()

@@ -825,6 +825,9 @@ func TestDriveEveryItem(t *testing.T) {
 		t.Fatalf("own comment %+v", r)
 	}
 	notes := m["drive:notes:n1"]
+	if strings.Join(notes.References, ",") != "calendar:winton:evA" || strings.Join(m["drive:transcript:n5"].References, ",") != "calendar:winton:evA" {
+		t.Fatalf("notes and transcripts reference their meeting: %v %v", notes.References, m["drive:transcript:n5"].References)
+	}
 	if notes.Subject != "drive:winton:n1" || notes.EventTitle != "Meeting notes created" || notes.Fields["meeting"] != "Weekly sync" ||
 		notes.Fields["link"] != "https://docs.google.com/document/d/n1/edit" || notes.Fields["meeting_start"] != "2026-11-07T15:00:00Z" {
 		t.Fatalf("notes %+v", notes)
@@ -1278,5 +1281,131 @@ func TestGoogleReadsBodiesOnlyForSealedRules(t *testing.T) {
 	}
 	if f.ListsSealed("gmail", "body") || !f.ListsSealed("drive", "body") || f.ListsSealed("calendar", "body") {
 		t.Fatal("ListsSealed")
+	}
+}
+
+// A meeting's video link is meet_link; a recurring instance, and a summary more than one event has, are dated in title
+// so their threads tell one day from another. Each instance keeps its own id, and its own subject.
+func TestCalendarTitlesAndMeetLinks(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"timeZone":"America/Los_Angeles","items":[
+  {"id":"st1_20261112T170000Z","recurringEventId":"st1","status":"confirmed","etag":"\"1\"","summary":"Tech stand-up","start":{"dateTime":"2026-11-12T17:00:00Z"},"end":{"dateTime":"2026-11-12T17:15:00Z"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-01T00:00:00Z","hangoutLink":"https://meet.google.com/abc-defg-hij",
+   "organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]},
+  {"id":"rv1","status":"confirmed","etag":"\"2\"","summary":"Design review","start":{"dateTime":"2026-11-09T17:00:00Z"},"end":{"dateTime":"2026-11-09T18:00:00Z"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-01T00:00:00Z","conferenceData":{"entryPoints":[{"entryPointType":"phone","uri":"tel:+1-555"},{"entryPointType":"video","uri":"https://zoom.us/j/123"}]},
+   "organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]},
+  {"id":"rv2","status":"confirmed","etag":"\"3\"","summary":"design  review","start":{"dateTime":"2026-11-13T17:00:00Z"},"end":{"dateTime":"2026-11-13T18:00:00Z"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-01T00:00:00Z","hangoutLink":"http://meet.example/plain",
+   "organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]},
+  {"id":"one","status":"confirmed","etag":"\"4\"","summary":"Board prep","start":{"date":"2026-11-10"},"end":{"date":"2026-11-11"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-01T00:00:00Z","organizer":{"email":"winton@example.com","self":true}}
+]}`)
+	}
+	c, _ := NewCalendar(opts(t, srv))
+	got, err := c.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := srv.Query("/calendar/v3/calendars/primary/events").Get("fields"); !strings.Contains(f, "hangoutLink") || !strings.Contains(f, "conferenceData(entryPoints(entryPointType,uri))") || !strings.Contains(f, "recurringEventId") {
+		t.Fatalf("fields %s", f)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	for key, want := range map[string][3]string{
+		"calendar:st1_20261112T170000Z:upcoming:1": {"calendar:winton:st1_20261112T170000Z", "Tech stand-up · Thu 12 Nov", "https://meet.google.com/abc-defg-hij"},
+		"calendar:rv1:upcoming:2":                  {"calendar:winton:rv1", "Design review · Mon 9 Nov", "https://zoom.us/j/123"},
+		"calendar:rv2:upcoming:3":                  {"calendar:winton:rv2", "design review · Fri 13 Nov", ""},
+		"calendar:one:upcoming:4":                  {"calendar:winton:one", "Board prep", ""},
+	} {
+		it, ok := m[key]
+		if !ok {
+			t.Fatalf("no %s in %v", key, keys(m))
+		}
+		if it.Subject != want[0] || it.Fields["title"] != want[1] || it.Fields["meet_link"] != want[2] {
+			t.Errorf("%s: %s %q %q", key, it.Subject, it.Fields["title"], it.Fields["meet_link"])
+		}
+	}
+	if m["calendar:st1_20261112T170000Z:upcoming:1"].Fields["summary"] != "Tech stand-up" {
+		t.Fatal("summary changed")
+	}
+	if datedTitle("All hands", calTime{Date: "2026-11-12"}, time.UTC) != "All hands · Thu 12 Nov" {
+		t.Fatal("all-day date")
+	}
+}
+
+// Gmail's web client saves a reply as a draft, then sends it. The history may record that as a message added with
+// SENT, or as the draft's id gaining SENT (labelsAdded). Either way the reply is the person's own act: TypeSent, own,
+// on the thread's subject, so it closes the asks there.
+func TestGmailSentFromADraft(t *testing.T) {
+	srv := googletest.New(t)
+	srv.Routes["/gmail/v1/users/me/history"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"history":[
+  {"id":"301","messagesAdded":[{"message":{"id":"d7","threadId":"t7","labelIds":["DRAFT"]}}]},
+  {"id":"302","labelsRemoved":[{"message":{"id":"d7","threadId":"t7","labelIds":["SENT"]},"labelIds":["DRAFT"]}]},
+  {"id":"303","labelsAdded":[{"message":{"id":"d7","threadId":"t7","labelIds":["SENT"]},"labelIds":["SENT"]}]},
+  {"id":"304","messagesAdded":[{"message":{"id":"s8","threadId":"t8s","labelIds":["SENT"]}}]}
+],"historyId":"360"}`)
+	}
+	srv.Routes["/gmail/v1/users/me/threads/t7"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"id":"t7","messages":[
+  {"id":"r7","threadId":"t7","labelIds":["INBOX"],"internalDate":"1794132000000","payload":{"headers":[{"name":"From","value":"dana@example.com"},{"name":"To","value":"winton@example.com"},{"name":"Subject","value":"Question"}]}},
+  {"id":"d7","threadId":"t7","labelIds":["SENT"],"internalDate":"1794133800000","payload":{"headers":[{"name":"From","value":"winton@example.com"},{"name":"To","value":"dana@example.com"},{"name":"Subject","value":"Re: Question"}]}}
+]}`)
+	}
+	srv.Routes["/gmail/v1/users/me/threads/t8s"] = func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"id":"t8s","messages":[
+  {"id":"s8","threadId":"t8s","labelIds":["SENT"],"internalDate":"1794133800000","payload":{"headers":[{"name":"From","value":"winton@example.com"},{"name":"To","value":"bob@example.com"},{"name":"Subject","value":"New topic"}]}}
+]}`)
+	}
+	g, err := NewGmail(opts(t, srv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.Collect(context.Background(), []byte("300"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, GmailFields, GmailStateFields)
+	reply, sent := m["gmail:t7:d7"], m["gmail:t8s:s8"]
+	if len(m) != 2 || reply.Type != TypeSent || !reply.Own || reply.Subject != "gmail:winton:thread:t7" || reply.EventTitle != "Replied" {
+		t.Fatalf("reply from a draft: %v %+v", keys(m), reply)
+	}
+	if sent.Type != TypeSent || !sent.Own || sent.EventTitle != "Sent" {
+		t.Fatalf("new mail: %+v", sent)
+	}
+}
+
+// A cursor from before the summary hash is read once for the hashes, so a new event that shares its summary with a
+// meeting fingerprinted earlier is dated too. That read yields nothing for unchanged events.
+func TestCalendarSummaryHashBackfill(t *testing.T) {
+	srv := googletest.New(t)
+	old := `{"id":"rvOld","status":"confirmed","etag":"\"1\"","summary":"Design review","start":{"dateTime":"2026-11-09T17:00:00Z"},"end":{"dateTime":"2026-11-09T18:00:00Z"},"created":"2026-10-01T00:00:00Z","updated":"2026-10-01T00:00:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]}`
+	fresh := `{"id":"rvNew","status":"confirmed","etag":"\"2\"","summary":"Design review","start":{"dateTime":"2026-11-16T17:00:00Z"},"end":{"dateTime":"2026-11-16T18:00:00Z"},"created":"2026-11-08T11:50:00Z","updated":"2026-11-08T11:50:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"needsAction"}]}`
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("updatedMin") != "" {
+			io.WriteString(w, `{"timeZone":"UTC","items":[`+fresh+`]}`)
+			return
+		}
+		io.WriteString(w, `{"timeZone":"UTC","items":[`+old+`,`+fresh+`]}`)
+	}
+	var seen calEvent
+	if err := json.Unmarshal([]byte(old), &seen); err != nil {
+		t.Fatal(err)
+	}
+	fp := seen.seen()
+	fp.S, fp.Start, fp.End = "", "2026-11-09T17:00:00Z", "2026-11-09T18:00:00Z"
+	cur, _ := json.Marshal(calCursor{Since: "2026-11-08T11:00:00Z", Events: map[string]calSeen{"rvOld": fp}})
+	c, _ := NewCalendar(opts(t, srv))
+	got, err := c.Collect(context.Background(), cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	if len(m) != 1 || m["calendar:rvNew:response_needed:2"].Fields["title"] != "Design review · Mon 16 Nov" {
+		t.Fatalf("got %v %+v", keys(m), m["calendar:rvNew:response_needed:2"].Fields)
+	}
+	if !strings.Contains(string(got.Next), `"summaries":true`) {
+		t.Fatalf("cursor %s", got.Next)
 	}
 }

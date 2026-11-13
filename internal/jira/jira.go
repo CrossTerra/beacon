@@ -211,7 +211,8 @@ func (s *Source) jql(since time.Time, loc *time.Location, first bool, account st
 	sort.Strings(projects)
 	clause := "project in (" + strings.Join(projects, ", ") + ")"
 	if first {
-		return clause + " AND resolution = Unresolved AND assignee = currentUser() ORDER BY updated ASC"
+		// An issue whose status is in the Done category is not open work, whether or not its workflow sets a resolution.
+		return clause + " AND resolution = Unresolved AND statusCategory != Done AND assignee = currentUser() ORDER BY updated ASC"
 	}
 	when := since.In(loc).Format("2006-01-02 15:04")
 	// text ~ account id is not verified against live ADF mentions. Mentions are also taken from fetched comments.
@@ -323,6 +324,10 @@ func (s *Source) changelog(ctx context.Context, secret keychain.Secret, key stri
 					To         string `json:"to"`
 					FromString string `json:"fromString"`
 					ToString   string `json:"toString"`
+					// A user field's from and to can be a username or user key from before Atlassian moved to account
+					// ids; these carry the account ids.
+					TmpFromAccountID string `json:"tmpFromAccountId"`
+					TmpToAccountID   string `json:"tmpToAccountId"`
 				} `json:"items"`
 			} `json:"values"`
 			Total  int  `json:"total"`
@@ -338,7 +343,12 @@ func (s *Source) changelog(ctx context.Context, secret keychain.Secret, key stri
 			}
 			hist := history{id: h.ID.String(), author: h.Author.AccountID, created: at}
 			for _, it := range h.Items {
-				hist.items = append(hist.items, change{field: jiraField(it.FieldID, it.Field), from: it.From, to: it.To, fromString: it.FromString, toString: it.ToString})
+				c := change{field: jiraField(it.FieldID, it.Field), from: it.From, to: it.To, fromString: it.FromString, toString: it.ToString}
+				if c.field == "assignee" {
+					// The person is compared by account id. A from or to that is not one names no one Beacon can match.
+					c.from, c.to = accountOf(it.TmpFromAccountID, it.From, it.FromString), accountOf(it.TmpToAccountID, it.To, it.ToString)
+				}
+				hist.items = append(hist.items, c)
 			}
 			out = append(out, hist)
 		}
@@ -389,6 +399,19 @@ func (s *Source) comments(ctx context.Context, secret keychain.Secret, key strin
 	return nil, errors.New("jira: comment pagination did not end")
 }
 
+// accountOf is a user field's account id: tmp when Jira sent one, else the raw value. A field that was cleared has
+// neither and no display value, and is "". One that was set but names no account id keeps its raw value, so it is
+// still a change, and still not the person's account.
+func accountOf(tmp, raw, display string) string {
+	if tmp = strings.TrimSpace(tmp); tmp != "" {
+		return tmp
+	}
+	if raw == "" && display != "" {
+		return "?"
+	}
+	return raw
+}
+
 func commentBody(raw json.RawMessage) (string, map[string]bool) {
 	if len(raw) == 0 {
 		return "", nil
@@ -410,7 +433,10 @@ func decodeIssue(raw []byte, browse string) (issue, error) {
 			Summary string `json:"summary"`
 			DueDate string `json:"duedate"`
 			Status  *struct {
-				Name string `json:"name"`
+				Name           string `json:"name"`
+				StatusCategory *struct {
+					Key string `json:"key"`
+				} `json:"statusCategory"`
 			} `json:"status"`
 			Assignee *struct {
 				AccountID   string `json:"accountId"`
@@ -439,6 +465,9 @@ func decodeIssue(raw []byte, browse string) (issue, error) {
 	}
 	if resp.Fields.Status != nil {
 		iss.status = resp.Fields.Status.Name
+		if c := resp.Fields.Status.StatusCategory; c != nil {
+			iss.done = c.Key == "done"
+		}
 	}
 	if resp.Fields.Assignee != nil {
 		iss.account = resp.Fields.Assignee.AccountID

@@ -423,3 +423,96 @@ func TestAssignedTitleNamesOnlyOthers(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// Jira can send a legacy username in a changelog's from and to; the account ids are in tmpFromAccountId and
+// tmpToAccountId. The person is matched by account id, so an assignment to them is addressed and reads "Assigned".
+func TestAssigneeByAccountID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		switch r.URL.Path {
+		case "/rest/api/3/myself":
+			io.WriteString(w, `{"accountId":"712020:abc","timeZone":"UTC"}`)
+		case "/rest/api/3/search/jql":
+			io.WriteString(w, `{"issues":[{"key":"ENG-1"}],"isLast":true}`)
+		case "/rest/api/3/issue/ENG-1":
+			io.WriteString(w, strings.Replace(eng1, "acc-winton", "712020:abc", 1))
+		case "/rest/api/3/issue/ENG-1/changelog":
+			io.WriteString(w, `{"values":[
+  {"id":"801","created":"2026-11-08T11:00:00.000+0000","author":{"accountId":"acc-dana"},"items":[{"field":"assignee","fieldId":"assignee","from":null,"to":"winton","toString":"Winton Welsh","tmpFromAccountId":null,"tmpToAccountId":"712020:abc"}]},
+  {"id":"802","created":"2026-11-08T11:10:00.000+0000","author":{"accountId":"acc-dana"},"items":[{"field":"assignee","fieldId":"assignee","from":"winton","to":"dana","fromString":"Winton Welsh","toString":"Dana","tmpFromAccountId":"712020:abc","tmpToAccountId":"acc-dana"}]},
+  {"id":"803","created":"2026-11-08T11:20:00.000+0000","author":{"accountId":"acc-dana"},"items":[{"field":"assignee","fieldId":"assignee","from":"dana","to":null,"fromString":"Dana","toString":null,"tmpFromAccountId":"acc-dana","tmpToAccountId":null}]}
+],"total":3,"isLast":true}`)
+		case "/rest/api/3/issue/ENG-1/comment":
+			io.WriteString(w, `{"comments":[],"total":0}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	s := newTest(t, srv)
+	got, err := s.Collect(context.Background(), []byte("2026-11-08T10:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]source.Item{}
+	for _, it := range got.Items {
+		by[it.Key] = it
+	}
+	if a := by["jira:ENG-1:801"]; a.Type != TypeAssigned || !a.Addressed || a.EventTitle != "Assigned" {
+		t.Fatalf("assigned to the person: %+v", a)
+	}
+	if a := by["jira:ENG-1:802"]; a.Type != TypeAssigned || a.Addressed || a.EventTitle != "Assigned to Dana" {
+		t.Fatalf("assigned to someone else: %+v", a)
+	}
+	if a := by["jira:ENG-1:803"]; a.Type != TypeUnassigned || a.Addressed {
+		t.Fatalf("unassigned: %+v", a)
+	}
+}
+
+// The first run skips an issue whose status is in the Done category, even with no resolution, and asks for none.
+func TestFirstRunSkipsDone(t *testing.T) {
+	var jql string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Sun, 08 Nov 2026 12:00:00 GMT")
+		switch r.URL.Path {
+		case "/rest/api/3/myself":
+			io.WriteString(w, `{"accountId":"acc-winton","timeZone":"UTC"}`)
+		case "/rest/api/3/search/jql":
+			body, _ := io.ReadAll(r.Body)
+			jql = string(body)
+			io.WriteString(w, `{"issues":[{"key":"ENG-1"},{"key":"ENG-2"}],"isLast":true}`)
+		case "/rest/api/3/issue/ENG-1":
+			io.WriteString(w, strings.Replace(eng1, `"status": {"name": "In Progress"}`, `"status": {"name": "Shipped", "statusCategory": {"key": "done"}}`, 1))
+		case "/rest/api/3/issue/ENG-2":
+			io.WriteString(w, strings.Replace(strings.Replace(eng1, "ENG-1", "ENG-2", -1), `"status": {"name": "In Progress"}`, `"status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}}`, 1))
+		case "/rest/api/3/issue/ENG-1/changelog", "/rest/api/3/issue/ENG-2/changelog":
+			io.WriteString(w, `{"values":[],"total":0,"isLast":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	got, err := newTest(t, srv).Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(jql, "statusCategory != Done") {
+		t.Fatalf("jql %s", jql)
+	}
+	if len(got.Items) != 1 || got.Items[0].Subject != "jira:ENG-2" {
+		t.Fatalf("%+v", got.Items)
+	}
+	// High maps to high; the due date is the end of the due day in the account's zone.
+	it := got.Items[0]
+	if it.Priority != "high" || it.DueAt == nil || !it.DueAt.Equal(time.Date(2026, 11, 9, 23, 59, 59, 0, time.UTC)) {
+		t.Fatalf("priority %q due %v", it.Priority, it.DueAt)
+	}
+}
+
+func TestAskPriority(t *testing.T) {
+	for name, want := range map[string]string{"Highest": "high", "High": "high", "Medium": "medium", "Low": "low", "Lowest": "low", "P1": "", "": ""} {
+		if got := askPriority(name); got != want {
+			t.Errorf("%q: %q", name, got)
+		}
+	}
+}
