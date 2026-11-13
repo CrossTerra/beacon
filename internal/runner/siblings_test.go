@@ -186,3 +186,41 @@ func TestCloseOnly(t *testing.T) {
 		t.Fatalf("decision %s", e.Decision)
 	}
 }
+
+// A direct message's day is one subject. The person's top-level reply names the asks it answers there (close_only),
+// and its bound still closes the earlier asks that opened their own subjects before day subjects: on its own subject
+// only the named asks close, and a sibling's close is not narrowed by the names.
+func TestCloseOnlyWithSiblings(t *testing.T) {
+	at := time.Date(2026, 11, 7, 9, 0, 0, 0, time.UTC)
+	day := "fx:dm:winton:D1:2026-11-07"
+	old := dmItem("D1", "050.000000", "050.000000", false, at) // decided before day subjects
+	top := source.Item{Source: "fx", Subject: day, Key: "fx:D1:100.000000", Type: "message", OccurredAt: at.Add(time.Minute), Actor: "fx:user:dana"}
+	inThread := source.Item{Source: "fx", Subject: day, Key: "fx:D1:150.000000", Type: "message", OccurredAt: at.Add(2 * time.Minute), Actor: "fx:user:dana"}
+	reply := source.Item{Source: "fx", Subject: day, Key: "fx:D1:300.000000", Type: "message", OccurredAt: at.Add(3 * time.Minute), Own: true,
+		CloseSiblingsBefore: "300.000000", CloseOnly: []string{"fx:D1:100.000000"}}
+	none := source.Item{Source: "fx", Subject: day, Key: "fx:D1:400.000000", Type: "message", OccurredAt: at.Add(4 * time.Minute), Own: true,
+		CloseOnly: []string{"fx:D1:400.000000"}}
+
+	f := newFixture(t)
+	f.src.items = []source.Item{old, top, inThread, reply, none}
+	r, done := f.runner(true, nil)
+	r.Rules = mustRules(t, askRules)
+	defer done()
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, p := range rep.Items {
+		got[p.Item.Key] = closesOf(p.Body)
+	}
+	if got[reply.Key] != `"closes":[{"key":"fx:D1:050.000000"},{"key":"fx:D1:100.000000"}]` {
+		t.Fatalf("reply closes %s", got[reply.Key])
+	}
+	if got[none.Key] != "" {
+		t.Fatalf("an own message that answers nothing closed %s", got[none.Key])
+	}
+	if open := r.Outbox.OpenAsks(day); len(open) != 1 || open[0] != inThread.Key {
+		t.Fatalf("open on the day: %v", open)
+	}
+}

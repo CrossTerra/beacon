@@ -47,14 +47,14 @@ func TestTitles(t *testing.T) {
 	m := byKey(t, got.Items)
 	type want struct{ title, channel, author string }
 	wants := map[string]want{
-		// A direct message, and the person's own message there.
-		"slack:D0DANA:1794132000.000100": {"DM with Dana Scully", "Dana Scully", "Dana Scully"},
-		"slack:D0DANA:1794132600.000200": {"DM with Dana Scully", "Dana Scully", "Dana Scully"},
-		"slack:D0DANA:1794133200.000300": {"You to Dana Scully", "Dana Scully", ""},
+		// A direct message, and the person's own message there: one subject that day, titled for the conversation and the day.
+		"slack:D0DANA:1794132000.000100": {"DM with Dana Scully · Sun 8 Nov", "Dana Scully", "Dana Scully"},
+		"slack:D0DANA:1794132600.000200": {"DM with Dana Scully · Sun 8 Nov", "Dana Scully", "Dana Scully"},
+		"slack:D0DANA:1794133200.000300": {"DM with Dana Scully · Sun 8 Nov", "Dana Scully", ""},
 		// A group direct message names the others, not the person.
-		"slack:G0GROUP:1794136800.001200": {"Group DM: Carol Danvers, Dana Scully", "Carol Danvers, Dana Scully", "Dana Scully"},
-		"slack:G0GROUP:1794137500.001400": {"Group DM: Carol Danvers, Dana Scully", "Carol Danvers, Dana Scully", "Carol Danvers"},
-		"slack:G0GROUP:1794137600.001500": {"You to Carol Danvers, Dana Scully", "Carol Danvers, Dana Scully", ""},
+		"slack:G0GROUP:1794136800.001200": {"Group DM: Carol Danvers, Dana Scully · Sun 8 Nov", "Carol Danvers, Dana Scully", "Dana Scully"},
+		"slack:G0GROUP:1794137500.001400": {"Group DM: Carol Danvers, Dana Scully · Sun 8 Nov", "Carol Danvers, Dana Scully", "Carol Danvers"},
+		"slack:G0GROUP:1794137600.001500": {"Group DM: Carol Danvers, Dana Scully · Sun 8 Nov", "Carol Danvers, Dana Scully", ""},
 		// A channel mention, and a reply in its thread: one subject, one title.
 		"slack:C0ENG:1794133800.000400": {"#eng: Bob Ross mentioned you", "eng", "Bob Ross"},
 		"slack:C0ENG:1794134500.000750": {"#eng: Bob Ross mentioned you", "eng", "Carol Danvers"},
@@ -266,7 +266,7 @@ func TestNameCache(t *testing.T) {
 	if n := len(srv2.Queries("/api/users.info")) + len(srv2.Queries("/api/conversations.members")); n != 0 {
 		t.Fatalf("%d lookups with a fresh cache", n)
 	}
-	if m := byKey(t, got.Items); m["slack:D0DANA:1794132000.000100"].Fields[FieldTitle] != "DM with Dana Scully" {
+	if m := byKey(t, got.Items); m["slack:D0DANA:1794132000.000100"].Fields[FieldTitle] != "DM with Dana Scully · Sun 8 Nov" {
 		t.Fatal("a cached name was not used")
 	}
 	// Past its TTL, a name is read again.

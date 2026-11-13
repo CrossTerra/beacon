@@ -252,7 +252,7 @@ func TestSlackStarterRules(t *testing.T) {
 		}
 	}
 	dm := bodies["slack:D0DANA:1794132000.000100"]
-	for _, want := range []string{`"subject":"slack:dm:winton:D0DANA:1794132000.000100"`, `"to":["@winton"]`, `"priority":"high"`, `"title":"Direct message"`, `"actor":"slack:user:U0DANA"`} {
+	for _, want := range []string{`"subject":"slack:dm:winton:D0DANA:2026-11-08"`, `"to":["@winton"]`, `"priority":"high"`, `"title":"Direct message"`, `"actor":"slack:user:U0DANA"`} {
 		if !strings.Contains(dm, want) {
 			t.Fatalf("direct message misses %s: %s", want, dm)
 		}

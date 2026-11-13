@@ -46,7 +46,7 @@ func opts(srv *slacktest.Server, sl *sleeps) Options {
 		Person: "winton", Workspace: slacktest.Workspace, User: slacktest.User, Channels: []string{slacktest.Review},
 		Identity: "slack:user:" + slacktest.User,
 		Token:    func() (keychain.Secret, error) { return keychain.FromString(slacktest.Token) },
-		Base:     srv.URL, HTTP: srv.Client(), Now: sl.now, Sleep: sl.sleep,
+		Base:     srv.URL, HTTP: srv.Client(), Now: sl.now, Sleep: sl.sleep, Location: time.UTC,
 	}
 }
 
@@ -89,13 +89,13 @@ func TestEveryItem(t *testing.T) {
 		before                            string
 	}
 	wants := map[string]want{
-		"slack:D0DANA:1794132000.000100":   {TypeDM, "slack:dm:winton:D0DANA:1794132000.000100", "Direct message", "U0DANA", "im", true, false, ""},
-		"slack:D0DANA:1794132600.000200":   {TypeDM, "slack:dm:winton:D0DANA:1794132600.000200", "Direct message", "U0DANA", "im", true, false, ""},
-		"slack:D0DANA:1794133200.000300":   {TypeOwn, "slack:dm:winton:D0DANA:1794133200.000300", "Sent", "U0WINTON", "im", false, true, "1794133200.000300"},
-		"slack:D0BOT:1794131000.000050":    {TypeDM, "slack:dm:winton:D0BOT:1794131000.000050", "Direct message", "B0JIRA", "im", true, false, ""},
-		"slack:G0GROUP:1794136800.001200":  {TypeMentioned, "slack:dm:winton:G0GROUP:1794136800.001200", "Mentioned", "U0DANA", "mpim", true, false, ""},
-		"slack:G0GROUP:1794137500.001400":  {TypeDM, "slack:dm:winton:G0GROUP:1794137500.001400", "Direct message", "U0CAROL", "mpim", true, false, ""},
-		"slack:G0GROUP:1794137600.001500":  {TypeOwn, "slack:dm:winton:G0GROUP:1794137600.001500", "Sent", "U0WINTON", "mpim", false, true, ""},
+		"slack:D0DANA:1794132000.000100":   {TypeDM, "slack:dm:winton:D0DANA:2026-11-08", "Direct message", "U0DANA", "im", true, false, ""},
+		"slack:D0DANA:1794132600.000200":   {TypeDM, "slack:dm:winton:D0DANA:2026-11-08", "Direct message", "U0DANA", "im", true, false, ""},
+		"slack:D0DANA:1794133200.000300":   {TypeOwn, "slack:dm:winton:D0DANA:2026-11-08", "Sent", "U0WINTON", "im", false, true, "1794133200.000300"},
+		"slack:D0BOT:1794131000.000050":    {TypeDM, "slack:dm:winton:D0BOT:2026-11-08", "Direct message", "B0JIRA", "im", true, false, ""},
+		"slack:G0GROUP:1794136800.001200":  {TypeMentioned, "slack:dm:winton:G0GROUP:2026-11-08", "Mentioned", "U0DANA", "mpim", true, false, ""},
+		"slack:G0GROUP:1794137500.001400":  {TypeDM, "slack:dm:winton:G0GROUP:2026-11-08", "Direct message", "U0CAROL", "mpim", true, false, ""},
+		"slack:G0GROUP:1794137600.001500":  {TypeOwn, "slack:dm:winton:G0GROUP:2026-11-08", "Sent", "U0WINTON", "mpim", false, true, "1794137600.001500"},
 		"slack:C0SECRET:1794134000.000450": {TypeMentioned, "slack:dm:winton:C0SECRET:1794134000.000450", "Mentioned", "U0HR", "private", true, false, ""},
 		"slack:C0ENG:1794133800.000400":    {TypeMentioned, "slack:C0ENG:1794133800.000400", "Mentioned", "U0BOB", "channel", true, false, ""},
 		"slack:C0ENG:1794134500.000750":    {TypeThreadReply, "slack:C0ENG:1794133800.000400", "Thread reply", "U0CAROL", "channel", false, false, ""},
@@ -139,6 +139,19 @@ func TestEveryItem(t *testing.T) {
 	own := m["slack:D0DANA:1794133200.000300"]
 	if own.Actor != "slack:user:U0WINTON" {
 		t.Fatalf("own actor %q", own.Actor)
+	}
+	// A direct message's top-level messages that day are one subject. The person's reply names the asks before it on
+	// that subject, and only those.
+	if strings.Join(own.CloseOnly, ",") != "slack:D0DANA:1794132000.000100,slack:D0DANA:1794132600.000200" {
+		t.Fatalf("own reply closes %v", own.CloseOnly)
+	}
+	if g := m["slack:G0GROUP:1794137600.001500"]; strings.Join(g.CloseOnly, ",") != "slack:G0GROUP:1794136800.001200,slack:G0GROUP:1794137500.001400" {
+		t.Fatalf("own group reply closes %v", g.CloseOnly)
+	}
+	for k, it := range m {
+		if !it.Own && len(it.CloseOnly) > 0 {
+			t.Fatalf("%s closes %v", k, it.CloseOnly)
+		}
 	}
 	if a := m["slack:D0BOT:1794131000.000050"]; a.Actor != "slack:bot:B0JIRA" || strings.Join(a.References, ",") != "jira:ENG-1" {
 		t.Fatalf("bot %+v", a)
@@ -703,7 +716,7 @@ func TestDeletedAsk(t *testing.T) {
 	}
 	m := byKey(t, second.Items)
 	d, ok := m["slack:D0DANA:1794132000.000100:deleted"]
-	if !ok || len(m) != 1 || d.Type != TypeDeleted || d.Subject != "slack:dm:winton:D0DANA:1794132000.000100" || d.EventTitle != "Deleted" || d.Own || d.Actor != "" || d.Version != "deleted" ||
+	if !ok || len(m) != 1 || d.Type != TypeDeleted || d.Subject != "slack:dm:winton:D0DANA:2026-11-08" || d.EventTitle != "Deleted" || d.Own || d.Actor != "" || d.Version != "deleted" ||
 		strings.Join(d.CloseOnly, ",") != "slack:D0DANA:1794132000.000100" {
 		t.Fatalf("got %+v", second.Items)
 	}

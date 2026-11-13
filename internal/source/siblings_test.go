@@ -97,9 +97,13 @@ func TestCloseOnlyValidation(t *testing.T) {
 	}
 	other := it
 	other.CloseOnly = []string{"gmail:t1:m1"}
+	// An own act may name the asks it answers on its subject and close earlier siblings too.
 	both := it
-	both.Own, both.Subject, both.CloseSiblingsBefore = true, "slack:dm:winton:D1:1700000000.000100", "1700000000.000100"
-	for name, b := range map[string]Item{"another source's key": other, "with close_siblings_before": both} {
+	both.Own, both.Subject, both.CloseSiblingsBefore = true, "slack:dm:winton:D1:2026-11-12", "1700000000.000100"
+	if err := Validate(both, nil, nil); err != nil {
+		t.Fatalf("own act with both: %v", err)
+	}
+	for name, b := range map[string]Item{"another source's key": other} {
 		if Validate(b, nil, nil) == nil {
 			t.Errorf("%s: accepted", name)
 		}

@@ -45,9 +45,9 @@ func TestSlackThreadTitles(t *testing.T) {
 		t.Fatalf("report:\n%s", report)
 	}
 	for key, want := range map[string][2]string{
-		"slack:D0DANA:1794132000.000100":   {"DM with Dana Scully", "Direct message"},
-		"slack:D0DANA:1794133200.000300":   {"You to Dana Scully", "Sent"},
-		"slack:G0GROUP:1794137500.001400":  {"Group DM: Carol Danvers, Dana Scully", "Direct message"},
+		"slack:D0DANA:1794132000.000100":   {"DM with Dana Scully · Sun 8 Nov", "Direct message"},
+		"slack:D0DANA:1794133200.000300":   {"DM with Dana Scully · Sun 8 Nov", "Sent"},
+		"slack:G0GROUP:1794137500.001400":  {"Group DM: Carol Danvers, Dana Scully · Sun 8 Nov", "Direct message"},
 		"slack:C0ENG:1794133800.000400":    {"#eng: Bob Ross mentioned you", "Mentioned"},
 		"slack:C0ENG:1794130000.000600":    {"#eng thread", "Replied"},
 		"slack:C0REVIEW:1794136200.001100": {"You in #review", "Sent"},
@@ -67,7 +67,7 @@ func TestSlackThreadTitles(t *testing.T) {
 			}
 		}
 	}
-	if th, _ := sig.ThreadFor("slack:dm:winton:D0DANA:1794132000.000100"); th.Title != "DM with Dana Scully" {
+	if th, _ := sig.ThreadFor("slack:dm:winton:D0DANA:2026-11-08"); th.Title != "DM with Dana Scully · Sun 8 Nov" {
 		t.Fatalf("thread %+v", th)
 	}
 	// Only a send pass writes the name cache; no name is in the log.
@@ -100,7 +100,7 @@ func TestSlackTitlesWithoutScopes(t *testing.T) {
 	if thread, event := openTitle(t, e.Body); thread != "" || event != "Direct message" {
 		t.Fatalf("thread %q, event %q", thread, event)
 	}
-	if th, _ := sig.ThreadFor("slack:dm:winton:D0DANA:1794132000.000100"); th.Title != "Direct message" {
+	if th, _ := sig.ThreadFor("slack:dm:winton:D0DANA:2026-11-08"); th.Title != "Direct message" {
 		t.Fatalf("thread %+v", th)
 	}
 	log, _ := os.ReadFile(filepath.Join(dir, "state", "outbox.jsonl"))
@@ -127,10 +127,10 @@ func TestSlackRetitlesThreadsBeaconOpened(t *testing.T) {
 	sig.Restrict("slack:dm:*")
 	run("run", "--once")
 	for subject, want := range map[string]string{
-		"slack:dm:winton:D0DANA:1794132000.000100": "Direct message",
-		"slack:C0ENG:1794133800.000400":            "Mentioned",
-		"slack:C0REVIEW:1794136200.001100":         "Sent",
-		"slack:C0REVIEW:1794135800.001060":         "Mentioned",
+		"slack:dm:winton:D0DANA:2026-11-08": "Direct message",
+		"slack:C0ENG:1794133800.000400":     "Mentioned",
+		"slack:C0REVIEW:1794136200.001100":  "Sent",
+		"slack:C0REVIEW:1794135800.001060":  "Mentioned",
 	} {
 		if th, ok := sig.ThreadFor(subject); !ok || th.Title != want {
 			t.Fatalf("%s: %+v", subject, th)
@@ -154,9 +154,8 @@ func TestSlackRetitlesThreadsBeaconOpened(t *testing.T) {
 	advance(16 * time.Minute)
 	report := run("run", "--once")
 	for subject, want := range map[string]string{
-		"slack:dm:winton:D0DANA:1794132000.000100":   "DM with Dana Scully",
-		"slack:dm:winton:D0DANA:1794133200.000300":   "You to Dana Scully",
-		"slack:dm:winton:G0GROUP:1794137500.001400":  "Group DM: Carol Danvers, Dana Scully",
+		"slack:dm:winton:D0DANA:2026-11-08":          "DM with Dana Scully · Sun 8 Nov",
+		"slack:dm:winton:G0GROUP:2026-11-08":         "Group DM: Carol Danvers, Dana Scully · Sun 8 Nov",
 		"slack:C0ENG:1794133800.000400":              "#eng: Bob Ross mentioned you",
 		"slack:C0ENG:1794120000.000500":              "#eng thread",
 		"slack:C0REVIEW:1794136200.001100":           "You in #review",
