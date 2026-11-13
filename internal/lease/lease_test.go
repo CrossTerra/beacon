@@ -113,13 +113,20 @@ func TestClaimShape(t *testing.T) {
 }
 
 // legacyClaim is a sent claim from a version whose claims were asks to Beacon itself.
-func legacyClaim(t *testing.T, ob *outbox.Outbox, key string) {
+// With s, Signal holds it too.
+func legacyClaim(t *testing.T, ob *outbox.Outbox, key string, s ...*signaltest.Server) {
 	t.Helper()
 	body := `{"subject":"beacon:lease:winton","type":"beacon.lease_claimed","key":"` + key + `","open":{"title":"Beacon lease for @winton"},"to":["me"],"metadata":{"run":"a:lease"}}`
 	if err := ob.Append(outbox.Lease, key, "beacon:lease:winton", "", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
-	if err := ob.Mark(key, outbox.Sent, "evt_legacy", 201, "", ""); err != nil {
+	id := "evt_legacy"
+	if len(s) > 0 {
+		s[0].Seed(key, []byte(body))
+		e, _ := s[0].Event(key)
+		id = e.ID
+	}
+	if err := ob.Mark(key, outbox.Sent, id, 201, "", ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -212,7 +219,7 @@ func TestLeaseRow(t *testing.T) {
 	b, _ := instance(t, s, t.TempDir(), "b:lease", c)
 	a.API, b.API = a.Writer.(*signal.Client), b.Writer.(*signal.Client)
 	a.Threads = a.Writer.(*signal.Client)
-	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
+	legacyClaim(t, ob, "claim:beacon:lease:winton:100", s)
 
 	st, err := a.Ensure(context.Background())
 	if err != nil || !st.Held || !st.Until.Equal(c.t.Add(15*time.Minute)) {
@@ -242,13 +249,30 @@ func TestLeaseRow(t *testing.T) {
 		}
 	}
 	// Only the event that withdraws the earlier claim's ask, and the archive of its thread, were written, once each.
-	evs := s.Events()
+	evs := s.Events()[1:]
 	if len(evs) != 2 || !strings.Contains(string(evs[0].Body), `"type":"beacon.lease_moved"`) ||
 		!strings.Contains(string(evs[0].Body), `"closes":[{"key":"claim:beacon:lease:winton:100"}],"outcome":"withdrawn"`) || strings.Contains(string(evs[0].Body), `"to"`) {
-		t.Fatalf("events: %v", evs)
+		t.Fatalf("events: %s", evs)
 	}
 	if string(evs[1].Body) != `{"subject":"signal:thread:1","type":"thread.archived","key":"beacon:lease:winton:archived:1"}` {
 		t.Fatalf("archive: %s", evs[1].Body)
+	}
+	// A thread merged into another conversation is not archived: that would archive the other conversation.
+	s2 := signaltest.New("tok")
+	defer s2.Close()
+	s2.Leases, s2.LeaseNow = true, c.now
+	m, mob := instance(t, s2, t.TempDir(), "m:lease", c)
+	m.API, m.Threads = m.Writer.(*signal.Client), m.Writer.(*signal.Client)
+	s2.OpenAs("other:conversation", "Another conversation")
+	legacyClaim(t, mob, "claim:beacon:lease:winton:300", s2)
+	s2.Merge("beacon:lease:winton", "other:conversation")
+	if st, err := m.Ensure(context.Background()); err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	for _, e := range s2.Events() {
+		if strings.Contains(string(e.Body), "thread.archived") {
+			t.Fatalf("archived a merged thread's survivor: %s", e.Body)
+		}
 	}
 	// The holder stops. Within three periods the other takes over.
 	for i := 0; i < 2; i++ {

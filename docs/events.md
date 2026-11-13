@@ -238,7 +238,8 @@ an event: it writes nothing into the log, opens no ask and is in no thread. Each
   `outcome: withdrawn`. It goes through the outbox like any body: one Signal does not answer stays pending and is
   resent as the same bytes at the next renewal, and one it refuses is recorded and not written again. Neither costs
   the lease.
-- Once that event is written, the thread it landed in (the old claims' thread) is archived, once, with
+- Once that event is written, the old claims' thread (the one Beacon's first claim opened, and only while it has not
+  been merged into another thread) is archived, once, with
   `thread.archived` about `signal:thread:<n>`, through the outbox, so the old claims leave Signal's lists and search.
   A thread a person unarchives later is not archived again.
 

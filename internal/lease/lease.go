@@ -219,14 +219,15 @@ func (l *Lease) ensureRow(ctx context.Context, st *Status) (bool, error) {
 const rowPeriods = 3
 
 // archive archives the thread the old claims are in, once: after the event that closed them was written, so the old
-// claims leave Signal's lists and search. Like the close, it never costs the lease. A thread a person unarchives later
-// is not archived again.
+// claims leave Signal's lists and search. That is the thread Beacon's first claim opened, and only while it is still
+// that thread: one merged into another conversation is left alone, so no other thread is archived. Like the close, it
+// never costs the lease. A thread a person unarchives later is not archived again.
 func (l *Lease) archive(ctx context.Context, until time.Time) error {
 	if l.Threads == nil || !l.Now().Before(until) {
 		return nil
 	}
 	prefix := Subject(l.Person) + ":archived:"
-	closed := ""
+	closed, firstClaim := "", ""
 	for _, e := range l.Outbox.Entries() {
 		switch {
 		case e.Kind != outbox.Lease:
@@ -239,19 +240,21 @@ func (l *Lease) archive(ctx context.Context, until time.Time) error {
 			return nil
 		case strings.HasPrefix(e.Key, Subject(l.Person)+":closed:") && (e.State == outbox.Sent || e.State == outbox.Replayed) && e.EventID != "":
 			closed = e.EventID
+		case firstClaim == "" && strings.HasPrefix(e.Key, "claim:"+Subject(l.Person)+":") && (e.State == outbox.Sent || e.State == outbox.Replayed) && e.EventID != "":
+			firstClaim = e.EventID
 		}
 	}
-	if closed == "" {
+	if closed == "" || firstClaim == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, until.Sub(l.Now()))
 	defer cancel()
-	opened, err := l.Threads.EventOpened(ctx, closed)
-	if err != nil || opened.ThreadID == "" {
+	opened, err := l.Threads.EventOpened(ctx, firstClaim)
+	if err != nil || opened.ThreadID == "" || opened.Number == 0 {
 		return nil
 	}
 	th, err := l.Threads.Thread(ctx, opened.ThreadID)
-	if err != nil || th.Number <= 0 || th.MergedInto != "" {
+	if err != nil || th.Number != opened.Number || th.MergedInto != "" {
 		return nil
 	}
 	n := strconv.FormatInt(th.Number, 10)
