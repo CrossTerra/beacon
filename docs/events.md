@@ -231,9 +231,10 @@ an event: it writes nothing into the log, opens no ask and is in no thread. Each
   unreachable Signal ends the pass with the lease not taken.
 - A renewal sends the same name, run and period every time, so it is not appended to the outbox: there is no body to
   replay. A restarted instance has the same run and renews its own lease.
-- The first claim that holds closes the open asks that earlier, event-based claims left (an earlier version made each
-  claim an ask to Beacon itself), with one `beacon.lease_moved` event on `beacon:lease:<handle>` that names them in
-  `closes`. That event goes through the outbox like any body.
+- Once the lease is held, the open asks that earlier claims left (an earlier version made each claim an ask to Beacon
+  itself) are closed by one `beacon.lease_moved` event on `beacon:lease:<handle>` that names them in `closes`. It
+  goes through the outbox like any body: one Signal does not answer stays pending and is resent as the same bytes at
+  the next renewal, and one it refuses is recorded and not written again. Neither costs the lease.
 
 **Claims by event.** A Signal that answers `404` does not offer leases. The process then claims by event, as below,
 and asks for the API again an hour later, so a Signal that starts offering leases is used without a restart. An instance that already holds this period and the next by
@@ -242,7 +243,7 @@ API run one instance: one that holds the row and one that claims by event do not
 
 Time is cut into periods of `lease.period`. Period `N` is held by whoever wrote the claim with key
 `claim:beacon:lease:<handle>:<N>`; Signal keeps one event per key, so one instance holds each period. A claim is a
-keyed event with `metadata.run` (Signal DEC-172). It asks no one:
+keyed event with `metadata.run` (Signal DEC-172). It asks no one and closes nothing:
 
 ```json
 {
@@ -265,7 +266,7 @@ keyed event with `metadata.run` (Signal DEC-172). It asks no one:
   marked `expired`, since no one can hold that period any more.
 - When the holder stops, another instance takes over within two periods.
 - A restarted instance has the same instance id and outbox, so its claims are the same requests and replay.
-- The first claims close, in `closes`, the asks to Beacon itself that claims from an earlier version left open.
+- Once a claim holds, the asks earlier claims left open are closed by the same `beacon.lease_moved` event as above.
 - Claims go through the outbox like any body. Beacon does not read Signal's log for the lease: the answer to a
   claim says who holds the period.
 

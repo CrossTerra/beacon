@@ -124,21 +124,79 @@ func legacyClaim(t *testing.T, ob *outbox.Outbox, key string) {
 	}
 }
 
-// The first claim after an upgrade closes the asks earlier claims left open, and no later claim names them again.
+// Once the lease is held after an upgrade, one event closes the asks earlier claims left open; claims themselves
+// close nothing. A close Signal does not answer stays pending and is resent as the same bytes; one it refuses is
+// recorded, does not cost the lease, and is not written again.
 func TestClaimsCloseLegacyAsks(t *testing.T) {
 	s := signaltest.New("tok")
 	defer s.Close()
 	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
 	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	a.Writer.(*signal.Client).Attempts = 1
 	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
 	legacyClaim(t, ob, "claim:beacon:lease:winton:101")
-	if _, err := a.Ensure(context.Background()); err != nil {
-		t.Fatal(err)
+	// The close is not answered the first time.
+	s.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.Contains(string(r.Body), "lease_moved") {
+			return signaltest.Reply{Status: 503, Body: `{}`}
+		}
+		return signaltest.Reply{}
 	}
-	evs := s.Events()
-	if len(evs) != 2 || !strings.Contains(string(evs[0].Body), `"closes":[{"key":"claim:beacon:lease:winton:100"},{"key":"claim:beacon:lease:winton:101"}]`) ||
-		strings.Contains(string(evs[1].Body), "closes") {
-		t.Fatalf("claims: %s / %s", evs[0].Body, evs[1].Body)
+	if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	var closing string
+	for _, e := range ob.Pending() {
+		closing = e.Key
+	}
+	if !strings.HasPrefix(closing, "beacon:lease:winton:closed:") {
+		t.Fatalf("pending %v", ob.Pending())
+	}
+	s.Script = nil
+	c.t = c.t.Add(5 * time.Minute)
+	if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+		t.Fatalf("%+v %v", st, err)
+	}
+	var claims, closes int
+	for _, e := range s.Events() {
+		switch {
+		case strings.Contains(string(e.Body), "lease_moved"):
+			closes++
+			if e.Key != closing || !strings.Contains(string(e.Body), `"closes":[{"key":"claim:beacon:lease:winton:100"},{"key":"claim:beacon:lease:winton:101"}]`) {
+				t.Fatalf("close %s", e.Body)
+			}
+		case strings.Contains(string(e.Body), "closes"):
+			t.Fatalf("a claim closes: %s", e.Body)
+		default:
+			claims++
+		}
+	}
+	if closes != 1 || claims != 3 {
+		t.Fatalf("%d closes, %d claims", closes, claims)
+	}
+	// A refused close (the asks were closed in Signal some other way) does not cost the lease and is not retried.
+	b, ob2 := instance(t, s, t.TempDir(), "a:lease", c)
+	legacyClaim(t, ob2, "claim:beacon:lease:winton:200")
+	s.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+		if strings.Contains(string(r.Body), "lease_moved") {
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"x"}}`}
+		}
+		return signaltest.Reply{}
+	}
+	for i := 0; i < 2; i++ {
+		if st, err := b.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("refused close: %+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	n := 0
+	for _, r := range s.Requests() {
+		if strings.Contains(string(r.Body), "claim:beacon:lease:winton:200") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("a refused close was sent %d times", n)
 	}
 }
 

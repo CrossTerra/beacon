@@ -1,20 +1,20 @@
-// Package lease keeps one Beacon instance per person sending (DEC-25).
+// Package lease keeps one Beacon instance per person sending (DEC-25, DEC-39).
 //
 // Where Signal offers leases (POST /api/leases, Signal DEC-280), the lease is a row there, not an event: the instance
 // claims "beacon:lease:<person>" for two periods and renews it once a period, and another instance gets 409 until the
-// holder stops renewing. Nothing is written into the log and no ask opens. The first claim through the API closes the
-// open asks that earlier, event-based claims left.
+// holder stops renewing. Nothing is written into the log and no ask opens.
 //
-// Where Signal answers 404, the lease is a claim per period, as before, and the API is asked again an hour later. Time is cut into periods of a fixed length.
-// The lease for period N is the Signal claim with key "claim:beacon:lease:<person>:<N>": a key holds one event only, so
-// one instance holds each period. The instance that holds period N claims N+1 during N, so it keeps the lease for as
-// long as it runs. Another instance tries the current period each time it runs, gets 409 idempotency_conflict while
-// the lease is held, and takes the lease within two periods of the holder stopping. A claim asks no one (an earlier
-// version made each one an ask to Beacon itself); the first claims close the asks those left.
+// Where Signal answers 404, the lease is a claim per period, and the API is asked again an hour later. Time is cut
+// into periods of a fixed length. The lease for period N is the Signal claim with key
+// "claim:beacon:lease:<person>:<N>": a key holds one event only, so one instance holds each period. The instance that
+// holds period N claims N+1 during N, so it keeps the lease for as long as it runs. Another instance tries the current
+// period each time it runs, gets 409 idempotency_conflict while the lease is held, and takes the lease within two
+// periods of the holder stopping. A claim asks no one and closes nothing.
 //
-// Claims and the events that close old claims are request bodies like any other: they go through the outbox, and a
-// retry sends the stored bytes. A lease row is not an event and is not in the outbox: renewing it sends the same
-// name, run and period each time.
+// An earlier version made each claim an ask to Beacon itself. Once the lease is held, one event closes the asks those
+// left open. Claims and that event are request bodies like any other: they go through the outbox, and a retry sends
+// the stored bytes. A lease row is not an event and is not in the outbox: renewing it sends the same name, run and
+// period each time.
 package lease
 
 import (
@@ -155,7 +155,7 @@ func (l *Lease) Ensure(ctx context.Context) (Status, error) {
 	if next {
 		st.Until = l.end(p + 1)
 	}
-	return st, nil
+	return st, l.closeClaims(ctx, st.Until)
 }
 
 // apiRetry is how long after a 404 the lease API is asked again.
@@ -201,15 +201,7 @@ func (l *Lease) ensureRow(ctx context.Context, st *Status) (bool, error) {
 		l.until = res.ExpiresAt
 	}
 	st.Held, st.Until = true, l.until
-	// The asks event claims left open are closed once the row holds. A failure leaves the body pending for the next
-	// renewal; it does not cost the lease.
-	if err := l.closeClaims(ctx); err != nil && !errors.Is(err, signal.ErrUnavailable) && !errors.Is(err, context.DeadlineExceeded) {
-		var r *RefusedError
-		if !errors.As(err, &r) {
-			return true, err
-		}
-	}
-	return true, nil
+	return true, l.closeClaims(ctx, l.until)
 }
 
 // openClaims are the keys of this person's sent claims that ask someone and that no body in the outbox closes, oldest
@@ -240,8 +232,15 @@ func (l *Lease) openClaims() []string {
 const closesMax = 20
 
 // closeClaims writes one event that closes the open claims, at most closesMax, and sends it, or resends the one a
-// previous renewal left pending.
-func (l *Lease) closeClaims(ctx context.Context) error {
+// previous renewal left pending. It runs once the lease is held, and never costs it: a body Signal does not answer
+// stays pending for the next renewal, and one it refuses is recorded and not written again. Only a failure to record
+// is an error.
+func (l *Lease) closeClaims(ctx context.Context, until time.Time) error {
+	if !l.Now().Before(until) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, until.Sub(l.Now()))
+	defer cancel()
 	prefix := Subject(l.Person) + ":closed:"
 	for _, e := range l.Outbox.Pending() {
 		if e.Kind == outbox.Lease && strings.HasPrefix(e.Key, prefix) {
@@ -279,11 +278,12 @@ func (l *Lease) closeClaims(ctx context.Context) error {
 	return l.send(ctx, key, body)
 }
 
-// send writes a stored lease body and records Signal's answer. A refusal is recorded and not sent again.
+// send writes a stored lease body and records Signal's answer. A refusal is recorded and not sent again; no answer
+// leaves it pending. Only a failure to record is returned.
 func (l *Lease) send(ctx context.Context, key string, body []byte) error {
 	res, err := l.Writer.Write(ctx, body)
 	if err != nil {
-		return err
+		return nil
 	}
 	switch res.Outcome {
 	case signal.Written:
@@ -291,10 +291,7 @@ func (l *Lease) send(ctx context.Context, key string, body []byte) error {
 	case signal.Replayed:
 		return l.Outbox.Mark(key, outbox.Replayed, res.EventID, res.Status, "", "")
 	}
-	if err := l.Outbox.Mark(key, outbox.Rejected, "", res.Status, res.Code, res.Message); err != nil {
-		return err
-	}
-	return &RefusedError{Status: res.Status, Code: res.Code}
+	return l.Outbox.Mark(key, outbox.Rejected, "", res.Status, res.Code, res.Message)
 }
 
 type closeBody struct {
@@ -368,7 +365,6 @@ type claimBody struct {
 	Open    struct {
 		Title string `json:"title"`
 	} `json:"open"`
-	Closes   []ref `json:"closes,omitempty"`
 	Metadata struct {
 		Run           string `json:"run"`
 		PeriodStart   string `json:"period_start"`
@@ -384,15 +380,8 @@ func (l *Lease) body(p int64) ([]byte, error) {
 	b.Type = "beacon.lease_claimed"
 	b.Key = l.Key(p)
 	b.Open.Title = "Beacon lease for " + l.Person
-	// A claim asks no one: it is bookkeeping, not work. It closes the asks earlier claims left open, which were asks
-	// to Beacon itself.
-	open := l.openClaims()
-	if len(open) > closesMax {
-		open = open[:closesMax]
-	}
-	for _, k := range open {
-		b.Closes = append(b.Closes, ref{Key: k})
-	}
+	// A claim asks no one and closes nothing: it is bookkeeping, not work. The asks earlier claims left are closed by
+	// their own event (closeClaims), which is never dropped as a claim can be when its period ends.
 	secs := int64(l.Period / time.Second)
 	b.Metadata.Run = l.Run
 	b.Metadata.PeriodStart = time.Unix(p*secs, 0).UTC().Format(time.RFC3339)
