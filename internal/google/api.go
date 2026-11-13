@@ -347,3 +347,35 @@ func parseTime(s string) (time.Time, error) {
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// sealedTitles are the neutral thread titles for a thread Beacon opened with an object title that its current rules
+// would seal. They name the kind of thing, never the thing.
+const (
+	titleColleagueMail = "Mail from a colleague"
+	titleMail          = "Mail"
+	titleMeeting       = "Meeting"
+	titleDocument      = "Document"
+	titleMeetingNotes  = "Meeting notes"
+)
+
+// SealedTitle implements the runner's SealedTitler: mail from an address at the account's own domain is from a
+// colleague.
+func (g *Gmail) SealedTitle(it source.Item) string {
+	from := strings.ToLower(it.Fields["from"])
+	_, domain, ok := strings.Cut(strings.ToLower(g.account), "@")
+	if _, at, found := strings.Cut(from, "@"); ok && found && domain != "" && at == domain {
+		return titleColleagueMail
+	}
+	return titleMail
+}
+
+// SealedTitle implements the runner's SealedTitler.
+func (c *Calendar) SealedTitle(source.Item) string { return titleMeeting }
+
+// SealedTitle implements the runner's SealedTitler.
+func (d *Drive) SealedTitle(it source.Item) string {
+	if it.Type == TypeNotesCreated || it.Type == TypeTranscriptCreated {
+		return titleMeetingNotes
+	}
+	return titleDocument
+}

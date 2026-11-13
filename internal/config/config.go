@@ -31,7 +31,7 @@ const (
 
 // Defaults.
 const (
-	DefaultLeasePeriod  = 5 * time.Minute
+	DefaultLeasePeriod  = 15 * time.Minute
 	DefaultPollInterval = time.Minute
 )
 

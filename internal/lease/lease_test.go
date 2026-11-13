@@ -102,12 +102,146 @@ func TestClaimShape(t *testing.T) {
 	if err := json.Unmarshal(evs[2].Body, &last); err != nil {
 		t.Fatal(err)
 	}
+	// A claim is bookkeeping: it asks no one, so there is nothing to close.
 	if last.Subject != "beacon:lease:winton" || !strings.HasPrefix(last.Key, "claim:beacon:lease:winton:") ||
-		len(last.To) != 1 || last.To[0] != "me" || last.Metadata["run"] != "a:lease" || last.Open["title"] == "" {
+		last.To != nil || last.Metadata["run"] != "a:lease" || last.Open["title"] == "" || last.Closes != nil {
 		t.Fatalf("claim: %s", evs[2].Body)
 	}
-	if len(last.Closes) != 1 || last.Closes[0]["key"] != evs[1].Key {
-		t.Fatalf("claim does not close the previous one: %s", evs[2].Body)
+	if strings.Contains(string(evs[2].Body), `"to"`) {
+		t.Fatalf("a claim asks: %s", evs[2].Body)
+	}
+}
+
+// legacyClaim is a sent claim from a version whose claims were asks to Beacon itself.
+func legacyClaim(t *testing.T, ob *outbox.Outbox, key string) {
+	t.Helper()
+	body := `{"subject":"beacon:lease:winton","type":"beacon.lease_claimed","key":"` + key + `","open":{"title":"Beacon lease for @winton"},"to":["me"],"metadata":{"run":"a:lease"}}`
+	if err := ob.Append(outbox.Lease, key, "beacon:lease:winton", "", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ob.Mark(key, outbox.Sent, "evt_legacy", 201, "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The first claim after an upgrade closes the asks earlier claims left open, and no later claim names them again.
+func TestClaimsCloseLegacyAsks(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
+	legacyClaim(t, ob, "claim:beacon:lease:winton:101")
+	if _, err := a.Ensure(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	evs := s.Events()
+	if len(evs) != 2 || !strings.Contains(string(evs[0].Body), `"closes":[{"key":"claim:beacon:lease:winton:100"},{"key":"claim:beacon:lease:winton:101"}]`) ||
+		strings.Contains(string(evs[1].Body), "closes") {
+		t.Fatalf("claims: %s / %s", evs[0].Body, evs[1].Body)
+	}
+}
+
+// With Signal's lease API the lease is a row: renewed once a period for two, no event and no ask. Another instance
+// is refused until the holder stops renewing, then takes it within two periods. The open asks earlier claims left are
+// closed once, by one event.
+func TestLeaseRow(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	s.Leases, s.LeaseNow = true, c.now
+	a, ob := instance(t, s, t.TempDir(), "a:lease", c)
+	b, _ := instance(t, s, t.TempDir(), "b:lease", c)
+	a.API, b.API = a.Writer.(*signal.Client), b.Writer.(*signal.Client)
+	legacyClaim(t, ob, "claim:beacon:lease:winton:100")
+
+	st, err := a.Ensure(context.Background())
+	if err != nil || !st.Held || !st.Until.Equal(c.t.Add(10*time.Minute)) {
+		t.Fatalf("a: %+v %v", st, err)
+	}
+	if st, err := b.Ensure(context.Background()); err != nil || st.Held {
+		t.Fatalf("b took a held lease: %+v %v", st, err)
+	}
+	// Within a period the holder does not call Signal again.
+	claims := s.LeaseClaims()
+	for i := 0; i < 4; i++ {
+		c.t = c.t.Add(time.Minute)
+		if st, _ := a.Ensure(context.Background()); !st.Held {
+			t.Fatal("a lost the lease within its period")
+		}
+	}
+	if s.LeaseClaims() != claims {
+		t.Fatalf("renewed %d times within one period", s.LeaseClaims()-claims)
+	}
+	for i := 0; i < 4; i++ {
+		c.t = c.t.Add(5 * time.Minute)
+		if st, _ := a.Ensure(context.Background()); !st.Held {
+			t.Fatalf("period %d: a lost the lease", i)
+		}
+		if st, _ := b.Ensure(context.Background()); st.Held {
+			t.Fatalf("period %d: b took the lease", i)
+		}
+	}
+	// Only the event that closes the earlier claim's ask was written, once.
+	evs := s.Events()
+	if len(evs) != 1 || !strings.Contains(string(evs[0].Body), `"type":"beacon.lease_moved"`) ||
+		!strings.Contains(string(evs[0].Body), `"closes":[{"key":"claim:beacon:lease:winton:100"}]`) || strings.Contains(string(evs[0].Body), `"to"`) {
+		t.Fatalf("events: %v", evs)
+	}
+	// The holder stops. Within two periods the other takes over.
+	c.t = c.t.Add(5 * time.Minute)
+	if st, _ := b.Ensure(context.Background()); st.Held {
+		t.Fatal("b took the lease before it expired")
+	}
+	c.t = c.t.Add(5 * time.Minute)
+	if st, _ := b.Ensure(context.Background()); !st.Held {
+		t.Fatal("b did not take the lease after a stopped")
+	}
+	// The old holder comes back and is refused.
+	if st, _ := a.Ensure(context.Background()); st.Held {
+		t.Fatal("a held the lease b took")
+	}
+}
+
+// A Signal without leases answers 404: the lease is claimed by event, and the API is not asked again.
+func TestLeaseRowFallsBackToClaims(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, _ := instance(t, s, t.TempDir(), "a:lease", c)
+	a.API = a.Writer.(*signal.Client)
+	for i := 0; i < 3; i++ {
+		if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("%+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	n := 0
+	for _, r := range s.Requests() {
+		if r.Path == "/api/leases" {
+			n++
+		}
+	}
+	if n != 1 || len(s.Events()) != 4 {
+		t.Fatalf("%d lease API calls, %d claims", n, len(s.Events()))
+	}
+}
+
+// A lease refusal other than another holder is an error naming Signal's status and code.
+func TestLeaseRowRefused(t *testing.T) {
+	s := signaltest.New("tok")
+	defer s.Close()
+	s.Leases = true
+	s.LeaseScript = func(int) signaltest.Reply {
+		return signaltest.Reply{Status: 403, Body: `{"error":{"code":"forbidden","message":"x"}}`}
+	}
+	c := &clock{time.Date(2026, 11, 7, 12, 1, 0, 0, time.UTC)}
+	a, _ := instance(t, s, t.TempDir(), "a:lease", c)
+	a.API = a.Writer.(*signal.Client)
+	st, err := a.Ensure(context.Background())
+	var refused *lease.RefusedError
+	if st.Held || !errors.As(err, &refused) || refused.Status != 403 || refused.Code != "forbidden" || len(s.Events()) != 0 {
+		t.Fatalf("%+v %v", st, err)
 	}
 }
 

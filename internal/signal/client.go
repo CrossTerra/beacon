@@ -1,5 +1,6 @@
-// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events, reads the
-// restricted subject prefixes with GET /api/restrictions, and checks a key with GET /api/me. To retitle a thread its
+// Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events, holds its send
+// lease with POST /api/leases, reads the restricted subject prefixes with GET /api/restrictions, and checks a key with
+// GET /api/me. To retitle a thread its
 // own event opened, it reads that event (GET /api/events/{id}) and that thread (GET /api/threads/{id}). It reads no
 // log.
 package signal
@@ -439,4 +440,122 @@ func (c *Client) Restrictions(ctx context.Context) ([]string, error) {
 		out = append(out, d.Prefix)
 	}
 	return out, nil
+}
+
+// ErrNoLeases is a 404 from POST /api/leases: this Signal does not offer leases, and the caller claims by event.
+var ErrNoLeases = errors.New("signal: leases are not offered (404)")
+
+// LeaseResult is Signal's answer to a lease claim.
+type LeaseResult struct {
+	// Held is true when the caller holds the lease now, until ExpiresAt as Signal reckons it.
+	Held      bool
+	ExpiresAt time.Time
+	// Status and Code are Signal's, for a refusal other than another holder.
+	Status int
+	Code   string
+}
+
+// LeaseRefused is a lease claim Signal refused for a reason other than another holder.
+type LeaseRefused struct {
+	Status int
+	Code   string
+}
+
+func (e *LeaseRefused) Error() string {
+	return fmt.Sprintf("Signal refused the lease with %d %s", e.Status, e.Code)
+}
+
+// ClaimLease claims or renews the lease name for run, for ttl, with POST /api/leases (Signal DEC-280). A lease is a
+// row, not an event: it writes nothing into the log and opens no ask. Held is false when another holder has it. A 404
+// is ErrNoLeases, a 401 ErrUnauthorized, another refusal *LeaseRefused, and no final answer ErrUnavailable. 429, 5xx
+// and network errors are retried as a write is.
+func (c *Client) ClaimLease(ctx context.Context, name, run string, ttl time.Duration) (LeaseResult, error) {
+	body, err := json.Marshal(struct {
+		Name       string `json:"name"`
+		Run        string `json:"run"`
+		TTLSeconds int64  `json:"ttl_seconds"`
+	}{name, run, int64(ttl / time.Second)})
+	if err != nil {
+		return LeaseResult{}, err
+	}
+	backoff := c.Backoff
+	var last error
+	for attempt := 1; attempt <= c.Attempts; attempt++ {
+		res, wait, err := c.leaseOnce(ctx, body)
+		if err == nil {
+			return res, nil
+		}
+		var again retryable
+		if !errors.As(err, &again) || ctx.Err() != nil {
+			return LeaseResult{}, err
+		}
+		last = err
+		if attempt == c.Attempts {
+			break
+		}
+		if wait == 0 {
+			wait = backoff
+			backoff = min(backoff*2, c.MaxBackoff)
+		}
+		if err := c.Sleep(ctx, wait); err != nil {
+			return LeaseResult{}, err
+		}
+	}
+	return LeaseResult{}, fmt.Errorf("%w: %v", ErrUnavailable, last)
+}
+
+func (c *Client) leaseOnce(ctx context.Context, body []byte) (LeaseResult, time.Duration, error) {
+	u := c.base.JoinPath("/api/leases")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return LeaseResult{}, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	c.secret.Authorize(req.Header)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return LeaseResult{}, 0, ctx.Err()
+		}
+		var denied *egress.DeniedError
+		if errors.As(err, &denied) {
+			return LeaseResult{}, 0, err
+		}
+		return LeaseResult{}, 0, retryable{}
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var parsed struct {
+		Held      bool   `json:"held"`
+		ExpiresAt string `json:"expires_at"`
+		Error     struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(data, &parsed)
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		exp, err := time.Parse(time.RFC3339, parsed.ExpiresAt)
+		if err != nil || !parsed.Held {
+			return LeaseResult{}, 0, &LeaseRefused{Status: resp.StatusCode, Code: "unreadable"}
+		}
+		return LeaseResult{Held: true, ExpiresAt: exp}, 0, nil
+	case resp.StatusCode == http.StatusConflict:
+		return LeaseResult{Status: resp.StatusCode, Code: parsed.Error.Code}, 0, nil
+	case resp.StatusCode == http.StatusNotFound:
+		return LeaseResult{}, 0, ErrNoLeases
+	case resp.StatusCode == http.StatusUnauthorized:
+		return LeaseResult{}, 0, ErrUnauthorized
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return LeaseResult{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: parsed.Error.Code}
+	case resp.StatusCode >= 500:
+		return LeaseResult{}, 0, retryable{status: resp.StatusCode, code: parsed.Error.Code}
+	default:
+		code := parsed.Error.Code
+		if code == "" {
+			code = "http_" + strconv.Itoa(resp.StatusCode)
+		}
+		return LeaseResult{}, 0, &LeaseRefused{Status: resp.StatusCode, Code: code}
+	}
 }

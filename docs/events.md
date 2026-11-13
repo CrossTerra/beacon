@@ -160,7 +160,7 @@ print it. An append from before this was stored has no `decision`. Each later li
 | `superseded` | The current rules no longer send a refusal. `code` is `hold` or `never`. | Final. Not sent. |
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
-`kind` is `event` for items and `lease` for lease claims. Pending counts (`run`, the report) count event bodies
+`kind` is `event` for items and `lease` for lease claims and the event that closes old claims. Pending counts (`run`, the report) count event bodies
 only. A line torn by a crash while it was written is cut off the file when a send pass next opens it under the lock (a dry run skips it and changes nothing); it was never synced, so its
 body was never sent. The directory is synced when the outbox file is created, so the file itself survives a crash.
 
@@ -212,24 +212,50 @@ accepted, is not sent again.
 
 ## The lease
 
-One instance per person sends (DEC-25). Time is cut into periods of `lease.period`. Period `N` is held by whoever
-wrote the claim with key `claim:beacon:lease:<handle>:<N>`; Signal keeps one event per key, so one instance holds
-each period. A claim is a Signal claim (a keyed ask to the writer itself, with `metadata.run`):
+One instance per person sends (DEC-25, DEC-39). `lease.period` (default 15 minutes) is how often the holder renews;
+it holds the lease for two periods, so another instance takes over within two periods of the holder stopping.
+
+**Signal's lease API.** Where Signal offers it (`POST /api/leases`, Signal DEC-280), the lease is a row in Signal, not
+an event: it writes nothing into the log, opens no ask and is in no thread. Each send pass that needs it claims
+`beacon:lease:<handle>` for this instance's run, for two periods, at most once a period:
+
+```json
+{"name": "beacon:lease:winton", "run": "<instance id>:lease", "ttl_seconds": 1800}
+```
+
+- `200` holds the lease until two periods after the claim was sent, or Signal's `expires_at` if that is earlier. The
+  pass does not ask Signal again until a period has passed.
+- `409` means another instance holds it: this one does not hold the lease and sends nothing. It still collects and
+  appends to its own outbox.
+- A refused key (`401`) or another refusal fails the pass, and `beacon run` exits non-zero with the reason; an
+  unreachable Signal ends the pass with the lease not taken.
+- A renewal sends the same name, run and period every time, so it is not appended to the outbox: there is no body to
+  replay. A restarted instance has the same run and renews its own lease.
+- The first claim that holds closes the open asks that earlier, event-based claims left (an earlier version made each
+  claim an ask to Beacon itself), with one `beacon.lease_moved` event on `beacon:lease:<handle>` that names them in
+  `closes`. That event goes through the outbox like any body.
+
+**Claims by event.** A Signal that answers `404` does not offer leases. The process then claims by event, as below,
+and does not ask for the API again until it restarts. An instance that already holds this period and the next by
+claim asks Signal nothing until it would claim again, and then tries the API first. During the move to Signal's lease
+API run one instance: one that holds the row and one that claims by event do not exclude each other.
+
+Time is cut into periods of `lease.period`. Period `N` is held by whoever wrote the claim with key
+`claim:beacon:lease:<handle>:<N>`; Signal keeps one event per key, so one instance holds each period. A claim is a
+keyed event with `metadata.run` (Signal DEC-172). It asks no one:
 
 ```json
 {
   "subject": "beacon:lease:winton",
   "type": "beacon.lease_claimed",
-  "key": "claim:beacon:lease:winton:5893412",
+  "key": "claim:beacon:lease:winton:1964470",
   "open": {"title": "Beacon lease for @winton"},
-  "to": ["me"],
-  "closes": [{"key": "claim:beacon:lease:winton:5893411"}],
-  "metadata": {"run": "<instance id>:lease", "period_start": "2026-11-07T12:00:00Z", "period_seconds": 300}
+  "metadata": {"run": "<instance id>:lease", "period_start": "2026-11-07T12:00:00Z", "period_seconds": 900}
 }
 ```
 
 - Each pass that sends first claims the current period, then the next one. The holder therefore always owns the
-  period after the current one, and keeps the lease for as long as it runs.
+  period after the current one, and keeps the lease for as long as it runs: one claim a period.
 - Another instance's claim on a held period differs in `metadata.run` and gets `409 idempotency_conflict`: it does
   not hold the lease, and sends nothing. It still collects and appends to its own outbox.
 - Any other answer is not "held by another instance". A refused key (`401`) or a refused claim (another 4xx) fails
@@ -239,10 +265,11 @@ each period. A claim is a Signal claim (a keyed ask to the writer itself, with `
   marked `expired`, since no one can hold that period any more.
 - When the holder stops, another instance takes over within two periods.
 - A restarted instance has the same instance id and outbox, so its claims are the same requests and replay.
-- Each claim closes the holder's previous claim, so at most two of its asks to itself stay open.
+- The first claims close, in `closes`, the asks to Beacon itself that claims from an earlier version left open.
 - Claims go through the outbox like any body. Beacon does not read Signal's log for the lease: the answer to a
   claim says who holds the period.
-- A pass stops sending when the lease it holds runs out mid-pass.
+
+A pass stops sending when the lease it holds runs out mid-pass.
 
 Periods come from the local clock. Two machines whose clocks differ by more than a period can disagree about which
 period is current; the key still allows one holder per period.

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Event is an event the fake wrote.
@@ -64,6 +65,19 @@ type Server struct {
 	subjects map[string]int64
 	opened   map[string]int64
 	landed   map[string]int64
+
+	// Leases turns on POST /api/leases (Signal DEC-280); without it the route is 404, as on a Signal that does not
+	// offer leases. LeaseNow is the fake's clock for them. LeaseScript, when set, answers a lease claim first.
+	Leases      bool
+	LeaseNow    func() time.Time
+	LeaseScript func(n int) Reply
+	leases      map[string]leaseRow
+	leaseClaims int
+}
+
+type leaseRow struct {
+	actor, run string
+	expires    time.Time
 }
 
 // Thread is a thread the fake holds.
@@ -161,6 +175,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.readThread(w, id)
 		return
 	}
+	if r.URL.Path == "/api/leases" && r.Method == http.MethodPost {
+		s.claimLease(w, actor.ID, body)
+		return
+	}
 	if r.URL.Path != "/api/events" || r.Method != http.MethodPost {
 		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"Not found."}}`, nil)
 		return
@@ -186,6 +204,55 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	status, out := s.write(parsed.Key, body)
 	reply(w, status, out, nil)
+}
+
+func (s *Server) claimLease(w http.ResponseWriter, actor string, body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.Leases {
+		reply(w, http.StatusNotFound, `{"error":{"code":"not_found","message":"Not found."}}`, nil)
+		return
+	}
+	s.leaseClaims++
+	if s.LeaseScript != nil {
+		if rp := s.LeaseScript(s.leaseClaims); rp.Status != 0 {
+			reply(w, rp.Status, rp.Body, rp.Headers)
+			return
+		}
+	}
+	var c struct {
+		Name string `json:"name"`
+		Run  string `json:"run"`
+		TTL  int64  `json:"ttl_seconds"`
+	}
+	if json.Unmarshal(body, &c) != nil || c.Name == "" || c.Run == "" || c.TTL < 10 || c.TTL > 86400 {
+		reply(w, http.StatusBadRequest, `{"error":{"code":"invalid","message":"A lease claim is { name, run, ttl_seconds }."}}`, nil)
+		return
+	}
+	now := time.Now()
+	if s.LeaseNow != nil {
+		now = s.LeaseNow()
+	}
+	if s.leases == nil {
+		s.leases = map[string]leaseRow{}
+	}
+	row, ok := s.leases[c.Name]
+	if ok && row.expires.After(now) && (row.actor != actor || row.run != c.Run) {
+		reply(w, http.StatusConflict, fmt.Sprintf(`{"error":{"code":"conflict","message":"Another holder has this lease until it expires.","details":{"run":%q,"expires_at":%q}}}`,
+			row.run, row.expires.UTC().Format(time.RFC3339Nano)), nil)
+		return
+	}
+	row = leaseRow{actor: actor, run: c.Run, expires: now.Add(time.Duration(c.TTL) * time.Second)}
+	s.leases[c.Name] = row
+	reply(w, http.StatusOK, fmt.Sprintf(`{"name":%q,"run":%q,"expires_at":%q,"held":true,"acquired":%t}`, c.Name, c.Run,
+		row.expires.UTC().Format(time.RFC3339Nano), !ok), nil)
+}
+
+// LeaseClaims is how many lease claims the fake received.
+func (s *Server) LeaseClaims() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseClaims
 }
 
 func (s *Server) write(key string, body []byte) (int, string) {

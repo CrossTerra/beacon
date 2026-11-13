@@ -301,6 +301,17 @@ subject, body (when read), every label on the thread and every from, to and cc i
 description (when read), organiser and attendees; Drive's title and body, and for notes and transcripts their
 meeting's title, organiser, attendees and calendar event, whose level they take (DEC-35).
 
+**Retitling threads whose title is now sealed.** A thread Beacon opened with a plain object title (a mail's subject,
+an event's summary, a file's name) is renamed to a neutral title once that title is sealed: the current rule for the
+stored item seals it without leaving its title field plain, or Beacon has since sent an event on the subject with its
+title sealed (a raise leaves nothing plain). The neutral title names the kind of thing, never the thing: "Mail from a
+colleague" for mail from an address at the account's own domain, else "Mail"; "Meeting"; "Meeting notes" for notes
+and transcripts, else "Document". It uses the same path and checks as Slack's retitle ([Slack](#slack)): after the
+pass's pending bodies, up to 20 threads a pass between them, only a thread whose first event Beacon sent opened it
+(`open.number`), not merged, still with the title Beacon opened it with, on a restricted prefix; the `thread.titled`
+body goes through the outbox under `<source>:retitle:<thread number>:<title hash>`, and a thread left alone is
+recorded in `retitled.json`.
+
 ### Gmail
 
 **Cursor.** The mailbox's history id, and the time of the pass that stored it (the server's `Date`, else the newest

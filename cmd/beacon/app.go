@@ -638,7 +638,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		return fail(logs.ReasonState, failText(logs.ReasonState, e))
 	}
 	r.Threads, r.Retitled = client, retitled
-	r.Lease = &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
+	r.Lease = &lease.Lease{Outbox: ob, Writer: client, API: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 		Period: e.cfg.LeasePeriod(), Now: a.now}
 
 	for pass := 0; ; pass++ {
@@ -1147,7 +1147,7 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 		Rules: e.rules, Person: e.person, Outbox: ob, Writer: client, Log: log, Now: a.now, Seed: sf, Floor: floor,
 		SealOwner: &e.cfg.Seal.Owner,
 		Personal:  personal(e.sources), Restrictions: client,
-		Lease: &lease.Lease{Outbox: ob, Writer: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
+		Lease: &lease.Lease{Outbox: ob, Writer: client, API: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 			Period: e.cfg.LeasePeriod(), Now: a.now},
 	}
 	rep, err := r.RetryRejected(ctx)
