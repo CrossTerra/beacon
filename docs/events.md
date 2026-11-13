@@ -236,7 +236,7 @@ an event: it writes nothing into the log, opens no ask and is in no thread. Each
   `closes`. That event goes through the outbox like any body.
 
 **Claims by event.** A Signal that answers `404` does not offer leases. The process then claims by event, as below,
-and does not ask for the API again until it restarts. An instance that already holds this period and the next by
+and asks for the API again an hour later, so a Signal that starts offering leases is used without a restart. An instance that already holds this period and the next by
 claim asks Signal nothing until it would claim again, and then tries the API first. During the move to Signal's lease
 API run one instance: one that holds the row and one that claims by event do not exclude each other.
 

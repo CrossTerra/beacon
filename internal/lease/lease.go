@@ -5,7 +5,7 @@
 // holder stops renewing. Nothing is written into the log and no ask opens. The first claim through the API closes the
 // open asks that earlier, event-based claims left.
 //
-// Where Signal answers 404, the lease is a claim per period, as before. Time is cut into periods of a fixed length.
+// Where Signal answers 404, the lease is a claim per period, as before, and the API is asked again an hour later. Time is cut into periods of a fixed length.
 // The lease for period N is the Signal claim with key "claim:beacon:lease:<person>:<N>": a key holds one event only, so
 // one instance holds each period. The instance that holds period N claims N+1 during N, so it keeps the lease for as
 // long as it runs. Another instance tries the current period each time it runs, gets 409 idempotency_conflict while
@@ -53,10 +53,12 @@ type Lease struct {
 	Run    string // names this instance, the same across restarts
 	Period time.Duration
 	Now    func() time.Time
-	// API, when set, holds the lease as a row in Signal. A 404 falls back to claims for the life of this process.
+	// API, when set, holds the lease as a row in Signal. A 404 falls back to claims, and the API is asked again an
+	// hour later, so a Signal that starts offering leases is used without a restart.
 	API API
 
-	noAPI bool
+	// retryAPI is when the API may be asked again after a 404.
+	retryAPI time.Time
 	// held, until and renew are the lease row as this process last claimed it.
 	held         bool
 	until, renew time.Time
@@ -131,7 +133,7 @@ func (l *Lease) Ensure(ctx context.Context) (Status, error) {
 	st := Status{Period: p}
 	// An instance that already holds this period and the next by claim keeps them: it asks Signal nothing until it
 	// would claim again. Then it tries the lease API first.
-	if l.API != nil && !l.noAPI && !(l.claimed(p) && l.claimed(p+1)) {
+	if l.API != nil && !l.Now().Before(l.retryAPI) && !(l.claimed(p) && l.claimed(p+1)) {
 		done, err := l.ensureRow(ctx, &st)
 		if done || err != nil {
 			return st, err
@@ -156,6 +158,9 @@ func (l *Lease) Ensure(ctx context.Context) (Status, error) {
 	return st, nil
 }
 
+// apiRetry is how long after a 404 the lease API is asked again.
+const apiRetry = time.Hour
+
 // claimed reports whether the outbox shows this instance holding period p by claim.
 func (l *Lease) claimed(p int64) bool {
 	e, ok := l.Outbox.Get(l.Key(p))
@@ -177,7 +182,8 @@ func (l *Lease) ensureRow(ctx context.Context, st *Status) (bool, error) {
 	var refused *signal.LeaseRefused
 	switch {
 	case errors.Is(err, signal.ErrNoLeases):
-		l.noAPI = true
+		l.held = false
+		l.retryAPI = start.Add(apiRetry)
 		return false, nil
 	case errors.As(err, &refused):
 		l.held = false

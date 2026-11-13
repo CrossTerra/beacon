@@ -203,7 +203,8 @@ func TestLeaseRow(t *testing.T) {
 	}
 }
 
-// A Signal without leases answers 404: the lease is claimed by event, and the API is not asked again.
+// A Signal without leases answers 404: the lease is claimed by event, and the API is not asked again for an hour.
+// Once Signal offers leases, the instance moves to them and claims no more.
 func TestLeaseRowFallsBackToClaims(t *testing.T) {
 	s := signaltest.New("tok")
 	defer s.Close()
@@ -224,6 +225,17 @@ func TestLeaseRowFallsBackToClaims(t *testing.T) {
 	}
 	if n != 1 || len(s.Events()) != 4 {
 		t.Fatalf("%d lease API calls, %d claims", n, len(s.Events()))
+	}
+	s.Leases, s.LeaseNow = true, c.now
+	c.t = c.t.Add(time.Hour)
+	for i := 0; i < 4; i++ {
+		if st, err := a.Ensure(context.Background()); err != nil || !st.Held {
+			t.Fatalf("%+v %v", st, err)
+		}
+		c.t = c.t.Add(5 * time.Minute)
+	}
+	if s.LeaseClaims() == 0 || len(s.Events()) > 6 {
+		t.Fatalf("%d lease claims, %d events", s.LeaseClaims(), len(s.Events()))
 	}
 }
 
