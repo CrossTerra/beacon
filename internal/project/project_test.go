@@ -107,6 +107,32 @@ func TestAskMe(t *testing.T) {
 	}
 }
 
+// An ask takes the source's priority when its rule sets none, and the rule's when it sets one. Without an ask the
+// source's priority does not leave as one.
+func TestAskPriorityFromSource(t *testing.T) {
+	it := baseItem()
+	it.Priority = "medium"
+	r := rule("title")
+	r.Ask = "me"
+	b, data, err := Project(Input{Item: it, Rule: r, Person: person})
+	if err != nil || b.Priority != "medium" || b.DueAt == "" {
+		t.Fatalf("source priority: %s %v", data, err)
+	}
+	r.Priority = "low"
+	if b, _, _ = Project(Input{Item: it, Rule: r, Person: person}); b.Priority != "low" {
+		t.Fatalf("rule priority: %q", b.Priority)
+	}
+	if b, _, _ = Project(Input{Item: it, Rule: rule("title"), Person: person}); b.Priority != "" {
+		t.Fatalf("priority without an ask: %q", b.Priority)
+	}
+	// A retry from the stored decision asks with the same priority.
+	r.Priority = ""
+	d := Decide(it, r, false, "")
+	if b, _, _ = Project(Input{Item: d.Item, Rule: r, Person: person}); b.Priority != "medium" {
+		t.Fatalf("retry priority: %q", b.Priority)
+	}
+}
+
 // DEC-11 as narrowed by DEC-27: by only on the person's own acts, from the configured identity.
 func TestBy(t *testing.T) {
 	own := baseItem()

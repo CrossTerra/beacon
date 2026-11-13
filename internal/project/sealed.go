@@ -65,6 +65,7 @@ func projectSealed(in Input) (*Body, []byte, error) {
 	sealedFields := map[string]string{}
 	sealedMeta := map[string]any{}
 	listed := map[string]bool{}
+	var plainRefs []string
 	for _, name := range r.Fields {
 		listed[name] = true
 		switch name {
@@ -73,7 +74,14 @@ func projectSealed(in Input) (*Body, []byte, error) {
 				sealedMeta["actor"] = it.Actor
 			}
 		case rules.FieldReferences:
-			if len(it.References) > 0 {
+			if len(it.References) == 0 {
+				continue
+			}
+			// Left plain, they relate this thread to the subjects they name (Signal DEC-284); sealed, they relate
+			// nothing.
+			if plain[name] {
+				plainRefs = append([]string(nil), it.References...)
+			} else {
 				sealedMeta["references"] = append([]string(nil), it.References...)
 			}
 		default:
@@ -120,6 +128,9 @@ func projectSealed(in Input) (*Body, []byte, error) {
 	}
 	if it.Native != "" && !strings.Contains(it.Native, "@") {
 		meta["native"] = it.Native
+	}
+	if len(plainRefs) > 0 {
+		meta["references"] = plainRefs
 	}
 	if len(meta) > 0 {
 		b.Metadata = meta

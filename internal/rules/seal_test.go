@@ -22,6 +22,9 @@ func TestSealParses(t *testing.T) {
 	if f.Rules[0].Seal != "owner+agents" || len(f.Rules[0].Plain) != 1 || f.Rules[1].Seal != "owner" {
 		t.Fatalf("%+v %+v", f.Rules[0], f.Rules[1])
 	}
+	if _, err := Parse([]byte("rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [references]\n    fields: [references]\n")); err != nil {
+		t.Fatalf("references may stay plain: %v", err)
+	}
 	if !f.ListsSealed("drive", "body") || !f.ListsSealed("gmail", "body") || f.ListsSealed("slack", "body") {
 		t.Fatal("ListsSealed")
 	}
@@ -29,16 +32,16 @@ func TestSealParses(t *testing.T) {
 
 func TestSealRefused(t *testing.T) {
 	for name, y := range map[string]string{
-		"seal on never":     "rules:\n  - name: a\n    match: {}\n    tier: never\n    seal: owner\n",
-		"plain on never":    "rules:\n  - name: a\n    match: {}\n    tier: never\n    plain: [subject]\n",
-		"unknown level":     "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: agents\n    fields: [subject]\n",
-		"plain without":     "rules:\n  - name: a\n    match: {}\n    tier: send\n    plain: [subject]\n    fields: [subject]\n",
-		"body plain":        "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [body]\n    fields: [body]\n",
-		"actor plain":       "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [actor]\n    fields: [actor]\n",
-		"references plain":  "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [references]\n    fields: [references]\n",
-		"plain not listed":  "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [subject]\n    fields: [from]\n",
-		"plain twice":       "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [subject, subject]\n    fields: [subject]\n",
-		"seal not a string": "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: [owner]\n",
+		"seal on never":         "rules:\n  - name: a\n    match: {}\n    tier: never\n    seal: owner\n",
+		"plain on never":        "rules:\n  - name: a\n    match: {}\n    tier: never\n    plain: [subject]\n",
+		"unknown level":         "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: agents\n    fields: [subject]\n",
+		"plain without":         "rules:\n  - name: a\n    match: {}\n    tier: send\n    plain: [subject]\n    fields: [subject]\n",
+		"body plain":            "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [body]\n    fields: [body]\n",
+		"actor plain":           "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [actor]\n    fields: [actor]\n",
+		"references not listed": "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [references]\n    fields: [title]\n",
+		"plain not listed":      "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [subject]\n    fields: [from]\n",
+		"plain twice":           "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: owner\n    plain: [subject, subject]\n    fields: [subject]\n",
+		"seal not a string":     "rules:\n  - name: a\n    match: {}\n    tier: send\n    seal: [owner]\n",
 	} {
 		if _, err := Parse([]byte(y)); err == nil {
 			t.Errorf("%s: accepted", name)

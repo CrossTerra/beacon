@@ -45,10 +45,10 @@ rules:
 | `fields` | no | What the event carries (DEC-6). See [Fields](#fields). |
 | `state` | no | Which of the source's state fields go in the event's state snapshot (DEC-28). See [State](#state). |
 | `ask` | no | `me`: the event asks the person (DEC-21). Nobody else can be asked (DEC-12). |
-| `priority` | no | `low`, `medium`, `high` or `urgent`, for the ask. Needs `ask`. |
+| `priority` | no | `low`, `medium`, `high` or `urgent`, for the ask. Needs `ask`. Without it, an ask takes the source's own priority when it has one (a Jira issue's, [`sources.md`](sources.md#jira)). |
 | `close_by_others` | no | `true`: when this rule sends another person's act, it closes the person's open asks on the same subject (DEC-20), or only those the item names when it sets `close_only`. |
 | `seal` | no | `owner` or `owner+agents`: the event is sealed (DEC-30). See [Sealed rules](#sealed-rules). |
-| `plain` | no | Fields of a sealed rule that stay outside `sealed`: a subset of `fields`, never `body`, `actor` or `references`. Needs `seal`. |
+| `plain` | no | Fields of a sealed rule that stay outside `sealed`: a subset of `fields`, never `body` or `actor`. `references` may stay plain: they are subjects, and Signal relates threads only through plain ones (Signal DEC-284). Needs `seal`. |
 
 A `never` rule takes none of `fields`, `state`, `ask`, `priority`, `close_by_others`, `seal` or `plain`.
 
@@ -115,7 +115,7 @@ the callers the level allows (Signal DEC-250 to DEC-254). Beacon handles no keys
     match: {source: gmail, type: received}
     tier: hold
     seal: owner+agents      # or owner
-    plain: [subject]        # left outside sealed; never body, actor or references
+    plain: [subject]        # left outside sealed; never body or actor
     fields: [subject, body, actor, from]
 ```
 
@@ -123,9 +123,10 @@ the callers the level allows (Signal DEC-250 to DEC-254). Beacon handles no keys
   and for a grant with `sealed: true`. Beacon's own key opens neither.
 - Outside `sealed` a sealed event carries only the envelope, fixed in code (DEC-31): the subject, the type, the key,
   `by` on the person's own acts, `to`, `priority`, `due_at`, `closes`, `occurred_at`, `open.title` when its field is
-  in `plain`, `metadata.fields` with the `plain` fields, `metadata.native` with the source's opaque id (no `@`), and the
-  `unread` and `starred` state flags as booleans. The event title, the body, `actor`, `references`, every other field
-  and every other state field go in `sealed`. The shape is in [`events.md`](events.md#sealed-events).
+  in `plain`, `metadata.fields` with the `plain` fields, `metadata.native` with the source's opaque id (no `@`),
+  `metadata.references` when `plain` lists `references`, and the `unread` and `starred` state flags as booleans. The
+  event title, the body, `actor`, `references` the rule does not leave plain, every other field and every other state
+  field go in `sealed`. The shape is in [`events.md`](events.md#sealed-events).
 - Signal seals only a person's own subjects: those under `gmail:`, `calendar:`, `drive:` and `slack:dm:`. A sealed rule
   that can match only shared subjects is an error in `beacon rules check`; at run time such an item is held as
   `sensitive_shared`.

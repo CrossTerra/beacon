@@ -97,7 +97,8 @@ conclusion. A team request is addressed.
 
 **Items.** `opened`, `ready`, `review_requested`, `review_request_removed`, `reviewed` (field `review_state`),
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
-only), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
+only, and only for a conclusion: passing or failing; checks starting or still running are not events, and the
+snapshot's `checks` still says `pending`), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
 The event title describes the change. The pull request title stays the `title` field, and the thread title when a
 rule lists `title`. The event title never includes comment or review text. Keys and subjects are unchanged; a push
 key keeps the full sha.
@@ -111,7 +112,7 @@ key keeps the full sha.
 | `reviewed` | Reviewed: approved, Reviewed: changes requested, or Reviewed: commented. Any other state is that state with underscores as spaces. With no state, Reviewed. |
 | `commented` | Commented |
 | `pushed` | Pushed `<short sha>`. The short sha is the first 7 characters, or the whole sha when it is shorter. |
-| `checks_changed` | Checks: passing, Checks: failing, or Checks: pending. `pass` is passing and `fail` is failing. A conclusion of `none` is Checks: none. |
+| `checks_changed` | Checks: passing or Checks: failing. `pass` is passing and `fail` is failing. |
 | `merged` | Merged |
 | `closed` | Closed |
 
@@ -168,8 +169,10 @@ lookback window are not emitted. Comments before that window are not emitted. Th
 backwards, and a `Date` more than an hour ahead of the local clock fails the pass. An issue that has moved out of
 the configured projects is dropped and counted. It does not fail the pass.
 
-**First run.** Unresolved issues assigned to the person. Not their history: comments are not read. One `assigned`
-item per issue, keyed by the latest assignment's changelog id, or `open` when the issue has none.
+**First run.** Unresolved issues assigned to the person whose status is not in Jira's Done category
+(`statusCategory != Done`, and an issue that reads back as Done is skipped too), since a workflow can reach Done
+without setting a resolution. Not their history: comments are not read. One `assigned` item per issue, keyed by the
+latest assignment's changelog id, or `open` when the issue has none.
 
 **Items.** `assigned`, `unassigned`, `transitioned` (`from_status`, `to_status`), `commented`, `mentioned`,
 `due_changed`. A comment is one item, `commented`, with `addressed` when it mentions the person. `mentioned` is
@@ -187,6 +190,10 @@ a mention was added to. Keys and subjects are unchanged.
 | `mentioned` | Mentioned |
 | `due_changed` | Due date set to `<date>`, the date the changelog already returned. A cleared due date is Due date cleared. |
 
+**The person is an account id.** An assignment is to the person when its account id is theirs. A changelog's
+`from` and `to` can be a username or user key from before Atlassian moved to account ids; Beacon reads
+`tmpFromAccountId` and `tmpToAccountId` first, and compares neither display names nor usernames.
+
 **Addressed.** Assignment to the person; a comment or field change that mentions the person; a transition, by
 someone else, of an issue assigned to the person.
 
@@ -202,6 +209,9 @@ distinct. A history with one field change uses the changelog id alone. Both form
 **State.** `status`, `assignee` (display name), `resolution`, `due` (`YYYY-MM-DD`), `priority`.
 
 **Due.** The issue's due date is `due_at`, the end of that date in the account's timezone (DEC-21).
+
+**Priority.** An ask from a rule that sets no `priority` takes the issue's: Highest and High are `high`, Medium is
+`medium`, Low and Lowest are `low`. Another scheme's names set none. A rule's `priority` wins.
 
 **Identity.** `person.identities.<name>` is `jira:account:<account id>`. A mismatch is `identity_mismatch`.
 
@@ -406,8 +416,8 @@ nothing), and moved is `changed`. One the grant can no longer read (a permission
 rather than read again on every full re-read.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
-its summary, location, start, end and status, a hash of its start and end, the person's response, and whether it is
-cancelled. The cursor holds hashes and response values, not event text. An entry is dropped a day after its event
+its summary, location, start, end and status, a hash of its start and end, a hash of its summary alone (to tell a
+repeated summary), the person's response, and whether it is cancelled. The cursor holds hashes and response values, not event text. An entry is dropped a day after its event
 ends. A change of state is a change of the fingerprint or the response, so another attendee's response, which bumps
 the event's `updated` time, is not an event.
 
@@ -436,13 +446,18 @@ cancel of an event the person organises is not own (a co-organiser or a delegate
 Otherwise the actor is the organizer. A `changed` event the person has not answered is addressed. The title never
 includes the summary, a name or the description.
 
-**Subject.** `calendar:<person>:<event id>`. **Key.** `calendar:<event id>:<item>:<etag>`; the version is the
-event's etag.
+**Subject.** `calendar:<person>:<event id>`, the event's own id: an instance of a recurring meeting has its own
+(`<series id>_<start>`), so each meeting is its own thread, never the series. **Key.**
+`calendar:<event id>:<item>:<etag>`; the version is the event's etag.
 
-**Fields.** `summary`, `start` and `end` (RFC 3339 in UTC, or a date for an all-day event), `organizer` (address),
+**Fields.** `title` (the summary, with the meeting's day in the calendar's time zone, "Tech stand-up · Thu 12 Nov",
+when the summary alone does not tell one meeting from another: an instance of a recurring meeting, or a summary, compared
+without case or extra spaces, that another event in the 30-day window has; otherwise the summary; a rule that lists
+it titles the thread with it), `summary`, `start` and `end` (RFC 3339 in UTC, or a date for an all-day event), `organizer` (address),
 `attendees` (how many are listed), `attendee_addresses` (their addresses, lowercased, sorted, joined with `, `;
 DEC-37), `response` (the person's: `needsAction`, `accepted`, `declined`, `tentative`; `accepted` when they organise
-it and are not listed), `link`, `body` (the description, only when a sealed rule lists it).
+it and are not listed), `link`, `meet_link` (the video link: Meet's `hangoutLink`, else the conference's video entry
+point, such as a Zoom link; only an `https` link), `body` (the description, only when a sealed rule lists it).
 
 **State.** `status` (`confirmed`, `tentative`, `cancelled`), `start`, `end`, `response`.
 
@@ -476,7 +491,10 @@ with a link. A Google Doc attachment whose title ends in `Transcript` (a Meet tr
 (`files.export` as plain text, the first 32 KiB) only when a sealed rule lists `body`. "Attended" is "organised or
 accepted": Google does not say who joined. Notes are usually attached while the meeting runs, which is the event's
 last update, so a pass reads the meetings that ended since the last one without an `updatedMin`, and a meeting with
-notes is found the pass after it ends.
+notes is found the pass after it ends. Notes and transcripts carry `references` (DEC-17): the meeting's subject,
+`calendar:<person>:<event id>`, by the id of the event the document is attached to, an instance and not its series.
+A rule that lists `references` sends it; on a sealed rule it relates the threads in Signal only when the rule also
+leaves it plain (`plain: [references]`, Signal DEC-284).
 
 **First run.** The last 7 days: unresolved comments by others that mention or are assigned to the person, and
 meeting notes. No own acts.

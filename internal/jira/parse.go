@@ -37,6 +37,8 @@ type issue struct {
 	account    string
 	resolution string
 	due        string
+	// done is a status in Jira's Done category.
+	done bool
 }
 
 type change struct {
@@ -158,7 +160,7 @@ func itemsFrom(name, person string, iss issue, histories []history, comments []c
 }
 
 func firstItems(name, person string, iss issue, histories []history, observed time.Time, loc *time.Location) ([]source.Item, error) {
-	if iss.account != person {
+	if iss.account != person || iss.done {
 		return nil, nil
 	}
 	id := "open"
@@ -241,6 +243,7 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 			Addressed:  e.addressed,
 			Fields:     fields,
 			DueAt:      due,
+			Priority:   askPriority(iss.priority),
 			State:      stateOf(iss),
 			ObservedAt: &obs,
 			Version:    version,
@@ -291,6 +294,20 @@ func dueValue(c *change) string {
 		return s
 	}
 	return strings.TrimSpace(c.to)
+}
+
+// askPriority maps Jira's default priority scheme onto an ask's priority. Another scheme's names map to "", and
+// the ask takes the rule's priority or none.
+func askPriority(name string) string {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "highest", "high":
+		return "high"
+	case "medium":
+		return "medium"
+	case "low", "lowest":
+		return "low"
+	}
+	return ""
 }
 
 func oneLine(s string) string {

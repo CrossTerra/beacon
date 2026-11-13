@@ -17,8 +17,10 @@ import (
 )
 
 // CalendarFields is Calendar's fixed field list (DEC-6). attendees is a count; attendee_addresses the attendees'
-// addresses (DEC-37). body is the description, read only when a sealed rule lists it.
-var CalendarFields = []string{"summary", "start", "end", "organizer", "attendees", "attendee_addresses", "response", "link", "body"}
+// addresses (DEC-37). body is the description, read only when a sealed rule lists it. title is the summary, with the
+// meeting's day when the summary alone does not tell one meeting from another (a recurring meeting's instance, or a
+// summary that more than one event in the window has). meet_link is the meeting's video link.
+var CalendarFields = []string{"title", "summary", "start", "end", "organizer", "attendees", "attendee_addresses", "response", "link", "meet_link", "body"}
 
 // CalendarStateFields is Calendar's state field list (DEC-28).
 var CalendarStateFields = []string{"status", "start", "end", "response"}
@@ -98,6 +100,8 @@ type calSeen struct {
 	T string `json:"t"`
 	// R is the person's response.
 	R string `json:"r,omitempty"`
+	// S is a hash of the summary alone, so a summary that more than one event has is dated in the title.
+	S string `json:"s,omitempty"`
 	C bool   `json:"c,omitempty"`
 	// Start and End place the event, so an entry is dropped once the event is over, and a full re-read knows which
 	// events it should have seen.
@@ -155,18 +159,27 @@ type calPerson struct {
 }
 
 type calEvent struct {
-	ID          string      `json:"id"`
-	Status      string      `json:"status"`
-	ETag        string      `json:"etag"`
-	Summary     string      `json:"summary"`
-	Description string      `json:"description"`
-	Location    string      `json:"location"`
-	Start       calTime     `json:"start"`
-	End         calTime     `json:"end"`
-	Created     string      `json:"created"`
-	Updated     string      `json:"updated"`
-	HTMLLink    string      `json:"htmlLink"`
-	EventType   string      `json:"eventType"`
+	ID          string  `json:"id"`
+	Status      string  `json:"status"`
+	ETag        string  `json:"etag"`
+	Summary     string  `json:"summary"`
+	Description string  `json:"description"`
+	Location    string  `json:"location"`
+	Start       calTime `json:"start"`
+	End         calTime `json:"end"`
+	Created     string  `json:"created"`
+	Updated     string  `json:"updated"`
+	HTMLLink    string  `json:"htmlLink"`
+	EventType   string  `json:"eventType"`
+	// RecurringEventID is the series an instance belongs to. The instance keeps its own id, and its own subject.
+	RecurringEventID string `json:"recurringEventId"`
+	HangoutLink      string `json:"hangoutLink"`
+	ConferenceData   *struct {
+		EntryPoints []struct {
+			EntryPointType string `json:"entryPointType"`
+			URI            string `json:"uri"`
+		} `json:"entryPoints"`
+	} `json:"conferenceData"`
 	Organizer   calPerson   `json:"organizer"`
 	Creator     calPerson   `json:"creator"`
 	Attendees   []calPerson `json:"attendees"`
@@ -220,8 +233,65 @@ func (e *calEvent) seen() calSeen {
 		F: hash(e.Summary, e.Location, e.Start.String(), e.End.String(), e.Status),
 		T: hash(e.Start.String(), e.End.String()),
 		R: e.response(),
+		S: summaryHash(e.Summary),
 		C: e.Status == "cancelled",
 	}
+}
+
+// summaryHash is "" for an event with no summary: events with none are not one repeated meeting.
+func summaryHash(summary string) string {
+	s := strings.ToLower(oneLine(summary))
+	if s == "" {
+		return ""
+	}
+	return hash("summary", s)
+}
+
+// meetLink is the event's video link: Meet's hangoutLink, else the conference's video entry point. Only an https
+// link is kept.
+func (e *calEvent) meetLink() string {
+	link := e.HangoutLink
+	if link == "" && e.ConferenceData != nil {
+		for _, p := range e.ConferenceData.EntryPoints {
+			if p.EntryPointType == "video" {
+				link = p.URI
+				break
+			}
+		}
+	}
+	u, err := url.Parse(link)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return ""
+	}
+	return link
+}
+
+// datedTitle is the summary with the meeting's day in the calendar's zone: "Tech stand-up · Thu 12 Nov".
+func datedTitle(summary string, start calTime, tz *time.Location) string {
+	summary = oneLine(summary)
+	if summary == "" {
+		return ""
+	}
+	if tz == nil {
+		tz = time.UTC
+	}
+	var day time.Time
+	if start.DateTime != "" {
+		t, err := time.Parse(time.RFC3339, start.DateTime)
+		if err != nil {
+			return summary
+		}
+		day = t.In(tz)
+	} else if start.Date != "" {
+		t, err := time.Parse("2006-01-02", start.Date)
+		if err != nil {
+			return summary
+		}
+		day = t
+	} else {
+		return summary
+	}
+	return summary + " · " + day.Format("Mon 2 Jan")
 }
 
 // Collect implements source.Source. A nil cursor emits events in the next 7 days (DEC-23) and fingerprints the rest
@@ -281,6 +351,7 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	}
 	obs := c.observed()
 	var items []source.Item
+	var pending []calPending
 	var times []time.Time
 	for i := range events {
 		e := &events[i]
@@ -333,7 +404,18 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 		if typ == "" {
 			continue
 		}
-		items = append(items, c.item(e, typ, prev, known, next, tz, obs))
+		pending = append(pending, calPending{e: e, typ: typ, prev: prev, known: known, next: next})
+	}
+	// A summary is repeated when more than one event Beacon knows in the window has it, this pass's included.
+	summaries := map[string]int{}
+	for _, s := range cur.Events {
+		if s.S != "" && !s.C {
+			summaries[s.S]++
+		}
+	}
+	for _, p := range pending {
+		dated := p.e.RecurringEventID != "" || summaries[p.next.S] > 1
+		items = append(items, c.item(p.e, p.typ, p.prev, p.known, p.next, tz, obs, dated))
 	}
 	for id, s := range cur.Events {
 		if end, err := parseTime(s.End); err == nil && end.Before(now.Add(-24*time.Hour)) {
@@ -355,6 +437,15 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].Key < items[j].Key })
 	return source.Collected{Items: items, Next: data}, nil
+}
+
+// calPending is an event that yields an item this pass, before its title is known.
+type calPending struct {
+	e     *calEvent
+	typ   string
+	prev  calSeen
+	known bool
+	next  calSeen
 }
 
 // changeType is the one item an event yields this pass: a cancel, then a change of the person's response, then a
@@ -465,7 +556,7 @@ func sortedIDs(m map[string]calSeen) []string {
 }
 
 func eventFields(bodies bool) string {
-	f := "id,status,etag,summary,location,start,end,created,updated,htmlLink,eventType,organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
+	f := "id,status,etag,summary,location,start,end,created,updated,htmlLink,eventType,recurringEventId,hangoutLink,conferenceData(entryPoints(entryPointType,uri)),organizer(email,self),creator(email,self),attendees(email,self,responseStatus)"
 	if bodies {
 		f += ",description"
 	}
@@ -543,10 +634,15 @@ func listEvents(ctx context.Context, c *common, q url.Values) ([]calEvent, *time
 	return nil, nil, errors.New("calendar: pagination did not end")
 }
 
-func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next calSeen, tz *time.Location, obs time.Time) source.Item {
+func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next calSeen, tz *time.Location, obs time.Time, dated bool) source.Item {
 	resp := e.response()
 	attendees := attendeeAddresses(e)
+	title := oneLine(e.Summary)
+	if dated {
+		title = datedTitle(e.Summary, e.Start, tz)
+	}
 	fields := map[string]string{
+		"title":              title,
 		"summary":            oneLine(e.Summary),
 		"start":              e.Start.String(),
 		"end":                e.End.String(),
@@ -555,6 +651,7 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 		"attendee_addresses": strings.Join(attendees, ", "),
 		"response":           resp,
 		"link":               e.HTMLLink,
+		"meet_link":          e.meetLink(),
 	}
 	local := &source.Local{
 		Text:      map[string]string{"summary": fields["summary"]},

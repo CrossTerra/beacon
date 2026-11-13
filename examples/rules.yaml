@@ -145,7 +145,7 @@ rules:
   - name: calendar-own-acts
     match: {source: calendar, own: true}
     tier: send
-    fields: [summary, start, end, link, response]
+    fields: [title, summary, start, end, link, meet_link, response]
     state: [status, start, end, response]
 
   - name: drive-own-acts
@@ -190,7 +190,7 @@ rules:
     tier: send
     ask: me
     priority: medium
-    fields: [summary, start, end, organizer, attendees, link, actor]
+    fields: [title, summary, start, end, organizer, attendees, link, meet_link, actor]
     state: [status, start, end, response]
 
   # An event on your calendar was created by someone else, changed or cancelled. Calendar does not say
@@ -200,7 +200,7 @@ rules:
       source: calendar
       type: {regex: "created|changed|cancelled"}
     tier: send
-    fields: [summary, start, end, organizer, response, link, actor]
+    fields: [title, summary, start, end, organizer, response, link, meet_link, actor]
     state: [status, start, end, response]
 
   # The first run's events in the next 7 days.
@@ -209,7 +209,7 @@ rules:
       source: calendar
       type: upcoming
     tier: send
-    fields: [summary, start, end, organizer, response, link]
+    fields: [title, summary, start, end, organizer, response, link, meet_link]
     state: [status, start, end, response]
 
   # A comment or reply assigned to you.
@@ -240,7 +240,7 @@ rules:
       source: drive
       type: notes_created
     tier: send
-    fields: [title, link, meeting, meeting_start]
+    fields: [title, link, meeting, meeting_start, references]
 
   # --- Slack
 

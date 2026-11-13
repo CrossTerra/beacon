@@ -18,6 +18,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `fields` | The source's fixed fields; only names in the source's field list. |
 | `references` | Explicit references to other subjects (DEC-17). |
 | `due_at` | The source's own due time, when it has one (DEC-21). |
+| `priority` | The source's own priority for the object, as `low`, `medium` or `high`, when it has one (a Jira issue's). An ask takes it when its rule sets none. |
 | `state` | The object's current state, when the source returned it (DEC-28): only names in the source's state field list. |
 | `observed_at` | When the source returned `state`. Required with `state`. |
 | `version` | The source's version marker for this change: the last part of `key` (DEC-9). Required with `state`. |
@@ -55,7 +56,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
-| `priority` | The rule's priority, with `to`. |
+| `priority` | The rule's priority, with `to`; without one, the source's own (a Jira issue's), when it has one. |
 | `due_at` | The item's due time, with `to`. |
 | `closes` | On the person's own acts, and on items a `close_by_others` rule sends: the keys of open asks on the same subject, oldest first, at most 20. An own act with `close_siblings_before` adds the earlier asks that opened its sibling subjects. An item with `close_only` closes only the open asks it names. |
 | `state` | The state snapshot (DEC-28), in the shape Signal stores: `fields` holds the state fields the rule lists that the item has, and `observed_at` and `version` sit beside `fields`. Omitted when the rule lists none, the item has no snapshot, or none of the listed fields is present. Any other key in `state` is refused. |
@@ -103,11 +104,11 @@ encrypts `sealed` at rest; the rest is the envelope, fixed in code (DEC-31):
 
 | Part | Holds |
 | --- | --- |
-| Outside `sealed` | `subject`, `type`, `key`, `occurred_at`, `open`, `by` (own acts), `to`, `priority`, `due_at`, `closes`. No top-level `title` or `body`. `open.title` only from a field in `plain`, by the same order as a plain event (title, summary, subject); otherwise Signal titles a new thread "Sealed item". `metadata` holds only `fields` (the `plain` fields) and `native`. `state.fields` holds only `unread` and `starred`, as booleans, with `observed_at` and `version`; it is sent, possibly empty, whenever the rule lists a state field the item has. |
+| Outside `sealed` | `subject`, `type`, `key`, `occurred_at`, `open`, `by` (own acts), `to`, `priority`, `due_at`, `closes`. No top-level `title` or `body`. `open.title` only from a field in `plain`, by the same order as a plain event (title, summary, subject); otherwise Signal titles a new thread "Sealed item". `metadata` holds only `fields` (the `plain` fields), `native`, and `references` when `plain` lists it (Signal DEC-284). `state.fields` holds only `unread` and `starred`, as booleans, with `observed_at` and `version`; it is sent, possibly empty, whenever the rule lists a state field the item has. |
 | `sealed.level` | `owner` or `owner+agents`: the rule's level, raised on the machine (DEC-33 to DEC-35). |
 | `sealed.title` | The event title (the change's description), else the `title` field. |
 | `sealed.body` | The body, when the rule lists it. Cut to fit 64 KiB of sealed parts, with `sealed.metadata.truncated: true`. |
-| `sealed.metadata` | `actor`, `references`, `fields` with every listed field not in `plain` (a sealed `title` included), and `truncated`. |
+| `sealed.metadata` | `actor`, `references` not left plain, `fields` with every listed field not in `plain` (a sealed `title` included), and `truncated`. |
 | `sealed.state` | Every listed state field other than the flags. |
 
 The key never holds `@` (Signal refuses one). A sealed write is up to 128 KB (Signal's `SEALED_REQUEST_MAX_BYTES`),

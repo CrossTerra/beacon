@@ -49,6 +49,17 @@ func TestSealedGolden(t *testing.T) {
 	if p := signaltest.SealedProblem(data); p != "" {
 		t.Fatalf("Signal would refuse %s", p)
 	}
+	// References left plain stay in the envelope, so Signal can relate the threads (Signal DEC-284).
+	_, data, err = Project(Input{Item: mailItem(), Rule: sealedRule("owner+agents", []string{"references"}, "subject", "references"), Person: person, Level: seal.Agents})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"metadata":{"native":"18c9","references":["jira:CANARY-1"]}`) || strings.Count(string(data), "CANARY-1") != 1 {
+		t.Fatalf("plain references: %s", data)
+	}
+	if p := signaltest.SealedProblem(data); p != "" {
+		t.Fatalf("Signal would refuse %s", p)
+	}
 	// Owner, nothing plain: the thread is not titled, and only the envelope is outside sealed.
 	_, data, err = Project(Input{Item: mailItem(), Rule: sealedRule("owner", nil, "subject", "body", "actor", "from", "to"), Person: person, Level: seal.Owner})
 	if err != nil {
