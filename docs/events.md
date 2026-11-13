@@ -104,9 +104,10 @@ encrypts `sealed` at rest; the rest is the envelope, fixed in code (DEC-31):
 
 | Part | Holds |
 | --- | --- |
-| Outside `sealed` | `subject`, `type`, `key`, `occurred_at`, `open`, `by` (own acts), `to`, `priority`, `due_at`, `closes`. No top-level `title` or `body`. `open.title` only from a field in `plain`, by the same order as a plain event (title, summary, subject); otherwise Signal titles a new thread "Sealed item". `metadata` holds only `fields` (the `plain` fields), `native`, and `references` when `plain` lists it (Signal DEC-284). `state.fields` holds only `unread` and `starred`, as booleans, with `observed_at` and `version`; it is sent, possibly empty, whenever the rule lists a state field the item has. |
+| Outside `sealed` | `subject`, `type`, `key`, `occurred_at`, `open`, `by` (own acts), `to`, `priority`, `due_at`, `closes`. No top-level `title` or `body`. `open.title` only from a field in `plain`, by the same order as a plain event (title, summary, subject). `metadata` holds only `fields` (the `plain` fields), `native`, and `references` when `plain` lists it (Signal DEC-284). `state.fields` holds only `unread` and `starred`, as booleans, with `observed_at` and `version`; it is sent, possibly empty, whenever the rule lists a state field the item has. |
 | `sealed.level` | `owner` or `owner+agents`: the rule's level, raised on the machine (DEC-33 to DEC-35). |
 | `sealed.title` | The event title (the change's description), else the `title` field. |
+| `sealed.open.title` | The thread's title when that field is not plain (the same order: title, summary, subject), with a plain `open` and no plain `open.title` (Signal DEC-281). Signal stores "Sealed item" and opens it for the readers the level allows. |
 | `sealed.body` | The body, when the rule lists it. Cut to fit 64 KiB of sealed parts, with `sealed.metadata.truncated: true`. |
 | `sealed.metadata` | `actor`, `references` not left plain, `fields` with every listed field not in `plain` (a sealed `title` included), and `truncated`. |
 | `sealed.state` | Every listed state field other than the flags. |
@@ -212,18 +213,19 @@ accepted, is not sent again.
 
 ## The lease
 
-One instance per person sends (DEC-25, DEC-39). `lease.period` (default 15 minutes) is how often the holder renews;
-it holds the lease for two periods, so another instance takes over within two periods of the holder stopping.
+One instance per person sends (DEC-25, DEC-39). `lease.period` (default 15 minutes) is how often the holder renews.
+A lease row is held for three periods (Signal asks for a renewal at about a third of the lease) and a claim for two,
+so another instance takes over within three periods of the holder stopping, or two with claims.
 
 **Signal's lease API.** Where Signal offers it (`POST /api/leases`, Signal DEC-280), the lease is a row in Signal, not
 an event: it writes nothing into the log, opens no ask and is in no thread. Each send pass that needs it claims
-`beacon:lease:<handle>` for this instance's run, for two periods, at most once a period:
+`beacon:lease:<handle>` for this instance's run, for three periods, at most once a period:
 
 ```json
-{"name": "beacon:lease:winton", "run": "<instance id>:lease", "ttl_seconds": 1800}
+{"name": "beacon:lease:winton", "run": "<instance id>:lease", "ttl_seconds": 2700}
 ```
 
-- `200` holds the lease until two periods after the claim was sent, or Signal's `expires_at` if that is earlier. The
+- `200` holds the lease until three periods after the claim was sent, or Signal's `expires_at` if that is earlier. The
   pass does not ask Signal again until a period has passed.
 - `409` means another instance holds it: this one does not hold the lease and sends nothing. It still collects and
   appends to its own outbox.
@@ -232,9 +234,13 @@ an event: it writes nothing into the log, opens no ask and is in no thread. Each
 - A renewal sends the same name, run and period every time, so it is not appended to the outbox: there is no body to
   replay. A restarted instance has the same run and renews its own lease.
 - Once the lease is held, the open asks that earlier claims left (an earlier version made each claim an ask to Beacon
-  itself) are closed by one `beacon.lease_moved` event on `beacon:lease:<handle>` that names them in `closes`. It
-  goes through the outbox like any body: one Signal does not answer stays pending and is resent as the same bytes at
-  the next renewal, and one it refuses is recorded and not written again. Neither costs the lease.
+  itself) are closed by one `beacon.lease_moved` event on `beacon:lease:<handle>` that names them in `closes`, with
+  `outcome: withdrawn`. It goes through the outbox like any body: one Signal does not answer stays pending and is
+  resent as the same bytes at the next renewal, and one it refuses is recorded and not written again. Neither costs
+  the lease.
+- Once that event is written, the thread it landed in (the old claims' thread) is archived, once, with
+  `thread.archived` about `signal:thread:<n>`, through the outbox, so the old claims leave Signal's lists and search.
+  A thread a person unarchives later is not archived again.
 
 **Claims by event.** A Signal that answers `404` does not offer leases. The process then claims by event, as below,
 and asks for the API again an hour later, so a Signal that starts offering leases is used without a restart. An instance that already holds this period and the next by

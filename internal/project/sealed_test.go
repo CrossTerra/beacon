@@ -60,12 +60,12 @@ func TestSealedGolden(t *testing.T) {
 	if p := signaltest.SealedProblem(data); p != "" {
 		t.Fatalf("Signal would refuse %s", p)
 	}
-	// Owner, nothing plain: the thread is not titled, and only the envelope is outside sealed.
+	// Owner, nothing plain: the thread is titled in sealed (Signal DEC-281), and only the envelope is outside sealed.
 	_, data, err = Project(Input{Item: mailItem(), Rule: sealedRule("owner", nil, "subject", "body", "actor", "from", "to"), Person: person, Level: seal.Owner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = `{"subject":"gmail:winton:thread:18c2","type":"gmail.received","key":"gmail:18c2:18c9","occurred_at":"2026-11-11T17:00:00.000Z","open":{},"to":["@winton"],"priority":"high","metadata":{"native":"18c9"},"state":{"fields":{"starred":false,"unread":true},"observed_at":"2026-11-11T18:00:00.000Z","version":"18c9"},"sealed":{"level":"owner","title":"Reply received","body":"CANARY-BODY","metadata":{"actor":"email:rahul@crossterra.co","fields":{"from":"rahul@crossterra.co","subject":"CANARY-SUBJECT","to":"winton@crossterra.co"}},"state":{"labels":"INBOX, CANARY-STATE","last_from":"rahul@crossterra.co"}}}`
+	want = `{"subject":"gmail:winton:thread:18c2","type":"gmail.received","key":"gmail:18c2:18c9","occurred_at":"2026-11-11T17:00:00.000Z","open":{},"to":["@winton"],"priority":"high","metadata":{"native":"18c9"},"state":{"fields":{"starred":false,"unread":true},"observed_at":"2026-11-11T18:00:00.000Z","version":"18c9"},"sealed":{"level":"owner","title":"Reply received","body":"CANARY-BODY","metadata":{"actor":"email:rahul@crossterra.co","fields":{"from":"rahul@crossterra.co","subject":"CANARY-SUBJECT","to":"winton@crossterra.co"}},"state":{"labels":"INBOX, CANARY-STATE","last_from":"rahul@crossterra.co"},"open":{"title":"CANARY-SUBJECT"}}}`
 	if string(data) != want {
 		t.Fatalf("got  %s\nwant %s", data, want)
 	}

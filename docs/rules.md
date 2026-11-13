@@ -123,7 +123,8 @@ the callers the level allows (Signal DEC-250 to DEC-254). Beacon handles no keys
   and for a grant with `sealed: true`. Beacon's own key opens neither.
 - Outside `sealed` a sealed event carries only the envelope, fixed in code (DEC-31): the subject, the type, the key,
   `by` on the person's own acts, `to`, `priority`, `due_at`, `closes`, `occurred_at`, `open.title` when its field is
-  in `plain`, `metadata.fields` with the `plain` fields, `metadata.native` with the source's opaque id (no `@`),
+  in `plain` (otherwise the thread's title goes in `sealed.open.title`, which Signal opens for the readers the level
+  allows, Signal DEC-281), `metadata.fields` with the `plain` fields, `metadata.native` with the source's opaque id (no `@`),
   `metadata.references` when `plain` lists `references`, and the `unread` and `starred` state flags as booleans. The
   event title, the body, `actor`, `references` the rule does not leave plain, every other field and every other state
   field go in `sealed`. The shape is in [`events.md`](events.md#sealed-events).

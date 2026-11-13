@@ -110,15 +110,20 @@ func projectSealed(in Input) (*Body, []byte, error) {
 			}
 		}
 	}
-	// The thread title is the first of title, summary and subject the rule lists, as on a plain event, and only when
-	// that field is plain. Otherwise Signal titles the thread "Sealed item".
+	// The thread title is the first of title, summary and subject the rule lists, as on a plain event: plain in
+	// open.title when that field is plain, else sealed in sealed.open.title, which Signal opens for the readers the
+	// level allows and shows to anyone else as "Sealed item" (Signal DEC-281).
 	for _, name := range []string{FieldTitle, "summary", "subject"} {
 		v, ok := it.Fields[name]
 		if !listed[name] || !ok {
 			continue
 		}
-		if plain[name] {
-			b.Open.Title = title(v)
+		if t := title(v); t != "" {
+			if plain[name] {
+				b.Open.Title = t
+			} else {
+				sl.Open = &Open{Title: t}
+			}
 		}
 		break
 	}

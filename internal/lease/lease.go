@@ -1,7 +1,7 @@
 // Package lease keeps one Beacon instance per person sending (DEC-25, DEC-39).
 //
 // Where Signal offers leases (POST /api/leases, Signal DEC-280), the lease is a row there, not an event: the instance
-// claims "beacon:lease:<person>" for two periods and renews it once a period, and another instance gets 409 until the
+// claims "beacon:lease:<person>" for three periods and renews it once a period, and another instance gets 409 until the
 // holder stops renewing. Nothing is written into the log and no ask opens.
 //
 // Where Signal answers 404, the lease is a claim per period, and the API is asked again an hour later. Time is cut
@@ -45,6 +45,12 @@ type API interface {
 	ClaimLease(ctx context.Context, name, run string, ttl time.Duration) (signal.LeaseResult, error)
 }
 
+// Threads reads where one of Beacon's events landed, so the old claims' thread can be archived.
+type Threads interface {
+	EventOpened(ctx context.Context, id string) (signal.Opened, error)
+	Thread(ctx context.Context, id string) (signal.Thread, error)
+}
+
 // Lease is this instance's view of the lease.
 type Lease struct {
 	Outbox *outbox.Outbox
@@ -56,6 +62,8 @@ type Lease struct {
 	// API, when set, holds the lease as a row in Signal. A 404 falls back to claims, and the API is asked again an
 	// hour later, so a Signal that starts offering leases is used without a restart.
 	API API
+	// Threads, when set with API, archives the thread the old claims are in once they are closed.
+	Threads Threads
 
 	// retryAPI is when the API may be asked again after a 404.
 	retryAPI time.Time
@@ -170,15 +178,15 @@ func (l *Lease) claimed(p int64) bool {
 // Name is the lease's name in Signal's lease API.
 func Name(person string) string { return Subject(person) }
 
-// ensureRow holds the lease as a row in Signal. It renews once a period, for two periods, so a holder that stops is
-// replaced within two periods, as with claims. done is false when Signal offers no leases: the caller claims by event.
+// ensureRow holds the lease as a row in Signal. It renews once a period, for three periods (Signal asks for a renewal
+// at about a third of the lease), so a holder that stops is replaced within three periods. done is false when Signal offers no leases: the caller claims by event.
 func (l *Lease) ensureRow(ctx context.Context, st *Status) (bool, error) {
 	start := l.Now()
 	if l.held && start.Before(l.renew) && start.Before(l.until) {
 		st.Held, st.Until = true, l.until
 		return true, nil
 	}
-	res, err := l.API.ClaimLease(ctx, Name(l.Person), l.Run, 2*l.Period)
+	res, err := l.API.ClaimLease(ctx, Name(l.Person), l.Run, rowPeriods*l.Period)
 	var refused *signal.LeaseRefused
 	switch {
 	case errors.Is(err, signal.ErrNoLeases):
@@ -196,12 +204,70 @@ func (l *Lease) ensureRow(ctx context.Context, st *Status) (bool, error) {
 		return true, nil
 	}
 	// The local clock bounds every write; Signal's expiry is the later bound, so the earlier one is used.
-	l.held, l.until, l.renew = true, start.Add(2*l.Period), start.Add(l.Period)
+	l.held, l.until, l.renew = true, start.Add(rowPeriods*l.Period), start.Add(l.Period)
 	if !res.ExpiresAt.IsZero() && res.ExpiresAt.Before(l.until) {
 		l.until = res.ExpiresAt
 	}
 	st.Held, st.Until = true, l.until
-	return true, l.closeClaims(ctx, l.until)
+	if err := l.closeClaims(ctx, l.until); err != nil {
+		return true, err
+	}
+	return true, l.archive(ctx, l.until)
+}
+
+// rowPeriods is how many periods a lease row is claimed for; it is renewed every period.
+const rowPeriods = 3
+
+// archive archives the thread the old claims are in, once: after the event that closed them was written, so the old
+// claims leave Signal's lists and search. Like the close, it never costs the lease. A thread a person unarchives later
+// is not archived again.
+func (l *Lease) archive(ctx context.Context, until time.Time) error {
+	if l.Threads == nil || !l.Now().Before(until) {
+		return nil
+	}
+	prefix := Subject(l.Person) + ":archived:"
+	closed := ""
+	for _, e := range l.Outbox.Entries() {
+		switch {
+		case e.Kind != outbox.Lease:
+		case strings.HasPrefix(e.Key, prefix):
+			if e.State == outbox.Pending {
+				ctx, cancel := context.WithTimeout(ctx, until.Sub(l.Now()))
+				defer cancel()
+				return l.send(ctx, e.Key, e.Body)
+			}
+			return nil
+		case strings.HasPrefix(e.Key, Subject(l.Person)+":closed:") && (e.State == outbox.Sent || e.State == outbox.Replayed) && e.EventID != "":
+			closed = e.EventID
+		}
+	}
+	if closed == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, until.Sub(l.Now()))
+	defer cancel()
+	opened, err := l.Threads.EventOpened(ctx, closed)
+	if err != nil || opened.ThreadID == "" {
+		return nil
+	}
+	th, err := l.Threads.Thread(ctx, opened.ThreadID)
+	if err != nil || th.Number <= 0 || th.MergedInto != "" {
+		return nil
+	}
+	n := strconv.FormatInt(th.Number, 10)
+	key := prefix + n
+	body, err := json.Marshal(struct {
+		Subject string `json:"subject"`
+		Type    string `json:"type"`
+		Key     string `json:"key"`
+	}{"signal:thread:" + n, "thread.archived", key})
+	if err != nil {
+		return err
+	}
+	if err := l.Outbox.Append(outbox.Lease, key, Subject(l.Person), "", body); err != nil {
+		return err
+	}
+	return l.send(ctx, key, body)
 }
 
 // openClaims are the keys of this person's sent claims that ask someone and that no body in the outbox closes, oldest
@@ -267,6 +333,8 @@ func (l *Lease) closeClaims(ctx context.Context, until time.Time) error {
 	for _, k := range open {
 		b.Closes = append(b.Closes, ref{Key: k})
 	}
+	// Nobody did the work they asked for: Beacon withdraws them.
+	b.Outcome = "withdrawn"
 	b.Metadata.Run = l.Run
 	body, err := json.Marshal(b)
 	if err != nil {
@@ -301,7 +369,8 @@ type closeBody struct {
 	Open    struct {
 		Title string `json:"title"`
 	} `json:"open"`
-	Closes   []ref `json:"closes"`
+	Closes   []ref  `json:"closes"`
+	Outcome  string `json:"outcome"`
 	Metadata struct {
 		Run string `json:"run"`
 	} `json:"metadata"`
