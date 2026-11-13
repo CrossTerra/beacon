@@ -50,10 +50,14 @@ type Item struct {
 	// CloseSiblingsBefore, on an own act, also closes earlier asks in the same conversation that DEC-10 makes their own
 	// subjects: an open ask on a sibling subject (one that differs from Subject only in the last part) that opened that
 	// subject (the ask's key ends in that last part, so it is not a reply inside it) and whose last part is before
-	// this value. A top-level reply in a Slack direct message sets it to its own ts.
+	// this value. A top-level reply in a Slack direct message sets it to its own ts, for the asks recorded before
+	// direct messages had one subject a day. With CloseOnly, CloseOnly narrows the asks on Subject and this adds the
+	// siblings'.
 	CloseSiblingsBefore string `json:"close_siblings_before,omitempty"`
 	// CloseOnly, when set, narrows what this item may close to these ask keys on its subject. A Slack deletion names the
-	// ask the deleted message opened, so a close_by_others rule closes that ask and not the others in its thread.
+	// ask the deleted message opened, so a close_by_others rule closes that ask and not the others in its thread. The
+	// person's own message in a Slack direct message names the asks it answers on its day's subject, or only its own
+	// key, which is never an ask, when it answers none.
 	CloseOnly []string `json:"close_only,omitempty"`
 	// Native is the source's own opaque id for the message or object: a Gmail message id, a Slack channel id and ts,
 	// a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person. A
@@ -342,9 +346,6 @@ func Validate(it Item, fields, stateFields []string) error {
 	}
 	if it.Native != "" && (!printable.MatchString(it.Native) || strings.Contains(it.Native, "@")) {
 		return fmt.Errorf("native is not an opaque id of 1 to 200 printable characters without @")
-	}
-	if len(it.CloseOnly) > 0 && it.CloseSiblingsBefore != "" {
-		return fmt.Errorf("close_only and close_siblings_before do not combine")
 	}
 	if it.CloseSiblingsBefore != "" {
 		// Siblings share everything but the last part, so the prefix must name one conversation, not a stem or a

@@ -639,8 +639,8 @@ title stays the short one above.
 
 | Conversation | Thread title |
 | --- | --- |
-| One-to-one direct message | `DM with Dana Scully`; the person's own top-level message there, `You to Dana Scully` |
-| Group direct message | `Group DM: Carol Danvers, Dana Scully` (up to three others, then `+N`); the person's own, `You to Carol Danvers, Dana Scully` |
+| One-to-one direct message, one day | `DM with Dana Scully · Thu 12 Nov` |
+| Group direct message, one day | `Group DM: Carol Danvers, Dana Scully · Thu 12 Nov` (up to three others, then `+N`) |
 | Channel, the thread's root a mention of the person | `#eng: Bob Ross mentioned you` |
 | Configured channel, the root a review request | `#review: Erin Burnett asked for a review` |
 | Channel, the root the person's own | `You in #eng` |
@@ -668,17 +668,25 @@ title differs. The change is appended to the outbox before it is sent, under the
 longer describe is recorded in `retitled.json` (subject and a fixed reason, no title) and not read again. Without the
 name scopes, threads wait and nothing is recorded.
 
-**Answered (DEC-19, DEC-20).** An own message in a thread is on the thread's subject, so it closes the open asks
-there. A one-to-one direct message has no thread for its top-level messages: each is its own subject. An own
-top-level message there sets `close_siblings_before` to its own `ts`, so it also closes the open asks that opened the
-conversation's other subjects before it: earlier top-level messages, not a question inside a thread there and not a
-message posted after it, even one search indexed late ([`events.md`](events.md#items)). An own top-level message in a
-channel or a group direct message closes nothing else: it may be about something else. Someone else's answer closes
+**Answered (DEC-19, DEC-20).** An own message in a channel's or a private channel's thread is on the thread's
+subject, so it closes the open asks there. In a one-to-one or group direct message a day of the conversation is one
+subject, which holds that day's top-level messages and the threads under them, so the person's own message names what
+it answers (`close_only`, [`events.md`](events.md#items)) from the messages that addressed them in the last 7 days: a
+top-level message, the top-level messages before it that day; a reply in a thread, that thread's messages and its
+root. Not a question inside another thread, not a message posted after it (even one search indexed late), and not
+another day's or another conversation's. An own message that answers none names its own key, which is never an ask,
+so it closes nothing. A top-level message also sets `close_siblings_before` to its own `ts`, which closes the asks that
+opened their own subjects before direct messages had one subject a day. An own top-level message in a channel
+closes nothing else: it may be about something else. Someone else's answer closes
 an ask only through a `close_by_others` rule, for example on `thread_reply` in a thread the person was mentioned in.
 
-**Subject (DEC-10).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or the message's own
-when it is not in a thread. In a one-to-one or group direct message, or a private channel,
-`slack:dm:<person>:<channel>:<thread ts>`, the person being `person.handle` without `@`. Private channels use the same
+**Subject (DEC-10, DEC-38).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or the
+message's own when it is not in a thread. In a private channel, `slack:dm:<person>:<channel>:<thread ts>`, the person
+being `person.handle` without `@`. In a one-to-one or group direct message, one subject per conversation per local
+day: `slack:dm:<person>:<channel>:<YYYY-MM-DD>`, the day the message's thread root was posted, in the machine's time
+zone. So a day's top-level messages are one thread, and a reply in a thread stays on its root's subject, even on a
+later day. Before DEC-38 a direct message's subject ended in its thread's root `ts`, like a private channel's; threads
+opened that way keep it. Private channels use the same
 stem as direct messages, so one restriction (`slack:dm:*`) keeps them all private. A channel is public only when a
 read says so: `is_private: false` on a search match, or `conversations.info` for a configured channel. A channel no
 read described, or any id that is not `C…`, is treated as private. **Key.** `slack:<channel>:<ts>`; the version is the

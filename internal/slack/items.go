@@ -95,11 +95,32 @@ func (s *Source) mentions(m *message) bool {
 	return s.api.configured(m.channel) && broadcast.MatchString(m.text)
 }
 
+// subject is a message's subject. A public channel's thread is slack:<channel>:<root ts>, and a private channel's
+// slack:dm:<person>:<channel>:<root ts>. A direct or group direct message has one subject per conversation per day:
+// slack:dm:<person>:<channel>:<YYYY-MM-DD>, the local day its root was posted, so a conversation's top-level messages
+// that day are one thread, and a reply in a thread stays on its root's subject.
 func (s *Source) subject(channel, root, kind string) string {
-	if kind != kindChannel {
-		return PersonalStem + s.person + ":" + channel + ":" + root
+	switch kind {
+	case kindChannel:
+		return "slack:" + channel + ":" + root
+	case kindIM, kindMPIM:
+		return PersonalStem + s.person + ":" + channel + ":" + s.day(root)
 	}
-	return "slack:" + channel + ":" + root
+	return PersonalStem + s.person + ":" + channel + ":" + root
+}
+
+// day is the local day of a Slack ts.
+func (s *Source) day(ts string) string {
+	return tsTime(ts).In(s.loc).Format("2006-01-02")
+}
+
+// dayPattern is the last part of a direct message's subject.
+var dayPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+// askKey is the key of the item a message yields, which is the key of the ask it opened.
+func (s *Source) askKey(channel, ts string) string {
+	key, _ := source.FitKey(s.name+":"+channel+":"+ts, ts)
+	return key
 }
 
 func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
@@ -125,6 +146,9 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	if s.bodies && m.text != "" {
 		fields["body"] = m.text
 	}
+	if tsTime(m.root()).IsZero() {
+		return source.Item{}, false
+	}
 	key, version := source.FitKey(s.name+":"+m.channel+":"+m.ts, m.ts)
 	it := source.Item{
 		Source:     s.name,
@@ -147,9 +171,9 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	switch typ {
 	case TypeOwn:
 		it.Own = true
-		// A top-level reply in a one-to-one direct message answers the earlier top-level messages there, each its own
-		// subject. Not later ones, and not replies inside a thread.
-		if kind == kindIM && !m.inThread() {
+		// A top-level reply in a direct message answers the earlier top-level messages there. Before day subjects each
+		// was its own subject, a sibling of this one; the asks on this day's subject are named in closes.
+		if (kind == kindIM || kind == kindMPIM) && !m.inThread() {
 			it.CloseSiblingsBefore = m.ts
 		}
 	case TypeDM, TypeMentioned:
@@ -165,12 +189,62 @@ func (s *Source) track(p *pass, items []source.Item) {
 			continue
 		}
 		root := it.Fields["thread_ts"]
-		p.cur.Asked[it.Fields["channel"]+"/"+it.Fields["ts"]] = &asked{Subject: it.Subject, Root: root, Kind: it.Fields["channel_type"], Checked: p.observed}
+		k := it.Fields["channel"] + "/" + it.Fields["ts"]
+		subject := it.Subject
+		if a := p.cur.Asked[k]; a != nil && a.Subject != "" {
+			// The ask is on the subject it was sent on. A message read again after DEC-38 gave direct messages day
+			// subjects keeps its old one, so its deletion and the replies that answer it still name that ask's subject.
+			subject = a.Subject
+		}
+		p.cur.Asked[k] = &asked{Subject: subject, Root: root, Kind: it.Fields["channel_type"], Checked: p.observed}
 	}
 	for k, a := range p.cur.Asked {
 		if p.msgs[k] != nil {
 			a.Checked = p.observed
 		}
+	}
+}
+
+// closes names the asks each of the person's own messages in a direct or group direct message answers, among the
+// asks on its day's subject: a top-level message answers the top-level messages before it, and a reply in a thread
+// answers that thread, its root included. Nothing else on the subject: not a question in another thread, not a
+// message after it. An own message that answers none names its own key, which is never an ask, so it closes nothing
+// on its subject. Asks are known from the messages tracked for deletion, which hold every message that addressed the
+// person in the last 7 days.
+func (s *Source) closes(p *pass, items []source.Item) {
+	keys := make([]string, 0, len(p.cur.Asked))
+	for k := range p.cur.Asked {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i := range items {
+		it := &items[i]
+		kind := it.Fields["channel_type"]
+		if !it.Own || (kind != kindIM && kind != kindMPIM) {
+			continue
+		}
+		channel, ts, root := it.Fields["channel"], it.Fields["ts"], it.Fields["thread_ts"]
+		var named []string
+		for _, k := range keys {
+			a := p.cur.Asked[k]
+			c, at, _ := strings.Cut(k, "/")
+			if c != channel || a.Subject != it.Subject {
+				continue
+			}
+			answers := false
+			if root == "" {
+				answers = a.Root == "" && tsLess(at, ts)
+			} else {
+				answers = a.Root == root || (a.Root == "" && at == root)
+			}
+			if answers {
+				named = append(named, s.askKey(c, at))
+			}
+		}
+		if len(named) == 0 {
+			named = []string{it.Key}
+		}
+		it.CloseOnly = named
 	}
 }
 

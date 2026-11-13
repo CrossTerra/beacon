@@ -36,7 +36,8 @@ same pull request.
    date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
    comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
    `title`, `summary` or `subject`, as the thread title. Slack's `title` is the conversation's: who and where, built
-   only from display names and the channel's name ("DM with Dana Scully", "#eng: Bob Ross mentioned you"), never
+   only from display names, the channel's name and, for a direct message's day, that day ("DM with Dana Scully · Thu
+   12 Nov", "#eng: Bob Ross mentioned you"), never
    message text. Display names (`channel_name`, `author_name`) are fields like any other and leave only when a rule
    lists them. Slack names are read only when a rule lists one of those three fields. A thread Beacon opened before
    its rule listed `title` is renamed (`thread.titled`) only when the current rule for the stored item still sends it
@@ -121,9 +122,10 @@ same pull request.
    waits the same way, including after the source is gone. Your own acts are recorded from the source's own record only: a Gmail message is
    yours only with the `SENT` label, never because its From header names you, and a calendar change is yours only when
    it is your response or an event your account created, and a Slack message is yours only when Slack's `user` is the
-   token's user and it has no `bot_id`. Your own top-level message in a one-to-one Slack direct message also closes
-   the asks on that conversation's earlier top-level messages, which DEC-10 makes separate subjects: only those
-   before it, never a question inside a thread there, and never an ask in another conversation.
+   token's user and it has no `bot_id`. A Slack direct or group direct message has one subject per conversation per
+   day (DEC-38), so your own message there closes only the asks it answers on that day's subject: a top-level message,
+   the top-level messages before it; a reply in a thread, that thread. Never a question inside another thread, a
+   message after it, or an ask in another day or conversation.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
 11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull

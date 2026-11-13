@@ -100,6 +100,9 @@ type Options struct {
 	HTTP  *http.Client
 	Now   func() time.Time
 	Sleep func(context.Context, time.Duration) error
+	// Location is the zone whose days group a direct message's top-level messages into one subject. Nil is the
+	// machine's.
+	Location *time.Location
 }
 
 // Source reads Slack.
@@ -113,6 +116,7 @@ type Source struct {
 	token     func() (keychain.Secret, error)
 	api       *api
 	now       func() time.Time
+	loc       *time.Location
 	bodies    bool
 	// groups are the user groups the person is in, read at groupsAt.
 	groups   map[string]bool
@@ -147,6 +151,10 @@ func New(o Options) (*Source, error) {
 	if now == nil {
 		now = time.Now
 	}
+	loc := o.Location
+	if loc == nil {
+		loc = time.Local
+	}
 	a, err := newAPI(o.Base, o, now)
 	if err != nil {
 		return nil, err
@@ -165,7 +173,7 @@ func New(o Options) (*Source, error) {
 	sort.Strings(channels)
 	s := &Source{
 		name: name, person: o.Person, workspace: o.Workspace, user: o.User, identity: o.Identity,
-		channels: channels, token: o.Token, api: a, now: now, groupDMs: map[string]bool{}, cachePath: o.Cache,
+		channels: channels, token: o.Token, api: a, now: now, loc: loc, groupDMs: map[string]bool{}, cachePath: o.Cache,
 	}
 	a.configured = func(c string) bool { return allowed[c] }
 	a.groupDM = func(c string) bool { return s.groupDMs[c] }
@@ -343,6 +351,7 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 	}
 	s.flush()
 	s.track(p, items)
+	s.closes(p, items)
 	deleted, err := s.checkDeleted(ctx, p)
 	if err != nil {
 		return source.Collected{}, err
