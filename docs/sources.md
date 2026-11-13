@@ -417,7 +417,8 @@ rather than read again on every full re-read.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
 its summary, location, start, end and status, a hash of its start and end, a hash of its summary alone (to tell a
-repeated summary), the person's response, and whether it is cancelled. The cursor holds hashes and response values, not event text. An entry is dropped a day after its event
+repeated summary), the person's response, and whether it is cancelled. A cursor from before the summary hash is read
+once over the whole window for it; that read yields no items. The cursor holds hashes and response values, not event text. An entry is dropped a day after its event
 ends. A change of state is a change of the fingerprint or the response, so another attendee's response, which bumps
 the event's `updated` time, is not an event.
 

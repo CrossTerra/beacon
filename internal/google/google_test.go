@@ -1375,3 +1375,37 @@ func TestGmailSentFromADraft(t *testing.T) {
 		t.Fatalf("new mail: %+v", sent)
 	}
 }
+
+// A cursor from before the summary hash is read once for the hashes, so a new event that shares its summary with a
+// meeting fingerprinted earlier is dated too. That read yields nothing for unchanged events.
+func TestCalendarSummaryHashBackfill(t *testing.T) {
+	srv := googletest.New(t)
+	old := `{"id":"rvOld","status":"confirmed","etag":"\"1\"","summary":"Design review","start":{"dateTime":"2026-11-09T17:00:00Z"},"end":{"dateTime":"2026-11-09T18:00:00Z"},"created":"2026-10-01T00:00:00Z","updated":"2026-10-01T00:00:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"}]}`
+	fresh := `{"id":"rvNew","status":"confirmed","etag":"\"2\"","summary":"Design review","start":{"dateTime":"2026-11-16T17:00:00Z"},"end":{"dateTime":"2026-11-16T18:00:00Z"},"created":"2026-11-08T11:50:00Z","updated":"2026-11-08T11:50:00Z","organizer":{"email":"dana@example.com"},"attendees":[{"email":"winton@example.com","self":true,"responseStatus":"needsAction"}]}`
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("updatedMin") != "" {
+			io.WriteString(w, `{"timeZone":"UTC","items":[`+fresh+`]}`)
+			return
+		}
+		io.WriteString(w, `{"timeZone":"UTC","items":[`+old+`,`+fresh+`]}`)
+	}
+	var seen calEvent
+	if err := json.Unmarshal([]byte(old), &seen); err != nil {
+		t.Fatal(err)
+	}
+	fp := seen.seen()
+	fp.S, fp.Start, fp.End = "", "2026-11-09T17:00:00Z", "2026-11-09T18:00:00Z"
+	cur, _ := json.Marshal(calCursor{Since: "2026-11-08T11:00:00Z", Events: map[string]calSeen{"rvOld": fp}})
+	c, _ := NewCalendar(opts(t, srv))
+	got, err := c.Collect(context.Background(), cur)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	if len(m) != 1 || m["calendar:rvNew:response_needed:2"].Fields["title"] != "Design review · Mon 16 Nov" {
+		t.Fatalf("got %v %+v", keys(m), m["calendar:rvNew:response_needed:2"].Fields)
+	}
+	if !strings.Contains(string(got.Next), `"summaries":true`) {
+		t.Fatalf("cursor %s", got.Next)
+	}
+}

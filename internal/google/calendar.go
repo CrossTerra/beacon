@@ -92,6 +92,9 @@ func (c *Calendar) StateFields() []string { return append([]string(nil), Calenda
 type calCursor struct {
 	Since  string             `json:"since"`
 	Events map[string]calSeen `json:"events"`
+	// Summaries is set once every event in the window has its summary hash (S), so a repeated summary is dated even
+	// when the other event was fingerprinted before S existed.
+	Summaries bool `json:"summaries,omitempty"`
 }
 
 type calSeen struct {
@@ -349,6 +352,21 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 		}
 		events = append(events, moved...)
 	}
+	if !first && !cur.Summaries {
+		// Fingerprints from before the summary hash have none, and a pass reads again only the events that changed.
+		// Read the window once for the hashes alone: unchanged events yield nothing from this read.
+		all, _, err := c.list(ctx, now, time.Time{})
+		if err != nil {
+			return source.Collected{}, err
+		}
+		for i := range all {
+			if s, ok := cur.Events[all[i].ID]; ok && s.S == "" {
+				s.S = summaryHash(all[i].Summary)
+				cur.Events[all[i].ID] = s
+			}
+		}
+	}
+	cur.Summaries = true
 	obs := c.observed()
 	var items []source.Item
 	var pending []calPending
