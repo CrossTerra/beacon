@@ -25,7 +25,7 @@ later. It is never the
 local clock, and it never moves backwards. A later `Date` in the same pass is ignored, so a pass longer than the
 lookback does not skip events that arrived while it was running. A `Date` more than an hour ahead of the local
 clock fails the pass. With no `Date`, the cursor is the newest source event time, not a local-clock stamp on a
-push or a check change. If there is no `Date` and no such event time, the cursor is not moved. A pass reads from
+push, a check change or the snapshot beside one. If there is no `Date` and no such event time, the cursor is not moved. A pass reads from
 the committed cursor minus 15 minutes, so indexing lag and clock skew land in an overlap. Gmail's cursor is the
 mailbox's history id, and Calendar's adds a fingerprint per event; see [Gmail](#gmail) and [Calendar](#calendar).
 Slack's adds a watermark per followed thread and configured channel; see [Slack](#slack).

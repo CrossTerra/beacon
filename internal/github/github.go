@@ -226,11 +226,12 @@ func (s *Source) observed() time.Time {
 }
 
 // sourceTimes is the no-Date cursor fallback. Pushed and checks_changed are omitted: those stamps can be the
-// local clock, and must not move the cursor.
+// local clock, and must not move the cursor. A snapshot is omitted too: it copies its change's stamp, which counts
+// here only when that change does.
 func sourceTimes(items []source.Item) []time.Time {
 	var out []time.Time
 	for _, it := range items {
-		if it.Type == TypePushed || it.Type == TypeChecksChanged {
+		if it.Type == TypePushed || it.Type == TypeChecksChanged || it.Type == TypeSnapshot {
 			continue
 		}
 		if !it.OccurredAt.IsZero() {

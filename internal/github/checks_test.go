@@ -201,3 +201,17 @@ func TestCollectRefreshesMergeableAndMergedChecks(t *testing.T) {
 		t.Fatalf("merge snapshot %+v", snap)
 	}
 }
+
+// A checks snapshot copies its conclusion's stamp, which can be the local clock: it must not become the cursor.
+func TestSnapshotsDoNotMoveTheCursor(t *testing.T) {
+	local := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	items := []source.Item{
+		{Type: TypeChecksChanged, OccurredAt: local},
+		{Type: TypeSnapshot, OccurredAt: local, Covers: "github:acme/app#9:checks:def456:pass"},
+		{Type: TypeCommented, OccurredAt: local.Add(-time.Hour)},
+	}
+	got := sourceTimes(items)
+	if len(got) != 1 || !got[0].Equal(local.Add(-time.Hour)) {
+		t.Fatalf("times %v", got)
+	}
+}
