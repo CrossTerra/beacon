@@ -49,6 +49,21 @@ rules:
     seal: owner+agents
     fields: [title, meeting, meeting_start, body]
 
+  # A billing or account problem from a service the work runs on, which Gmail marks as bulk (Updates). Receipts do
+  # not match.
+  - name: service-alerts
+    match:
+      source: gmail
+      type: received
+      fields:
+        from: {regex: '(?i)[^@]+@([a-z0-9-]+\.)*github\.com'}
+        subject: {regex: '(?i).*\b(billing|payment (failed|declined)|failed payment|past due|overdue|suspended|locked|action required|problem)\b.*'}
+    tier: send
+    seal: owner+agents
+    fields: [subject, body, from]
+    ask: me
+    priority: high
+
   # Never: bulk mail.
   - name: bulk
     match: {source: gmail, fields: {bulk: "true"}}

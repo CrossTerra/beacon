@@ -59,6 +59,10 @@ type Item struct {
 	// person's own message in a Slack direct message names the asks it answers on its day's subject, or only its own
 	// key, which is never an ask, when it answers none.
 	CloseOnly []string `json:"close_only,omitempty"`
+	// Covers is the key of the change this item stands beside: a snapshot of the object's state written when that
+	// change itself is not sent. The runner decides it after the other items of the pass and skips it when the covered
+	// key is sent, or waiting to be sent.
+	Covers string `json:"covers,omitempty"`
 	// Native is the source's own opaque id for the message or object: a Gmail message id, a Slack channel id and ts,
 	// a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person. A
 	// sealed event carries it as metadata.native (DEC-31, Signal DEC-264).
@@ -333,6 +337,9 @@ func Validate(it Item, fields, stateFields []string) error {
 	}
 	if len(it.State) > 0 && (it.ObservedAt == nil || it.ObservedAt.IsZero() || it.Version == "") {
 		return fmt.Errorf("a state snapshot needs observed_at and version")
+	}
+	if it.Covers != "" && (!printable.MatchString(it.Covers) || !strings.HasPrefix(it.Covers, it.Source+":") || it.Covers == it.Key) {
+		return fmt.Errorf("covers names a key that is not another of this source's")
 	}
 	for _, k := range it.CloseOnly {
 		if !printable.MatchString(k) || !strings.HasPrefix(k, it.Source+":") {

@@ -30,6 +30,9 @@ const (
 	TypeChecksChanged        = "checks_changed"
 	TypeMerged               = "merged"
 	TypeClosed               = "closed"
+	// TypeSnapshot is the pull request's state beside a merge, a close or a check conclusion. Its key names the
+	// change it covers, and the runner sends it only when that change is not sent.
+	TypeSnapshot = "snapshot"
 )
 
 var issueKeyPattern = regexp.MustCompile(`[A-Z][A-Z0-9]+-\d+`)
@@ -90,6 +93,7 @@ type pull struct {
 	User      *ghUser `json:"user"`
 	Body      string  `json:"body"`
 	Created   string  `json:"created_at"`
+	Closed    string  `json:"closed_at"`
 	Mergeable *bool   `json:"mergeable"`
 	Base      *struct {
 		Ref string `json:"ref"`
@@ -110,6 +114,12 @@ func (p pull) author() string {
 		return ""
 	}
 	return p.User.Login
+}
+
+// closedSince reports a pull request merged or closed at or after since. A zero since is a first run: open only.
+func (p pull) closedSince(since time.Time) bool {
+	at, err := parseTime(p.Closed)
+	return err == nil && !since.IsZero() && !at.Before(since)
 }
 
 func (p pull) headSHA() string {
@@ -174,6 +184,22 @@ type checkSuite struct {
 	Conclusion string `json:"conclusion"`
 	UpdatedAt  string `json:"updated_at"`
 	HeadSHA    string `json:"head_sha"`
+	// Runs is latest_check_runs_count. Nil when GitHub did not say.
+	Runs *int `json:"latest_check_runs_count"`
+}
+
+// idleSuiteAge is how long a suite may wait with no check runs before it is not counted. GitHub makes a suite for
+// every installed app that listens to pushes, and an app that never runs leaves it queued for good: counted, the
+// checks would read pending forever and never conclude.
+const idleSuiteAge = 10 * time.Minute
+
+// idle reports a suite that has waited idleSuiteAge with no check runs.
+func (c checkSuite) idle(obs time.Time) bool {
+	if strings.EqualFold(c.Status, "completed") || c.Runs == nil || *c.Runs != 0 || obs.IsZero() {
+		return false
+	}
+	at, err := parseTime(c.UpdatedAt)
+	return err == nil && obs.Sub(at) >= idleSuiteAge
 }
 
 type flexID string
@@ -215,7 +241,7 @@ func build(in buildInput) ([]source.Item, error) {
 		return nil, fmt.Errorf("github: a pull request is missing its author or repository")
 	}
 	obs := in.Observed.UTC()
-	snap := snapshot(pr, in.Reviews, in.Checks, in.Fetched)
+	snap := snapshot(pr, in.Reviews, in.Checks, in.Fetched, obs)
 	var items []source.Item
 	add := func(it source.Item, err error) error {
 		if err != nil {
@@ -246,7 +272,11 @@ func build(in buildInput) ([]source.Item, error) {
 				}
 			}
 		}
-		return stamp(items, snap, obs, in), nil
+		withSnaps, err := in.withSnapshots(items, snap)
+		if err != nil {
+			return nil, err
+		}
+		return stamp(withSnaps, snap, obs, in), nil
 	}
 	created, err := parseTime(pr.Created)
 	if err == nil && !created.Before(in.Since) {
@@ -324,6 +354,10 @@ func build(in buildInput) ([]source.Item, error) {
 			items = append(items, it)
 		}
 	}
+	items, err = in.withSnapshots(items, snap)
+	if err != nil {
+		return nil, err
+	}
 	return stamp(items, snap, obs, in), nil
 }
 
@@ -377,7 +411,7 @@ func currentRequests(in buildInput, obs time.Time) ([]source.Item, error) {
 func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
 	// Only a conclusion is a change: checks starting or still running are not events. The snapshot still says
 	// pending (state.checks), on every other item of the pull request.
-	conclusion := aggregateChecks(in.Checks)
+	conclusion := aggregateChecks(in.Checks, obs)
 	if conclusion != "pass" && conclusion != "fail" {
 		return source.Item{}, false
 	}
@@ -387,6 +421,9 @@ func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
 	}
 	at := time.Time{}
 	for _, c := range in.Checks {
+		if c.idle(obs) {
+			continue
+		}
 		if t, err := parseTime(c.UpdatedAt); err == nil && (at.IsZero() || t.After(at)) {
 			at = t
 		}
@@ -405,6 +442,34 @@ func checksItem(in buildInput, obs time.Time) (source.Item, bool) {
 		return source.Item{}, false
 	}
 	return it, true
+}
+
+// withSnapshots adds a snapshot item beside each merge, close and check conclusion, so a rule can record the pull
+// request's state when the change's own rule sends nothing. Each covers its change: the runner does not send it when
+// the change is sent. It has no actor and is not own or addressed, so it closes and asks nothing unless its rule says.
+func (in buildInput) withSnapshots(items []source.Item, snap map[string]string) ([]source.Item, error) {
+	out := items
+	for _, ch := range items {
+		var what string
+		switch ch.Type {
+		case TypeMerged:
+			what = "merged"
+		case TypeClosed:
+			what = "closed"
+		case TypeChecksChanged:
+			what = "checks " + checksWords(snap["checks"])
+		default:
+			continue
+		}
+		it, err := in.item(TypeSnapshot, "snapshot:"+ch.Version, "", ch.OccurredAt, "", "", false)
+		if err != nil {
+			return nil, err
+		}
+		it.EventTitle = "State: " + what
+		it.Covers = ch.Key
+		out = append(out, it)
+	}
+	return out, nil
 }
 
 func stamp(items []source.Item, snap map[string]string, obs time.Time, in buildInput) []source.Item {
@@ -514,6 +579,8 @@ func eventTitle(typ, reviewState, changeID, requested string) string {
 		return "Merged"
 	case TypeClosed:
 		return "Closed"
+	case TypeSnapshot:
+		return "State"
 	default:
 		return ""
 	}
@@ -580,7 +647,7 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-func snapshot(pr pull, reviews []review, checks []checkSuite, fetched bool) map[string]string {
+func snapshot(pr pull, reviews []review, checks []checkSuite, fetched bool, obs time.Time) map[string]string {
 	state := strings.ToLower(pr.State)
 	if pr.Merged {
 		state = "merged"
@@ -611,7 +678,7 @@ func snapshot(pr pull, reviews []review, checks []checkSuite, fetched bool) map[
 		st["review_decision"] = d
 	}
 	if fetched {
-		st["checks"] = aggregateChecks(checks)
+		st["checks"] = aggregateChecks(checks, obs)
 	}
 	return st
 }
@@ -646,12 +713,13 @@ func reviewDecision(reviews []review, requested int) string {
 	}
 }
 
-func aggregateChecks(suites []checkSuite) string {
-	if len(suites) == 0 {
-		return "none"
-	}
+// aggregateChecks is the conclusion of the head's check suites. A suite idle with no check runs is not counted (idle).
+func aggregateChecks(suites []checkSuite, obs time.Time) string {
 	fail, pending, pass := false, false, false
 	for _, s := range suites {
+		if s.idle(obs) {
+			continue
+		}
 		if !strings.EqualFold(s.Status, "completed") {
 			pending = true
 			continue

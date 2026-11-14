@@ -449,10 +449,30 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	projected := map[string]int{}
 	withheld := map[string]*Withheld{}
 	r.sealCounts = sealCounts{held: map[logs.Reason]int{}}
+	// An item that covers another is decided after every other item of the pass, so it knows whether that one is sent.
+	var covering []source.Item
+	ordered := make([]source.Item, 0, len(items))
 	for _, it := range items {
-		p, err := r.decide(it, view)
+		if it.Covers != "" {
+			covering = append(covering, it)
+			continue
+		}
+		ordered = append(ordered, it)
+	}
+	sending := map[string]bool{}
+	for _, it := range append(ordered, covering...) {
+		var p Planned
+		var err error
+		if it.Covers != "" && r.covered(it.Covers, sending) {
+			p = Planned{Item: it, Tier: rules.Never, Skipped: "its change is sent"}
+		} else {
+			p, err = r.decide(it, view)
+		}
 		if err != nil {
 			return rep, err
+		}
+		if p.Tier == rules.Send && p.Skipped == "" && p.Err == nil && p.Withheld == "" {
+			sending[it.Key] = true
 		}
 		if p.Err != nil {
 			projected[it.Source]++
@@ -639,6 +659,26 @@ func (r *Runner) decide(it source.Item, view *asks) (Planned, error) {
 		r.AfterAppend(it.Key)
 	}
 	return p, nil
+}
+
+// covered reports whether the change key names is sent, waiting to be sent, or decided send in this pass (a dry run
+// records nothing). A change held, dropped or refused is not: the item that covers it may record the state instead.
+func (r *Runner) covered(key string, sending map[string]bool) bool {
+	if sending[key] {
+		return true
+	}
+	if r.Outbox == nil {
+		return false
+	}
+	e, ok := r.Outbox.Get(key)
+	if !ok {
+		return false
+	}
+	switch e.State {
+	case outbox.Pending, outbox.Sent, outbox.Replayed:
+		return true
+	}
+	return false
 }
 
 // project builds the body. If the body or the request is over Signal's limit, it tries again without the body and

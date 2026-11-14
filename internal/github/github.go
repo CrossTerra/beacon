@@ -226,11 +226,12 @@ func (s *Source) observed() time.Time {
 }
 
 // sourceTimes is the no-Date cursor fallback. Pushed and checks_changed are omitted: those stamps can be the
-// local clock, and must not move the cursor.
+// local clock, and must not move the cursor. A snapshot is omitted too: it copies its change's stamp, which counts
+// here only when that change does.
 func sourceTimes(items []source.Item) []time.Time {
 	var out []time.Time
 	for _, it := range items {
-		if it.Type == TypePushed || it.Type == TypeChecksChanged {
+		if it.Type == TypePushed || it.Type == TypeChecksChanged || it.Type == TypeSnapshot {
 			continue
 		}
 		if !it.OccurredAt.IsZero() {
@@ -535,7 +536,8 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 	}
 	var checks []checkSuite
 	fetched := false
-	if strings.EqualFold(pr.author(), login) && strings.EqualFold(pr.State, "open") && !pr.Merged && pr.headSHA() != "" {
+	// Open, or merged or closed inside the window, so the snapshot a merge or close carries says how its checks ended.
+	if strings.EqualFold(pr.author(), login) && pr.headSHA() != "" && (strings.EqualFold(pr.State, "open") && !pr.Merged || pr.closedSince(since)) {
 		checks, fetched, err = s.checks(ctx, secret, h, pr.headSHA())
 		if err != nil {
 			return nil, err
@@ -544,11 +546,44 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 	if !first && !involved(pr, timeline, reviews, comments, login, s.teams) {
 		return nil, nil
 	}
-	return build(buildInput{
+	in := buildInput{
 		Name: s.name, PR: pr, Timeline: timeline, Reviews: reviews, Comments: comments,
 		Checks: checks, Fetched: fetched, Login: login, Since: since, First: first,
 		Observed: observed, Projects: s.projects, Teams: s.teams,
-	})
+	}
+	items, err := build(in)
+	if err != nil || len(items) == 0 || pr.Mergeable != nil || !strings.EqualFold(pr.State, "open") || pr.Merged {
+		return items, err
+	}
+	// GitHub works out mergeable when asked and answers null until it has. Read once more after a moment, so the
+	// snapshot these items carry says true or false rather than unknown. Still null, it stays unknown.
+	again, err := s.mergeable(ctx, secret, raw)
+	if err != nil || again == nil {
+		return items, err
+	}
+	in.PR.Mergeable = again
+	return build(in)
+}
+
+// mergeWait is how long a pass waits before reading a pull request's mergeable again.
+const mergeWait = 2 * time.Second
+
+func (s *Source) mergeable(ctx context.Context, secret keychain.Secret, raw string) (*bool, error) {
+	if err := s.http.Pause(ctx, mergeWait); err != nil {
+		return nil, err
+	}
+	body, _, err := s.get(ctx, secret, raw)
+	if unavailable(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var again pull
+	if err := json.Unmarshal(body, &again); err != nil {
+		return nil, errors.New("github: a pull request could not be read")
+	}
+	return again.Mergeable, nil
 }
 
 func (s *Source) timeline(ctx context.Context, secret keychain.Secret, h hit) ([]timelineEvent, error) {
