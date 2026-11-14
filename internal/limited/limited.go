@@ -72,6 +72,10 @@ func (c *Client) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// Pause waits d with the client's Sleep, or returns the context's error. A source uses it to wait before reading
+// something again.
+func (c *Client) Pause(ctx context.Context, d time.Duration) error { return c.sleep(ctx, d) }
+
 func (c *Client) attempts() int {
 	if c.MaxAttempts > 0 {
 		return c.MaxAttempts

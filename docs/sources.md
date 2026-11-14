@@ -82,7 +82,10 @@ qualifier: some tokens can read the repositories and still cannot search a user.
 involved in (author, assignee, reviewer, review requested of them or of a team they are in, mentioned, or commenter)
 yields no items. The full timeline is fetched; events before the lookback window are not emitted. Own open pull
 requests are also read for check suites, because a check conclusion does not change the pull request's `updated`
-time. If that extra search fails, items from the updated search are still returned and the cursor stays. A pull
+time. The check suites of the person's own pull requests are read when they are open, and when they were merged or
+closed inside the window, so the snapshot a merge or close carries says how the checks ended. GitHub answers
+`mergeable` with null until it has worked it out: when a pass yields items for an open pull request whose `mergeable`
+is null, it waits 2 seconds and reads the pull request once more, and a value it then gives is the snapshot's. If that extra search fails, items from the updated search are still returned and the cursor stays. A pull
 request the token cannot read (404, or a 403 that names a permission failure) is skipped. A bare 403 is not a skip:
 a secondary rate limit often arrives as a 403 with no `Retry-After`, and skipping it would move the cursor past
 unread events. That 403 fails the pass. A failure reading the timeline or reviews fails the pass and the cursor
@@ -98,7 +101,12 @@ conclusion. A team request is addressed.
 **Items.** `opened`, `ready`, `review_requested`, `review_request_removed`, `reviewed` (field `review_state`),
 `commented`, `pushed` (only on a pull request the person has reviewed), `checks_changed` (own open pull requests
 only, and only for a conclusion: passing or failing; checks starting or still running are not events, and the
-snapshot's `checks` still says `pending`), `merged`, `closed`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
+snapshot's `checks` still says `pending`), `merged`, `closed`, `snapshot`. A merge yields `merged` only, never also `closed`. `closed` is a close without a merge.
+Each `merged`, `closed` and `checks_changed` comes with a `snapshot` item: the same pull request's state, for a rule
+that records it when the change's own rule sends nothing, so Signal's snapshot does not stay `open` or `pending` after
+a merge or a conclusion the rules drop. It has no actor, is not own or addressed, and names its change in `covers`
+([`events.md`](events.md#items)): Beacon does not send it when that change is sent or waiting to be sent, in that pass
+or an earlier one, and reports it as skipped (`its change is sent`). A held, dropped or refused change does not stop it.
 The event title describes the change. The pull request title stays the `title` field, and the thread title when a
 rule lists `title`. The event title never includes comment or review text. Keys and subjects are unchanged; a push
 key keeps the full sha.
@@ -115,6 +123,7 @@ key keeps the full sha.
 | `checks_changed` | Checks: passing or Checks: failing. `pass` is passing and `fail` is failing. |
 | `merged` | Merged |
 | `closed` | Closed |
+| `snapshot` | State: merged, State: closed, State: checks passing, or State: checks failing |
 
 `own` is set when the person caused the change. `checks_changed` has no actor and `own` is false: a check finishing
 is not the person's act, and must not close their asks. `pushed` is not filtered by the git commit's author or committer time when it is the current head. A commit made
@@ -126,8 +135,8 @@ of the original, so it stays stable and is not dropped.
 
 **Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is `opened`
 (the pull request's id; the open has no timeline event), `timeline` (ready, review requested or removed, merged,
-closed), `review`, `comment` (an issue comment), `review-comment`, `push` (the commit sha), or
-`checks:<head sha>:<conclusion>`. Kinds keep ids that overlap across those APIs from colliding.
+closed), `review`, `comment` (an issue comment), `review-comment`, `push` (the commit sha),
+`checks:<head sha>:<conclusion>`, or `snapshot:<the change's version>` (`snapshot:timeline:15`). Kinds keep ids that overlap across those APIs from colliding.
 
 **Addressed.** A review request naming the person, or naming a team the person is in. A team is `org/slug`, and only
 a team whose organization is a configured owner counts. `@login` in a comment, a review, or the pull request body
@@ -140,7 +149,9 @@ or title on `opened`. `@login` does not match a longer login.
 `changes_requested`, `review_required`), `mergeable` (`true`, `false`, `unknown`), `checks` (`pass`, `fail`,
 `pending`, `none`), `requested_reviewers` (logins, comma-separated). `checks` is set when Beacon read check suites.
 A failure, timeout, cancellation, or action required is `fail`; an incomplete suite is `pending`; success, neutral,
-and skipped are `pass`.
+and skipped are `pass`. A suite that is not complete, has no check runs (`latest_check_runs_count` 0), and was last
+updated 10 minutes or more before the pass is not counted: GitHub makes a suite for every installed app that listens
+to pushes, and one that never runs stays queued for good, which would keep `checks` at `pending` and never conclude.
 
 **References.** An issue key matching `[A-Z][A-Z0-9]+-\d+` in the title or head branch, limited to the GitHub
 source's `projects` and to any Jira source's projects, becomes `jira:<KEY>`.
@@ -690,6 +701,39 @@ so it closes nothing. A top-level message also sets `close_siblings_before` to i
 opened their own subjects before direct messages had one subject a day. An own top-level message in a channel
 closes nothing else: it may be about something else. Someone else's answer closes
 an ask only through a `close_by_others` rule, for example on `thread_reply` in a thread the person was mentioned in.
+
+**Thread replies.** `thread_reply` is read in every channel thread the person posted in or was mentioned in, public or
+private, whether or not the config names the channel; the replies after the person's first post or mention there are
+items. No starter rule sends them. To record them without asking, and let a reply close the mention the thread holds,
+put these above `everything-else` (after the mention rules):
+
+```yaml
+  # Replies in channel threads you posted in or were mentioned in: recorded, not asked. Someone
+  # else's reply closes the open ask in that thread (close_by_others); your own reply closes it
+  # as an own act, as before. In a private channel, sealed with the text.
+  - name: slack-thread-replies-private
+    match:
+      source: slack
+      type: thread_reply
+      fields:
+        channel_type: private
+    tier: send
+    close_by_others: true
+    seal: owner+agents
+    plain: [title]
+    fields: [title, channel, channel_type, permalink, author, actor, body, author_name, channel_name]
+
+  - name: slack-thread-replies
+    match: {source: slack, type: thread_reply, fields: {channel_type: channel}}
+    tier: send
+    close_by_others: true
+    fields: [title, channel, channel_type, permalink, author, actor, author_name, channel_name]
+```
+
+`close_by_others` closes the person's open asks on the thread's subject when anyone replies there, including a reply
+that does not answer them; leave it out to keep the ask open until the person replies. A top-level message in a
+channel that is neither a mention nor a review request in a configured channel is not an item, and a channel's
+history is read only when the config names it (`channels`).
 
 **Subject (DEC-10, DEC-38).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or the
 message's own when it is not in a thread. In a private channel, `slack:dm:<person>:<channel>:<thread ts>`, the person

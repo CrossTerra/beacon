@@ -108,24 +108,27 @@ func TestCollectEveryItem(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"github:acme/app#7:review:12":          TypeReviewed,
-		"github:acme/app#7:comment:13":         TypeCommented,
-		"github:acme/app#7:comment:14":         TypeCommented,
-		"github:acme/app#7:push:aaa111":        TypePushed,
-		"github:acme/app#7:push:abc111":        TypePushed,
-		"github:acme/app#7:timeline:15":        TypeMerged,
-		"github:acme/app#8:opened:800":         TypeOpened,
-		"github:acme/app#8:timeline:21":        TypeReviewRequested,
-		"github:acme/app#8:timeline:22":        TypeReviewRequestRemoved,
-		"github:acme/app#8:review:23":          TypeReviewed,
-		"github:acme/app#8:timeline:24":        TypeReady,
-		"github:acme/app#8:comment:26":         TypeCommented,
-		"github:acme/app#8:push:ccc999":        TypePushed,
-		"github:acme/app#8:push:bbb222":        TypePushed,
-		"github:acme/app#8:timeline:25":        TypeClosed,
-		"github:acme/app#8:review-comment:77":  TypeCommented,
-		"github:acme/app#9:checks:def456:fail": TypeChecksChanged,
-		"github:acme/lib#3:comment:31":         TypeCommented,
+		"github:acme/app#7:review:12":                   TypeReviewed,
+		"github:acme/app#7:comment:13":                  TypeCommented,
+		"github:acme/app#7:comment:14":                  TypeCommented,
+		"github:acme/app#7:push:aaa111":                 TypePushed,
+		"github:acme/app#7:push:abc111":                 TypePushed,
+		"github:acme/app#7:timeline:15":                 TypeMerged,
+		"github:acme/app#8:opened:800":                  TypeOpened,
+		"github:acme/app#8:timeline:21":                 TypeReviewRequested,
+		"github:acme/app#8:timeline:22":                 TypeReviewRequestRemoved,
+		"github:acme/app#8:review:23":                   TypeReviewed,
+		"github:acme/app#8:timeline:24":                 TypeReady,
+		"github:acme/app#8:comment:26":                  TypeCommented,
+		"github:acme/app#8:push:ccc999":                 TypePushed,
+		"github:acme/app#8:push:bbb222":                 TypePushed,
+		"github:acme/app#8:timeline:25":                 TypeClosed,
+		"github:acme/app#8:review-comment:77":           TypeCommented,
+		"github:acme/app#9:checks:def456:fail":          TypeChecksChanged,
+		"github:acme/lib#3:comment:31":                  TypeCommented,
+		"github:acme/app#7:snapshot:timeline:15":        TypeSnapshot,
+		"github:acme/app#8:snapshot:timeline:25":        TypeSnapshot,
+		"github:acme/app#9:snapshot:checks:def456:fail": TypeSnapshot,
 	}
 	if len(byKey) != len(want) {
 		var keys []string
@@ -135,24 +138,27 @@ func TestCollectEveryItem(t *testing.T) {
 		t.Fatalf("items %d, want %d: %v", len(byKey), len(want), keys)
 	}
 	titles := map[string]string{
-		"github:acme/app#7:review:12":          "Reviewed: approved",
-		"github:acme/app#7:comment:13":         "Commented",
-		"github:acme/app#7:comment:14":         "Commented",
-		"github:acme/app#7:push:aaa111":        "Pushed aaa111",
-		"github:acme/app#7:push:abc111":        "Pushed abc111",
-		"github:acme/app#7:timeline:15":        "Merged",
-		"github:acme/app#8:opened:800":         "Opened",
-		"github:acme/app#8:timeline:21":        "Review requested",
-		"github:acme/app#8:timeline:22":        "Review request removed",
-		"github:acme/app#8:review:23":          "Reviewed: changes requested",
-		"github:acme/app#8:timeline:24":        "Ready for review",
-		"github:acme/app#8:comment:26":         "Commented",
-		"github:acme/app#8:push:ccc999":        "Pushed ccc999",
-		"github:acme/app#8:push:bbb222":        "Pushed bbb222",
-		"github:acme/app#8:timeline:25":        "Closed",
-		"github:acme/app#8:review-comment:77":  "Commented",
-		"github:acme/app#9:checks:def456:fail": "Checks: failing",
-		"github:acme/lib#3:comment:31":         "Commented",
+		"github:acme/app#7:review:12":                   "Reviewed: approved",
+		"github:acme/app#7:comment:13":                  "Commented",
+		"github:acme/app#7:comment:14":                  "Commented",
+		"github:acme/app#7:push:aaa111":                 "Pushed aaa111",
+		"github:acme/app#7:push:abc111":                 "Pushed abc111",
+		"github:acme/app#7:timeline:15":                 "Merged",
+		"github:acme/app#8:opened:800":                  "Opened",
+		"github:acme/app#8:timeline:21":                 "Review requested",
+		"github:acme/app#8:timeline:22":                 "Review request removed",
+		"github:acme/app#8:review:23":                   "Reviewed: changes requested",
+		"github:acme/app#8:timeline:24":                 "Ready for review",
+		"github:acme/app#8:comment:26":                  "Commented",
+		"github:acme/app#8:push:ccc999":                 "Pushed ccc999",
+		"github:acme/app#8:push:bbb222":                 "Pushed bbb222",
+		"github:acme/app#8:timeline:25":                 "Closed",
+		"github:acme/app#8:review-comment:77":           "Commented",
+		"github:acme/app#9:checks:def456:fail":          "Checks: failing",
+		"github:acme/lib#3:comment:31":                  "Commented",
+		"github:acme/app#7:snapshot:timeline:15":        "State: merged",
+		"github:acme/app#8:snapshot:timeline:25":        "State: closed",
+		"github:acme/app#9:snapshot:checks:def456:fail": "State: checks failing",
 	}
 	for k, typ := range want {
 		it, ok := byKey[k]
@@ -555,6 +561,7 @@ func newTest(t *testing.T, srv *httptest.Server, repos, projects []string) *Sour
 		Token: func() (keychain.Secret, error) { return keychain.FromString(token) },
 		HTTP:  srv.Client(),
 		Now:   func() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) },
+		Sleep: func(context.Context, time.Duration) error { return nil },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -686,6 +693,8 @@ func starterTier(it source.Item) rules.Tier {
 	case it.Type == TypeMerged && it.Fields["author"] == "winton":
 		return rules.Send
 	case it.Type == TypeChecksChanged && it.Fields["author"] == "winton":
+		return rules.Send
+	case it.Type == TypeSnapshot:
 		return rules.Send
 	default:
 		return rules.Never

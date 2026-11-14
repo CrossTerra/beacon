@@ -32,7 +32,7 @@ same pull request.
    leaves as `by` on your own acts (DEC-27). An event's title is a description of that change, not a source field
    and not the object's title. It leaves with the event so a thread's events do not all read as the pull request,
    issue, mail or file title. It is built only from the change the source already recorded (who was requested when
-   it is not you, the review state, a short commit sha, the check conclusion, the assignee's display name when it is not you, the status names, the due
+   it is not you, the review state, a short commit sha, the check conclusion, a pull request's state (merged or closed), the assignee's display name when it is not you, the status names, the due
    date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
    comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
    `title`, `summary` or `subject`, as the thread title. Slack's `title` is the conversation's: who and where, built

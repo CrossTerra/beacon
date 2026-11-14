@@ -103,6 +103,15 @@ rules:
     fields: [title, url, repo, number, author, references]
     state: [state, head_sha, checks, review_decision, mergeable]
 
+  # The pull request's state beside a merge, a close or a check conclusion that no rule above sent,
+  # so Signal's snapshot says merged, closed, passing or failing. Asks nothing. Beacon does not send
+  # it when the change itself was sent.
+  - name: github-snapshots
+    match: {source: github, type: snapshot}
+    tier: send
+    fields: [title, url, repo, number]
+    state: [state, head_sha, checks, review_decision, mergeable]
+
   # Assigned to the person.
   - name: jira-assigned
     match:
@@ -160,6 +169,22 @@ rules:
     tier: send
     ask: me
     priority: medium
+    fields: [subject, from, date, link]
+    state: [unread, starred, last_from]
+
+  # A billing or account problem from a service your work runs on. Gmail files these under Updates,
+  # so this comes before the bulk rule. Receipts do not match. Add the domains of the other services
+  # you depend on.
+  - name: gmail-service-alerts
+    match:
+      source: gmail
+      type: received
+      fields:
+        from: {regex: '(?i)[^@]+@([a-z0-9-]+\.)*github\.com'}
+        subject: {regex: '(?i).*\b(billing|payment (failed|declined)|failed payment|past due|overdue|suspended|locked|action required|problem)\b.*'}
+    tier: send
+    ask: me
+    priority: high
     fields: [subject, from, date, link]
     state: [unread, starred, last_from]
 
@@ -307,8 +332,15 @@ rules:
     fields: [title, channel, channel_type, permalink, author, actor]
 
   # Replies in threads you posted in or were mentioned in (thread_reply) and review requests in
-  # your configured channels (review_request) are not sent. To let someone else's answer close a
-  # mention, send thread replies with close_by_others: true once you have seen what they hold.
+  # your configured channels (review_request) are not sent. To record thread replies without an
+  # ask, and let someone else's reply close the mention in that thread, uncomment these once you
+  # have seen what they hold (docs/sources.md, Slack, "Thread replies"):
+  #
+  # - name: slack-thread-replies
+  #   match: {source: slack, type: thread_reply, fields: {channel_type: channel}}
+  #   tier: send
+  #   close_by_others: true
+  #   fields: [title, channel, channel_type, permalink, author, actor]
 
   - name: everything-else
     match: {}
