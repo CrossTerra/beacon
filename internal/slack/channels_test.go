@@ -563,16 +563,22 @@ func TestFollowedBackfillStaysInTheWindow(t *testing.T) {
 		return &message{channel: "C0ENG", ts: formatTS(testNow.Add(-time.Hour)), threadTS: formatTS(root), user: "U0BOB",
 			kind: kindChannel, followed: true, joined: formatTS(testNow)}
 	}
-	if typ := s.typeOf(reply(testNow.Add(-24 * time.Hour))); typ != TypeChannel {
+	if typ := s.typeOf(reply(testNow.Add(-24*time.Hour)), testNow); typ != TypeChannel {
 		t.Fatalf("a reply in a day-old thread: %q", typ)
 	}
-	if typ := s.typeOf(reply(testNow.Add(-5 * 24 * time.Hour))); typ != "" {
+	if typ := s.typeOf(reply(testNow.Add(-5*24*time.Hour)), testNow); typ != "" {
 		t.Fatalf("a reply in a 5-day-old thread before the person joined: %q", typ)
 	}
 	// After joining it is a thread reply, whatever the root's age.
 	late := reply(testNow.Add(-5 * 24 * time.Hour))
 	late.joined = formatTS(testNow.Add(-2 * time.Hour))
-	if typ := s.typeOf(late); typ != TypeThreadReply {
+	if typ := s.typeOf(late, testNow); typ != TypeThreadReply {
 		t.Fatalf("%q", typ)
+	}
+	// The window is the pass's, not the clock after a long pass: a root just inside it when the pass began stays in.
+	edge := reply(testNow.Add(-replyWindow + time.Minute))
+	s.now = func() time.Time { return testNow.Add(time.Hour) }
+	if typ := s.typeOf(edge, testNow); typ != TypeChannel {
+		t.Fatalf("a root inside the pass's window: %q", typ)
 	}
 }

@@ -386,7 +386,7 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 	if err := s.collect(ctx, p); err != nil {
 		return source.Collected{}, err
 	}
-	items, dropped := s.items(p.msgs, id.URL)
+	items, dropped := s.items(p.msgs, id.URL, p.now)
 	warning := s.nameItems(ctx, p, id, items)
 	if ctx.Err() != nil {
 		return source.Collected{}, ctx.Err()

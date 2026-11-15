@@ -28,15 +28,16 @@ var (
 // Message subtypes that are messages someone wrote. Joins, edits, deletions, topic changes and the rest are not events.
 var written = map[string]bool{"": true, "thread_broadcast": true, "file_share": true, "me_message": true, "bot_message": true}
 
-// items turns the pool into items, one per message. web is the workspace's address, for permalinks Slack did not give.
-func (s *Source) items(msgs pool, web string) ([]source.Item, int) {
+// items turns the pool into items, one per message. web is the workspace's address, for permalinks Slack did not give;
+// now is the pass's time, which the reads that filled the pool used too.
+func (s *Source) items(msgs pool, web string, now time.Time) ([]source.Item, int) {
 	var out []source.Item
 	dropped := 0
 	for _, m := range msgs {
 		if !written[m.subtype] {
 			continue
 		}
-		typ := s.typeOf(m)
+		typ := s.typeOf(m, now)
 		if typ == "" {
 			continue
 		}
@@ -58,7 +59,8 @@ func (s *Source) items(msgs pool, web string) ([]source.Item, int) {
 }
 
 // typeOf picks the item type for a message, or "" when it is not an item. The order is the documented precedence.
-func (s *Source) typeOf(m *message) string {
+// now is the pass's time: the window a reply's root must be in is the one the pass's reads looked back over.
+func (s *Source) typeOf(m *message, now time.Time) string {
 	if s.own(m) {
 		// The person's own message is an event in a conversation Beacon follows: a direct or group direct message, a
 		// private channel, a thread, or a channel the source reads. A top-level message elsewhere answers no ask
@@ -78,7 +80,7 @@ func (s *Source) typeOf(m *message) string {
 		return TypeThreadReply
 	case m.history && s.reads(m.channel) && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
 		return TypeReviewRequest
-	case s.reads(m.channel) && (m.history || (m.inThread() && !tsTime(m.threadTS).Before(s.now().Add(-replyWindow)))):
+	case s.reads(m.channel) && (m.history || (m.inThread() && !tsTime(m.threadTS).Before(now.Add(-replyWindow)))):
 		// Anything else someone wrote in a channel the source reads: a top-level message read from its history, or a
 		// reply in a thread whose root is in the window the channel's reads look back over. A thread followed later
 		// is read back to the pass's window, and its older replies would otherwise reach past that window.
