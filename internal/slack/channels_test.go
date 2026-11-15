@@ -553,3 +553,26 @@ func TestChannelTitles(t *testing.T) {
 		}
 	}
 }
+
+// A reply in a followed thread before the person joined is a channel message only when its root is in the window a
+// channel's reads look back over, as a swept thread's would be; an older thread's earlier replies are not items.
+func TestFollowedBackfillStaysInTheWindow(t *testing.T) {
+	s, _ := memberSource(t, memberServer(t), nil)
+	s.members = map[string]string{"C0ENG": kindChannel}
+	reply := func(root time.Time) *message {
+		return &message{channel: "C0ENG", ts: formatTS(testNow.Add(-time.Hour)), threadTS: formatTS(root), user: "U0BOB",
+			kind: kindChannel, followed: true, joined: formatTS(testNow)}
+	}
+	if typ := s.typeOf(reply(testNow.Add(-24 * time.Hour))); typ != TypeChannel {
+		t.Fatalf("a reply in a day-old thread: %q", typ)
+	}
+	if typ := s.typeOf(reply(testNow.Add(-5 * 24 * time.Hour))); typ != "" {
+		t.Fatalf("a reply in a 5-day-old thread before the person joined: %q", typ)
+	}
+	// After joining it is a thread reply, whatever the root's age.
+	late := reply(testNow.Add(-5 * 24 * time.Hour))
+	late.joined = formatTS(testNow.Add(-2 * time.Hour))
+	if typ := s.typeOf(late); typ != TypeThreadReply {
+		t.Fatalf("%q", typ)
+	}
+}

@@ -78,9 +78,10 @@ func (s *Source) typeOf(m *message) string {
 		return TypeThreadReply
 	case m.history && s.reads(m.channel) && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
 		return TypeReviewRequest
-	case s.reads(m.channel) && (m.inThread() || m.history):
+	case s.reads(m.channel) && (m.history || (m.inThread() && !tsTime(m.threadTS).Before(s.now().Add(-replyWindow)))):
 		// Anything else someone wrote in a channel the source reads: a top-level message read from its history, or a
-		// reply read from a thread.
+		// reply in a thread whose root is in the window the channel's reads look back over. A thread followed later
+		// is read back to the pass's window, and its older replies would otherwise reach past that window.
 		return TypeChannel
 	}
 	return ""
