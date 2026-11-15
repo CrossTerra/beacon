@@ -27,7 +27,7 @@ rules:
     match: {source: github, own: true}
     tier: send
     fields: [title, url, repo, number, actor, references]
-    state: [state, checks, review_decision]
+    state: [state, checks, review_decision, author]
 
   - name: jira-own-acts
     match: {source: jira, own: true}
@@ -45,7 +45,7 @@ rules:
     ask: me
     priority: high
     fields: [title, url, repo, number, author, actor, references]
-    state: [state, draft, head_sha, review_decision, mergeable, checks, requested_reviewers]
+    state: [state, draft, head_sha, review_decision, mergeable, checks, requested_reviewers, author]
 
   # A comment that mentions the person.
   - name: github-comments-addressed
@@ -57,7 +57,7 @@ rules:
     ask: me
     priority: high
     fields: [title, url, repo, number, author, actor, references]
-    state: [state, checks, review_decision]
+    state: [state, checks, review_decision, author]
 
   - name: jira-comments-addressed
     match:
@@ -79,7 +79,7 @@ rules:
         author: YOUR_LOGIN
     tier: send
     fields: [title, url, repo, number, author, review_state, actor, references]
-    state: [state, draft, head_sha, review_decision, mergeable, checks]
+    state: [state, draft, head_sha, review_decision, mergeable, checks, author]
 
   # A merge of a pull request the person wrote, by someone else. Their own merge is an own act.
   - name: github-merges-on-own
@@ -90,7 +90,7 @@ rules:
         author: YOUR_LOGIN
     tier: send
     fields: [title, url, repo, number, author, actor, references]
-    state: [state, head_sha, checks]
+    state: [state, head_sha, checks, author]
 
   # A check-suite conclusion on the person's own open pull request.
   - name: github-checks-on-own
@@ -101,7 +101,7 @@ rules:
         author: YOUR_LOGIN
     tier: send
     fields: [title, url, repo, number, author, references]
-    state: [state, head_sha, checks, review_decision, mergeable]
+    state: [state, head_sha, checks, review_decision, mergeable, author]
 
   # The pull request's state beside a merge, a close or a check conclusion that no rule above sent,
   # so Signal's snapshot says merged, closed, passing or failing. Asks nothing. Beacon does not send
@@ -110,7 +110,7 @@ rules:
     match: {source: github, type: snapshot}
     tier: send
     fields: [title, url, repo, number]
-    state: [state, head_sha, checks, review_decision, mergeable]
+    state: [state, head_sha, checks, review_decision, mergeable, author]
 
   # Assigned to the person.
   - name: jira-assigned
@@ -155,7 +155,7 @@ rules:
     match: {source: calendar, own: true}
     tier: send
     fields: [title, summary, start, end, link, meet_link, response]
-    state: [status, start, end, response]
+    state: [status, start, end, response, attendees, meet_link]
 
   - name: drive-own-acts
     match: {source: drive, own: true}
@@ -216,7 +216,7 @@ rules:
     ask: me
     priority: medium
     fields: [title, summary, start, end, organizer, attendees, link, meet_link, actor]
-    state: [status, start, end, response]
+    state: [status, start, end, response, attendees, meet_link]
 
   # An event on your calendar was created by someone else, changed or cancelled. Calendar does not say
   # who changed an event, so a change to an event you organise is here too, not an own act.
@@ -226,7 +226,7 @@ rules:
       type: {regex: "created|changed|cancelled"}
     tier: send
     fields: [title, summary, start, end, organizer, response, link, meet_link, actor]
-    state: [status, start, end, response]
+    state: [status, start, end, response, attendees, meet_link]
 
   # The first run's events in the next 7 days.
   - name: calendar-upcoming
@@ -235,7 +235,16 @@ rules:
       type: upcoming
     tier: send
     fields: [title, summary, start, end, organizer, response, link, meet_link]
-    state: [status, start, end, response]
+    state: [status, start, end, response, attendees, meet_link]
+
+  # The state of each meeting in the next 7 days, written as it enters that window and when its
+  # state changes, so Signal can list your meetings in the next 24 hours. Asks nothing. Beacon does
+  # not send it when the change beside it was sent.
+  - name: calendar-snapshots
+    match: {source: calendar, type: snapshot}
+    tier: send
+    fields: [title, start, end, response, link, meet_link]
+    state: [status, start, end, response, attendees, meet_link]
 
   # A comment or reply assigned to you.
   - name: drive-assigned

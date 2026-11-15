@@ -582,7 +582,12 @@ func TestCalendarEveryItem(t *testing.T) {
 		t.Fatalf("event types %v fields %s", q["eventTypes"], q.Get("fields"))
 	}
 	m := byKey(t, first.Items, CalendarFields, CalendarStateFields)
-	want := []string{"calendar:ev1:response_needed:3001 response_needed", "calendar:ev2:upcoming:3002 upcoming", "calendar:ev4:upcoming:3004 upcoming"}
+	// Each event in the next 7 days also has a snapshot, which covers its item. ev3 is beyond them.
+	want := []string{
+		"calendar:ev1:response_needed:3001 response_needed", "calendar:ev1:snapshot:3001 snapshot",
+		"calendar:ev2:snapshot:3002 snapshot", "calendar:ev2:upcoming:3002 upcoming",
+		"calendar:ev4:snapshot:3004 snapshot", "calendar:ev4:upcoming:3004 upcoming",
+	}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("first %v", keys(m))
 	}
@@ -622,12 +627,13 @@ func TestCalendarEveryItem(t *testing.T) {
 		t.Fatalf("second query %v", q)
 	}
 	m = byKey(t, second.Items, CalendarFields, CalendarStateFields)
+	// ev3 is beyond the snapshot window and has had no snapshot, so another attendee's response there yields nothing.
 	want = []string{
-		"calendar:ev1:responded:3101 responded",
-		"calendar:ev2:changed:3102 changed",
-		"calendar:ev4:cancelled:3104 cancelled",
-		"calendar:ev5:created:3105 created",
-		"calendar:ev6:response_needed:3106 response_needed",
+		"calendar:ev1:responded:3101 responded", "calendar:ev1:snapshot:3101 snapshot",
+		"calendar:ev2:changed:3102 changed", "calendar:ev2:snapshot:3102 snapshot",
+		"calendar:ev4:cancelled:3104 cancelled", "calendar:ev4:snapshot:3104 snapshot",
+		"calendar:ev5:created:3105 created", "calendar:ev5:snapshot:3105 snapshot",
+		"calendar:ev6:response_needed:3106 response_needed", "calendar:ev6:snapshot:3106 snapshot",
 	}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("second %v (another attendee's response must not be an event)", keys(m))
@@ -676,6 +682,127 @@ func TestCalendarEveryItem(t *testing.T) {
 	}
 }
 
+// Every event in the next 7 days has a current snapshot: written beside its change, when it enters the window
+// unchanged, and when its state changes without a change item, once each.
+func TestCalendarSnapshotsInTheWindow(t *testing.T) {
+	srv := googletest.New(t)
+	o := opts(t, srv)
+	c, _ := NewCalendar(o)
+	first, err := c.Collect(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byKey(t, first.Items, CalendarFields, CalendarStateFields)
+	s := m["calendar:ev1:snapshot:3001"]
+	if s.Covers != "calendar:ev1:response_needed:3001" || s.Subject != "calendar:winton:ev1" || s.EventTitle != "State: response needed" {
+		t.Fatalf("snapshot %+v", s)
+	}
+	if s.Own || s.Addressed || s.Actor != "" || s.DueAt != nil || s.ObservedAt == nil || s.Version != "3001" {
+		t.Fatalf("a snapshot is a state, not an act or an ask: %+v", s)
+	}
+	wantState := map[string]string{"status": "confirmed", "start": "2026-11-09T17:00:00Z", "end": "2026-11-09T18:00:00Z", "response": "needsAction", "attendees": "3"}
+	if len(s.State) != len(wantState) {
+		t.Fatalf("state %v", s.State)
+	}
+	for k, v := range wantState {
+		if s.State[k] != v {
+			t.Errorf("state %s = %q, want %q", k, s.State[k], v)
+		}
+	}
+	if m["calendar:ev2:snapshot:3002"].EventTitle != "State: accepted" || m["calendar:ev2:snapshot:3002"].Covers != "calendar:ev2:upcoming:3002" {
+		t.Fatalf("%+v", m["calendar:ev2:snapshot:3002"])
+	}
+	if _, ok := m["calendar:ev3:snapshot:3003"]; ok {
+		t.Fatal("ev3 starts beyond the window")
+	}
+
+	// From here nothing changes but what each step says. windowReads counts reads of the 7-day window.
+	changed := `{"timeZone":"UTC","items":[]}`
+	windowReads := 0
+	var windowMax string
+	srv.Routes["/calendar/v3/calendars/primary/events"] = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		switch {
+		case q.Get("updatedMin") != "" && q.Get("singleEvents") == "true":
+			io.WriteString(w, changed)
+		case q.Get("updatedMin") == "" && q.Get("singleEvents") == "true":
+			windowReads++
+			windowMax = q.Get("timeMax")
+			io.WriteString(w, googletest.EventsFirst)
+		default:
+			io.WriteString(w, `{"items":[]}`)
+		}
+	}
+	quiet, err := c.Collect(context.Background(), first.Next)
+	if err != nil || len(quiet.Items) != 0 || windowReads != 0 {
+		t.Fatalf("an unchanged window: %v items %d, window reads %d", err, len(quiet.Items), windowReads)
+	}
+
+	// Eleven days on, ev1, ev2 and ev4 are over and ev3 (25 Nov) has entered the window, unchanged.
+	o.Now = func() time.Time { return time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC) }
+	later, _ := NewCalendar(o)
+	entered, err := later.Collect(context.Background(), quiet.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = byKey(t, entered.Items, CalendarFields, CalendarStateFields)
+	if strings.Join(keys(m), "|") != "calendar:ev3:snapshot:3003 snapshot" || windowReads != 1 || windowMax != "2026-11-26T12:00:00Z" {
+		t.Fatalf("entered %v, window reads %d to %s", keys(m), windowReads, windowMax)
+	}
+	s = m["calendar:ev3:snapshot:3003"]
+	if s.Covers != "" || s.State["start"] != "2026-11-25T09:00:00Z" || s.State["response"] != "accepted" || s.State["attendees"] != "2" || s.EventTitle != "State: accepted" {
+		t.Fatalf("entered %+v", s)
+	}
+	again, err := later.Collect(context.Background(), quiet.Next)
+	if err != nil || len(again.Items) != 1 || again.Items[0].Key != s.Key {
+		t.Fatalf("the same pass again: %v %v", err, again.Items)
+	}
+	reads := windowReads
+	done, err := later.Collect(context.Background(), entered.Next)
+	if err != nil || len(done.Items) != 0 || windowReads != reads {
+		t.Fatalf("a written snapshot is not written again: %v %d, window reads %d", err, len(done.Items), windowReads-reads)
+	}
+
+	// A Meet link and an attendee are added: no change item (another attendee is not a change), but the state is new.
+	changed = `{"timeZone":"UTC","items":[
+  {"id":"ev3","status":"confirmed","etag":"\"3303\"","summary":"Quarterly","start":{"dateTime":"2026-11-25T09:00:00Z"},"end":{"dateTime":"2026-11-25T10:00:00Z"},
+   "created":"2026-10-01T00:00:00Z","updated":"2026-11-19T11:55:00Z","hangoutLink":"https://meet.google.com/abc-defg-hij","organizer":{"email":"dana@example.com"},
+   "attendees":[{"email":"winton@example.com","self":true,"responseStatus":"accepted"},{"email":"bob@example.com","responseStatus":"needsAction"},{"email":"carol@example.com","responseStatus":"needsAction"}]}
+]}`
+	linked, err := later.Collect(context.Background(), done.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = byKey(t, linked.Items, CalendarFields, CalendarStateFields)
+	if strings.Join(keys(m), "|") != "calendar:ev3:snapshot:3303 snapshot" {
+		t.Fatalf("linked %v", keys(m))
+	}
+	if s := m["calendar:ev3:snapshot:3303"]; s.State["meet_link"] != "https://meet.google.com/abc-defg-hij" || s.State["attendees"] != "3" || s.Covers != "" {
+		t.Fatalf("linked %+v", s)
+	}
+	same, err := later.Collect(context.Background(), linked.Next)
+	if err != nil || len(same.Items) != 0 {
+		t.Fatalf("the same state again: %v %d", err, len(same.Items))
+	}
+
+	// Moved beyond the window: the change, and a snapshot beside it, so Signal does not keep the old start.
+	changed = strings.NewReplacer("3303", "3304", "2026-11-25T09", "2026-12-20T09", "2026-11-25T10", "2026-12-20T10", "11:55:00Z", "11:58:00Z").Replace(changed)
+	moved, err := later.Collect(context.Background(), same.Next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = byKey(t, moved.Items, CalendarFields, CalendarStateFields)
+	if strings.Join(keys(m), "|") != "calendar:ev3:changed:3304 changed|calendar:ev3:snapshot:3304 snapshot" {
+		t.Fatalf("moved %v", keys(m))
+	}
+	if s := m["calendar:ev3:snapshot:3304"]; s.Covers != "calendar:ev3:changed:3304" || s.State["start"] != "2026-12-20T09:00:00Z" {
+		t.Fatalf("moved %+v", s)
+	}
+	if strings.Contains(string(moved.Next), "meet.google.com") || strings.Contains(string(moved.Next), "Quarterly") {
+		t.Fatalf("the cursor holds event content: %s", moved.Next)
+	}
+}
+
 func TestCalendarGoneReadsTheWindow(t *testing.T) {
 	srv := googletest.New(t)
 	c, _ := NewCalendar(opts(t, srv))
@@ -714,7 +841,8 @@ func TestCalendarGoneReadsTheWindow(t *testing.T) {
 			delete(m, k)
 		}
 	}
-	want := []string{"calendar:ev1:changed:3301 changed", "calendar:ev3:cancelled:gone cancelled"}
+	// ev1 had a snapshot, so moving it out of the window writes one; ev3 never had one, so its cancel writes none.
+	want := []string{"calendar:ev1:changed:3301 changed", "calendar:ev1:snapshot:3301 snapshot", "calendar:ev3:cancelled:gone cancelled"}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v", keys(m))
 	}
@@ -1039,7 +1167,8 @@ func TestCalendarMovedOutOfTheWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
-	want := []string{"calendar:ev2:cancelled:3202 cancelled", "calendar:ev3:changed:3203 changed"}
+	// ev2 had a snapshot in the window, so its cancel has one beside it; ev3 was beyond the window and had none.
+	want := []string{"calendar:ev2:cancelled:3202 cancelled", "calendar:ev2:snapshot:3202 snapshot", "calendar:ev3:changed:3203 changed"}
 	if strings.Join(keys(m), "|") != strings.Join(want, "|") {
 		t.Fatalf("got %v", keys(m))
 	}
@@ -1402,6 +1531,11 @@ func TestCalendarSummaryHashBackfill(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := byKey(t, got.Items, CalendarFields, CalendarStateFields)
+	// rvOld is in the window and, fingerprinted before snapshots, has had none: it gets one, dated like rvNew.
+	if old := m["calendar:rvOld:snapshot:1"]; old.Type != TypeSnapshot || old.Fields["title"] != "Design review · Mon 9 Nov" {
+		t.Fatalf("old %+v", old)
+	}
+	delete(m, "calendar:rvOld:snapshot:1")
 	if len(m) != 1 || m["calendar:rvNew:response_needed:2"].Fields["title"] != "Design review · Mon 16 Nov" {
 		t.Fatalf("got %v %+v", keys(m), m["calendar:rvNew:response_needed:2"].Fields)
 	}

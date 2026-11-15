@@ -221,6 +221,18 @@ func TestCollectEveryItem(t *testing.T) {
 	if checks.State["mergeable"] != "true" || checks.Fields["repo"] != "acme/app" || checks.Fields["number"] != "9" {
 		t.Fatalf("fields %+v", checks)
 	}
+	// Every snapshot names the pull request's author as an identity, so a reader can mark the person's own.
+	for _, it := range got.Items {
+		if it.Fields["author"] == "" || it.State["author"] != "github:user:"+it.Fields["author"] {
+			t.Errorf("%s: state author %q, field %q", it.Key, it.State["author"], it.Fields["author"])
+		}
+	}
+	if a := byKey["github:acme/app#9:snapshot:checks:def456:fail"].State["author"]; a != "github:user:winton" {
+		t.Errorf("snapshot author %q", a)
+	}
+	if a := byKey["github:acme/app#8:timeline:25"].State["author"]; a == "" || a == "github:user:winton" {
+		t.Errorf("someone else's pull request: author %q", a)
+	}
 	again, err := s.Collect(context.Background(), []byte("2026-11-01T00:00:00Z"))
 	if err != nil {
 		t.Fatal(err)

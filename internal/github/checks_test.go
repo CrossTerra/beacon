@@ -118,7 +118,7 @@ func TestSnapshotsBesideStateChanges(t *testing.T) {
 	if s.Type != TypeSnapshot || s.Covers != "github:acme/app#9:timeline:15" || s.EventTitle != "State: merged" || s.Own || s.Addressed || s.Actor != "" {
 		t.Fatalf("snapshot %+v", s)
 	}
-	if s.State["state"] != "merged" || s.State["checks"] != "pass" || s.ObservedAt == nil || s.Version != "snapshot:timeline:15" {
+	if s.State["state"] != "merged" || s.State["checks"] != "pass" || s.State["author"] != "github:user:winton" || s.ObservedAt == nil || s.Version != "snapshot:timeline:15" {
 		t.Fatalf("snapshot state %v", s.State)
 	}
 	if err := source.Validate(s, Fields, StateFields); err != nil {

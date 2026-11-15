@@ -15,8 +15,9 @@ import (
 // Fields is the source's fixed field list (DEC-6).
 var Fields = []string{"repo", "number", "title", "url", "author", "review_state", "body", "base", "head_ref"}
 
-// StateFields is the source's fixed state field list (DEC-28). checks is pass, fail, pending or none.
-var StateFields = []string{"state", "draft", "head_sha", "review_decision", "mergeable", "checks", "requested_reviewers"}
+// StateFields is the source's fixed state field list (DEC-28). checks is pass, fail, pending or none. author is the
+// pull request's author as an identity, github:user:<login>.
+var StateFields = []string{"state", "draft", "head_sha", "review_decision", "mergeable", "checks", "requested_reviewers", "author"}
 
 // Item types (DEC-18).
 const (
@@ -673,6 +674,11 @@ func snapshot(pr pull, reviews []review, checks []checkSuite, fetched bool, obs 
 		"head_sha":            pr.headSHA(),
 		"mergeable":           mergeable,
 		"requested_reviewers": strings.Join(reviewers, ","),
+	}
+	// The author as an identity (github:user:<login>), so a reader can tell the person's own pull requests from the
+	// snapshot alone.
+	if login := pr.author(); login != "" && !strings.Contains(login, "@") {
+		st["author"] = "github:user:" + login
 	}
 	if d := reviewDecision(reviews, len(reviewers)); d != "" {
 		st["review_decision"] = d
