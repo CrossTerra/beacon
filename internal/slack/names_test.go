@@ -117,7 +117,7 @@ func TestNamesWithoutScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a token without the name scopes failed the pass: %v", err)
 	}
-	if got.Warning != source.WarnNamesScope || got.Next == nil || len(got.Items) != 16 {
+	if got.Warning != source.WarnNamesScope || got.Next == nil || len(got.Items) != 18 {
 		t.Fatalf("warning %q, next %v, %d items", got.Warning, got.Next != nil, len(got.Items))
 	}
 	for _, it := range got.Items {
@@ -169,7 +169,7 @@ func TestNameLookupFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a failed name lookup failed the pass: %v", err)
 	}
-	if got.Warning != source.WarnNamesFailed || len(got.Items) != 16 {
+	if got.Warning != source.WarnNamesFailed || len(got.Items) != 18 {
 		t.Fatalf("warning %q, %d items", got.Warning, len(got.Items))
 	}
 	if n := len(srv.Queries("/api/users.info")); n != 1 {

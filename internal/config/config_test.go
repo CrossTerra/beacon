@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 const valid = `
@@ -152,6 +154,36 @@ func TestSlackConfig(t *testing.T) {
 	} {
 		if _, err := Parse([]byte(bad)); err == nil {
 			t.Fatalf("parsed:\n%s", bad)
+		}
+	}
+
+	// channels: member reads every channel the person is in, alone or beside ids, and is written back as it was.
+	for in, want := range map[string]struct {
+		ids    string
+		member bool
+		out    string
+	}{
+		"channels: member":             {"", true, "channels: member"},
+		"channels: [member, C0REVIEW]": {"C0REVIEW", true, "- member"},
+		"channels: [C0REVIEW]":         {"C0REVIEW", false, "- C0REVIEW"},
+		"channels:\n      - member\n":  {"", true, "channels: member"},
+	} {
+		c, err := Parse([]byte(strings.Replace(y, "channels: [C0REVIEW]", in, 1)))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		ch := c.Sources[0].Channels
+		if strings.Join(ch.IDs(), ",") != want.ids || ch.Member() != want.member {
+			t.Fatalf("%s: %v", in, ch)
+		}
+		out, err := yaml.Marshal(c.Sources[0])
+		if err != nil || !strings.Contains(string(out), want.out) {
+			t.Fatalf("%s: %s %v", in, out, err)
+		}
+	}
+	for _, bad := range []string{"channels: members", "channels: [member, member]", "channels: {member: true}"} {
+		if _, err := Parse([]byte(strings.Replace(y, "channels: [C0REVIEW]", bad, 1))); err == nil {
+			t.Fatalf("parsed %s", bad)
 		}
 	}
 }

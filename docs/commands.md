@@ -155,7 +155,7 @@ not written to the config.
 beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh] [--yes]
 beacon source add jira --site SITE --project KEY [--project KEY]
 beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
-beacon source add slack [--channel ID]... [--name NAME]
+beacon source add slack [--channel ID|member]... [--name NAME]
 ```
 
 `--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
@@ -179,7 +179,7 @@ through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, op
 (`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`,
 `mpim:read`, `usergroups:read`, `users:read`, `im:read`), it names them and stores nothing. A token already stored
 without `users:read` and `im:read` still collects; see [`sources.md`](sources.md#slack). Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
-and `user` and each `--channel`, names any other scopes the token holds (Beacon never uses them), and, when
+and `user` and each `--channel` (`--channel member` reads every channel the person is in), names any other scopes the token holds (Beacon never uses them), and, when
 `person.identities` has no entry for the source, prints the one to add. See [`sources.md`](sources.md#slack).
 
 ## `beacon seed FILE`

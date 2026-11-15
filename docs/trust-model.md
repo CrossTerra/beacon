@@ -81,11 +81,12 @@ same pull request.
    redirects are not followed. Each Google source also refuses any URL outside the API paths it uses, because
    `www.googleapis.com` serves other APIs too. The Slack source refuses any method but `auth.test`,
    `search.messages`, `conversations.replies`, `conversations.history`, `conversations.info`, `conversations.members`,
-   `users.info`, `users.conversations` (group direct messages only) and `usergroups.list`, any query key those calls
-   do not use, a search that is not one of its three, the history of a channel the config does not name or a group
-   direct message the person is not in, and `conversations.info` or `conversations.members` on a conversation the
-   pass made no item from, so its token cannot post, mark read or list the workspace's people or channels through
-   Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
+   `users.info`, `users.conversations` (group direct messages, and with `channels: member` the public and private
+   channels the person is in) and `usergroups.list`, any query key those calls do not use, a search that is not one of
+   its three, the history of a channel the config does not name (with `member`, one the person is not a member of) or
+   a group direct message the person is not in, and `conversations.info` or `conversations.members` on a conversation
+   the pass neither reads nor made an item from, so its token cannot post, mark read or list the workspace's people or
+   the channels the person is not in through Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
@@ -195,6 +196,14 @@ same pull request.
   again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
+- **A public channel's messages, with a rule that lists `body`, go to everyone who reads Signal.** Slack channel
+  messages (`channel_message`) and review requests in the channels Beacon reads are recorded so agents need not scan
+  Slack. A rule that sends a public channel's `body` plain, as the starter rules do, sends text the whole company can
+  already read in Slack, and makes it readable to every reader of Signal too, agents and their model providers
+  included; Signal cannot delete it. That is the same audience, not a wider one, only while the channel stays public
+  and Signal's readers are the company. A private channel's messages are under `slack:dm:` and leave only sealed.
+  With `channels: member`, whether a channel is private is read once an hour: a channel made private in that hour is
+  still read as public until then, and anything Beacon already sent from it stays where it was sent.
 - **A public channel's thread title is public.** With a rule that lists Slack's `title`, a public channel thread is
   named for its channel and who started it ("#eng: Bob Ross mentioned you"), and every reader of Signal sees that
   name, as they see the event. Direct message, group direct message and private channel threads are personal and

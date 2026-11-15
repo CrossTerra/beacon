@@ -81,6 +81,22 @@ rules:
     tier: send
     seal: owner+agents
     fields: [subject, body, actor, from, to]
+  # Slack channel messages and review requests to the room: recorded, never an ask. Apps are dropped. A private
+  # channel's are sealed with their text; a public channel's text leaves plain, as everyone in the company can already
+  # read it in Slack. Before slack-private, which asks.
+  - name: slack-channel-bots
+    match: {source: slack, type: {regex: 'channel_message|review_request'}, fields: {author: {glob: "B*"}}}
+    tier: never
+  - name: slack-channel-messages-private
+    match: {source: slack, type: {regex: 'channel_message|review_request'}, fields: {channel_type: private}}
+    tier: send
+    seal: owner+agents
+    fields: [title, thread_ts, reply_count, body, actor, permalink, references, author_name, channel_name]
+  - name: slack-channel-messages
+    match: {source: slack, type: {regex: 'channel_message|review_request'}, fields: {channel_type: channel}}
+    tier: send
+    fields: [title, thread_ts, reply_count, body, actor, permalink, references, author_name, channel_name]
+
   - name: slack-private
     match: {source: slack, fields: {channel_type: {regex: 'im|mpim|private'}}}
     tier: send

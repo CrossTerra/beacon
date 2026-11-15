@@ -15,8 +15,10 @@ type cursorData struct {
 	Since string `json:"since"`
 	// Threads are keyed by "<channel>/<thread ts>".
 	Threads map[string]*thread `json:"threads,omitempty"`
-	// Channels holds the configured channels and the group direct messages, by id.
+	// Channels holds the channels the source reads and the group direct messages, by id.
 	Channels map[string]*watermark `json:"channels,omitempty"`
+	// Replies maps "<channel>/<root ts>" of a channel thread found by a sweep to the newest reply read there.
+	Replies map[string]string `json:"replies,omitempty"`
 	// Mentions maps "<channel>/<ts>" of each mention search found in the last 7 days to its ts.
 	Mentions map[string]string `json:"mentions,omitempty"`
 	// Asked holds messages that addressed the person, by "<channel>/<ts>", to notice their deletion.
@@ -29,6 +31,9 @@ func (c *cursorData) init() {
 	}
 	if c.Channels == nil {
 		c.Channels = map[string]*watermark{}
+	}
+	if c.Replies == nil {
+		c.Replies = map[string]string{}
 	}
 	if c.Mentions == nil {
 		c.Mentions = map[string]string{}
@@ -53,12 +58,14 @@ type thread struct {
 
 // watermark is a conversation's top level read so far. Seen is the newest ts read with nothing unread below it. When a
 // read stopped at its page limit, Gap is the oldest ts it read and Head the newest: everything between Seen and Gap is
-// read next.
+// read next. Swept is where a channel's last sweep for new replies left off, and Reply the newest reply it saw.
 type watermark struct {
 	Kind   string `json:"kind,omitempty"`
 	Seen   string `json:"seen"`
 	Gap    string `json:"gap,omitempty"`
 	Head   string `json:"head,omitempty"`
+	Swept  string `json:"swept,omitempty"`
+	Reply  string `json:"reply,omitempty"`
 	Polled string `json:"polled,omitempty"`
 }
 
@@ -74,7 +81,7 @@ type asked struct {
 func (t *thread) polledAt() string    { return t.Polled }
 func (t *thread) latest() string      { return maxTS(t.Last, t.Seen) }
 func (w *watermark) polledAt() string { return w.Polled }
-func (w *watermark) latest() string   { return maxTS(maxTS(w.Seen, w.Head), w.Gap) }
+func (w *watermark) latest() string   { return maxTS(maxTS(maxTS(w.Seen, w.Head), w.Gap), w.Reply) }
 
 func maxTS(a, b string) string {
 	if tsLess(a, b) {
@@ -101,8 +108,14 @@ func parseCursor(b []byte) (cursorData, error) {
 		}
 	}
 	for ch, w := range c.Channels {
-		if w == nil || !channelPattern.MatchString(ch) || !ts(w.Seen, false) || !ts(w.Gap, true) || !ts(w.Head, true) || !kinds[w.Kind] {
+		if w == nil || !channelPattern.MatchString(ch) || !ts(w.Seen, false) || !ts(w.Gap, true) || !ts(w.Head, true) || !ts(w.Swept, true) || !ts(w.Reply, true) || !kinds[w.Kind] {
 			return cursorData{}, errors.New("slack: the cursor holds a conversation it cannot read")
+		}
+	}
+	for k, v := range c.Replies {
+		ch, root, ok := strings.Cut(k, "/")
+		if !ok || !channelPattern.MatchString(ch) || !ts(root, false) || !ts(v, false) {
+			return cursorData{}, errors.New("slack: the cursor holds a thread it cannot read")
 		}
 	}
 	for k, v := range c.Mentions {

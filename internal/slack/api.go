@@ -48,6 +48,9 @@ const (
 	methodUser       = "users.info"
 )
 
+// memberTypes is the one other list users.conversations may ask for, with member: the person's channels.
+const memberTypes = "public_channel,private_channel"
+
 var spacing = map[string]time.Duration{
 	methodSearch:     3 * time.Second,
 	methodUserGroups: 3 * time.Second,
@@ -119,7 +122,7 @@ type api struct {
 	now      func() time.Time
 	sleep    func(context.Context, time.Duration) error
 	clock    source.Clock
-	// configured reports whether a channel is one the config names; groupDM whether it is a group direct message
+	// configured reports whether a channel is one the source reads (the config names it, or member found it); groupDM whether it is a group direct message
 	// the person is in. conversations.history reads only those. named reports whether a conversation holds a message
 	// this pass made an item of, or a thread Beacon is retitling: conversations.info reads configured and named ones,
 	// conversations.members only named ones.
@@ -128,7 +131,9 @@ type api struct {
 	named      func(string) bool
 	// user is the token's user. Search queries may name only this user.
 	user string
-	last map[string]time.Time
+	// member is set when the config says member: users.conversations may then list public and private channels.
+	member bool
+	last   map[string]time.Time
 }
 
 func newAPI(base string, o Options, now func() time.Time) (*api, error) {
@@ -163,7 +168,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// allow refuses a URL outside slack.com, the four methods, and each method's query keys.
+// allow refuses a URL outside slack.com, the nine methods, and each method's query keys.
 func (a *api) allow(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || !secureURL(u) || !strings.EqualFold(u.Hostname(), a.host) || hostPort(u) != a.hostPort || u.Fragment != "" {
@@ -218,7 +223,7 @@ func (a *api) allow(raw string) error {
 			return nil
 		}
 	case methodGroupDMs:
-		if onlyKeys(q, "types", "exclude_archived", "limit", "cursor") && q.Get("types") == "mpim" && paging {
+		if onlyKeys(q, "types", "exclude_archived", "limit", "cursor") && (q.Get("types") == "mpim" || (a.member && q.Get("types") == memberTypes)) && paging {
 			return nil
 		}
 	case methodUserGroups:

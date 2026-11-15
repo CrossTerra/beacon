@@ -105,6 +105,9 @@ func TestEveryItem(t *testing.T) {
 		"slack:C0REVIEW:1794135000.000900": {TypeReviewRequest, "slack:C0REVIEW:1794135000.000900", "Review requested", "U0ERIN", "channel", false, false, ""},
 		"slack:C0REVIEW:1794135800.001060": {TypeMentioned, "slack:C0REVIEW:1794135800.001060", "Mentioned", "U0BOB", "channel", true, false, ""},
 		"slack:C0REVIEW:1794135700.001050": {TypeMentioned, "slack:C0REVIEW:1794135700.001050", "Mentioned", "U0FRANK", "channel", true, false, ""},
+		// Everything else someone wrote in the channel: top-level messages without replies share the channel's day.
+		"slack:C0REVIEW:1794135600.001000": {TypeChannel, "slack:C0REVIEW:2026-11-08", "Channel message", "U0FRANK", "channel", false, false, ""},
+		"slack:C0REVIEW:1794135900.001070": {TypeChannel, "slack:C0REVIEW:2026-11-08", "Channel message", "U0BOB", "channel", false, false, ""},
 	}
 	if len(m) != len(wants) {
 		var ks []string
@@ -178,7 +181,7 @@ func TestEveryItem(t *testing.T) {
 		t.Fatalf("cut %v dropped %d", got.Cut, got.Dropped)
 	}
 
-	if _, ok := m["slack:C0REVIEW:1794135900.001070"]; ok {
+	if m["slack:C0REVIEW:1794135900.001070"].Type != TypeChannel {
 		t.Fatal("a mention of a user group the person is not in is a mention")
 	}
 	if r := m["slack:C0SECRET:1794134000.000450"]; strings.Join(r.References, ",") != "github:pr:acme/hr#3" {
@@ -290,7 +293,10 @@ func TestCursorWindows(t *testing.T) {
 			}
 		case "/api/conversations.history":
 			history++
-			if (q.Get("channel") == slacktest.Review && q.Get("oldest") != "1794136200.001100") || (q.Get("channel") == "G0GROUP" && q.Get("oldest") != "1794137600.001500") {
+			// A channel's read goes back replyWindow for thread roots with new replies; what is at or below its
+			// watermark is not an item again (no items above). A group direct message reads from its watermark.
+			at := tsTime(q.Get("oldest")).Add(replyWindow)
+			if (q.Get("channel") == slacktest.Review && (at.Before(testNow.Add(16*time.Minute)) || at.After(testNow.Add(20*time.Minute)))) || (q.Get("channel") == "G0GROUP" && q.Get("oldest") != "1794137600.001500") {
 				t.Fatalf("history %v", q)
 			}
 		}
@@ -516,7 +522,7 @@ func TestGoneThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(again.Next), `"C0REVIEW":{"kind":"channel","seen":"1794136200.001100"}`) {
+	if !strings.Contains(string(again.Next), `"C0REVIEW":{"kind":"channel","seen":"1794136200.001100","swept":"1794138300.000000"}`) {
 		t.Fatalf("channel watermark lost: %s", again.Next)
 	}
 

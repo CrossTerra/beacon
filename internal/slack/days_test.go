@@ -91,8 +91,13 @@ func TestDayThreadTitle(t *testing.T) {
 	if err != nil || got != "DM with Dana Scully · Sun 8 Nov" {
 		t.Fatalf("%q %v", got, err)
 	}
-	if _, err := s.ThreadTitle(context.Background(), "slack:C0ENG:2026-11-08"); err == nil {
-		t.Fatal("a channel subject with a day")
+	// A public channel's day of top-level messages is titled for the channel.
+	if got, err := s.ThreadTitle(context.Background(), "slack:C0ENG:2026-11-08"); err != nil || got != "#eng · Sun 8 Nov" {
+		t.Fatalf("%q %v", got, err)
+	}
+	// A public subject never names a private channel's day.
+	if _, err := s.ThreadTitle(context.Background(), "slack:C0SECRET:2026-11-08"); err == nil {
+		t.Fatal("a private channel's day on a public subject")
 	}
 }
 

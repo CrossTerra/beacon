@@ -100,16 +100,22 @@ func permalinkThread(raw string) string {
 
 // apiMessage is a message as conversations.replies and conversations.history return it.
 type apiMessage struct {
-	Subtype  string `json:"subtype"`
-	User     string `json:"user"`
-	BotID    string `json:"bot_id"`
-	Text     string `json:"text"`
-	TS       string `json:"ts"`
-	ThreadTS string `json:"thread_ts"`
+	Subtype     string `json:"subtype"`
+	User        string `json:"user"`
+	BotID       string `json:"bot_id"`
+	Text        string `json:"text"`
+	TS          string `json:"ts"`
+	ThreadTS    string `json:"thread_ts"`
+	ReplyCount  int    `json:"reply_count"`
+	LatestReply string `json:"latest_reply"`
 }
 
 func (a apiMessage) message(channel string) *message {
-	return &message{channel: channel, ts: a.TS, threadTS: a.ThreadTS, user: a.User, botID: a.BotID, subtype: a.Subtype, text: a.Text}
+	m := &message{channel: channel, ts: a.TS, threadTS: a.ThreadTS, user: a.User, botID: a.BotID, subtype: a.Subtype, text: a.Text}
+	if a.ReplyCount > 0 && (a.ThreadTS == "" || a.ThreadTS == a.TS) {
+		m.replyCount, m.latestReply = a.ReplyCount, a.LatestReply
+	}
+	return m
 }
 
 // replies reads a thread after oldest, oldest first. A long thread stops at the page limit; the watermark moves only
@@ -241,6 +247,53 @@ func (s *Source) listGroupDMs(ctx context.Context, tok keychain.Secret) ([]strin
 		}
 	}
 	return nil, fmt.Errorf("slack: the group direct message list did not end")
+}
+
+// loadMembers reads the public and private channels the person is a member of, once an hour, when the config says
+// member. A channel is public only when Slack says so (is_private false) and its id is a channel's (C…).
+func (s *Source) loadMembers(ctx context.Context, p *pass) error {
+	if !s.member || (s.members != nil && p.now.Sub(s.membersAt) < membersEvery && !p.now.Before(s.membersAt)) {
+		return nil
+	}
+	out := map[string]string{}
+	next := ""
+	for page := 0; ; page++ {
+		if page == listPages {
+			return fmt.Errorf("slack: the channel list did not end")
+		}
+		q := url.Values{"types": {memberTypes}, "exclude_archived": {"true"}, "limit": {"200"}}
+		if next != "" {
+			q.Set("cursor", next)
+		}
+		var resp struct {
+			Channels []struct {
+				ID         string `json:"id"`
+				IsPrivate  *bool  `json:"is_private"`
+				IsIM       bool   `json:"is_im"`
+				IsMPIM     bool   `json:"is_mpim"`
+				IsArchived bool   `json:"is_archived"`
+			} `json:"channels"`
+			envelope
+		}
+		if _, err := s.api.call(ctx, p.tok, methodGroupDMs, q, &resp); err != nil {
+			return err
+		}
+		for _, c := range resp.Channels {
+			if !channelPattern.MatchString(c.ID) || strings.HasPrefix(c.ID, "D") || c.IsIM || c.IsMPIM || c.IsArchived {
+				continue
+			}
+			kind := kindPrivate
+			if c.IsPrivate != nil && !*c.IsPrivate && strings.HasPrefix(c.ID, "C") {
+				kind = kindChannel
+			}
+			out[c.ID] = kind
+		}
+		if next = resp.Metadata.NextCursor; next == "" {
+			break
+		}
+	}
+	s.members, s.membersAt = out, p.now
+	return nil
 }
 
 // loadGroups reads the user groups the person is in, once an hour. A message that mentions one mentions the person.
