@@ -398,7 +398,7 @@ func (s *Source) titleFor(ctx context.Context, r *resolver, c *cachedConv, root 
 		if who := r.user(ctx, root.user); who != "" {
 			return where + ": " + who + " mentioned you"
 		}
-	case s.api.configured(root.channel) && !root.inThread() && reviewLink.MatchString(root.text) && reviewWording.MatchString(root.text):
+	case s.reads(root.channel) && !root.inThread() && reviewLink.MatchString(root.text) && reviewWording.MatchString(root.text):
 		if who := r.user(ctx, root.user); who != "" {
 			return where + ": " + who + " asked for a review"
 		}
@@ -449,8 +449,9 @@ func (s *Source) nameItems(ctx context.Context, p *pass, id Identity, items []so
 		t, ok := titles[it.Subject]
 		if !ok {
 			if day := dayOf(it.Subject); day != "" {
-				// A direct message's subject is a day of the conversation, not one message's thread.
-				t = datedTitle(s.titleFor(ctx, r, c, nil), day)
+				// A direct message's subject, or a channel's for top-level messages without replies, is a day of the
+				// conversation, not one message's thread.
+				t = s.dayTitle(ctx, r, c, day)
 			} else {
 				t = s.titleFor(ctx, r, c, p.msgs[channel+"/"+rootOf(it)])
 			}
@@ -466,13 +467,27 @@ func (s *Source) nameItems(ctx context.Context, p *pass, id Identity, items []so
 	return r.warning()
 }
 
-// dayOf is the day a direct message's subject names, or "".
+// dayOf is the day a day subject names (a direct message's, or a channel's top-level messages'), or "".
 func dayOf(subject string) string {
 	i := strings.LastIndex(subject, ":")
-	if !strings.HasPrefix(subject, PersonalStem) || i < 0 || !dayPattern.MatchString(subject[i+1:]) {
+	if !strings.HasPrefix(subject, "slack:") || i < 0 || !dayPattern.MatchString(subject[i+1:]) {
 		return ""
 	}
 	return subject[i+1:]
+}
+
+// dayTitle is a day subject's title: the conversation's with the day for a direct or group direct message ("DM with
+// Dana Scully · Thu 12 Nov"), the channel's name with the day for a channel ("#eng · Thu 12 Nov").
+func (s *Source) dayTitle(ctx context.Context, r *resolver, c *cachedConv, day string) string {
+	switch {
+	case c == nil:
+		return ""
+	case c.Kind == kindIM || c.Kind == kindMPIM:
+		return datedTitle(s.titleFor(ctx, r, c, nil), day)
+	case c.Name == "":
+		return ""
+	}
+	return datedTitle("#"+c.Name, day)
 }
 
 // datedTitle is a conversation's title with the day: "DM with Dana Scully · Thu 12 Nov". "" stays "".
@@ -523,10 +538,11 @@ func (s *Source) ThreadTitle(ctx context.Context, subject string) (string, error
 		return "", source.ErrNoTitle
 	}
 	if day != "" {
-		if c.Kind != kindIM && c.Kind != kindMPIM {
+		// A public subject's day is a public channel's; a personal one's may be any conversation's.
+		if !strings.HasPrefix(subject, PersonalStem) && c.Kind != kindChannel {
 			return "", source.ErrNoTitle
 		}
-		title := datedTitle(s.titleFor(ctx, r, c, nil), day)
+		title := s.dayTitle(ctx, r, c, day)
 		if r.failed != nil {
 			return "", ctx.Err()
 		}
@@ -570,7 +586,7 @@ func (s *Source) flush() {
 }
 
 // parseSubject reads one of this source's subjects: slack:<channel>:<root>, slack:dm:<person>:<channel>:<root>, or
-// slack:dm:<person>:<channel>:<YYYY-MM-DD> for a direct message's day.
+// either with <YYYY-MM-DD> for a day of a direct message or of a channel's top-level messages.
 func (s *Source) parseSubject(subject string) (channel, root string, ok bool) {
 	rest, personal := strings.CutPrefix(subject, PersonalStem)
 	if personal {
@@ -583,7 +599,7 @@ func (s *Source) parseSubject(subject string) (channel, root string, ok bool) {
 		return "", "", false
 	}
 	channel, root, ok = strings.Cut(rest, ":")
-	if !ok || !channelPattern.MatchString(channel) || !(tsPattern.MatchString(root) || (personal && dayPattern.MatchString(root))) {
+	if !ok || !channelPattern.MatchString(channel) || !(tsPattern.MatchString(root) || dayPattern.MatchString(root)) {
 		return "", "", false
 	}
 	if !personal && !strings.HasPrefix(channel, "C") {

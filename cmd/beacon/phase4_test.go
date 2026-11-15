@@ -215,7 +215,9 @@ func TestSlackStarterRules(t *testing.T) {
 		"slack:C0ENG:1794130000.000600":    "send",
 		"slack:C0ENG:1794134400.000700":    "never",
 		"slack:C0REVIEW:1794136200.001100": "send",
-		"slack:C0REVIEW:1794135000.000900": "never",
+		"slack:C0REVIEW:1794135000.000900": "send",
+		"slack:C0REVIEW:1794135600.001000": "send",
+		"slack:C0REVIEW:1794135900.001070": "send",
 		"slack:C0SECRET:1794134000.000450": "send",
 		"slack:C0ENG:1794134500.000750":    "never",
 		"slack:G0GROUP:1794137500.001400":  "send",
@@ -246,10 +248,24 @@ func TestSlackStarterRules(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("got %v\n%s", got, report)
 	}
-	for _, words := range []string{`"body"`, "deploy", "budget", "offsite", "alerts", "PTAL", "Merged", "salary", "acme/hr", "Lunch", "pager"} {
-		if strings.Contains(report, words) {
-			t.Fatalf("message text would leave (%s):\n%s", words, report)
+	// Text leaves only from a public channel's channel messages and review requests, which everyone in the company
+	// can already read in Slack.
+	public := map[string]bool{"slack:C0REVIEW:1794135000.000900": true, "slack:C0REVIEW:1794135600.001000": true, "slack:C0REVIEW:1794135900.001070": true}
+	for k, body := range bodies {
+		if public[k] {
+			if !strings.Contains(body, `"body":`) || !strings.Contains(body, `"subject":"slack:C0REVIEW:`) || strings.Contains(body, `"to"`) {
+				t.Fatalf("%s: %s", k, body)
+			}
+			continue
 		}
+		for _, words := range []string{`"body"`, "deploy", "budget", "offsite", "alerts", "PTAL", "Merged", "salary", "acme/hr", "Lunch", "pager"} {
+			if strings.Contains(body, words) {
+				t.Fatalf("message text would leave (%s):\n%s", words, report)
+			}
+		}
+	}
+	if day := bodies["slack:C0REVIEW:1794135600.001000"]; !strings.Contains(day, `"subject":"slack:C0REVIEW:2026-11-08"`) || !strings.Contains(day, `"title":"Channel message"`) {
+		t.Fatalf("channel message: %s", day)
 	}
 	dm := bodies["slack:D0DANA:1794132000.000100"]
 	for _, want := range []string{`"subject":"slack:dm:winton:D0DANA:2026-11-08"`, `"to":["@winton"]`, `"priority":"high"`, `"title":"Direct message"`, `"actor":"slack:user:U0DANA"`} {
@@ -275,7 +291,7 @@ func TestSlackStarterRules(t *testing.T) {
 	if group := bodies["slack:G0GROUP:1794137500.001400"]; !strings.Contains(group, `"subject":"slack:dm:winton:G0GROUP:`) || !strings.Contains(group, `"priority":"medium"`) {
 		t.Fatalf("group message: %s", group)
 	}
-	if !strings.Contains(report, "slack: dm_received 4 mentioned 5 own_message 4 review_request 1 thread_reply 2") {
+	if !strings.Contains(report, "slack: channel_message 2 dm_received 4 mentioned 5 own_message 4 review_request 1 thread_reply 2") {
 		t.Fatalf("summary:\n%s", report)
 	}
 	if len(sig.Requests()) != 0 {
@@ -334,7 +350,8 @@ func TestSlackDirectMessagesSentWhenRestricted(t *testing.T) {
 		t.Fatalf("own reply %s", e.Body)
 	}
 	for _, e := range sig.Events() {
-		if strings.Contains(string(e.Body), `"body"`) {
+		channel := strings.Contains(string(e.Body), `"type":"slack.channel_message"`) || strings.Contains(string(e.Body), `"type":"slack.review_request"`)
+		if strings.Contains(string(e.Body), `"body"`) && (!channel || !strings.Contains(string(e.Body), `"channel_type":"channel"`) || strings.Contains(string(e.Body), `"subject":"slack:dm:`)) {
 			t.Fatalf("a body left: %s", e.Body)
 		}
 	}

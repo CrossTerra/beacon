@@ -82,7 +82,7 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 		case "slack":
 			sl, err := slack.New(slack.Options{
 				Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"),
-				Workspace: s.Workspace, User: s.User, Channels: s.Channels,
+				Workspace: s.Workspace, User: s.User, Channels: s.Channels.IDs(), Member: s.Channels.Member(),
 				Identity: cfg.Person.Identities[s.SourceName()],
 				Token:    a.secretFunc(keychain.SlackAccount(s.Workspace, s.User)),
 				Cache:    filepath.Join(cfg.StatePath(), slack.CacheFile(s.SourceName())),
@@ -240,7 +240,7 @@ func (a *app) cmdSource(ctx context.Context, args []string) error {
 func (a *app) addSlack(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("source add slack")
 	var channels repeatFlag
-	fs.Var(&channels, "channel", "channel id (C…) whose top-level messages are read for review requests (repeatable)")
+	fs.Var(&channels, "channel", "channel id (C…) to read, or member for every channel you are in (repeatable)")
 	name := fs.String("name", "slack", "source name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -282,7 +282,7 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if missing := append(append([]string(nil), id.Missing...), id.MissingNames...); len(missing) > 0 {
 		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(missing, ", "))
 	}
-	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: channels}
+	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: config.SlackChannels(channels)}
 	if src.Name == "slack" {
 		src.Name = ""
 	}

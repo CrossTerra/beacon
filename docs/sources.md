@@ -28,7 +28,7 @@ clock fails the pass. With no `Date`, the cursor is the newest source event time
 push, a check change or the snapshot beside one. If there is no `Date` and no such event time, the cursor is not moved. A pass reads from
 the committed cursor minus 15 minutes, so indexing lag and clock skew land in an overlap. Gmail's cursor is the
 mailbox's history id, and Calendar's adds a fingerprint per event; see [Gmail](#gmail) and [Calendar](#calendar).
-Slack's adds a watermark per followed thread and configured channel; see [Slack](#slack).
+Slack's adds a watermark per followed thread and channel it reads; see [Slack](#slack).
 
 A source with no cursor reads open state, not history (DEC-23). That first pass is a dry run until
 `beacon accept-first`. See [commands](commands.md#beacon-run). `beacon cursor reset <source>` removes a committed
@@ -583,7 +583,8 @@ sent.
 
 ## Slack
 
-`kind: slack`, with `workspace` and `user`, and optional `channels`. A user token (`xoxp-…`) the person provides, from
+`kind: slack`, with `workspace` and `user`, and optional `channels`: channel ids, `member` for every public and
+private channel the person is a member of, or both (`channels: member`, `channels: [member, C0123REVW]`). A user token (`xoxp-…`) the person provides, from
 a Slack app they create in their own workspace (DEC-2). Beacon calls only read methods with it.
 
 **The app and the token.** At [api.slack.com/apps](https://api.slack.com/apps), create an app in the workspace (not
@@ -598,7 +599,7 @@ token. The token is stored in the keychain as `slack:<workspace id>:<user id>`, 
 | `search:read` | `search.messages`: direct messages, mentions, the person's own messages |
 | `channels:history`, `groups:history` | `conversations.replies` and `conversations.history` in public and private channels |
 | `im:history`, `mpim:history` | The same in direct and group direct messages |
-| `channels:read`, `groups:read` | `conversations.info` on a configured channel: is it private |
+| `channels:read`, `groups:read` | `conversations.info` on a channel the config names: is it private; with `member`, `users.conversations`: the public and private channels the person is in |
 | `mpim:read` | `users.conversations`: the group direct messages the person is in; `conversations.info` and `conversations.members` on one, for its members' names |
 | `usergroups:read` | `usergroups.list`: the user groups the person is in, so a group mention is a mention |
 | `users:read` | `users.info`: a person's display name, for titles and `author_name` |
@@ -621,22 +622,25 @@ each with only the query keys Beacon sends:
 | `auth.test` | none | |
 | `search.messages` | `query`, `count`, `page`, `sort`, `sort_dir` | the three queries below, naming only the token's user |
 | `conversations.replies` | `channel`, `ts`, `oldest`, `inclusive`, `limit`, `cursor` | |
-| `conversations.history` | `channel`, `oldest`, `latest`, `limit`, `cursor` | configured channels, and group direct messages the person is in |
-| `conversations.info` | `channel` | configured channels, and conversations this pass made an item from (or a thread being retitled) |
+| `conversations.history` | `channel`, `oldest`, `latest`, `limit`, `cursor` | channels the source reads (named in the config, or, with `member`, ones the person is a member of), and group direct messages the person is in |
+| `conversations.info` | `channel` | channels the source reads, and conversations this pass made an item from (or a thread being retitled) |
 | `conversations.members` | `channel`, `limit` | conversations this pass made an item from (or a thread being retitled) |
 | `users.info` | `user` | a user id (`U…`, `W…`) |
-| `users.conversations` | `types` (`mpim` only), `exclude_archived`, `limit`, `cursor` | |
+| `users.conversations` | `types`, `exclude_archived`, `limit`, `cursor` | `types` is `mpim`, or with `member` `public_channel,private_channel` |
 | `usergroups.list` | `include_users` | |
 
-Anything else is refused before it is sent (`source_scope`), so a request cannot post, mark read, list users or
-channels, or read the history of a channel the config does not name.
+Anything else is refused before it is sent (`source_scope`), so a request cannot post, mark read, list users, list
+channels the person is not in, or read the history of a channel the config does not name (or, with `member`, one the
+person is not a member of). The host is still `slack.com` only: `member` adds no egress.
 
 **Rate limits.** Slack limits each method per workspace by tier. Beacon spaces its own calls: `search.messages` and
 `usergroups.list` (Tier 2, 20 a minute) at most one every 3 seconds, `conversations.history`, `.replies` and `.info`
 and `users.conversations` (Tier 3, 50 a minute for an app built for one workspace) at most one every 1.2 seconds, and
 `users.info` and `conversations.members` (Tier 4, 100 a minute) at most one every 0.6 seconds. A `429`
 honours `Retry-After` as above; `"error":"ratelimited"` ends the pass. An app distributed to other workspaces outside
-the Slack Marketplace gets one `conversations.*` call a minute; create the app for your own workspace.
+the Slack Marketplace gets one `conversations.*` call a minute; create the app for your own workspace. Each method's
+spacing holds across passes, so back-to-back passes stay under the tier too; a pass with more to read than its limits
+below leaves the rest, longest unread first, for the next.
 
 **Errors.** `invalid_auth`, `not_authed`, `token_revoked`, `token_expired`, `account_inactive`, `missing_scope`,
 `not_allowed_token_type`, `no_permission` are `source_unauthorized`; run `beacon source add slack` again with a valid
@@ -654,9 +658,18 @@ and the cursor stays.
   over the last 7 days every pass. A mention older than the window that the cursor has not seen is kept: an edit
   added it, or search indexed it late. `after:` takes a date, so Beacon asks from two days before and keeps only
   messages in range. A query that reaches its page limit inside its range marks the pass cut; `run` says so.
-- `conversations.info` and `conversations.history` for each configured channel: whether it is private, and its top
-  level from its watermark, for review requests, `@here`/`@channel`/`@everyone`, user group mentions and the person's
-  own messages.
+- With `member`, `users.conversations` (`public_channel,private_channel`, archived ones left out), once an hour: the
+  channels the person is a member of, and whether each is private. A channel the person left is no longer read and
+  its watermark is dropped.
+- `conversations.info` and `conversations.history` for each channel the config names, every pass; and
+  `conversations.history` for the channels found by membership that are due, at most 40 a pass. A read takes the
+  top level from its watermark (review requests, mentions, the person's own messages and `channel_message`), and
+  starts 3 days back when that is earlier: Slack's history has no other way to show an old thread's new reply, so a
+  thread root there whose `latest_reply` is after what Beacon read of that thread is noted. Messages at or below the
+  watermark are not items again.
+- `conversations.replies` for each channel thread so noted, from what was read of it (a root seen with replies for
+  the first time: from the channel's previous read, less 15 minutes), oldest first, at most 40 a pass; the rest keep
+  their place for the next pass. A thread the person follows is read as below instead.
 - `users.conversations` and `conversations.history` for each group direct message the person is in, from its
   watermark: at most 20 a pass.
 - `conversations.replies` for each followed thread: a thread the person posted in, or was mentioned in, in the last 7
@@ -677,26 +690,30 @@ and the next pass reads that gap before anything newer. Nothing is skipped and t
 
 **Cursor.** The first server `Date` of the pass, as above; search reads from 15 minutes before it. Beside it: each
 followed thread (its kind, the person's first and latest post or mention there, the newest message read, when it was
-read), each configured channel's and group direct message's watermark (and a gap, when a read stopped at its limit),
+read), each channel's and group direct message's watermark (and a gap, when a read stopped at its limit; for a
+channel, also where its last look for new replies left off and the newest reply it saw), the newest reply read in
+each channel thread found that way (kept for 4 days),
 the mentions seen in the last 7 days, and the messages that addressed the person, with their subjects, for the
 deletion check. The cursor holds ids, kinds, subjects and timestamps, no text.
 
 **First run.** The last 7 days: direct and group direct messages, mentions, the person's own messages, replies in
-threads they posted or were mentioned in, and the configured channels (DEC-23).
+threads they posted or were mentioned in, and the channels the source reads, with the replies in their threads from
+the last 3 days (DEC-23). A channel the person joins later starts at the pass that found it.
 
 **Items.** One per message. When a message qualifies twice, the first in this table wins.
 
 | Item | When | Addressed | Event title |
 | --- | --- | --- | --- |
-| `own_message` | The person's message: the API's `user` is the token's user and there is no `bot_id`. Only in a direct or group direct message, a private channel, a thread, or a configured channel. Own. | no | Sent, or Replied in a thread |
-| `mentioned` | Someone else's message with `<@USER>`, a user group the person is in, or, in a configured channel only, `@here`, `@channel` or `@everyone`. | yes | Mentioned |
+| `own_message` | The person's message: the API's `user` is the token's user and there is no `bot_id`. Only in a direct or group direct message, a private channel, a thread, or a channel the source reads. Own. | no | Sent, or Replied in a thread |
+| `mentioned` | Someone else's message with `<@USER>`, a user group the person is in, or, in a channel the config names by id only, `@here`, `@channel` or `@everyone`. | yes | Mentioned |
 | `dm_received` | Someone else's message in a one-to-one or group direct message (`channel_type` says which). | yes | Direct message |
 | `thread_reply` | Someone else's reply in a followed thread, after the person's first post or mention there. | no | Thread reply |
-| `review_request` | Someone else's top-level message in a configured channel with a pull request or merge request link and review wording (`review`, `look`, `approve`, `approval`, `PTAL`, `eyes`). | no | Review requested |
+| `review_request` | Someone else's top-level message in a channel the source reads with a pull request or merge request link and review wording (`review`, `look`, `approve`, `approval`, `PTAL`, `eyes`). | no | Review requested |
+| `channel_message` | Someone else's message in a channel the source reads that no type above claims: a top-level message read from the channel's history, or a reply read from a thread there. An app's message included (the starter rules drop apps by author). `@here` in a channel read only by `member` is one: it asks the room, not the person. | no | Channel message, or Channel reply |
 | `message_deleted` | A message that was `mentioned` or `dm_received` no longer exists. On that message's subject, keyed `slack:<channel>:<ts>:deleted`, stamped with the pass's `Date`. It names the ask that message opened (`close_only`), so a `close_by_others` rule closes that ask and no other: another ask in the same thread stays open. | no | Deleted |
 
 Joins, edits, other message subtypes and reactions are not events (DEC-18); an edit that adds a mention is found by
-the mention search. A top-level message of the person's in a public channel that is not configured is not an item:
+the mention search. A top-level message of the person's in a public channel the source does not read is not an item:
 it answers no ask Beacon recorded. The thread it starts is still followed. An app's message has a `bot_id`: its
 `author` is that id and its actor `slack:bot:<id>`, and it is never own. The event title never includes message text
 or a name.
@@ -710,7 +727,8 @@ title stays the short one above.
 | One-to-one direct message, one day | `DM with Dana Scully · Thu 12 Nov` |
 | Group direct message, one day | `Group DM: Carol Danvers, Dana Scully · Thu 12 Nov` (up to three others, then `+N`) |
 | Channel, the thread's root a mention of the person | `#eng: Bob Ross mentioned you` |
-| Configured channel, the root a review request | `#review: Erin Burnett asked for a review` |
+| Channel the source reads, the root a review request | `#review: Erin Burnett asked for a review` |
+| Channel, one day's top-level messages without replies | `#eng · Thu 12 Nov` |
 | Channel, the root the person's own | `You in #eng` |
 | Channel, any other thread (a reply in a thread someone else started, an app's root, a root this pass did not read) | `#eng thread` |
 
@@ -777,19 +795,61 @@ put these above `everything-else` (after the mention rules):
 ```
 
 `close_by_others` closes the person's open asks on the thread's subject when anyone replies there, including a reply
-that does not answer them; leave it out to keep the ask open until the person replies. A top-level message in a
-channel that is neither a mention nor a review request in a configured channel is not an item, and a channel's
-history is read only when the config names it (`channels`).
+that does not answer them; leave it out to keep the ask open until the person replies. Outside the channels the source
+reads, a top-level message that is not a mention is not an item, and a channel's history is read only when the config
+names it or, with `channels: member`, the person is a member of it.
 
-**Subject (DEC-10, DEC-38).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or the
-message's own when it is not in a thread. In a private channel, `slack:dm:<person>:<channel>:<thread ts>`, the person
-being `person.handle` without `@`. In a one-to-one or group direct message, one subject per conversation per local
+**Channel messages.** With `channels`, someone else's messages there are `channel_message` items, and Bosun-style
+readers find problem reports and requests to the room in Signal instead of scanning Slack. They never ask: the
+starter rules send them with their text, plain in a public channel (text everyone in the company can already read in
+Slack; in Signal every reader can read it too, and it cannot be deleted there) and sealed `owner+agents` in a private
+one, and drop apps' messages. Review requests to the room go with them.
+
+```yaml
+  - name: slack-channel-messages-private
+    match:
+      source: slack
+      type: {regex: 'channel_message|review_request'}
+      fields: {channel_type: private}
+    tier: send
+    seal: owner+agents
+    fields: [title, channel, channel_type, thread_ts, reply_count, permalink, author, actor, body, references, author_name, channel_name]
+
+  - name: slack-channel-messages
+    match:
+      source: slack
+      type: {regex: 'channel_message|review_request'}
+      fields: {channel_type: channel}
+    tier: send
+    fields: [title, channel, channel_type, thread_ts, reply_count, permalink, author, actor, body, references, author_name, channel_name]
+```
+
+Put them after the `slack-bots` rule and after any rule that should ask (a rule on one person's messages, say), since
+the first match wins. A rule that lists `body` and can match `channel_type: private` needs `seal` (DEC-32).
+
+**Volume.** A guide for about 30 channels at a working company's pace, say 15 top-level messages and 30 replies a
+channel a working day: about 450 top-level items and 900 replies, some 1,350 `channel_message` items a day (less the
+apps the rules drop), on about 30 day threads and 150 to 250 reply threads. The calls stay well inside the tiers: with
+a one-minute poll, channels with a message in the last hour are read every pass and the rest every 15 minutes, so
+about 10 to 15 `conversations.history` calls a minute (Tier 3 allows 50) of one page each, and `conversations.replies`
+only for threads with new replies (a few a minute). The limits per pass (40 channels, 40 swept threads, 40 followed
+threads, 20 deletion checks) bound a pass at about 50 seconds of history and two minutes of thread reads at the tier
+spacing, which a busy morning or the first run reaches and a later pass finishes.
+
+**Subject (DEC-10, DEC-38, DEC-40).** In a public channel, `slack:<channel>:<thread ts>`: the thread's root `ts`, or
+the message's own when it is not in a thread. In a private channel, `slack:dm:<person>:<channel>:<thread ts>`, the
+person being `person.handle` without `@`. A `channel_message` at the top level with no replies when it was read is on
+its channel's day instead: `slack:<channel>:<YYYY-MM-DD>` in a public channel, `slack:dm:<person>:<channel>:<YYYY-MM-DD>`
+in a private one, the local day it was posted. A root with replies is its thread's subject, and every reply is on its
+root's thread subject. A root that gets its first reply after Beacon sent it stays on the day's thread; its replies
+open the thread's own. In a one-to-one or group direct message, one subject per conversation per local
 day: `slack:dm:<person>:<channel>:<YYYY-MM-DD>`, the day the message's thread root was posted, in the machine's time
 zone. So a day's top-level messages are one thread, and a reply in a thread stays on its root's subject, even on a
 later day. Before DEC-38 a direct message's subject ended in its thread's root `ts`, like a private channel's; threads
 opened that way keep it. Private channels use the same
 stem as direct messages, so one restriction (`slack:dm:*`) keeps them all private. A channel is public only when a
-read says so: `is_private: false` on a search match, or `conversations.info` for a configured channel. A channel no
+read says so: `is_private: false` on a search match, `conversations.info` for a channel the config names, or
+`users.conversations` for one found by `member`. A channel no
 read described, or any id that is not `C…`, is treated as private. **Key.** `slack:<channel>:<ts>`; the version is the
 message `ts`.
 
@@ -799,7 +859,8 @@ channels are held until Signal restricts `slack:dm:*`, exactly as Gmail's are he
 
 **Fields.** `channel` (id), `channel_type` (`im`, `mpim`, `private` or `channel`), `ts`, `thread_ts` (the root, when
 the message is a reply), `author` (user or bot id), `permalink` (Slack's, or built from the workspace address
-`auth.test` reports), `body` (the message text, only when a rule lists `body`), `title`, `channel_name` and
+`auth.test` reports), `reply_count` (a top-level message read from a channel's or group direct message's history: its
+replies when read, `0` for none), `body` (the message text, only when a rule lists `body`), `title`, `channel_name` and
 `author_name` (above). Rules match on the ids; the names are for reading. No state fields: Slack has no object state
 Beacon reads.
 

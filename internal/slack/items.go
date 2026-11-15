@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,9 +61,9 @@ func (s *Source) items(msgs pool, web string) ([]source.Item, int) {
 func (s *Source) typeOf(m *message) string {
 	if s.own(m) {
 		// The person's own message is an event in a conversation Beacon follows: a direct or group direct message, a
-		// private channel, a thread, or a configured channel. A top-level message elsewhere answers no ask Beacon
-		// recorded.
-		if m.personal() || m.inThread() || s.api.configured(m.channel) {
+		// private channel, a thread, or a channel the source reads. A top-level message elsewhere answers no ask
+		// Beacon recorded.
+		if m.personal() || m.inThread() || s.reads(m.channel) {
 			return TypeOwn
 		}
 		return ""
@@ -75,14 +76,19 @@ func (s *Source) typeOf(m *message) string {
 		return TypeDM
 	case m.followed && m.inThread() && tsLess(m.joined, m.ts):
 		return TypeThreadReply
-	case m.history && s.api.configured(m.channel) && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
+	case m.history && s.reads(m.channel) && !m.inThread() && reviewLink.MatchString(m.text) && reviewWording.MatchString(m.text):
 		return TypeReviewRequest
+	case s.reads(m.channel) && (m.inThread() || m.history):
+		// Anything else someone wrote in a channel the source reads: a top-level message read from its history, or a
+		// reply read from a thread.
+		return TypeChannel
 	}
 	return ""
 }
 
 // mentions reports whether a message names the person: directly, through a user group they are in, or, in a
-// configured channel only, through @here, @channel or @everyone.
+// channel the config names by id only, through @here, @channel or @everyone. In a channel read only because the person
+// is a member, a broadcast is a channel_message: it asks the room, not the person.
 func (s *Source) mentions(m *message) bool {
 	if strings.Contains(m.text, "<@"+s.user+">") || strings.Contains(m.text, "<@"+s.user+"|") {
 		return true
@@ -92,11 +98,11 @@ func (s *Source) mentions(m *message) bool {
 			return true
 		}
 	}
-	return s.api.configured(m.channel) && broadcast.MatchString(m.text)
+	return s.explicit[m.channel] && broadcast.MatchString(m.text)
 }
 
 // subject is a message's subject. A public channel's thread is slack:<channel>:<root ts>, and a private channel's
-// slack:dm:<person>:<channel>:<root ts>. A direct or group direct message has one subject per conversation per day:
+// slack:dm:<person>:<channel>:<root ts>; a channel's day is daySubject. A direct or group direct message has one subject per conversation per day:
 // slack:dm:<person>:<channel>:<YYYY-MM-DD>, the local day its root was posted, so a conversation's top-level messages
 // that day are one thread, and a reply in a thread stays on its root's subject.
 func (s *Source) subject(channel, root, kind string) string {
@@ -107,6 +113,15 @@ func (s *Source) subject(channel, root, kind string) string {
 		return PersonalStem + s.person + ":" + channel + ":" + s.day(root)
 	}
 	return PersonalStem + s.person + ":" + channel + ":" + root
+}
+
+// daySubject is the subject of a channel's top-level messages without replies on the local day of ts:
+// slack:<channel>:<YYYY-MM-DD> in a public channel, slack:dm:<person>:<channel>:<YYYY-MM-DD> in a private one.
+func (s *Source) daySubject(channel, ts, kind string) string {
+	if kind == kindChannel {
+		return "slack:" + channel + ":" + s.day(ts)
+	}
+	return PersonalStem + s.person + ":" + channel + ":" + s.day(ts)
 }
 
 // day is the local day of a Slack ts.
@@ -139,6 +154,8 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 	fields := map[string]string{"channel": m.channel, "channel_type": kind, "ts": m.ts, "author": author}
 	if m.inThread() {
 		fields["thread_ts"] = m.threadTS
+	} else if m.history {
+		fields["reply_count"] = strconv.Itoa(m.replyCount)
 	}
 	if p := permalink(m, web); p != "" {
 		fields["permalink"] = p
@@ -150,9 +167,14 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 		return source.Item{}, false
 	}
 	key, version := source.FitKey(s.name+":"+m.channel+":"+m.ts, m.ts)
+	subject := s.subject(m.channel, m.root(), kind)
+	if typ == TypeChannel && !m.inThread() && m.replyCount == 0 {
+		// A channel's top-level messages without replies are one thread a day; a thread with replies is its own.
+		subject = s.daySubject(m.channel, m.ts, kind)
+	}
 	it := source.Item{
 		Source:     s.name,
-		Subject:    s.subject(m.channel, m.root(), kind),
+		Subject:    subject,
 		Key:        key,
 		Type:       typ,
 		EventTitle: title(typ, m.inThread()),
@@ -333,6 +355,11 @@ func title(typ string, inThread bool) string {
 		return "Thread reply"
 	case TypeReviewRequest:
 		return "Review requested"
+	case TypeChannel:
+		if inThread {
+			return "Channel reply"
+		}
+		return "Channel message"
 	}
 	return ""
 }

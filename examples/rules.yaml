@@ -1,9 +1,10 @@
 # Starter rules for GitHub, Jira, Gmail, Calendar, Drive and Slack. Copy this file, replace YOUR_LOGIN with
 # your GitHub login, and point the config's rules key at it. Check it with: beacon rules check
 #
-# First match wins. An item no rule matches is never sent. Bodies are not listed: comment, review and
-# mail text, event descriptions, meeting notes and Slack messages stay on the machine unless you add
-# body to a rule, and Google sources do not even read them until a rule lists body. `title`,
+# First match wins. An item no rule matches is never sent. Bodies are listed only for Slack channel
+# messages (plain in public channels, sealed in private ones): comment, review and mail text, event
+# descriptions, meeting notes and direct messages stay on the machine unless you add body to a rule,
+# and Google sources do not even read them until a rule lists body. `title`,
 # `summary` and `subject` are the object's title, used as the thread title. The event title
 # describes the change (Opened, Reviewed: approved, Assigned to a name, New message, Response
 # needed, Mentioned) and is not one of these fields.
@@ -340,8 +341,36 @@ rules:
     priority: medium
     fields: [title, channel, channel_type, permalink, author, actor]
 
-  # Replies in threads you posted in or were mentioned in (thread_reply) and review requests in
-  # your configured channels (review_request) are not sent. To record thread replies without an
+  # Everything else someone wrote in a channel Beacon reads (the config's channels: its ids, or
+  # member for every channel you are in): channel_message, and review requests to the room
+  # (review_request). Recorded, never an ask. Top-level messages without replies are one thread a
+  # channel a day ("#eng · Thu 12 Nov"); a thread with replies is its own. Apps' messages were
+  # dropped above (slack-bots).
+  #
+  # A private channel is personal (slack:dm:…): its text is sealed for you and your agents, and
+  # waits until Signal restricts slack:dm:*.
+  - name: slack-channel-messages-private
+    match:
+      source: slack
+      type: {regex: 'channel_message|review_request'}
+      fields:
+        channel_type: private
+    tier: send
+    seal: owner+agents
+    fields: [title, channel, channel_type, thread_ts, reply_count, permalink, author, actor, body, references, author_name, channel_name]
+
+  # A public channel's text leaves plain. It is text everyone in the company can already read in
+  # Slack; once sent, every reader of Signal can read it too, and Signal cannot delete it.
+  - name: slack-channel-messages
+    match:
+      source: slack
+      type: {regex: 'channel_message|review_request'}
+      fields:
+        channel_type: channel
+    tier: send
+    fields: [title, channel, channel_type, thread_ts, reply_count, permalink, author, actor, body, references, author_name, channel_name]
+
+  # Replies in threads you posted in or were mentioned in (thread_reply) are not sent. To record thread replies without an
   # ask, and let someone else's reply close the mention in that thread, uncomment these once you
   # have seen what they hold (docs/sources.md, Slack, "Thread replies"):
   #

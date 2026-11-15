@@ -98,8 +98,62 @@ type Source struct {
 	// keychain as slack:<workspace>:<user>.
 	Workspace string `yaml:"workspace,omitempty"`
 	User      string `yaml:"user,omitempty"`
-	// Channels are Slack channel ids whose top-level messages a Slack source reads for review requests.
-	Channels []string `yaml:"channels,omitempty"`
+	// Channels are the Slack channels a Slack source reads: channel ids, and SlackMember for every channel the person
+	// is a member of. `channels: member` is the same as `channels: [member]`.
+	Channels SlackChannels `yaml:"channels,omitempty"`
+}
+
+// SlackMember in a Slack source's channels reads every public and private channel the person is a member of.
+const SlackMember = "member"
+
+// SlackChannels is a Slack source's channels: a list, or the single word member.
+type SlackChannels []string
+
+// UnmarshalYAML implements yaml.Unmarshaler: a scalar is a list of one.
+func (c *SlackChannels) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*c = SlackChannels{s}
+		return nil
+	}
+	var list []string
+	if err := n.Decode(&list); err != nil {
+		return err
+	}
+	*c = list
+	return nil
+}
+
+// MarshalYAML implements yaml.Marshaler: [member] is written as member.
+func (c SlackChannels) MarshalYAML() (any, error) {
+	if len(c) == 1 && c[0] == SlackMember {
+		return SlackMember, nil
+	}
+	return []string(c), nil
+}
+
+// Member reports whether the list holds member.
+func (c SlackChannels) Member() bool {
+	for _, v := range c {
+		if v == SlackMember {
+			return true
+		}
+	}
+	return false
+}
+
+// IDs are the channel ids the list names.
+func (c SlackChannels) IDs() []string {
+	var out []string
+	for _, v := range c {
+		if v != SlackMember {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // GoogleKinds are the source kinds that share the Google grant.
@@ -292,8 +346,8 @@ func (s Source) validateSlack(i int) []error {
 	}
 	seen := map[string]bool{}
 	for _, c := range s.Channels {
-		if !channelPattern.MatchString(c) {
-			errs = append(errs, fmt.Errorf("%s: channel %q is not a channel id (C…)", at, c))
+		if c != SlackMember && !channelPattern.MatchString(c) {
+			errs = append(errs, fmt.Errorf("%s: channel %q is not a channel id (C…) or member", at, c))
 		}
 		if seen[c] {
 			errs = append(errs, fmt.Errorf("%s: channel %q is listed twice", at, c))
