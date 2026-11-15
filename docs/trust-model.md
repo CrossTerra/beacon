@@ -33,7 +33,7 @@ same pull request.
    and not the object's title. It leaves with the event so a thread's events do not all read as the pull request,
    issue, mail or file title. It is built only from the change the source already recorded (who was requested when
    it is not you, the review state, a short commit sha, the check conclusion, a pull request's state (merged or closed), the assignee's display name when it is not you, the status names, the due
-   date; for Google, the item type and the person's calendar response; for Slack, the item type) and it never includes
+   date; for Google, the item type, the person's calendar response and whether the event is cancelled; for Slack, the item type) and it never includes
    comment, review, mail or message text, a mail subject, an event summary, a file name or a channel name. The object's title leaves only when a rule lists
    `title`, `summary` or `subject`, as the thread title. Slack's `title` is the conversation's: who and where, built
    only from display names, the channel's name and, for a direct message's day, that day ("DM with Dana Scully · Thu

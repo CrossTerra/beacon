@@ -22,8 +22,9 @@ import (
 // summary that more than one event in the window has). meet_link is the meeting's video link.
 var CalendarFields = []string{"title", "summary", "start", "end", "organizer", "attendees", "attendee_addresses", "response", "link", "meet_link", "body"}
 
-// CalendarStateFields is Calendar's state field list (DEC-28).
-var CalendarStateFields = []string{"status", "start", "end", "response"}
+// CalendarStateFields is Calendar's state field list (DEC-28). attendees is a count, as the field is; meet_link the
+// meeting's video link.
+var CalendarStateFields = []string{"status", "start", "end", "response", "attendees", "meet_link"}
 
 // Calendar item types (DEC-18).
 const (
@@ -33,6 +34,10 @@ const (
 	TypeResponseNeeded = "response_needed"
 	TypeResponded      = "responded"
 	TypeUpcoming       = "upcoming"
+	// TypeSnapshot is an event's state, written when the event enters the snapshot window and when that state changes,
+	// so Signal's latest snapshot of every meeting in the window is current. Beside a change it covers that change, and
+	// the runner sends it only when the change is not sent.
+	TypeSnapshot = "snapshot"
 )
 
 const (
@@ -40,6 +45,8 @@ const (
 	calendarWindow = 30 * 24 * time.Hour
 	// calendarFirst is how far ahead a first run emits events (DEC-23).
 	calendarFirst = 7 * 24 * time.Hour
+	// snapshotWindow is how far ahead every event has a current snapshot: one is written as an event enters it.
+	snapshotWindow = 7 * 24 * time.Hour
 )
 
 // Calendar reads the person's primary calendar.
@@ -110,6 +117,15 @@ type calSeen struct {
 	// events it should have seen.
 	Start string `json:"start,omitempty"`
 	End   string `json:"end,omitempty"`
+	// W is a hash of the state the last snapshot carried, or "" when the event has had none.
+	W string `json:"w,omitempty"`
+}
+
+// inWindow reports an event that has not ended and starts within the snapshot window.
+func (s calSeen) inWindow(now time.Time) bool {
+	start, err1 := parseTime(s.Start)
+	end, err2 := parseTime(s.End)
+	return err1 == nil && err2 == nil && end.After(now) && start.Before(now.Add(snapshotWindow))
 }
 
 type calTime struct {
@@ -224,6 +240,38 @@ func (e *calEvent) selfEmail() string {
 		return strings.ToLower(e.Creator.Email)
 	}
 	return ""
+}
+
+// state is the event's state snapshot (DEC-28), without empty values.
+func (e *calEvent) state() map[string]string {
+	st := map[string]string{
+		"status":    e.Status,
+		"start":     e.Start.String(),
+		"end":       e.End.String(),
+		"response":  e.response(),
+		"attendees": attendeeCount(e),
+		"meet_link": e.meetLink(),
+	}
+	for k, v := range st {
+		if v == "" {
+			delete(st, k)
+		}
+	}
+	return st
+}
+
+// stateHash is a hash of a state snapshot, so the cursor can tell a changed one without holding it.
+func stateHash(st map[string]string) string {
+	keys := make([]string, 0, len(st))
+	for k := range st {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := []string{"state"}
+	for _, k := range keys {
+		parts = append(parts, k, st[k])
+	}
+	return hash(parts...)
 }
 
 func hash(parts ...string) string {
@@ -371,6 +419,7 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	var items []source.Item
 	var pending []calPending
 	var times []time.Time
+	touched := map[string]bool{}
 	for i := range events {
 		e := &events[i]
 		if !idPattern.MatchString(e.ID) {
@@ -403,26 +452,49 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 			// A deleted instance can come without times. Keep it no longer than the window.
 			next.End = now.Add(calendarWindow).Format(time.RFC3339)
 		}
-		cur.Events[e.ID] = next
+		touched[e.ID] = true
 		var typ string
-		if first {
-			if e.Status == "cancelled" {
-				continue
-			}
-			if start := e.Start.at(tz); start.IsZero() || start.After(now.Add(calendarFirst)) {
-				continue
-			}
-			typ = TypeUpcoming
-			if e.response() == "needsAction" && !e.Organizer.Self {
-				typ = TypeResponseNeeded
-			}
-		} else {
+		switch {
+		case !first:
 			typ = changeType(e, prev, known, next, floor)
+		case e.Status == "cancelled":
+		default:
+			if start := e.Start.at(tz); !start.IsZero() && !start.After(now.Add(calendarFirst)) {
+				typ = TypeUpcoming
+				if e.response() == "needsAction" && !e.Organizer.Self {
+					typ = TypeResponseNeeded
+				}
+			}
 		}
-		if typ == "" {
+		// A snapshot when the event's state differs from the last one written, while it is in the window, or after it
+		// had one (so a meeting moved out of the window or into the past does not keep its old times). A cancelled
+		// event that never had one gets none.
+		next.W = prev.W
+		w := stateHash(e.state())
+		snap := w != prev.W && (next.inWindow(now) || prev.W != "") && !(next.C && prev.W == "")
+		if snap {
+			next.W = w
+		}
+		cur.Events[e.ID] = next
+		if typ == "" && !snap {
 			continue
 		}
-		pending = append(pending, calPending{e: e, typ: typ, prev: prev, known: known, next: next})
+		pending = append(pending, calPending{e: e, typ: typ, prev: prev, known: known, next: next, snap: snap})
+	}
+	if !first {
+		// An unchanged event that entered the window since the last pass is not in the list of changes. Read the
+		// window once for those, and only when there is one.
+		entered, err := c.entered(ctx, now, touched, cur.Events)
+		if err != nil {
+			return source.Collected{}, err
+		}
+		for i := range entered {
+			e := &entered[i]
+			s := cur.Events[e.ID]
+			s.W = stateHash(e.state())
+			cur.Events[e.ID] = s
+			pending = append(pending, calPending{e: e, prev: s, known: true, next: s, snap: true})
+		}
 	}
 	// A summary is repeated when more than one event Beacon knows in the window has it, this pass's included.
 	summaries := map[string]int{}
@@ -433,7 +505,17 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	}
 	for _, p := range pending {
 		dated := p.e.RecurringEventID != "" || summaries[p.next.S] > 1
-		items = append(items, c.item(p.e, p.typ, p.prev, p.known, p.next, tz, obs, dated))
+		covers := ""
+		if p.typ != "" {
+			it := c.item(p.e, p.typ, p.prev, p.known, p.next, tz, obs, dated)
+			items = append(items, it)
+			covers = it.Key
+		}
+		if p.snap {
+			it := c.item(p.e, TypeSnapshot, p.prev, p.known, p.next, tz, obs, dated)
+			it.Covers = covers
+			items = append(items, it)
+		}
 	}
 	for id, s := range cur.Events {
 		if end, err := parseTime(s.End); err == nil && end.Before(now.Add(-24*time.Hour)) {
@@ -457,13 +539,53 @@ func (c *Calendar) Collect(ctx context.Context, cursor []byte) (source.Collected
 	return source.Collected{Items: items, Next: data}, nil
 }
 
-// calPending is an event that yields an item this pass, before its title is known.
+// calPending is an event that yields items this pass, before its title is known: a change (typ, or "" for none), a
+// snapshot, or both.
 type calPending struct {
 	e     *calEvent
 	typ   string
 	prev  calSeen
 	known bool
 	next  calSeen
+	snap  bool
+}
+
+// entered reads the snapshot window for the events the cursor places in it that have never had a snapshot and that
+// this pass's list did not return: unchanged events that entered the window since they were fingerprinted. It reads
+// nothing when there are none. A cancelled one, or one the read does not return, is left alone.
+func (c *Calendar) entered(ctx context.Context, now time.Time, touched map[string]bool, known map[string]calSeen) ([]calEvent, error) {
+	want := map[string]bool{}
+	for id, s := range known {
+		if !touched[id] && s.W == "" && !s.C && s.inWindow(now) {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return nil, nil
+	}
+	fields := "items(" + eventFields(c.bodies) + "),nextPageToken,timeZone"
+	q := url.Values{
+		"singleEvents": {"true"},
+		"timeMin":      {now.Format(time.RFC3339)},
+		"timeMax":      {now.Add(snapshotWindow).Format(time.RFC3339)},
+		"maxResults":   {"250"},
+		"fields":       {fields},
+		"showDeleted":  {"true"},
+		"eventTypes":   keptEventTypes,
+	}
+	all, _, err := listEvents(ctx, &c.common, q)
+	if err != nil {
+		return nil, err
+	}
+	var out []calEvent
+	for _, e := range all {
+		if want[e.ID] && e.Status != "cancelled" && !skippedEventType(e.EventType) {
+			delete(want, e.ID)
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }
 
 // changeType is the one item an event yields this pass: a cancel, then a change of the person's response, then a
@@ -684,12 +806,7 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 			delete(fields, k)
 		}
 	}
-	state := map[string]string{"status": e.Status, "start": e.Start.String(), "end": e.End.String(), "response": resp}
-	for k, v := range state {
-		if v == "" {
-			delete(state, k)
-		}
-	}
+	state := e.state()
 	etag := strings.Trim(e.ETag, `"`)
 	if etag == "" || !idPattern.MatchString(etag) {
 		etag = hash(e.ETag, e.Updated)
@@ -704,7 +821,7 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 		Subject:    "calendar:" + c.person + ":" + e.ID,
 		Key:        key,
 		Type:       typ,
-		EventTitle: calendarTitle(typ, resp, known && prev.T != next.T),
+		EventTitle: calendarTitle(typ, resp, known && prev.T != next.T, e.Status == "cancelled"),
 		OccurredAt: at,
 		Fields:     fields,
 		Native:     opaque(e.ID),
@@ -731,6 +848,9 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 		organizer = ""
 	}
 	switch typ {
+	case TypeSnapshot:
+		// A state, not a change: no actor, not own, not addressed, and no due time to ask by.
+		it.DueAt = nil
 	case TypeResponded:
 		it.Own = true
 		if me := e.selfEmail(); me != "" {
@@ -757,7 +877,7 @@ func (c *Calendar) item(e *calEvent, typ string, prev calSeen, known bool, next 
 
 // calendarTitle describes the change from the item type and the person's response. It never uses the summary,
 // a name or the description.
-func calendarTitle(typ, resp string, moved bool) string {
+func calendarTitle(typ, resp string, moved, cancelled bool) string {
 	switch typ {
 	case TypeCreated:
 		return "Created"
@@ -778,6 +898,16 @@ func calendarTitle(typ, resp string, moved bool) string {
 		return "Responded"
 	case TypeUpcoming:
 		return "Upcoming"
+	case TypeSnapshot:
+		switch {
+		case cancelled:
+			return "State: cancelled"
+		case resp == "accepted", resp == "declined", resp == "tentative":
+			return "State: " + resp
+		case resp == "needsAction":
+			return "State: response needed"
+		}
+		return "State"
 	}
 	return ""
 }

@@ -25,8 +25,8 @@ One pass of `beacon run`:
    change of state (DEC-9). A `400` with no stored item is not a decision: Signal never stored it, so the same key
    is decided again and appended as a new attempt. A `409`, and anything Signal accepted, still blocks. A subject a
    seed file marks `never` is dropped before the rules file (DEC-24). `beacon outbox retry --rejected` re-sends a
-   refusal that still has its decided item, and does not touch a `409`. An item that `covers` another (a GitHub
-   `snapshot`) is decided after the rest of the pass, and skipped when the change it covers is sent or waiting to be.
+   refusal that still has its decided item, and does not touch a `409`. An item that `covers` another (a GitHub or
+   Calendar `snapshot`) is decided after the rest of the pass, and skipped when the change it covers is sent or waiting to be.
 3. **Decide.** The first rule that matches sets the tier. No match is `never` (DEC-3).
 4. **Record.** `never` adds the key and rule name to `dropped.jsonl`. `hold` adds the item to `held.jsonl`. `send`
    builds the request body with the projection and appends it to the outbox, with the listed fields, the event title,

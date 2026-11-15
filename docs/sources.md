@@ -147,7 +147,9 @@ or title on `opened`. `@login` does not match a longer login.
 
 **State.** `state` (`open`, `closed`, `merged`), `draft`, `head_sha`, `review_decision` (`approved`,
 `changes_requested`, `review_required`), `mergeable` (`true`, `false`, `unknown`), `checks` (`pass`, `fail`,
-`pending`, `none`), `requested_reviewers` (logins, comma-separated). `checks` is set when Beacon read check suites.
+`pending`, `none`), `requested_reviewers` (logins, comma-separated), `author` (the pull request's author as an
+identity, `github:user:<login>`, on every item including `snapshot`, so a reader of Signal's latest snapshot can tell
+the person's own pull requests from anyone else's). `checks` is set when Beacon read check suites.
 A failure, timeout, cancellation, or action required is `fail`; an incomplete suite is `pending`; success, neutral,
 and skipped are `pass`. A suite that is not complete, has no check runs (`latest_check_runs_count` 0), and was last
 updated 10 minutes or more before the pass is not counted: GitHub makes a suite for every installed app that listens
@@ -439,13 +441,31 @@ rather than read again on every full re-read.
 
 **Cursor.** The first server `Date` of the pass, as above, and for each event in the window a fingerprint: a hash of
 its summary, location, start, end and status, a hash of its start and end, a hash of its summary alone (to tell a
-repeated summary), the person's response, and whether it is cancelled. A cursor from before the summary hash is read
+repeated summary), the person's response, whether it is cancelled, and a hash of the state its last `snapshot`
+carried (none until it has had one). A cursor from before the summary hash is read
 once over the whole window for it; that read yields no items. The cursor holds hashes and response values, not event text. An entry is dropped a day after its event
 ends. A change of state is a change of the fingerprint or the response, so another attendee's response, which bumps
 the event's `updated` time, is not an event.
 
 **First run.** Events in the next 7 days: `response_needed` for an invitation the person has not answered, and
-`upcoming` for the rest. The rest of the 30-day window is fingerprinted and not emitted.
+`upcoming` for the rest, each with a `snapshot` beside it. The rest of the 30-day window is fingerprinted and not
+emitted.
+
+**Snapshots.** Every event that has not ended and starts in the next 7 days has a current snapshot in Signal, so a
+reader can list the person's meetings in the next 24 hours from Signal alone. A pass yields a `snapshot` for an event
+when its state (below) differs from the state its last snapshot carried, and either it is in those 7 days or it had a
+snapshot before (so a meeting moved out of the window, into the past or cancelled does not keep its old times). A
+cancelled event that never had one gets none. Beside a change item it covers that change
+([`events.md`](events.md#items)): Beacon does not send it when the change is sent or waiting to be sent, and reports it
+as skipped (`its change is sent`); a held, dropped or refused change does not stop it. An event that enters the 7 days
+unchanged is not in the list of changes, so when the cursor places an event in the 7 days that has had no snapshot and
+the pass did not see it, the pass reads the 7 days once (no `updatedMin`, with deleted events) and writes a snapshot
+for each such event, covering nothing. A pass with no such event makes no extra read. The key holds the etag and the
+cursor the state's hash, so the same state is written once, a pass collected again yields the same key, and an
+unchanged event yields nothing on later passes. Another attendee's response is still not a change item, but when it
+changes the attendee count it changes the state, so it yields a snapshot alone. A snapshot has no actor, is not own or
+addressed, and has no due time. A cursor from before snapshots has none for any event: its first pass writes one for
+each event in the next 7 days.
 
 **Not meetings.** Beacon skips events whose `eventType` is `workingLocation`, `outOfOffice`, `focusTime` or
 `birthday`. A working location is an all-day "Home" or "Office"; the others are blocks and birthdays. The list asks
@@ -462,6 +482,7 @@ fingerprinted. An all-day event of type `default` is kept. The field is the API'
 | `created` | An event Beacon has not seen, created since the window began. | Created |
 | `changed` | The summary, location, start, end or status changed. An event that enters the window already old, unseen, is `changed` once. | Rescheduled when the start or end changed, else Changed |
 | `upcoming` | First run only. | Upcoming |
+| `snapshot` | Beside any of the above in the snapshot window, or alone: see **Snapshots**. Not counted as the event's one item. | State: cancelled, State: accepted (declined, tentative), State: response needed, or State |
 
 Calendar does not say who changed an event. An own act closes the person's asks, so an item is own only when it is
 provably theirs: `responded`, and `created` for an event whose creator is the person's account. A change or a
@@ -482,9 +503,34 @@ DEC-37), `response` (the person's: `needsAction`, `accepted`, `declined`, `tenta
 it and are not listed), `link`, `meet_link` (the video link: Meet's `hangoutLink`, else the conference's video entry
 point, such as a Zoom link; only an `https` link), `body` (the description, only when a sealed rule lists it).
 
-**State.** `status` (`confirmed`, `tentative`, `cancelled`), `start`, `end`, `response`.
+**State.** `status` (`confirmed`, `tentative`, `cancelled`), `start`, `end`, `response`, `attendees` (how many are
+listed), `meet_link`, each as the field of the same name.
 
-**Due.** `due_at` is the start; an all-day event's is midnight in the calendar's time zone (DEC-21).
+**Due.** `due_at` is the start; an all-day event's is midnight in the calendar's time zone (DEC-21). A `snapshot` has
+none.
+
+**Reading the next 24 hours from Signal.** Signal does not filter on snapshot fields (Signal 12.01), so a reader lists
+the person's calendar subjects with their latest snapshots and filters them itself. `GET /api/state/stale` lists the
+subjects under a stem whose latest snapshot was observed more than `age` seconds ago; with `age=1` that is every
+calendar subject but one written in the last second:
+
+```
+GET /api/state/stale?prefix=calendar:<handle>:*&age=1&limit=100
+GET /api/state/stale?prefix=calendar:<handle>:*&age=1&limit=100&cursor=<next_cursor>   (until next_cursor is null)
+```
+
+The answer is `{ data, next_cursor }`; each row is `{ subject, thread_id, state, refresh_requested }`, and subjects
+with no snapshot (`state` null) come first, then the oldest snapshot first, so the meetings in the window are at the
+end. Keep a row when `state.fields.status` is not `cancelled`, `state.fields.end` is after now, and
+`state.fields.start` is before now plus 24 hours (`start` and `end` are RFC 3339 in UTC, or a date for an all-day
+event, which starts at midnight in the calendar's time zone); skip `response: declined` when declined meetings are not
+wanted. `state.observed_at` says how fresh each is, and `state.event_id` names the event that carried it. A field is
+there only when the rule that sent the snapshot listed it, so the `snapshot` rule and the rules for the change items
+beside it should list `status`, `start`, `end`, `response`, `attendees` and `meet_link` in `state`. An event whose
+rules send nothing (a `never` rule that matches it before the `snapshot` rule) has no current snapshot. A sealed rule
+leaves only booleans in a snapshot's plain `state.fields` (Signal DEC-257), and a state read does not open the sealed
+rest: for a sealed calendar rule, read each row's event (`GET /api/events/{state.event_id}`), which Signal opens for
+the person and their agents.
 
 ### Drive
 

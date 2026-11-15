@@ -62,7 +62,7 @@ Signal, without handing those services' credentials or unfiltered content to any
 | GitHub | pull request opened, closed, merged, marked ready; review requested or removed; review submitted (state and commit); new head commit on a pull request the person reviewed; check suite conclusion changed on the person's own pull request; comment by someone else; the person's own review or comment; the pull request's state beside a merge, close or check conclusion (`snapshot`, sent only when that change is not) | `updated_at` plus the change's own id |
 | Jira | assigned or unassigned; status transition; comment by someone else; mention; due date changed; the person's own transition or comment | changelog id or comment id |
 | Gmail | new message in a thread (from someone else, or sent by the person); starred | message id |
-| Calendar | created, changed or cancelled; the person's response needed; the person's response changed | event `updated` and `etag` |
+| Calendar | created, changed or cancelled; the person's response needed; the person's response changed; the event's state as it enters the next 7 days, and when that state changes (`snapshot`, sent only when the change beside it is not) | event `updated` and `etag` |
 | Drive | comment or reply that mentions the person or is assigned to them; the person's own comment, reply or resolve; meeting notes created for a meeting the person attended | comment id, reply id, file id |
 | Slack | direct message; mention; reply in a thread the person posted in; the person's own message in a followed conversation | message `ts` |
 | Agent sessions | started, finished, failed, waiting for input | session id plus state |
