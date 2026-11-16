@@ -242,6 +242,25 @@ func LimitOf(err error) *RateLimit {
 	return nil
 }
 
+// ScopeError is ErrScope with the family of the path that was refused: a template such as
+// "repositories/{unlisted}/issues/{n}/timeline", built from fixed words. It never holds a URL, a query, a name or an
+// id. errors.Is(err, ErrScope) holds for it.
+type ScopeError struct{ Family string }
+
+func (e *ScopeError) Error() string { return ErrScope.Error() }
+
+// Is makes a ScopeError match ErrScope.
+func (e *ScopeError) Is(target error) bool { return target == ErrScope }
+
+// ScopeFamily returns the refused path family an error carries, or "".
+func ScopeFamily(err error) string {
+	var se *ScopeError
+	if errors.As(err, &se) {
+		return se.Family
+	}
+	return ""
+}
+
 // A source returns these when a pass must not move the cursor. Their text is fixed: it names no item, token or URL.
 var (
 	// ErrRateLimited means the API's rate limit ended the pass. The caller resumes from the committed cursor.

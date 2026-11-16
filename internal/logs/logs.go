@@ -158,6 +158,17 @@ func RetryAfter(d time.Duration) Attr {
 	return Attr{slog.Int64("retry_after", s)}
 }
 
+// Family is the family of a request path a source's scope refused, as a template of fixed words and placeholders.
+// Anything else is logged as "other", so a source cannot put a URL, a name or an id in the log through it.
+func Family(f string) Attr {
+	if !family.MatchString(f) {
+		f = "other"
+	}
+	return Attr{slog.String("family", f)}
+}
+
+var family = regexp.MustCompile(`^[a-z][a-z_/{}-]{0,119}$`)
+
 // Why is a failure's reason code.
 func Why(r Reason) Attr { return Attr{slog.String("reason", string(r))} }
 

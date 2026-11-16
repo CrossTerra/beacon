@@ -294,7 +294,11 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			if reason == "" || reason == logs.ReasonInternal {
 				reason = logs.ReasonSource
 			}
-			r.Log.Log(logs.CollectFailed, logs.Source(s.Name()), logs.Why(reason))
+			attrs := []logs.Attr{logs.Source(s.Name()), logs.Why(reason)}
+			if fam := source.ScopeFamily(err); reason == logs.ReasonScope && fam != "" {
+				attrs = append(attrs, logs.Family(fam))
+			}
+			r.Log.Log(logs.CollectFailed, attrs...)
 			failed = append(failed, SourceFailure{Name: s.Name(), Reason: reason})
 			commit = false
 		}

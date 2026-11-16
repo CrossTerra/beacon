@@ -70,6 +70,11 @@ none was named) and, for Gmail, the units Beacon spent in the last minute. The a
 
 **Scope.** `repos`: `owner/name` or `owner/*`. Nothing outside them is requested. `owner/*` is searched as the
 owner's user or organization, and a result from any other repository is not fetched.
+GitHub's `Link` header names a later page of a repository resource by the repository's numeric id
+(`/repositories/<id>/...`). That form is followed only for a pull request's timeline, reviews, review comments and
+check suites, and only for an id GitHub gave, earlier in the same pass, as the base repository of a pull request read
+from a configured repository under that same name. Any other id or path is refused before it is sent; the log names
+the refused path's family (`collect_failed`, `scope_denied`, `family`).
 
 **Each pass.** Pull requests in the configured repositories updated since 15 minutes before the cursor, through the
 search API. The qualifier is `updated:>=` with an RFC3339 timestamp, one repository qualifier per query (an OR of

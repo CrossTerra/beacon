@@ -288,7 +288,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | Event | When |
 | --- | --- |
 | `run_started`, `run_finished` | Each pass. |
-| `collected`, `collect_failed`, `item_invalid` | Per source. `item_invalid` is a count of dropped items and the reason `item_invalid`. |
+| `collected`, `collect_failed`, `item_invalid` | Per source. `item_invalid` is a count of dropped items and the reason `item_invalid`. A GitHub `collect_failed` with `scope_denied` also has `family`: the refused path as a template of GitHub API words and placeholders (`repositories/{unlisted}/issues/{n}/timeline`, `repos/{owner}/{name}/contents/{x}`, `host`), never the URL, a query, a name or an id. |
 | `decided` | Counts per tier. |
 | `project_failed` | A count of items a send or hold rule matched that could not be built, with the reason `project_failed`. The cursor still moves. |
 | `dry_run` | A dry run ended without sending. |
