@@ -97,7 +97,11 @@ type pull struct {
 	Closed    string  `json:"closed_at"`
 	Mergeable *bool   `json:"mergeable"`
 	Base      *struct {
-		Ref string `json:"ref"`
+		Ref  string `json:"ref"`
+		Repo *struct {
+			ID       int64  `json:"id"`
+			FullName string `json:"full_name"`
+		} `json:"repo"`
 	} `json:"base"`
 	Head *struct {
 		Ref string `json:"ref"`

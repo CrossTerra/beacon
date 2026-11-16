@@ -138,6 +138,7 @@ func (s *Source) Collect(ctx context.Context, cursor []byte) (source.Collected, 
 		return source.Collected{}, err
 	}
 	s.clock.Reset()
+	s.scope.forget()
 	first := len(cursor) == 0
 	var since time.Time
 	if !first {
@@ -507,6 +508,11 @@ func (s *Source) pull(ctx context.Context, secret keychain.Secret, h hit, login 
 		return nil, errors.New("github: a pull request could not be read")
 	}
 	pr.owner, pr.name = h.owner, h.name
+	// A later page of this pull request's timeline, reviews, comments or check suites is linked by the repository's
+	// numeric id. The id is trusted only when GitHub names this configured repository as the pull request's base.
+	if pr.Base != nil && pr.Base.Repo != nil {
+		s.scope.learn(pr.Base.Repo.ID, pr.Base.Repo.FullName, h.owner, h.name)
+	}
 	// First run is open pull requests the person wrote or was asked to review, not every open pull request
 	// in the repository (DEC-23).
 	if first && !strings.EqualFold(pr.author(), login) && !reviewRequested(pr, login, s.teams) {

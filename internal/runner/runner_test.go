@@ -792,6 +792,36 @@ func TestRestrictingStem(t *testing.T) {
 	}
 }
 
+// A scope refusal is logged with the family of the refused path, and nothing else from the request. A family that
+// is not a template of words and placeholders is logged as "other".
+func TestScopeFamilyIsLogged(t *testing.T) {
+	f := newFixture(t)
+	f.src.collect = func([]byte) (source.Collected, error) {
+		return source.Collected{}, fmt.Errorf("wrapped: %w", &source.ScopeError{Family: "repositories/{unlisted}/issues/{n}/timeline"})
+	}
+	r, done := f.runner(false, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	want := `"msg":"collect_failed","source":"fx","reason":"scope_denied","family":"repositories/{unlisted}/issues/{n}/timeline"`
+	if !strings.Contains(f.log.String(), want) {
+		t.Fatalf("log:\n%s", f.log.String())
+	}
+	f.log.Reset()
+	f.src.collect = func([]byte) (source.Collected, error) {
+		return source.Collected{}, &source.ScopeError{Family: "repositories/4242/issues/9/timeline?page=2"}
+	}
+	r, done = f.runner(false, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	if !strings.Contains(f.log.String(), `"reason":"scope_denied","family":"other"`) || strings.Contains(f.log.String(), "4242") {
+		t.Fatalf("log:\n%s", f.log.String())
+	}
+}
+
 // A rate limit is logged with what the API said: the status, its reason code, the Retry-After and the source's
 // own spend. A pause and a failed collect both log it. Nothing else from the answer reaches the log.
 func TestRateLimitIsLogged(t *testing.T) {
