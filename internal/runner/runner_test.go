@@ -820,6 +820,18 @@ func TestScopeFamilyIsLogged(t *testing.T) {
 	if !strings.Contains(f.log.String(), `"reason":"scope_denied","family":"other"`) || strings.Contains(f.log.String(), "4242") {
 		t.Fatalf("log:\n%s", f.log.String())
 	}
+	f.log.Reset()
+	f.src.collect = func([]byte) (source.Collected, error) {
+		return source.Collected{}, &source.ScopeError{Family: "repos/{owner}/{name}/pulls/{n}/requested_reviewers"}
+	}
+	r, done = f.runner(false, nil)
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done()
+	if !strings.Contains(f.log.String(), `"family":"repos/{owner}/{name}/pulls/{n}/requested_reviewers"`) {
+		t.Fatalf("log:\n%s", f.log.String())
+	}
 }
 
 // A rate limit is logged with what the API said: the status, its reason code, the Retry-After and the source's

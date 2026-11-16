@@ -167,7 +167,7 @@ func Family(f string) Attr {
 	return Attr{slog.String("family", f)}
 }
 
-var family = regexp.MustCompile(`^[a-z][a-z/{}-]{0,119}$`)
+var family = regexp.MustCompile(`^[a-z][a-z_/{}-]{0,119}$`)
 
 // Why is a failure's reason code.
 func Why(r Reason) Attr { return Attr{slog.String("reason", string(r))} }
