@@ -63,9 +63,12 @@ type Item struct {
 	// change itself is not sent. The runner decides it after the other items of the pass and skips it when the covered
 	// key is sent, or waiting to be sent.
 	Covers string `json:"covers,omitempty"`
-	// Native is the source's own opaque id for the message or object: a Gmail message id, a Slack channel id and ts,
-	// a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person. A
-	// sealed event carries it as metadata.native (DEC-31, Signal DEC-264).
+	// Native is the source's own opaque id for the message or object. An observation of an act carries it
+	// namespaced, {source}:{kind}:… (DEC-29, Signal DEC-344): github:merge:{sha}, github:comment:{id},
+	// github:review:{id}, slack:message:{channel}:{ts}, jira:changelog:{id}, jira:comment:{id},
+	// gmail:message:{api id}. A Drive file id or a calendar event id stays the bare opaque id. Never a Message-ID
+	// header, message text, or anything that names a domain or a person. It leaves as metadata.native, and a sealed
+	// event keeps it in the envelope (DEC-31, Signal DEC-264).
 	Native string `json:"native,omitempty"`
 	// Local is what the item gives the raise to owner (DEC-33, DEC-35). It is matched on the machine only: it is not
 	// a field, it is never projected, stored or logged.
@@ -293,7 +296,24 @@ var (
 	namePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	typePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`)
 	printable   = regexp.MustCompile(`^[\x21-\x7e]{1,200}$`)
+	// Signal matches an observation only when native is {source}:{kind}:…, source and kind lowercase, and the rest
+	// has no whitespace and no @ (Signal DEC-344, DEC-264).
+	namespacedNative = regexp.MustCompile(`^[a-z0-9_-]+:[a-z0-9_-]+:[^\s@]+$`)
 )
+
+// ActNative is the source's own id for an act, {source}:{kind}:{id} (DEC-29, Signal DEC-344). It is empty when id
+// is missing or the result would not be an opaque id of 1 to 200 printable characters without whitespace or @, so
+// a bad id is omitted rather than dropping the item. It never carries content: callers pass an id, not text.
+func ActNative(sourceName, kind, id string) string {
+	if sourceName == "" || kind == "" || id == "" {
+		return ""
+	}
+	native := sourceName + ":" + kind + ":" + id
+	if !namespacedNative.MatchString(native) || !printable.MatchString(native) {
+		return ""
+	}
+	return native
+}
 
 // ValidName reports whether s can be a source name.
 func ValidName(s string) bool { return namePattern.MatchString(s) }

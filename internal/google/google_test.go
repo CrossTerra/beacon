@@ -173,11 +173,16 @@ func TestGmailEveryItem(t *testing.T) {
 	if star.Own || star.Actor != "" || star.Addressed {
 		t.Fatalf("starred %+v", star)
 	}
+	// The API id, never the RFC Message-ID. A star is not the message act, so it keeps the opaque id.
+	if recv.Native != "gmail:message:m1" || sent.Native != "gmail:message:m2" || recv.Subject != "gmail:winton:thread:t1" ||
+		strings.Contains(recv.Native, "@") || strings.Contains(recv.Native, "budget.review") || star.Native != "m1" {
+		t.Fatalf("natives recv %q sent %q star %q", recv.Native, sent.Native, star.Native)
+	}
 	_, body, err := project.Project(project.Input{Item: recv, Rule: send(t, "rules:\n  - name: t\n    match: {}\n    tier: send\n    fields: [subject, from]\n"), Person: project.Person{Handle: "@winton"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBody := `{"subject":"gmail:winton:thread:t1","type":"gmail.received","key":"gmail:t1:m1","occurred_at":"2026-11-08T10:00:00.000Z","title":"New message","open":{"title":"Budget review"},"metadata":{"fields":{"from":"dana@example.com","subject":"Budget review"}}}`
+	wantBody := `{"subject":"gmail:winton:thread:t1","type":"gmail.received","key":"gmail:t1:m1","occurred_at":"2026-11-08T10:00:00.000Z","title":"New message","open":{"title":"Budget review"},"metadata":{"fields":{"from":"dana@example.com","subject":"Budget review"},"native":"gmail:message:m1"}}`
 	if string(body) != wantBody {
 		t.Fatalf("got  %s\nwant %s", body, wantBody)
 	}
@@ -1367,7 +1372,8 @@ func TestSealFields(t *testing.T) {
 	if m["gmail:t2:m3"].Fields["bulk"] != "true" || m["gmail:t4:m5"].Fields["bulk"] != "true" {
 		t.Errorf("bulk: list header %q, category %q", m["gmail:t2:m3"].Fields["bulk"], m["gmail:t4:m5"].Fields["bulk"])
 	}
-	if recv.Native != "m1" || recv.Local == nil || recv.Local.Text["subject"] != "Budget review" ||
+	if recv.Native != "gmail:message:m1" || recv.Subject != "gmail:winton:thread:t1" || strings.Contains(recv.Native, "@") || strings.Contains(recv.Native, "Budget") ||
+		recv.Local == nil || recv.Local.Text["subject"] != "Budget review" ||
 		strings.Join(recv.Local.Addresses["thread_participants"], ",") != "dana@example.com,lee@example.com,ops@example.com,winton@example.com" ||
 		strings.Join(recv.Local.Labels, ",") != "INBOX,Projects,SENT,STARRED,UNREAD" {
 		t.Errorf("native and local %q %+v", recv.Native, recv.Local)

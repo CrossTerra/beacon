@@ -177,6 +177,63 @@ func TestEventTitleShapes(t *testing.T) {
 	}
 }
 
+// A merge's native is the merge commit sha already on the event or the pull request. Without one, the item is
+// still recorded and native is empty. The subject stays as GitHub named the repository; Signal lowercases github
+// subjects when it compares them.
+func TestMergeNative(t *testing.T) {
+	at := "2026-11-05T00:00:00Z"
+	base := func(sha, commitID, mergeSHA string) buildInput {
+		return buildInput{
+			Name: "github", Login: "winton", Since: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+			Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),
+			PR: pull{ID: 1, Number: 9, owner: "Acme", name: "App", Title: "Keep it", HTMLURL: "https://github.com/Acme/App/pull/9",
+				Merged: true, User: &ghUser{Login: "winton"}, MergeCommitSHA: mergeSHA},
+			Timeline: []timelineEvent{{ID: "15", Event: "merged", Actor: &ghUser{Login: "winton"}, SHA: sha, CommitID: commitID, CreatedAt: at}},
+		}
+	}
+	items, err := build(base("", "ABC9DEF", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var merged source.Item
+	for _, it := range items {
+		if it.Type == TypeMerged {
+			merged = it
+		}
+		if it.Type == TypeSnapshot && it.Native != "" {
+			t.Fatalf("snapshot carried a native %q", it.Native)
+		}
+	}
+	if merged.Native != "github:merge:abc9def" || merged.Subject != "github:pr:Acme/App#9" || strings.Contains(merged.Native, "Keep") {
+		t.Fatalf("commit_id %q on %q", merged.Native, merged.Subject)
+	}
+	items, err = build(base("", "", "from-pr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged = source.Item{}
+	for _, it := range items {
+		if it.Type == TypeMerged {
+			merged = it
+		}
+	}
+	if merged.Native != "github:merge:from-pr" {
+		t.Fatalf("pull request sha %q", merged.Native)
+	}
+	items, err = build(base("", "", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Type == TypeMerged && it.Native != "" {
+			t.Fatalf("invented %q", it.Native)
+		}
+	}
+	if got := source.ActNative("github", "comment", "has @"); got != "" {
+		t.Fatalf("comment id with @ left as %q", got)
+	}
+}
+
 func TestPushIgnoresCommitTime(t *testing.T) {
 	in := buildInput{
 		Name: "github", Login: "winton", Observed: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC),

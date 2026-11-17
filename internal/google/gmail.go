@@ -904,7 +904,9 @@ func (g *Gmail) item(t *gmailThread, r ref, me string, labels map[string]string)
 		State:      state,
 		ObservedAt: &obs,
 		Version:    version,
-		Native:     opaque(m.ID),
+		// A message is gmail:message:{api id}. The API id, never the RFC Message-ID. A star is not that act and
+		// keeps the opaque id, which Signal does not match.
+		Native: gmailNative(typ, m.ID),
 		// The raise matches the whole thread: its subject, who is in it, and its labels (DEC-33).
 		Local: &source.Local{
 			Text:      map[string]string{"subject": subject},
@@ -953,6 +955,16 @@ func (g *Gmail) threadState(live []*gmailMessage, labels map[string]string) map[
 }
 
 // gmailTitle describes the change. It never uses the subject, a name or the body.
+// gmailNative is the namespaced id of a received or sent message. Starred keeps the opaque API id: a star is
+// not the message, and the same native on the same thread would fold it into the send. The id is the API id.
+func gmailNative(typ, id string) string {
+	id = opaque(id)
+	if typ == TypeReceived || typ == TypeSent {
+		return source.ActNative("gmail", "message", id)
+	}
+	return id
+}
+
 func gmailTitle(typ string, reply bool) string {
 	switch typ {
 	case TypeReceived:

@@ -84,19 +84,22 @@ type ghUser struct {
 }
 
 type pull struct {
-	ID        int64   `json:"id"`
-	Number    int     `json:"number"`
-	Title     string  `json:"title"`
-	HTMLURL   string  `json:"html_url"`
-	State     string  `json:"state"`
-	Draft     bool    `json:"draft"`
-	Merged    bool    `json:"merged"`
-	User      *ghUser `json:"user"`
-	Body      string  `json:"body"`
-	Created   string  `json:"created_at"`
-	Closed    string  `json:"closed_at"`
-	Mergeable *bool   `json:"mergeable"`
-	Base      *struct {
+	ID      int64  `json:"id"`
+	Number  int    `json:"number"`
+	Title   string `json:"title"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Draft   bool   `json:"draft"`
+	Merged  bool   `json:"merged"`
+	// MergeCommitSHA is the pull request's merge commit, already in the pull request Beacon reads. A merged
+	// timeline event's commit_id is the same sha; either is the id an executor records, and neither is looked up.
+	MergeCommitSHA string  `json:"merge_commit_sha"`
+	User           *ghUser `json:"user"`
+	Body           string  `json:"body"`
+	Created        string  `json:"created_at"`
+	Closed         string  `json:"closed_at"`
+	Mergeable      *bool   `json:"mergeable"`
+	Base           *struct {
 		Ref  string `json:"ref"`
 		Repo *struct {
 			ID       int64  `json:"id"`
@@ -323,15 +326,18 @@ func build(in buildInput) ([]source.Item, error) {
 			err = add(in.item(TypeReviewRequestRemoved, "timeline:"+e.ID.String(), actor, at, "", "", false))
 		case "reviewed":
 			actor := loginOf(e.User)
-			err = add(in.item(TypeReviewed, "review:"+e.ID.String(), actor, at, strings.ToLower(e.State), e.Body, mentions(e.Body, in.Login)))
+			it, eerr := in.item(TypeReviewed, "review:"+e.ID.String(), actor, at, strings.ToLower(e.State), e.Body, mentions(e.Body, in.Login))
+			err = add(observed(it, eerr, "review", e.ID.String()))
 		case "commented":
 			actor := loginOf(e.User)
-			err = add(in.item(TypeCommented, "comment:"+e.ID.String(), actor, at, "", e.Body, mentions(e.Body, in.Login)))
+			it, eerr := in.item(TypeCommented, "comment:"+e.ID.String(), actor, at, "", e.Body, mentions(e.Body, in.Login))
+			err = add(observed(it, eerr, "comment", e.ID.String()))
 		case "committed", "head_ref_force_pushed":
 			// Commit author time is often older than the push. Do not filter pushes by that time; emit below.
 			continue
 		case "merged":
-			err = add(in.item(TypeMerged, "timeline:"+e.ID.String(), loginOf(e.Actor), at, "", "", false))
+			it, eerr := in.item(TypeMerged, "timeline:"+e.ID.String(), loginOf(e.Actor), at, "", "", false)
+			err = add(observed(it, eerr, "merge", mergeCommitSHA(e, pr)))
 		case "closed":
 			if merged {
 				continue
@@ -350,7 +356,8 @@ func build(in buildInput) ([]source.Item, error) {
 		if err != nil || at.Before(in.Since) {
 			continue
 		}
-		if err := add(in.item(TypeCommented, "review-comment:"+c.ID.String(), loginOf(c.User), at, "", c.Body, mentions(c.Body, in.Login))); err != nil {
+		it, err := in.item(TypeCommented, "review-comment:"+c.ID.String(), loginOf(c.User), at, "", c.Body, mentions(c.Body, in.Login))
+		if err := add(observed(it, err, "comment", c.ID.String())); err != nil {
 			return nil, err
 		}
 	}
@@ -530,6 +537,8 @@ func (in buildInput) itemRequested(typ, changeID, actorLogin string, at time.Tim
 	}
 	own := actorLogin != "" && strings.EqualFold(actorLogin, in.Login)
 	key, version := source.FitKey(fmt.Sprintf("github:%s/%s#%d:%s", pr.owner, pr.name, pr.Number, changeID), changeID)
+	// The subject is the pull request an agent's act names as its target. Signal compares github: subjects in
+	// lowercase (Signal DEC-242), so the casing GitHub returned still matches.
 	return source.Item{
 		Source:     in.Name,
 		Subject:    fmt.Sprintf("github:pr:%s/%s#%d", pr.owner, pr.name, pr.Number),
@@ -637,6 +646,29 @@ func checksWords(conclusion string) string {
 	default:
 		return conclusion
 	}
+}
+
+// observed sets the namespaced native on an item that observes an act (DEC-29). A missing or unsafe id leaves
+// native empty: Beacon does not invent one, and does not drop the item.
+func observed(it source.Item, err error, kind, id string) (source.Item, error) {
+	if err != nil {
+		return it, err
+	}
+	it.Native = source.ActNative("github", kind, id)
+	return it, nil
+}
+
+// mergeCommitSHA is the merge commit, from the timeline event Beacon already read, else the pull request's
+// merge_commit_sha from the same read. Empty when neither was returned. It is not looked up.
+func mergeCommitSHA(e timelineEvent, pr pull) string {
+	sha := strings.TrimSpace(e.CommitID)
+	if sha == "" && e.Event == "merged" {
+		sha = strings.TrimSpace(e.SHA)
+	}
+	if sha == "" {
+		sha = strings.TrimSpace(pr.MergeCommitSHA)
+	}
+	return strings.ToLower(sha)
 }
 
 func shortSHA(sha string) string {

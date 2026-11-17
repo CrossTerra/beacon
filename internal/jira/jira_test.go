@@ -159,7 +159,17 @@ func TestCollectEveryItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBody := `{"subject":"jira:ENG-1","type":"jira.transitioned","key":"jira:ENG-1:503","occurred_at":"2026-11-07T22:00:00.000Z","title":"To Do → In Progress","open":{"title":"Fix the gate"},"metadata":{"fields":{"from_status":"To Do","summary":"Fix the gate","to_status":"In Progress"}}}`
+	if tr.Native != "jira:changelog:503" || tr.Subject != "jira:ENG-1" || strings.Contains(tr.Native, "Progress") {
+		t.Fatalf("transition native %q", tr.Native)
+	}
+	// One history, two changes: the native is the changelog id, not the field suffix on the key.
+	if byKey["jira:ENG-1:508:status"].Native != "jira:changelog:508" || byKey["jira:ENG-1:508:assignee"].Native != "" {
+		t.Fatalf("shared changelog %q %q", byKey["jira:ENG-1:508:status"].Native, byKey["jira:ENG-1:508:assignee"].Native)
+	}
+	if comment.Native != "jira:comment:601" || strings.Contains(comment.Native, "please") || byKey["jira:ENG-1:501"].Native != "" {
+		t.Fatalf("comment native %q assigned %q", comment.Native, byKey["jira:ENG-1:501"].Native)
+	}
+	wantBody := `{"subject":"jira:ENG-1","type":"jira.transitioned","key":"jira:ENG-1:503","occurred_at":"2026-11-07T22:00:00.000Z","title":"To Do → In Progress","open":{"title":"Fix the gate"},"metadata":{"fields":{"from_status":"To Do","summary":"Fix the gate","to_status":"In Progress"},"native":"jira:changelog:503"}}`
 	if string(body) != wantBody {
 		t.Fatalf("got  %s\nwant %s", body, wantBody)
 	}

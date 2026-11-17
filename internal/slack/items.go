@@ -186,7 +186,9 @@ func (s *Source) item(m *message, typ, web string) (source.Item, bool) {
 		Fields:     fields,
 		References: references(m.text),
 		Version:    version,
-		Native:     m.channel + ":" + m.ts,
+		// The message an agent records as slack:message:{channel}:{ts}, on this item's subject. A deletion is not
+		// that act and keeps the opaque channel and ts, which Signal does not match.
+		Native: source.ActNative("slack", "message", m.channel+":"+m.ts),
 		// The text is read on the machine whether or not a rule sends it, and matched for the raise (DEC-33).
 		Local: &source.Local{Text: map[string]string{}},
 	}

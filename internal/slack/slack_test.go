@@ -723,7 +723,7 @@ func TestDeletedAsk(t *testing.T) {
 	m := byKey(t, second.Items)
 	d, ok := m["slack:D0DANA:1794132000.000100:deleted"]
 	if !ok || len(m) != 1 || d.Type != TypeDeleted || d.Subject != "slack:dm:winton:D0DANA:2026-11-08" || d.EventTitle != "Deleted" || d.Own || d.Actor != "" || d.Version != "deleted" ||
-		strings.Join(d.CloseOnly, ",") != "slack:D0DANA:1794132000.000100" {
+		strings.Join(d.CloseOnly, ",") != "slack:D0DANA:1794132000.000100" || strings.HasPrefix(d.Native, "slack:message:") {
 		t.Fatalf("got %+v", second.Items)
 	}
 	if strings.Contains(string(second.Next), "D0DANA/1794132000.000100") {
@@ -811,8 +811,8 @@ func TestBroadcastOnlyInConfiguredChannels(t *testing.T) {
 	}
 }
 
-// The raise reads a message's text, and its thread root's, whether or not a rule sends them; the native id is the
-// channel and ts (DEC-31, DEC-33).
+// The raise reads a message's text, and its thread root's, whether or not a rule sends them. A message's native id
+// is slack:message:{channel}:{ts} (DEC-29, DEC-31, DEC-33).
 func TestLocalTextAndNative(t *testing.T) {
 	srv := slacktest.New(t)
 	s, _ := newSource(t, srv)
@@ -825,14 +825,39 @@ func TestLocalTextAndNative(t *testing.T) {
 	if _, ok := dm.Fields["body"]; ok {
 		t.Fatal("a body without a rule listing it")
 	}
-	if dm.Local == nil || dm.Local.Text["body"] != "Can you check the deploy?" || dm.Native != "D0DANA:1794132000.000100" {
+	if dm.Local == nil || dm.Local.Text["body"] != "Can you check the deploy?" || dm.Native != "slack:message:D0DANA:1794132000.000100" {
 		t.Fatalf("dm %q %+v", dm.Native, dm.Local)
+	}
+	if strings.Contains(dm.Native, "deploy") || strings.Contains(dm.Native, "@") || strings.Contains(dm.Native, " ") {
+		t.Fatalf("dm native carries content %q", dm.Native)
 	}
 	reply := m["slack:C0ENG:1794134500.000750"]
 	if reply.Local.Text["body"] != "I'll handle it" || reply.Local.Text["thread_root"] != "<@U0WINTON> can you look at the alerts?" {
 		t.Fatalf("reply local %+v", reply.Local)
 	}
-	if strings.Contains(reply.Native, "@") {
-		t.Fatal("native holds @")
+	if reply.Native != "slack:message:C0ENG:1794134500.000750" || strings.Contains(reply.Native, "@") {
+		t.Fatalf("reply native %q", reply.Native)
+	}
+	// Every message item carries the namespaced id on its own subject. A deletion is not that act.
+	for _, it := range got.Items {
+		want := "slack:message:" + it.Fields["channel"] + ":" + it.Fields["ts"]
+		if it.Type == TypeDeleted {
+			if strings.HasPrefix(it.Native, "slack:message:") {
+				t.Fatalf("deletion matched as a message %q", it.Native)
+			}
+			continue
+		}
+		if it.Native != want || it.Subject == "" || strings.Contains(it.Native, " ") || strings.Contains(it.Native, "@") {
+			t.Fatalf("%s native %q subject %q", it.Type, it.Native, it.Subject)
+		}
+	}
+	for _, key := range []string{
+		"slack:D0DANA:1794133200.000300",   // own
+		"slack:C0ENG:1794133800.000400",    // mention
+		"slack:C0REVIEW:1794135600.001000", // channel message
+	} {
+		if m[key].Native == "" {
+			t.Fatalf("%s has no native", key)
+		}
 	}
 }
