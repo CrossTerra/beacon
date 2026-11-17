@@ -247,11 +247,26 @@ func finish(name, person string, iss issue, pending []emit, observed time.Time, 
 			State:      stateOf(iss),
 			ObservedAt: &obs,
 			Version:    version,
+			// The changelog id, not the field suffix the key uses when one history holds two changes. A comment's
+			// id, not the :comment the key adds. An assignment or a due-date change is not that act.
+			Native: actNative(e),
 		}
 		out = append(out, it)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// actNative is the source id of a transition or a comment (DEC-29). Other changelog rows are not those acts.
+func actNative(e emit) string {
+	switch e.typ {
+	case TypeTransitioned:
+		return source.ActNative("jira", "changelog", e.id)
+	case TypeCommented:
+		return source.ActNative("jira", "comment", e.id)
+	default:
+		return ""
+	}
 }
 
 // eventTitle describes the change. It uses the type and, when the change has them, the display name of an assignee

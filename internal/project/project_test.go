@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/rules"
+	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -56,6 +57,41 @@ func TestUnlistedFieldsNeverAppear(t *testing.T) {
 				t.Fatalf("fields %v: %s present=%v in %s", listed, f, got, data)
 			}
 		}
+	}
+}
+
+// An observation's native leaves on a plain event, and it is the id, not the body. A sealed event keeps it in
+// the envelope.
+func TestNativeLeavesPlain(t *testing.T) {
+	it := baseItem()
+	it.Type = "commented"
+	it.Native = "github:comment:77"
+	it.Fields["body"] = "SECRET-BODY please look"
+	b, data, err := Project(Input{Item: it, Rule: rule("body"), Person: person})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["native"] != "github:comment:77" || b.Sealed != nil {
+		t.Fatalf("plain native %+v", b.Metadata)
+	}
+	if strings.Contains(string(data), "please look") && strings.Contains(b.Metadata["native"].(string), "please") {
+		t.Fatal("native carried the body")
+	}
+	it.Source = "gmail"
+	it.Subject = "gmail:winton:thread:t1"
+	it.Native = "gmail:message:m1"
+	sealed, data, err := Project(Input{Item: it, Rule: &rules.Rule{Name: "r", Tier: rules.Send, Fields: []string{"body"}, Seal: "owner"}, Person: person, Level: seal.Owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Metadata["native"] != "gmail:message:m1" {
+		t.Fatalf("sealed envelope native %v", sealed.Metadata)
+	}
+	if sealed.Sealed == nil || sealed.Sealed.Metadata["native"] != nil {
+		t.Fatalf("native was sealed %+v", sealed.Sealed)
+	}
+	if strings.Count(string(data), "gmail:message:m1") != 1 {
+		t.Fatalf("native left more than once: %s", data)
 	}
 }
 

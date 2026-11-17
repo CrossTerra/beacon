@@ -24,7 +24,7 @@ Every source yields the same shape (`internal/source.Item`):
 | `version` | The source's version marker for this change: the last part of `key` (DEC-9). Required with `state`. |
 | `close_only` | Ask keys on the item's subject. When set, the item closes only those of them that are open, however its rule or own act would otherwise close. A Slack deletion names the ask the deleted message opened, so other asks in its thread stay open. The person's own message in a Slack direct message names the asks it answers on its day's subject, or its own key, which is never an ask, when it answers none. With `close_siblings_before` it narrows only the asks on the item's own subject. Kept in the stored decision. |
 | `covers` | The key of a change this item stands beside, from the same source: a GitHub `snapshot` covers its merge, close or check conclusion, and a Calendar `snapshot` the change of the event it stands beside (none when the event entered the window unchanged or only its state changed). The runner decides it after every other item of the pass and skips it, without recording it, when the covered key was decided `send` in this pass or is pending, sent or replayed in the outbox. |
-| `native` | The source's own opaque id for the message or object: a Gmail message id, a Slack channel id and `ts` (`C0ENG:1794133800.000400`), a Drive file id, a calendar event id. Never a Message-ID header or anything that names a domain or a person; an item whose `native` holds `@` is refused. A sealed event carries it as `metadata.native` (DEC-31). Kept in the stored decision. |
+| `native` | The source's own opaque id. An observation of an act carries it namespaced, `{source}:{kind}:…`, with no whitespace and no `@` (DEC-29, Signal DEC-344): `github:merge:{sha}`, `github:comment:{id}`, `github:review:{id}`, `slack:message:{channel}:{ts}`, `jira:changelog:{id}`, `jira:comment:{id}`, `gmail:message:{api id}`. A Drive file id and a calendar event id stay the bare opaque id. Never a Message-ID header, message text, or anything that names a domain or a person; an item whose `native` holds `@` is refused. It leaves as `metadata.native` on a plain event and on a sealed one, and sealing does not cover it (DEC-31). Kept in the stored decision. |
 | `close_siblings_before` | On an own act only, a decimal bound: it also closes an open ask on a sibling subject (one that differs from its own only in the last part) when that ask opened the subject (its key ends in that last part, so it is not a reply inside it) and that last part is less than the bound. Slack sets it to the `ts` of the person's top-level message in a direct or group direct message, for the asks recorded when each top-level message there was its own subject (before DEC-38). The subject must have at least four parts before the last, so the siblings are one conversation. It is kept in the stored decision, so a retry closes the same asks. |
 
 ## The request body
@@ -54,7 +54,7 @@ map keys are sorted, so the same item, rule and outbox state give the same bytes
 | `type` | Always: `<source>.<item type>`. |
 | `open` | Always (DEC-17): the event lands in the thread for its subject, opening it if needed. `open.title` is the object's title: the `title` field when the rule lists `title`, else the `summary` field when the rule lists `summary`, else the `subject` field (a mail thread's subject) when the rule lists `subject`. It is not a description of this change. Slack's `title` is the conversation's (`DM with Dana Scully · Thu 12 Nov`, `#eng: Bob Ross mentioned you`; [`sources.md`](sources.md#slack)). Signal uses it only when the write opens the thread. |
 | `title` | For GitHub, Jira, Gmail, Calendar, Drive and Slack, a short description of the change ([`sources.md`](sources.md)). It is not the object's title, it is not a source field, and it never includes comment, review, mail or message text. For a fixture without one, the `title` field when the rule lists it. |
-| `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. |
+| `body`, `metadata` | Only what the rule lists; see [`rules.md`](rules.md#fields). `metadata.actor` is never set on the person's own acts, whose identity leaves only as `by`. `metadata.native`, when the item has one, leaves whether or not a rule lists a field: it is the source's opaque id, not content. |
 | `by` | Only on the person's own acts, as `{"identity": person.identities[source]}`; omitted when none is configured (DEC-27). |
 | `to` | `[person.handle]` when the rule has `ask: me` and the item is not the person's own act. Never `me`: Signal reads `me` as the acting actor (DEC-27). |
 | `priority` | The rule's priority, with `to`; without one, the source's own (a Jira issue's), when it has one. |
@@ -67,8 +67,10 @@ and `version`. The listed fields are nested under `state.fields`. Signal's repla
 a retry of a key Signal already holds, with different bytes, is `409 idempotency_conflict`. A key Signal refused and
 did not store can be sent again with a corrected body.
 
-DEC-29 (one authoritative event per act, matched by `metadata.native`) needs Signal phase 12 and is not part of
-Phases 1 to 3: Beacon records every own act it is sent.
+DEC-29 is the namespaced `metadata.native` on an observation of a merge, comment, review, transition or message
+([`sources.md`](sources.md)). Beacon does not look the act up and does not drop the observation. Signal folds an
+observation that names the same subject and native as an act already recorded, in either order (Signal DEC-344,
+DEC-346). GitHub subjects are compared there in lowercase.
 
 Open asks are read from the outbox: bodies on the subject with `to` that are pending, sent or replayed, minus
 those any such body closes. Beacon writes every ask without `by`, so its integration actor is the asker; an own
@@ -91,7 +93,7 @@ encrypts `sealed` at rest; the rest is the envelope, fixed in code (DEC-31):
   "open": {"title": "Q4 planning"},
   "to": ["@winton"],
   "priority": "high",
-  "metadata": {"fields": {"subject": "Q4 planning"}, "native": "18c9"},
+  "metadata": {"fields": {"subject": "Q4 planning"}, "native": "gmail:message:18c9"},
   "state": {"fields": {"starred": false, "unread": true}, "observed_at": "2026-11-11T18:00:00.000Z", "version": "18c9"},
   "sealed": {
     "level": "owner+agents",

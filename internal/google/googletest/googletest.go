@@ -235,7 +235,7 @@ const (
 
 	ThreadT1 = `{"id":"t1","messages":[
   {"id":"m1","threadId":"t1","labelIds":["INBOX","UNREAD","STARRED","Label_1"],"internalDate":"1794132000000","payload":{"headers":[
-    {"name":"From","value":"Dana Lee <dana@example.com>"},{"name":"To","value":"Winton <winton@example.com>, ops@example.com"},{"name":"Cc","value":"Lee <LEE@example.com>"},{"name":"Subject","value":"Budget review"}]}},
+    {"name":"From","value":"Dana Lee <dana@example.com>"},{"name":"To","value":"Winton <winton@example.com>, ops@example.com"},{"name":"Cc","value":"Lee <LEE@example.com>"},{"name":"Subject","value":"Budget review"},{"name":"Message-ID","value":"<budget.review@mail.example>"}]}},
   {"id":"m2","threadId":"t1","labelIds":["SENT"],"internalDate":"1794133800000","payload":{"headers":[
     {"name":"From","value":"Winton <winton@example.com>"},{"name":"To","value":"dana@example.com"},{"name":"Subject","value":"Re: Budget review"}]}}
 ]}`

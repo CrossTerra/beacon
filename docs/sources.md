@@ -138,6 +138,19 @@ the lookback window, so history from before the first run is not emitted (DEC-23
 pass that sees the same head does not send twice. A key longer than 200 characters is shortened with a hash
 of the original, so it stays stable and is not dropped.
 
+**Native.** An observation of an act carries `metadata.native`, the source's own id, namespaced, on the pull
+request's subject (DEC-29). Signal compares `github:` subjects in lowercase, so the casing GitHub returned still
+matches an act that names the same pull request. Beacon sends only an id it already read. It does not look the act
+up, and an item with no id is still recorded.
+
+| Item | `native` |
+| --- | --- |
+| `merged` | `github:merge:{merge commit sha}`, from the timeline event's `commit_id` (or `sha`), else the pull request's `merge_commit_sha`. Empty when neither was returned. |
+| `commented` | `github:comment:{id}`, the issue comment's id or the review comment's id. |
+| `reviewed` | `github:review:{id}`, the review's id. |
+
+A close, a push, a check, a review request and a snapshot have no native. The id is never comment or review text.
+
 **Subject.** `github:pr:<owner>/<repo>#<n>`. **Key.** `github:<owner>/<repo>#<n>:<kind>:<id>`. The kind is `opened`
 (the pull request's id; the open has no timeline event), `timeline` (ready, review requested or removed, merged,
 closed), `review`, `comment` (an issue comment), `review-comment`, `push` (the commit sha),
@@ -214,6 +227,11 @@ a mention was added to. Keys and subjects are unchanged.
 
 **Addressed.** Assignment to the person; a comment or field change that mentions the person; a transition, by
 someone else, of an issue assigned to the person.
+
+**Native.** A transition carries `jira:changelog:{changelog id}` and a comment `jira:comment:{comment id}`, on
+`jira:<KEY>` (DEC-29). The changelog id is the history's id, not the field suffix the key adds when one history
+holds two changes. An assignment, a mention and a due-date change have no native. The id is never comment text.
+Beacon does not look the act up.
 
 **Subject.** `jira:<KEY>`. **Key.** `jira:<KEY>:<changelog id>` for a field change, and
 `jira:<KEY>:<comment id>:comment` for a comment. Comment ids and changelog ids are separate sequences and can
@@ -313,7 +331,8 @@ creator marked `self`. A mismatch is `identity_mismatch`, so a grant for another
 personal body leaves only sealed (DEC-32). Without one, Gmail does not fetch a message, Calendar does not ask for
 descriptions, and Drive asks for neither comment text nor notes or transcript text.
 
-**Sealing.** Each Google item carries its opaque `native` id (a Gmail message id, a calendar event id, a Drive file id)
+**Sealing.** A Gmail message carries `gmail:message:{api id}` (below). A star, a calendar event and a Drive file
+carry the opaque id (the API id, the event id, the file id). It stays in the envelope when the event is sealed.
 and, on the machine only, what the raise to `owner` reads (DEC-33, [`rules.md`](rules.md#sealed-rules)): Gmail's
 subject, body (when read), every label on the thread and every from, to and cc in the thread; Calendar's summary,
 description (when read), organiser and attendees; Drive's title and body, and for notes and transcripts their
@@ -412,6 +431,10 @@ reads and archiving are not events (DEC-18).
 
 **Subject.** `gmail:<person>:thread:<thread id>`. **Key.** `gmail:<thread id>:<message id>` for a message and
 `gmail:<thread id>:starred:<message id>` for a star. The version is the message id.
+
+**Native.** A received or sent message carries `gmail:message:{api id}` (DEC-29), the Gmail API id, never the RFC
+Message-ID. The subject is the person's mail thread. A star keeps the opaque API id and is not that act, so it does
+not fold into the message. Beacon does not look the act up.
 
 **Addressed.** The person's address is in To (not Cc). **Own.** `sent`, with `by`. `starred` has no actor and is not
 own: starring is a note to oneself, not an answer, and must not close an ask.
@@ -583,8 +606,8 @@ The version is the comment, reply or file id.
 (notes and transcripts; the addresses lowercased, sorted, joined with `, `; DEC-37), `body` (comment or reply text,
 or notes or transcript text; only when a sealed rule lists it). **State.** For comments: `resolved` (`true` or `false`), `assignee` (address).
 
-DEC-29 (one authoritative event per act) needs Signal phase 12 and is not built. Beacon records every change it is
-sent.
+Beacon records every change it is sent. Signal folds an observation that carries a namespaced `native` with an
+act that names the same subject and id (DEC-29). Beacon does not look the act up.
 
 ## Slack
 
@@ -873,7 +896,10 @@ Beacon reads.
 to find mentions, review wording and links, and to match `seal.owner` words, with the thread root's text when the pass
 read it (DEC-33); it leaves only as `body`, when a rule lists it. A body from a direct message, group direct message
 or private channel leaves only sealed (DEC-32); a public channel's may leave plain, and an item there that matches
-`seal.owner` is held as `sensitive_shared`. Each item's `native` id is `<channel>:<ts>`.
+`seal.owner` is held as `sensitive_shared`. A message item's `native` is `slack:message:{channel}:{ts}` (DEC-29),
+on that item's subject: an own message, a direct message, a mention, a thread reply, a review request and a channel
+message. It is the channel id and `ts`, never the text. A deletion keeps the opaque `<channel>:<ts>` and is not
+that act, so Signal does not fold it into the send. Beacon does not look the act up.
 
 **References (DEC-17).** A GitHub pull request link becomes `github:pr:<owner>/<repo>#<n>`, and a Jira link
 `https://<site>.atlassian.net/browse/KEY-1` becomes `jira:KEY-1`. They come from the text, and leave only when a rule

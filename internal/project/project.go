@@ -313,6 +313,9 @@ func Project(in Input) (*Body, []byte, error) {
 	if in.Truncated {
 		meta["truncated"] = true
 	}
+	// The source's opaque id leaves on every event that has one, not only a sealed one. Matching does not depend
+	// on a rule listing a field (DEC-29). An id with @ is omitted (DEC-31).
+	putNative(meta, it)
 	if len(meta) > 0 {
 		b.Metadata = meta
 	}
@@ -342,6 +345,15 @@ func Project(in Input) (*Body, []byte, error) {
 		return nil, nil, fmt.Errorf("project: request is %d bytes, over Signal's %d", len(data), requestMaxSize)
 	}
 	return b, data, nil
+}
+
+// putNative sets metadata.native when the item has an opaque id. An id with @ is omitted, never sealed and never
+// sent (DEC-31, Signal DEC-264). Act observations carry a namespaced id; sealing does not cover it.
+func putNative(meta map[string]any, it source.Item) {
+	if it.Native == "" || strings.Contains(it.Native, "@") {
+		return
+	}
+	meta["native"] = it.Native
 }
 
 // envelope sets who the event is by, whom it asks, and what it closes. They stay plain on a sealed event (DEC-31).

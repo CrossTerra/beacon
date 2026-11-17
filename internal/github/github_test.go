@@ -201,8 +201,25 @@ func TestCollectEveryItem(t *testing.T) {
 	if !rev.Own || rev.Fields["review_state"] != "changes_requested" {
 		t.Fatalf("own review %+v", rev)
 	}
-	if !byKey["github:acme/app#7:timeline:15"].Own || byKey["github:acme/app#7:timeline:15"].Type != TypeMerged {
+	merged := byKey["github:acme/app#7:timeline:15"]
+	if !merged.Own || merged.Type != TypeMerged {
 		t.Fatal("own merge")
+	}
+	if merged.Subject != "github:pr:acme/app#7" || merged.Native != "github:merge:6dcb09b5b57875f334f61aebed695e2e4193db5e" {
+		t.Fatalf("merge native %q on %q", merged.Native, merged.Subject)
+	}
+	if c13.Native != "github:comment:13" || c13.Subject != "github:pr:acme/app#7" || strings.Contains(c13.Native, "see") {
+		t.Fatalf("comment native %q", c13.Native)
+	}
+	if rev.Native != "github:review:23" || rev.Subject != "github:pr:acme/app#8" || strings.Contains(rev.Native, "fix") {
+		t.Fatalf("review native %q", rev.Native)
+	}
+	rc := byKey["github:acme/app#8:review-comment:77"]
+	if rc.Native != "github:comment:77" || strings.Contains(rc.Native, "nit") {
+		t.Fatalf("review comment native %q", rc.Native)
+	}
+	if byKey["github:acme/app#8:timeline:25"].Native != "" || byKey["github:acme/app#8:timeline:21"].Native != "" {
+		t.Fatal("a close or a review request is not an act id")
 	}
 	if !byKey["github:acme/app#8:timeline:25"].Own == false || byKey["github:acme/app#8:timeline:25"].Type != TypeClosed {
 		t.Fatal("close without merge")
@@ -608,7 +625,7 @@ const timeline7 = `[
   {"id": 13, "event": "commented", "user": {"login": "dana"}, "body": "see @winton", "created_at": "2026-11-02T01:00:00Z"},
   {"id": 14, "event": "commented", "user": {"login": "winton"}, "body": "done", "created_at": "2026-11-03T00:00:00Z"},
   {"sha": "aaa111", "event": "committed", "author": {"email": "winton@example.com", "date": "2026-10-01T00:00:00Z"}, "committer": {"email": "winton@example.com", "date": "2026-11-04T00:00:00Z"}},
-  {"id": 15, "event": "merged", "actor": {"login": "winton"}, "created_at": "2026-11-05T00:00:00Z"},
+  {"id": 15, "event": "merged", "actor": {"login": "winton"}, "commit_id": "6dcb09b5b57875f334f61aebed695e2e4193db5e", "created_at": "2026-11-05T00:00:00Z"},
   {"id": 16, "event": "closed", "actor": {"login": "winton"}, "created_at": "2026-11-05T00:00:01Z"}
 ]`
 

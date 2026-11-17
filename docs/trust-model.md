@@ -56,8 +56,8 @@ same pull request.
    the event title, the thread title when its field is not plain (`sealed.open.title`, Signal DEC-281), the body, who
    caused it (`actor`), and every field, state field and `references` the rule does
    not leave `plain` go in `sealed` (references are subjects; left plain, Signal relates threads through them, Signal
-   DEC-284); `metadata.native` is the source's opaque id, never a Message-ID or anything
-   with `@`. The local check (`seal.owner`, DEC-33), a meeting's level (DEC-35) and the subject floor (DEC-34) can
+   DEC-284); `metadata.native` is the source's opaque id, never a Message-ID, message text, or anything
+   with `@`. An observation of an act carries that id namespaced; sealing does not cover it (DEC-29). The local check (`seal.owner`, DEC-33), a meeting's level (DEC-35) and the subject floor (DEC-34) can
    only raise a level: they never lower or unseal one, add a field, or send an item a rule dropped. The log counts
    raises and never says why.
 4. **Local classifier by default.** The classifier runs on the machine. Using a hosted model is an explicit

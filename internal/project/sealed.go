@@ -131,9 +131,8 @@ func projectSealed(in Input) (*Body, []byte, error) {
 	if len(plainFields) > 0 {
 		meta["fields"] = plainFields
 	}
-	if it.Native != "" && !strings.Contains(it.Native, "@") {
-		meta["native"] = it.Native
-	}
+	// Native stays in the envelope. Sealing covers the parts listed today, not this id (DEC-31).
+	putNative(meta, it)
 	if len(plainRefs) > 0 {
 		meta["references"] = plainRefs
 	}
