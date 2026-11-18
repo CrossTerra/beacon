@@ -116,6 +116,8 @@ most half the lease period. Each source runs on its own loop, so a slow or faili
 | `calendar`, `drive` | `2m` |
 | `fixture` | `poll_interval` |
 
+A default longer than half the lease period is cut to half of it, so a pass renews the lease in time.
+
 The wait starts when a pass ends, so a source's passes are its pass time plus its interval apart. Each source's own
 rate limiting is unchanged: Slack spaces its calls by each method's tier and Gmail by its quota across passes, so a
 shorter interval cannot take a source over its API's limits; it only reads sooner. See

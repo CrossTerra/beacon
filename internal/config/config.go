@@ -119,12 +119,13 @@ var DefaultIntervals = map[string]time.Duration{
 const MinInterval = time.Second
 
 // SourceInterval is how long s's loop waits after a pass: its interval, else its kind's default, else poll_interval.
+// A kind's default is at most half the lease period, as a set interval must be, so a pass renews the lease in time.
 func (c *Config) SourceInterval(s Source) time.Duration {
 	if s.Interval > 0 {
 		return time.Duration(s.Interval)
 	}
 	if d, ok := DefaultIntervals[s.Kind]; ok {
-		return d
+		return min(d, c.LeasePeriod()/2)
 	}
 	return c.PollInterval()
 }

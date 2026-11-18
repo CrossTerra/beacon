@@ -109,6 +109,17 @@ sources:
 	if _, err := Parse(out); err != nil {
 		t.Fatal(err)
 	}
+	// With a one-minute lease, a default longer than half of it is cut to half; a set interval must already fit.
+	short, err := Parse([]byte(strings.Replace(strings.Replace(y, "interval: 5m", "interval: 20s", 1), "poll_interval: 45s", "poll_interval: 30s\nlease:\n  period: 1m", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := short.SourceInterval(Source{Kind: "calendar"}); got != 30*time.Second {
+		t.Fatalf("calendar under a 1m lease: %v", got)
+	}
+	if got := short.SourceInterval(Source{Kind: "slack"}); got != 15*time.Second {
+		t.Fatalf("slack under a 1m lease: %v", got)
+	}
 	for _, bad := range []string{"interval: 500ms", "interval: 8m", "interval: soon"} {
 		if _, err := Parse([]byte(strings.Replace(y, "interval: 5m", bad, 1))); err == nil {
 			t.Errorf("%s parsed", bad)

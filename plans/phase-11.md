@@ -24,7 +24,7 @@ A measurement over two days (915 passes) of the running agent:
 
 1. **A loop per source (DEC-41).** Each source makes a pass, waits its own interval, and makes the next. Defaults:
    Slack 15 s, Gmail 30 s, GitHub 60 s, Jira 60 s, Calendar and Drive 120 s; `sources[].interval` overrides, at least
-   1 s and at most half the lease period. A fixture keeps `poll_interval`, which also stays the base of the backoff
+   1 s and at most half the lease period; a default longer than that is cut to it. A fixture keeps `poll_interval`, which also stays the base of the backoff
    after a failure. A source's collect runs while other sources' passes decide and send; deciding, recording and
    sending is one pass at a time under one lock, and every pass reads the cursors and the acceptance again first. Each
    source's own rate limiting (Slack's per-method spacing, Gmail's quota budget, `Retry-After` holds) is unchanged and
