@@ -44,9 +44,32 @@ One pass of `beacon run`:
 
 A dry run does steps 1 to 3, prints each item's tier, rule and body, and writes nothing except `beacon run --first`,
 which records in `first.json` which sources completed that summary. It does not write a cursor, the outbox, the
-queue, or `pass.json`. It may contact source APIs to collect; it does not contact Signal. It reads the outbox, the
-hold queue and the cursor, so it shows what a send pass would do next. Without `--once` or `--first`, the pass
-repeats every `poll_interval`, and it still writes nothing.
+queue, `pass.json` or `coverage.json`. It may contact source APIs to collect; it does not contact Signal. It reads the
+outbox, the hold queue and the cursor, so it shows what a send pass would do next. Without `--once` or `--first`, the
+passes repeat on the source loops below, and a dry run still writes nothing.
+
+## Source loops
+
+`beacon run --once` makes one pass over every source in turn. The running agent instead runs each source on its own
+loop (DEC-41, `internal/schedule`): a source's pass is step 1 for that source alone (`runner.Gather`), then steps 2 to
+6 for what it collected (`runner.Process`), then a wait of the source's own interval before its next pass. Step 1
+touches nothing shared, so every source's collect runs at the same time as the others'. Steps 2 to 6 share the outbox,
+the hold queue, the cursors, the subject floor and the lease, so they run for one source at a time, under one lock, and
+read the cursors and the first-run acceptance again first. Step 6 sends every pending body, whichever source's pass
+decided it. A pass's thread retitles are of its own source's threads, since another source may be collecting.
+
+```
+slack    ──collect──┐ decide/record/send ┐ wait 15s ──collect──┐ decide/record/send ┐ wait 15s …
+gmail    ──collect──┼─────────┐ decide/record/send ┐ wait 30s ──collect──┼─ …
+github   ──────collect────────┼─────────────┐ decide/record/send ┐ wait 60s …
+                    one at a time, under the lock
+```
+
+The scheduler compares the wall clock with the monotonic clock every five seconds. A wall clock that moved 30 seconds
+or more further is a sleep: every loop makes a pass at once, and the sleep is logged and recorded as one, not as a
+long pass. A send loop then records each source's coverage (`internal/coverage`): locally in `coverage.json`, which
+`beacon status --coverage` prints, and in Signal while this instance holds the lease, as a heartbeat lease per source
+and a state snapshot when the coverage changes ([events](events.md#coverage)).
 
 ## Packages
 
@@ -66,9 +89,11 @@ repeats every `poll_interval`, and it still writes nothing.
 | `internal/project` | Builds the request body from an item and its rule. |
 | `internal/outbox` | The append-only record of every body, and each key's state. |
 | `internal/queue` | The hold queue and the record of dropped keys. |
-| `internal/signal` | The Signal client: `POST /api/events`, `GET /api/restrictions` when a personal source is enabled, and `GET /api/me` when `beacon key set` checks a key. Nothing else. |
+| `internal/signal` | The Signal client: `POST /api/events`, `POST /api/leases` (the send lease and the sources' heartbeats), `GET /api/restrictions` when a personal source is enabled, `GET /api/events/{id}` and `GET /api/threads/{id}` for a retitle, and `GET /api/me` when `beacon key set` checks a key. Nothing else. |
 | `internal/lease` | The send lease: a lease in Signal's lease API, else a claim event per period. |
-| `internal/runner` | One pass: collect, decide, record, send. The only code that hands item content to the client. |
+| `internal/runner` | One pass: collect, decide, record, send. `Gather` collects one source and touches nothing shared; `Process` decides, records and sends what it collected. The only code that hands item content to the client. |
+| `internal/schedule` | The source loops: each source's interval, the wake from sleep, one failing pass stopping them all. |
+| `internal/coverage` | Each source's coverage: `coverage.json`, `beacon status --coverage`, and the heartbeat leases and snapshots it sends to Signal through the outbox. No item content. |
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
 | `internal/service` | The per-user launchd agent: the plist, the last-pass record, log rotation. It does not read a credential and it does not send. |
@@ -92,7 +117,8 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `seed` | Imported seed lines (DEC-24) | No |
 | `slack-names-<source>.json` | Slack display names and channel names by id, with when each was read, for a day. Only when a rule lists `title`, `channel_name` or `author_name`. A dry run does not write it | Only as fields and titles a rule lists |
 | `retitled.json` | Subjects whose threads a send pass checked for a retitle and left alone, with a fixed reason (`not_opened`, `not_found`, `moved`, `renamed`, `same`, `unreadable`). No title | No |
-| `pass.json` | The last pass: time, outcome, whether this instance held the lease, and this instance's id when it did. A failed start records the reason here even when it did not send, and the failure streak that sets the backoff. Personal sources the pass withheld, with the prefix and a fixed reason. No item content. A successful dry run does not write it | No |
+| `pass.json` | The last pass (with the source loops, the last source's pass; a personal source another pass withheld stays listed until its own next pass): time, outcome, whether this instance held the lease, and this instance's id when it did. A failed start records the reason here even when it did not send, and the failure streak that sets the backoff. Personal sources the pass withheld, with the prefix and a fixed reason. No item content. A successful dry run does not write it | No |
+| `coverage.json` | Each source's coverage from the send loop: its interval, its last pass and how long the collect took, its last success, its last failure and reason code, how many passes in a row have failed, the last pass's cut and rate-limit flags, Slack's channel counts and oldest read, and the last sleep. Names, times, counts, flags and fixed codes only. A dry run and `--once` do not write it | As coverage snapshots ([events](events.md#coverage)) |
 | `service.leaf` | The SHA-256 of the signing certificate recorded by `beacon service install`. `beacon run` refuses a binary whose leaf does not match | No |
 | `service.stdout.log`, `service.stderr.log` | What the launchd agent prints. Standard error is the JSON log. Rotated by size, one generation kept | No |
 

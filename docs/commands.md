@@ -73,12 +73,77 @@ source error still has a config, so that record uses the state directory and the
 10-second throttle is on top of that wait, not instead of it. SIGTERM during the wait exits 0. SIGINT does not: the
 failure is still reported. `--once` and `--first` do not wait.
 
-`--once` makes one pass and exits. `--first` does too. Without either, `run` makes a pass every `poll_interval`
-until interrupted, in dry-run and in send mode. A dry-run loop still writes nothing. The log goes to standard error.
+`--once` makes one pass over every source, one after another, and exits. `--first` does too. Without either, `run`
+runs each source on its own loop until interrupted, in dry-run and in send mode (DEC-41): a source makes a pass, waits
+its own `interval` ([configuration](configuration.md#sources): Slack 15 seconds, Gmail 30, GitHub and Jira a minute,
+Calendar and Drive two), and makes the next. Every source makes its first pass at once when the loop starts. A source
+that is slow, rate limited or failing delays no other: its collect runs while other sources' passes decide and send.
+Deciding, recording and sending is one source's pass at a time, since every pass shares the outbox, the hold queue,
+the cursors and the lease, and each send pass sends every pending body, whichever source decided it. Each source pass
+prints its own report, reads the cursors and the first-run acceptance again, reads Signal's restricted prefixes
+(twice, as any send pass does), and, in send mode, writes `pass.json`. A pass that fails the run (a refused key, a
+refused lease, a state file) stops every loop, after the passes already deciding finish, and the run fails as above.
+With no source configured, one loop makes a pass every `poll_interval`: it sends what is pending and keeps the lease.
+A dry-run loop still writes nothing. The log goes to standard error.
 
-On SIGTERM the poll loop finishes the send already in progress, records it, and exits 0 without starting another
-send or another pass. That is the stop launchd uses. A lease renewal already underway finishes; no further event
-send starts after it. SIGINT still cancels the in-flight request. `beacon run` refuses to start as root.
+When the machine wakes from sleep, every source makes a pass at once. Beacon tells a sleep from a long pass by its two
+clocks: the wall clock runs on while the machine sleeps and the monotonic clock does not, so when the wall clock has
+moved 30 seconds or more further than the monotonic clock between two checks (every 5 seconds), the machine slept for
+the difference. The log says `woke` with how long, a send loop records the sleep in `coverage.json`, and a pass's
+time (`collected` `ms`) is monotonic, so a pass the sleep interrupted does not look long. A pass right after a wake
+that fails (the network may not be up yet) is tried again 10 seconds later, not a whole interval later. A wall clock
+set forward by 30 seconds or more also reads as a wake; it only starts the passes early.
+
+A send loop records each source's coverage after its pass, in `coverage.json`, and reports it to Signal while this
+instance holds the lease (DEC-42): a heartbeat lease per source, renewed after a pass that collected, and a coverage
+snapshot when the source's coverage changes. See [`beacon status`](#beacon-status) and
+[events](events.md#coverage). `--once` does neither.
+
+On SIGTERM every loop finishes the pass it is making (the send already in progress is recorded), and the run exits 0
+without starting another send or another pass. That is the stop launchd uses. A lease renewal already underway
+finishes; no further event send, coverage snapshot or heartbeat starts after it. SIGINT still cancels the in-flight
+request. `beacon run` refuses to start as root.
+
+## `beacon status`
+
+```bash
+beacon status [--coverage]
+```
+
+Prints the last pass from `pass.json` (`last_pass`, `outcome`, `lease`, `holder`, and a `withheld:` line per personal
+source), as `beacon service status` does, without asking launchd. With the source loops, the last pass is the last
+source's pass; a personal source's `withheld:` line stays until that source's next pass.
+
+`--coverage` adds each source's coverage from `coverage.json`, which a send loop writes after every source pass:
+
+```
+source: gmail
+  status: failing
+  every: 30s
+  last_pass: 2026-11-18T09:00:00Z (4s ago), collect took 412ms
+  last_success: 2026-11-18T03:00:00Z (6h0m4s ago)
+  last_failure: 2026-11-18T09:00:00Z (4s ago) source_unauthorized
+  failing: 720 passes in a row, since 2026-11-18T03:00:30Z (5h59m34s ago)
+  flags: none
+source: slack
+  status: limited
+  every: 15s
+  ...
+  flags: none
+  channels: 40 read of 140, 0 never read, 12 waiting, 0 with a gap, oldest read 2026-11-18T08:41:12Z (18m52s ago)
+asleep: 2026-11-18T01:12:40Z to 2026-11-18T08:59:31Z (7h46m51s)
+```
+
+`status` is `failing` after two failed passes in a row (one is recorded, and may be a network that is not up yet),
+`limited` when the last pass's read was cut at its limit (`cut`), Gmail's history had expired (`history_expired`), a
+read paused at a rate limit to continue next pass (`paused`), an API answered with its rate limit (`rate_limited`), or
+Slack channels wait: past the 40 a pass (`waiting`), below a page limit (`with a gap`), or more than 30 minutes since
+their last read; otherwise `ok`. `last_failure` keeps the last failure and its reason code after the source recovers.
+`flags` adds a names warning (`names_scope`, `names_failed`). `channels` (Slack) is how many of the channels the source
+reads its last pass read, how many it has not read yet, and when the least recently read one was read. `asleep` is the
+last sleep the loop saw. Times are UTC. A dry run writes no `coverage.json`, so a dry-run loop has no coverage to show.
+`status` reads the state directory only: no keychain, no launchd, no Signal. It prints nothing it did not validate:
+names, times, counts, flags and fixed reason codes.
 
 ## `beacon explain KEY`
 
@@ -288,7 +353,7 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | Event | When |
 | --- | --- |
 | `run_started`, `run_finished` | Each pass. |
-| `collected`, `collect_failed`, `item_invalid` | Per source. `item_invalid` is a count of dropped items and the reason `item_invalid`. A GitHub `collect_failed` with `scope_denied` also has `family`: the refused path as a template of GitHub API words and placeholders (`repositories/{unlisted}/issues/{n}/timeline`, `repos/{owner}/{name}/contents/{x}`, `host`), never the URL, a query, a name or an id. |
+| `collected`, `collect_failed`, `item_invalid` | Per source. `collected` has `ms`, how long the collect ran, not counting time asleep. `item_invalid` is a count of dropped items and the reason `item_invalid`. A GitHub `collect_failed` with `scope_denied` also has `family`: the refused path as a template of GitHub API words and placeholders (`repositories/{unlisted}/issues/{n}/timeline`, `repos/{owner}/{name}/contents/{x}`, `host`), never the URL, a query, a name or an id. |
 | `decided` | Counts per tier. |
 | `project_failed` | A count of items a send or hold rule matched that could not be built, with the reason `project_failed`. The cursor still moves. |
 | `dry_run` | A dry run ended without sending. |
@@ -308,6 +373,9 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `rate_limited` | A source's API answered with its rate limit and that stopped the source, before its `read_paused` or `collect_failed`. The source, the HTTP `status`, the API's `limit_reason` (a reason code from a fixed list, `other`, or empty), `retry_after` in seconds (`-1` when none was named), and `units`, the quota units the source spent in the last minute (Gmail; 0 for the others). See [sources](sources.md#rate-limits). |
 | `run_failed` | `beacon run` or `beacon outbox retry` stopped with an error. |
 | `run_stopped` | The poll loop exited after SIGTERM. Not a failure. |
+| `woke` | The machine woke from sleep: `slept`, in seconds. Every source makes a pass at once. |
+| `coverage` | A source's coverage snapshot sent to Signal: the source, its `status` (`ok`, `failing`, `limited`), the outcome (`pending` when Signal did not answer), Signal's status and code. |
+| `heartbeat_failed` | Signal did not renew a source's heartbeat lease: the source and a reason (`lease_refused` with Signal's status and code, `unauthorized`, `unavailable`, `lease_expired`). Not a failure of the pass. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
 `egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,

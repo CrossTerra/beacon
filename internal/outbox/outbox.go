@@ -59,6 +59,8 @@ const (
 	Event Kind = "event"
 	// Lease is a lease claim (DEC-25).
 	Lease Kind = "lease"
+	// Coverage is a source's coverage snapshot (DEC-42). It is not an item and asks no one.
+	Coverage Kind = "coverage"
 )
 
 // record is one line of the file.

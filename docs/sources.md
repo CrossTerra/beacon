@@ -393,8 +393,8 @@ leaves free are for that, and for a minute window that does not line up with Goo
 `429`, or a `403` whose reason is a rate limit, Beacon waits the `Retry-After`, or a whole minute when none is
 named, and tries that call once more, counted in the budget. A `Retry-After` over two minutes is not waited out:
 the call fails, and later passes do not call Gmail until it is over (see [Rate limits](#rate-limits)). Beacon does
-not otherwise back off between passes: the limit is a one-minute window, which is refilled before the next pass of
-the agent's two-minute poll, and waiting longer would only delay mail. A pass that waits for quota can be stopped
+not otherwise back off between passes: the limit is a one-minute window, the budget is kept across passes, so Gmail's
+30-second loop (DEC-41) spends no more than a slower one would, and waiting longer would only delay mail. A pass that waits for quota can be stopped
 by launchd's kill after SIGTERM; nothing of an unfinished collect is recorded, so the next pass reads it again.
 
 **Pause and resume.** If a rate limit still stops an open-state scan after something has been read, the collect
@@ -716,6 +716,11 @@ the longest unread first. Each keeps its own watermark, so one that waits loses 
 first: a read that stops at its page limit (2000 messages) keeps its watermark, records the gap below what it read,
 and the next pass reads that gap before anything newer. Nothing is skipped and the pass is not cut.
 
+**Reach.** Each pass reports, for [coverage](events.md#coverage), how many of the channels it reads (named, and found
+by membership) the pass read, how many have never been read, how many were due and waited past the 40 a pass, how many
+have a gap below a page limit, and when the least recently read one was read. Counts and a time: no channel id or
+name. A channel the config names is read every pass; one found by membership is read when it is due.
+
 **Cursor.** The first server `Date` of the pass, as above; search reads from 15 minutes before it. Beside it: each
 followed thread (its kind, the person's first and latest post or mention there, the newest message read, when it was
 read), each channel's and group direct message's watermark (and a gap, when a read stopped at its limit; for a
@@ -858,8 +863,9 @@ the first match wins. A rule that lists `body` and can match `channel_type: priv
 **Volume.** A guide for about 30 channels at a working company's pace, say 15 top-level messages and 30 replies a
 channel a working day: about 450 top-level items and 900 replies, some 1,350 `channel_message` items a day (less the
 apps the rules drop), on about 30 day threads and 150 to 250 reply threads. The calls stay well inside the tiers: with
-a one-minute poll, channels with a message in the last hour are read every pass and the rest every 15 minutes, so
-about 10 to 15 `conversations.history` calls a minute (Tier 3 allows 50) of one page each, and `conversations.replies`
+Slack's own 15-second loop (DEC-41), a pass every 20 to 60 seconds, channels with a message in the last hour are read
+every pass and the rest every 15 minutes, so about 15 to 40 `conversations.history` calls a minute of one page each;
+the spacing above keeps every method under its tier (Tier 3 allows 50) however short the interval, and `conversations.replies`
 only for threads with new replies (a few a minute). The limits per pass (40 channels, 40 swept threads, 40 followed
 threads, 20 deletion checks) bound a pass at about 50 seconds of history and two minutes of thread reads at the tier
 spacing, which a busy morning or the first run reaches and a later pass finishes.

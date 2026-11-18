@@ -522,7 +522,7 @@ func TestGoneThread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(again.Next), `"C0REVIEW":{"kind":"channel","seen":"1794136200.001100","swept":"1794138300.000000"}`) {
+	if !strings.Contains(string(again.Next), `"C0REVIEW":{"kind":"channel","seen":"1794136200.001100","swept":"1794138300.000000","polled":"2026-11-08T12:00:00Z"}`) {
 		t.Fatalf("channel watermark lost: %s", again.Next)
 	}
 

@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/coverage"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/runner"
 	"github.com/CrossTerra/beacon/internal/service"
@@ -363,6 +364,35 @@ func (a *app) cmdServiceStatus(ctx context.Context, args []string) error {
 	return nil
 }
 
+// cmdStatus prints the last pass from pass.json and, with --coverage, each source's coverage from coverage.json. It
+// reads the state directory only: no keychain, no launchd, no Signal.
+func (a *app) cmdStatus(args []string) error {
+	fs, cfgPath := a.flags("status")
+	cov := fs.Bool("coverage", false, "print each source's coverage: last success, last failure, flags, and Slack's channels")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: beacon status [--coverage] [--config PATH]")
+	}
+	cfg, err := a.loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	pass, passErr := service.ReadPass(cfg.StatePath())
+	fmt.Fprint(a.stdout, service.FormatPass(pass, passErr))
+	if !*cov {
+		return nil
+	}
+	rec, err := coverage.Read(cfg.StatePath())
+	if err != nil {
+		fmt.Fprintln(a.stdout, "coverage: unreadable")
+		return nil
+	}
+	fmt.Fprint(a.stdout, coverage.Format(rec, a.now()))
+	return nil
+}
+
 // identityStatus compares the plist binary with the leaf hash install recorded. It does not echo either.
 func (a *app) identityStatus(ctx context.Context, state string) string {
 	want, err := service.ReadLeaf(state)
@@ -418,8 +448,23 @@ func (a *app) cmdServiceLogs(args []string) error {
 	return err
 }
 
-func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome string) {
+// recordPass writes pass.json. sources are the sources the pass collected, when it collected only some: a personal
+// source another pass withheld stays listed until its own next pass. Nil means every source.
+func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome string, sources []string) {
 	p := service.Pass{At: a.now().UTC(), Outcome: outcome}
+	if sources != nil {
+		ours := map[string]bool{}
+		for _, s := range sources {
+			ours[s] = true
+		}
+		if prev, err := service.ReadPass(dir); err == nil {
+			for _, w := range prev.Withheld {
+				if !ours[w.Source] {
+					p.Withheld = append(p.Withheld, w)
+				}
+			}
+		}
+	}
 	if rep != nil && rep.Lease != nil {
 		switch {
 		case rep.Lease.Held:
@@ -450,7 +495,7 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 func (a *app) failLoop(once bool, dir string, poll time.Duration, interrupt context.Context, log *logs.Logger, reason logs.Reason, text string, alreadyRecorded bool) error {
 	log.Log(logs.RunFailed, logs.Why(reason))
 	if dir != "" && !alreadyRecorded {
-		a.recordPass(dir, "", nil, string(reason))
+		a.recordPass(dir, "", nil, string(reason), nil)
 	}
 	if !once && a.backoff(interrupt, poll, dir) {
 		log.Log(logs.RunStopped)

@@ -164,7 +164,8 @@ print it. An append from before this was stored has no `decision`. Each later li
 | `superseded` | The current rules no longer send a refusal. `code` is `hold` or `never`. | Final. Not sent. |
 | `expired` | Lease claims only: the claim's period ended before Signal answered. | Final. Never sent again. |
 
-`kind` is `event` for items and `lease` for lease claims and the event that closes old claims. Pending counts (`run`, the report) count event bodies
+`kind` is `event` for items, `lease` for lease claims and the event that closes old claims, and `coverage` for
+[coverage snapshots](#coverage), which the next report of that source sends first. Pending counts (`run`, the report) count event bodies
 only. A line torn by a crash while it was written is cut off the file when a send pass next opens it under the lock (a dry run skips it and changes nothing); it was never synced, so its
 body was never sent. The directory is synced when the outbox file is created, so the file itself survives a crash.
 
@@ -284,3 +285,63 @@ A pass stops sending when the lease it holds runs out mid-pass.
 
 Periods come from the local clock. Two machines whose clocks differ by more than a period can disagree about which
 period is current; the key still allows one holder per period.
+
+## Coverage
+
+A send loop reports how well each source is being read (DEC-42), so a source that stops collecting (a refused token, a
+rate limit, a machine asleep) is visible in Signal and not only in the local log. Only the instance that holds the
+send lease reports, after a source's pass and before the lease it holds runs out, and nothing after SIGTERM.
+`beacon run --once` and a dry run report nothing. What it reports is names, times, counts, flags and fixed reason
+codes: no item, key, id, name or text, and no error's text.
+
+**Heartbeat.** After a pass that collected, the source's heartbeat lease in Signal's lease API (Signal DEC-280, the
+same API as [the lease](#the-lease)) is claimed or renewed: name `beacon:heartbeat:<handle>:<source>`, run
+`<instance id>:heartbeat`, held for three times the source's interval and at least six minutes, and renewed once a
+third of that has passed. It is a row, not an event: nothing is written to the log. A source that fails, or a machine
+that sleeps or stops, renews nothing, and the lease expires: Signal reads it as `held: false` once `expires_at` has
+passed, and `renewed_at` is within a third of its time of the source's last success. A heartbeat is not in the
+outbox, and a renewal Signal refuses is logged (`heartbeat_failed`) and costs nothing else. Another instance's
+heartbeat is `409` until it expires; the new holder's then takes over. A Signal that answers `404` offers no leases:
+the snapshots below are the whole report, and the API is asked again an hour later.
+
+**Snapshot.** When a source's coverage changes, a `beacon.coverage` event on its own subject carries it as a state
+snapshot (DEC-28), so Signal keeps the latest per source (`GET /api/state?subject=beacon:coverage:<handle>:<source>`).
+Snapshots are written on change, so an old one is not a stale source: the heartbeat says whether the source is still
+collecting.
+
+```json
+{
+  "subject": "beacon:coverage:winton:gmail",
+  "type": "beacon.coverage",
+  "key": "beacon:coverage:winton:gmail:1794992430000",
+  "occurred_at": "2026-11-18T09:00:30.000Z",
+  "title": "gmail: failing (source_unauthorized)",
+  "open": {"title": "Beacon coverage for @winton: gmail"},
+  "metadata": {"run": "<instance id>:heartbeat"},
+  "state": {
+    "fields": {"status": "failing", "reason": "source_unauthorized", "failures": 2, "failing_since": "2026-11-18T09:00:00.000Z",
+      "last_success": "2026-11-18T03:00:00.000Z", "last_failure": "2026-11-18T09:00:30.000Z", "every_seconds": 30,
+      "cut": false, "history_expired": false, "paused": false, "rate_limited": false},
+    "observed_at": "2026-11-18T09:00:30.000Z",
+    "version": "1794992430000"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `failing` after two failed passes in a row, `limited` when the last read was cut, paused or rate limited, the history had expired, or Slack channels wait; else `ok`. As [`beacon status --coverage`](commands.md#beacon-status). |
+| `reason`, `last_failure` | The last failure's fixed reason code (`source_unauthorized`, `rate_limited`, `source_failed`, …) and when. Kept after the source recovers. |
+| `failures`, `failing_since` | While it fails: how many passes in a row, and since when. |
+| `last_success`, `every_seconds` | The end of the last pass that collected, and the source's interval. |
+| `cut`, `history_expired`, `paused`, `rate_limited`, `names` | The last pass's flags, and a names warning code. |
+| `channels_total`, `channels_read`, `channels_never`, `channels_waiting`, `channels_gaps`, `channels_oldest_read`, `channels_behind` | Slack only: the channels it reads, how many its last pass read, never read, waiting past the per-pass limit, with a gap below a page limit, the oldest last read, and whether any has waited more than 30 minutes. |
+
+A change is a change of the status and its reason, a flag, the interval, the number of channels, or whether channels
+are unread, waiting, gapped or behind; times and counts that move every pass are not. One failure is not a change
+until the next pass says whether the source is failing. A source writes at most one snapshot in five minutes, so one
+that fails every other pass does not fill the log; its first snapshot is written at its first pass. The key is the
+subject and the snapshot's time in milliseconds, which is also `version`. The body goes through the outbox (kind
+`coverage`) like any other: appended and synced before it is sent, one Signal does not answer stays pending and is sent
+first, as the same bytes, before a newer one, and one Signal refuses is recorded and not sent again. It asks no one
+and closes nothing. `beacon outbox` lists it; `beacon outbox retry --rejected` does not touch it.

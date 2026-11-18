@@ -15,10 +15,12 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/config"
+	"github.com/CrossTerra/beacon/internal/coverage"
 	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/keychain"
@@ -30,6 +32,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/queue"
 	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/runner"
+	"github.com/CrossTerra/beacon/internal/schedule"
 	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/service"
@@ -101,6 +104,7 @@ Commands:
   source add    store a source credential in the keychain and enable the source (github, jira, google, slack)
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
+  status        print the last pass; --coverage adds how well each source is being read
   service       install, uninstall, status or logs of the per-user launchd agent
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
@@ -150,6 +154,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdSeed(rest)
 	case "accept-first":
 		err = a.cmdAcceptFirst(rest)
+	case "status":
+		err = a.cmdStatus(rest)
 	case "service":
 		err = a.cmdService(ctx, rest)
 	case "keychain":
@@ -570,39 +576,31 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
 		r.Outbox, r.Queue = ob, q
-		for pass := 0; ; pass++ {
-			if a.termFired() {
-				log.Log(logs.RunStopped)
-				return nil
-			}
-			a.rotateServiceLogs(stateDir)
-			if pass > 0 {
-				if err := a.prepare(e, r, send); err != nil {
-					return fail(runner.Classify(err), failText(runner.Classify(err), e))
-				}
-			}
-			rep, err := r.Run(work)
-			if err != nil {
+		// --first is a summary, not a daemon. A dry run otherwise loops, each source on its own, and still writes
+		// nothing.
+		if !*once && !*first {
+			return a.sourceLoops(work, interrupt, e, r, loopRun{send: false, state: stateDir, poll: poll, bodies: *bodies, log: log})
+		}
+		if a.termFired() {
+			log.Log(logs.RunStopped)
+			return nil
+		}
+		a.rotateServiceLogs(stateDir)
+		rep, err := r.Run(work)
+		if err != nil {
+			return fail(runner.Classify(err), failText(runner.Classify(err), e))
+		}
+		a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), true))
+		if *first {
+			a.printFirst(rep)
+			if err := a.recordFirst(e, rep); err != nil {
 				return fail(runner.Classify(err), failText(runner.Classify(err), e))
 			}
-			a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), true))
-			if *first {
-				a.printFirst(rep)
-				if err := a.recordFirst(e, rep); err != nil {
-					return fail(runner.Classify(err), failText(runner.Classify(err), e))
-				}
-			}
-			// --first is a summary, not a daemon. A dry run otherwise loops, and still writes nothing.
-			if *once || *first || a.termFired() {
-				if a.termFired() {
-					log.Log(logs.RunStopped)
-				}
-				return nil
-			}
-			if a.waitPoll(interrupt, e.cfg.PollInterval(), log) {
-				return nil
-			}
 		}
+		if a.termFired() {
+			log.Log(logs.RunStopped)
+		}
+		return nil
 	}
 
 	ob, err := outbox.Open(e.cfg.StatePath(), a.now)
@@ -641,62 +639,222 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	r.Lease = &lease.Lease{Outbox: ob, Writer: client, API: client, Threads: client, Person: e.cfg.Person.Handle, Run: instance + ":lease",
 		Period: e.cfg.LeasePeriod(), Now: a.now}
 
-	for pass := 0; ; pass++ {
-		if a.termFired() {
-			log.Log(logs.RunStopped)
-			return nil
-		}
-		a.rotateServiceLogs(stateDir)
-		// Read the cursors and the first-run acceptance again before every pass, so beacon accept-first and beacon
-		// cursor reset take effect on the next pass of a running agent, not only after a restart. A source the agent
-		// still thinks is not accepted stores no cursor and no resume, and reads its whole open-state window again
-		// every pass.
-		if pass > 0 {
-			if err := a.prepare(e, r, send); err != nil {
-				reason := runner.Classify(err)
-				return a.failLoop(*once, stateDir, poll, interrupt, log, reason, failText(reason, e), false)
-			}
-		}
-		rep, err := r.Run(work)
-		if rep != nil {
-			a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), false))
-		}
-		outcome := passOutcome(err, a.termFired())
-		a.recordPass(stateDir, instance, rep, outcome)
-		if err != nil {
-			reason := runner.Classify(err)
-			var refused *lease.RefusedError
-			text := failText(reason, e)
-			if errors.As(err, &refused) {
-				text = refused.Error() + "; check that Beacon's key has write scope and the lease subject is allowed"
-			}
-			return a.failLoop(*once, stateDir, poll, interrupt, log, reason, text, true)
-		}
-		if *once || a.termFired() {
-			if a.termFired() {
-				log.Log(logs.RunStopped)
-			}
-			return nil
-		}
-		if a.waitPoll(interrupt, e.cfg.PollInterval(), log) {
-			return nil
-		}
+	if !*once {
+		reporter := &coverage.Reporter{Outbox: ob, Writer: client, API: client, Person: e.cfg.Person.Handle, Run: instance + ":heartbeat",
+			Now: a.now, Log: log}
+		return a.sourceLoops(work, interrupt, e, r, loopRun{send: true, state: stateDir, poll: poll, bodies: *bodies, log: log,
+			instance: instance, reporter: reporter})
 	}
+	if a.termFired() {
+		log.Log(logs.RunStopped)
+		return nil
+	}
+	a.rotateServiceLogs(stateDir)
+	rep, err := r.Run(work)
+	if rep != nil {
+		a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), false))
+	}
+	outcome := passOutcome(err, a.termFired())
+	a.recordPass(stateDir, instance, rep, outcome, nil)
+	if err != nil {
+		reason, text := sendFailure(err, e)
+		return a.failLoop(true, stateDir, poll, interrupt, log, reason, text, true)
+	}
+	if a.termFired() {
+		log.Log(logs.RunStopped)
+	}
+	return nil
 }
 
-// waitPoll waits for the next pass. It reports whether the loop should stop. SIGTERM is logged as a clean stop.
-func (a *app) waitPoll(interrupt context.Context, d time.Duration, log *logs.Logger) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-interrupt.Done():
-		return true
-	case <-a.termDone():
-		log.Log(logs.RunStopped)
-		return true
-	case <-timer.C:
-		return false
+// sendFailure is the reason and the printed text for a send pass that failed.
+func sendFailure(err error, e *env) (logs.Reason, string) {
+	reason := runner.Classify(err)
+	var refused *lease.RefusedError
+	text := failText(reason, e)
+	if errors.As(err, &refused) {
+		text = refused.Error() + "; check that Beacon's key has write scope and the lease subject is allowed"
 	}
+	return reason, text
+}
+
+// loopRun is what the source loops need besides the runner.
+type loopRun struct {
+	send     bool
+	state    string
+	poll     time.Duration
+	bodies   bool
+	log      *logs.Logger
+	instance string
+	// reporter writes coverage to Signal. Nil in a dry run, which writes nothing.
+	reporter *coverage.Reporter
+}
+
+// loopFailure is a pass that ends the run: its reason, the text to print, and whether pass.json already has it.
+type loopFailure struct {
+	reason   logs.Reason
+	text     string
+	recorded bool
+}
+
+func (f loopFailure) Error() string { return f.text }
+
+// sourceLoops runs each source on its own loop, every source's interval apart, until SIGTERM, SIGINT or a pass that
+// fails the run (DEC-41). A source's collect runs while other sources' passes decide and send; deciding, recording and
+// sending is one pass at a time, under one lock, since they share the outbox, the queue, the cursors and the lease.
+// When the machine wakes from sleep, every source makes a pass at once, and the sleep is logged and recorded as one.
+func (a *app) sourceLoops(work, interrupt context.Context, e *env, r *runner.Runner, lr loopRun) error {
+	var mu sync.Mutex
+	byName := map[string]source.Source{}
+	every := map[string]time.Duration{}
+	var names []string
+	var loops []schedule.Loop
+	for i, s := range e.sources {
+		d := e.cfg.SourceInterval(e.cfg.Sources[i])
+		byName[s.Name()], every[s.Name()] = s, d
+		names = append(names, s.Name())
+		loops = append(loops, schedule.Loop{Name: s.Name(), Every: d})
+	}
+	if len(loops) == 0 {
+		// No source yet: one loop, poll_interval apart, still sends pending bodies and keeps the lease.
+		loops = append(loops, schedule.Loop{Every: lr.poll})
+	}
+	pass := func(ctx context.Context, name string, woke bool) (schedule.Result, error) {
+		if name == "" {
+			mu.Lock()
+			defer mu.Unlock()
+			return schedule.Result{}, a.sourcelessPass(ctx, e, r, lr)
+		}
+		mu.Lock()
+		a.rotateServiceLogs(lr.state)
+		// Read the cursors and the first-run acceptance again before every pass, so beacon accept-first and beacon
+		// cursor reset take effect on the next pass of a running agent, not only after a restart.
+		if err := a.prepare(e, r, lr.send); err != nil {
+			mu.Unlock()
+			reason := runner.Classify(err)
+			return schedule.Result{}, loopFailure{reason: reason, text: failText(reason, e)}
+		}
+		var cur []byte
+		if r.Cursors != nil {
+			cur, _ = r.Cursors.Get(name)
+		}
+		mu.Unlock()
+		g := runner.Gather(ctx, byName[name], cur)
+		mu.Lock()
+		defer mu.Unlock()
+		if ctx.Err() != nil && interrupt.Err() == nil {
+			// Another loop's pass failed the run: this collect was cut short and decides nothing.
+			return schedule.Result{}, nil
+		}
+		// Again, under the lock: another source's pass may have committed its cursor since.
+		if err := a.prepare(e, r, lr.send); err != nil {
+			reason := runner.Classify(err)
+			return schedule.Result{}, loopFailure{reason: reason, text: failText(reason, e)}
+		}
+		rep, err := r.Process(ctx, []runner.Gathered{g})
+		res := schedule.Result{Failed: g.Err != nil}
+		if rep != nil {
+			a.printReport(rep, service.ReportBodies(lr.bodies, a.serviceStdout(lr.state), !lr.send))
+		}
+		if !lr.send {
+			if err != nil {
+				reason := runner.Classify(err)
+				return res, loopFailure{reason: reason, text: failText(reason, e)}
+			}
+			return res, nil
+		}
+		a.recordPass(lr.state, lr.instance, rep, passOutcome(err, a.termFired()), []string{name})
+		if err != nil {
+			reason, text := sendFailure(err, e)
+			return res, loopFailure{reason: reason, text: text, recorded: true}
+		}
+		if err := a.observe(ctx, lr, names, every, rep); err != nil {
+			reason := runner.Classify(err)
+			return res, loopFailure{reason: reason, text: failText(reason, e)}
+		}
+		return res, nil
+	}
+	sched := &schedule.Scheduler{
+		Loops: loops,
+		Pass:  pass,
+		Stop:  a.termDone(),
+		Woke: func(from, to time.Time) {
+			lr.log.Log(logs.Woke, logs.Seconds("slept", to.Sub(from)))
+			if !lr.send {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			rec, err := coverage.Read(lr.state)
+			if err != nil {
+				rec = coverage.Record{}
+			}
+			rec.Asleep(from, to)
+			_ = coverage.Write(lr.state, rec)
+		},
+	}
+	err := sched.Run(work)
+	var lf loopFailure
+	switch {
+	case errors.As(err, &lf):
+		return a.failLoop(false, lr.state, lr.poll, interrupt, lr.log, lf.reason, lf.text, lf.recorded)
+	case err != nil:
+		reason := runner.Classify(err)
+		return a.failLoop(false, lr.state, lr.poll, interrupt, lr.log, reason, failText(reason, e), false)
+	case a.termFired():
+		lr.log.Log(logs.RunStopped)
+	}
+	return nil
+}
+
+// sourcelessPass is a pass with no source to collect: it decides nothing and, in send mode, sends what is pending.
+func (a *app) sourcelessPass(ctx context.Context, e *env, r *runner.Runner, lr loopRun) error {
+	a.rotateServiceLogs(lr.state)
+	if err := a.prepare(e, r, lr.send); err != nil {
+		reason := runner.Classify(err)
+		return loopFailure{reason: reason, text: failText(reason, e)}
+	}
+	rep, err := r.Process(ctx, nil)
+	if rep != nil {
+		a.printReport(rep, service.ReportBodies(lr.bodies, a.serviceStdout(lr.state), !lr.send))
+	}
+	if !lr.send {
+		if err != nil {
+			reason := runner.Classify(err)
+			return loopFailure{reason: reason, text: failText(reason, e)}
+		}
+		return nil
+	}
+	a.recordPass(lr.state, lr.instance, rep, passOutcome(err, a.termFired()), []string{})
+	if err != nil {
+		reason, text := sendFailure(err, e)
+		return loopFailure{reason: reason, text: text, recorded: true}
+	}
+	return nil
+}
+
+// observe records what a send pass's sources came to in coverage.json and, while this instance holds the lease and is
+// not stopping, reports it to Signal. A record that cannot be read starts again; one that cannot be written is left,
+// as pass.json is. Only a body the outbox could not record is an error.
+func (a *app) observe(ctx context.Context, lr loopRun, names []string, every map[string]time.Duration, rep *runner.Report) error {
+	rec, err := coverage.Read(lr.state)
+	if err != nil {
+		rec = coverage.Record{}
+	}
+	rec.Keep(names)
+	for _, sp := range rep.Ran {
+		rec.Observe(sp.Name, every[sp.Name], coverage.Pass{Took: sp.Took, Failed: string(sp.Failed), Cut: sp.Cut, Expired: sp.Expired,
+			Paused: sp.Paused, Limited: sp.Limited, Names: sp.Warning, Reach: sp.Reach}, a.now())
+	}
+	_ = coverage.Write(lr.state, rec)
+	if lr.reporter == nil || rep.Lease == nil || !rep.Lease.Held || a.termFired() {
+		return nil
+	}
+	for _, sp := range rep.Ran {
+		if err := lr.reporter.Report(ctx, sp.Name, rec.Sources[sp.Name], rep.Lease.Until); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a *app) termFired() bool { return a.term != nil && a.term.Err() != nil }

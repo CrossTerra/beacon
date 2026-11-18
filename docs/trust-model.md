@@ -17,6 +17,7 @@ same pull request.
 | With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | The Slack name cache (display names and channel names by id) and the record of threads checked for a retitle |
 | With a rule that lists Slack's `title`, or a Google thread Beacon opened with a title that is now sealed: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
 | Your own identity in a source, as `by`, on your own acts | Who else caused a change, unless a rule lists `actor` |
+| Each source's coverage, from the running agent while it holds the lease (DEC-42): a heartbeat lease per source (your handle, the source's name, the instance id, a time to live) and, when it changes, a `beacon.coverage` snapshot on `beacon:coverage:<handle>:<source>`: status, fixed reason codes, times, counts and flags, never an item, a key, an id, a name or an error's text | `coverage.json` beyond what a snapshot carries: how long each collect took, and when the machine slept |
 
 ## Properties
 
@@ -214,6 +215,10 @@ same pull request.
 - **A lease in Signal's lease API is not in the outbox.** It is not an event: renewing it sends the same name, run and
   period each time, and nothing is replayed. Every event body, the claims and the event that closes old claims
   included, is still appended first.
+- **Coverage shows when the machine is reading.** A source's heartbeat lease is renewed every few minutes while it
+  collects, and its snapshot records its last success and last failure. Any key that can read Signal's leases or
+  `beacon:` subjects can tell from them when your Beacon was running and when it stopped or slept, a little more finely
+  than the send lease already shows. They say nothing about what was read.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the

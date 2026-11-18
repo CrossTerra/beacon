@@ -475,10 +475,20 @@ func TestMemberPacing(t *testing.T) {
 	if n := len(tr.at[methodHistory]); n != channelsPerPass {
 		t.Fatalf("%d channels read", n)
 	}
+	// The pass says how much it read: every channel is counted, 20 waited and were never read.
+	if r := got.Reach; r == nil || r.Total != channelsPerPass+20 || r.Read != channelsPerPass || r.Waiting != 20 || r.Never != 20 || r.Oldest.IsZero() {
+		t.Fatalf("reach %+v", got.Reach)
+	}
 	// The next pass, a minute later, reads the ones that waited first.
 	_ = sl.sleep(context.Background(), time.Minute)
-	if _, err := s.Collect(context.Background(), got.Next); err != nil {
+	again, err := s.Collect(context.Background(), got.Next)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// Every channel is busy, so every one is due again: the 20 never read go first, 20 wait, and the oldest read is
+	// still the first pass's.
+	if r := again.Reach; r == nil || r.Total != channelsPerPass+20 || r.Read != channelsPerPass || r.Waiting != 20 || r.Never != 0 || !r.Oldest.Equal(got.Reach.Oldest) {
+		t.Fatalf("second reach %+v", again.Reach)
 	}
 	seen := map[string]bool{}
 	for _, q := range srv.Queries("/api/conversations.history") {

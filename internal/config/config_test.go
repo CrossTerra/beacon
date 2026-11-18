@@ -76,6 +76,46 @@ func TestRejected(t *testing.T) {
 	}
 }
 
+// Each source has its own interval: the config's, else its kind's default, else poll_interval for a fixture (DEC-41).
+func TestSourceIntervals(t *testing.T) {
+	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", `poll_interval: 45s
+sources:
+  - kind: fixture
+    path: fixture.json
+  - kind: github
+    repos: ["acme/app"]
+  - kind: jira
+    site: acme
+    projects: ["ENG"]
+    interval: 5m
+`, 1)
+	c, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SourceInterval(c.Sources[0]) != 45*time.Second || c.SourceInterval(c.Sources[1]) != time.Minute || c.SourceInterval(c.Sources[2]) != 5*time.Minute {
+		t.Fatalf("%v %v %v", c.SourceInterval(c.Sources[0]), c.SourceInterval(c.Sources[1]), c.SourceInterval(c.Sources[2]))
+	}
+	for kind, want := range map[string]time.Duration{"slack": 15 * time.Second, "gmail": 30 * time.Second, "github": time.Minute,
+		"jira": time.Minute, "calendar": 2 * time.Minute, "drive": 2 * time.Minute} {
+		if got := c.SourceInterval(Source{Kind: kind}); got != want {
+			t.Errorf("%s: %v, want %v", kind, got, want)
+		}
+	}
+	out, err := c.Marshal()
+	if err != nil || !strings.Contains(string(out), "interval: 5m0s") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if _, err := Parse(out); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"interval: 500ms", "interval: 8m", "interval: soon"} {
+		if _, err := Parse([]byte(strings.Replace(y, "interval: 5m", bad, 1))); err == nil {
+			t.Errorf("%s parsed", bad)
+		}
+	}
+}
+
 func TestGitHubAndJiraConfig(t *testing.T) {
 	y := strings.Replace(valid, "sources:\n  - kind: fixture\n    path: fixture.json\n", `sources:
   - kind: github

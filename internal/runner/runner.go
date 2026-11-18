@@ -86,6 +86,9 @@ type Runner struct {
 	continued    []string
 	warnings     []Warning
 	sealCounts   sealCounts
+	ran          []SourcePass
+	// pass is the sources of the pass under way: their threads are the ones it may retitle.
+	pass []source.Source
 }
 
 // sealCounts is what a pass sealed, raised and held for sealing, for the log. Counts only.
@@ -208,6 +211,8 @@ type Report struct {
 	Warnings []Warning
 	// Retitled is how many thread titles this pass wrote.
 	Retitled int
+	// Ran is each source the pass collected, in order, with what its collect came to.
+	Ran []SourcePass
 }
 
 // Counts returns how many items landed in each tier, and how many were skipped.
@@ -240,12 +245,57 @@ type passSource struct {
 
 // Collect gathers items from every source, validated and sorted by when they happened, then by key.
 func (r *Runner) Collect(ctx context.Context) []source.Item {
-	items, _, _ := r.collect(ctx)
+	items, _, _ := r.absorb(r.gatherAll(ctx))
 	return items
 }
 
-// collect gathers items and the cursors that may be stored after they are decided.
-func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []SourceFailure) {
+// Gathered is one source's collect, before anything in it is decided.
+type Gathered struct {
+	Source source.Source
+	Got    source.Collected
+	Err    error
+	// Took is how long the collect ran, on the monotonic clock: time the machine spent asleep is not in it.
+	Took time.Duration
+}
+
+// Gather collects one source from cursor. It touches nothing the runner holds, so each source can be gathered on its
+// own loop while another pass is deciding; Process decides what it returns.
+func Gather(ctx context.Context, s source.Source, cursor []byte) Gathered {
+	start := time.Now()
+	got, err := s.Collect(ctx, cursor)
+	return Gathered{Source: s, Got: got, Err: err, Took: time.Since(start)}
+}
+
+// gatherAll collects every source in turn, each from its committed cursor.
+func (r *Runner) gatherAll(ctx context.Context) []Gathered {
+	out := make([]Gathered, 0, len(r.Sources))
+	for _, s := range r.Sources {
+		var cursor []byte
+		if r.Cursors != nil {
+			cursor, _ = r.Cursors.Get(s.Name())
+		}
+		out = append(out, Gather(ctx, s, cursor))
+	}
+	return out
+}
+
+// SourcePass is what one source's collect in a pass came to, for the coverage record. Counts, flags and fixed codes.
+type SourcePass struct {
+	Name string
+	Took time.Duration
+	// Failed is the reason the collect failed, or "".
+	Failed logs.Reason
+	// Cut, Expired and Paused are the gaps and partial reads the pass reports. Limited is a rate limit that slowed or
+	// stopped the read.
+	Cut, Expired, Paused, Limited bool
+	// Warning is a names warning code, or "".
+	Warning string
+	Reach   *source.Reach
+}
+
+// absorb logs each gathered collect, keeps the valid items, and works out which cursors may be stored after they are
+// decided.
+func (r *Runner) absorb(gathered []Gathered) ([]source.Item, []passSource, []SourceFailure) {
 	var items []source.Item
 	var passes []passSource
 	var failed []SourceFailure
@@ -253,12 +303,13 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 	r.partial = nil
 	r.continued = nil
 	r.warnings = nil
-	for _, s := range r.Sources {
-		var cursor []byte
-		if r.Cursors != nil {
-			cursor, _ = r.Cursors.Get(s.Name())
+	r.ran = nil
+	for _, g := range gathered {
+		s, got, err := g.Source, g.Got, g.Err
+		ran := SourcePass{Name: s.Name(), Took: g.Took, Paused: err == nil && got.Partial}
+		if err == nil {
+			ran.Cut, ran.Expired, ran.Reach = got.Cut, got.Gap, got.Reach
 		}
-		got, err := s.Collect(ctx, cursor)
 		// A limited or failed pass does not move the cursor. Items already read are still decided: a later pass
 		// collects them again, and keys make that harmless.
 		commit := err == nil && r.Send && !r.Unaccepted[s.Name()] && got.Next != nil && r.Cursors != nil && !got.Partial
@@ -271,6 +322,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			limit = source.LimitOf(err)
 		}
 		if limit != nil {
+			ran.Limited = true
 			r.Log.Log(logs.RateLimited, logs.Source(s.Name()), logs.Status(limit.Status), logs.LimitReason(limit.Reason),
 				logs.RetryAfter(limit.RetryAfter), logs.Count("units", limit.Units))
 		}
@@ -288,6 +340,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			}
 			r.Log.Log(logs.NamesUnavailable, logs.Source(s.Name()), logs.Why(logs.Reason(code)))
 			r.warnings = append(r.warnings, Warning{Source: s.Name(), Code: code})
+			ran.Warning = code
 		}
 		if err != nil {
 			reason := Classify(err)
@@ -301,7 +354,9 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 			r.Log.Log(logs.CollectFailed, attrs...)
 			failed = append(failed, SourceFailure{Name: s.Name(), Reason: reason})
 			commit = false
+			ran.Failed = reason
 		}
+		r.ran = append(r.ran, ran)
 		fields, stateFields := s.Fields(), s.StateFields()
 		invalid := 0
 		kept := 0
@@ -317,7 +372,7 @@ func (r *Runner) collect(ctx context.Context) ([]source.Item, []passSource, []So
 		if invalid+got.Dropped > 0 {
 			r.Log.Log(logs.ItemInvalid, logs.Source(s.Name()), logs.Count("items", invalid+got.Dropped), logs.Why(logs.ReasonItem))
 		}
-		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept))
+		r.Log.Log(logs.Collected, logs.Source(s.Name()), logs.Count("items", kept), logs.Millis(g.Took))
 		if got.Gap || got.Cut {
 			cut := 0
 			if got.Cut {
@@ -429,8 +484,25 @@ func (a *asks) record(subject, key string, b *project.Body) {
 	}
 }
 
-// Run makes one pass: collect, decide, record, and, when sending, send while this instance holds the lease.
+// Run makes one pass over every source, one after another: collect, decide, record, and, when sending, send while this
+// instance holds the lease.
 func (r *Runner) Run(ctx context.Context) (*Report, error) {
+	return r.process(ctx, r.Sources, r.gatherAll(ctx))
+}
+
+// Process decides, records and sends what Gather collected. It is the part of a pass that touches the outbox, the
+// queue, the cursors and the lease, so the caller runs one Process at a time. Only the gathered sources are a part of
+// the pass: their cursors, and the threads their titles name.
+func (r *Runner) Process(ctx context.Context, gathered []Gathered) (*Report, error) {
+	sources := make([]source.Source, 0, len(gathered))
+	for _, g := range gathered {
+		sources = append(sources, g.Source)
+	}
+	return r.process(ctx, sources, gathered)
+}
+
+func (r *Runner) process(ctx context.Context, sources []source.Source, gathered []Gathered) (*Report, error) {
+	r.pass = sources
 	mode := "dry-run"
 	if r.Send {
 		mode = "send"
@@ -442,8 +514,9 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	rep := &Report{Send: r.Send}
 	view := &asks{ob: r.Outbox, added: map[string][]string{}, closed: map[string]bool{}}
 
-	items, passes, failed := r.collect(ctx)
+	items, passes, failed := r.absorb(gathered)
 	rep.Failed, rep.Gaps, rep.Partial, rep.Continued, rep.Warnings = failed, r.gaps, r.partial, r.continued, r.warnings
+	rep.Ran = r.ran
 	if err := r.readRestrictions(ctx, r.Send); err != nil {
 		return rep, err
 	}

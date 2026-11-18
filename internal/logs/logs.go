@@ -62,6 +62,12 @@ const (
 	// SealHeld is how many items a pass held instead of sending, for body_needs_seal (DEC-32) or sensitive_shared
 	// (DEC-33).
 	SealHeld Event = "seal_held"
+	// Woke is the machine waking from sleep: how long it slept, in seconds. Every source then makes a pass at once.
+	Woke Event = "woke"
+	// Coverage is a source's coverage snapshot written to Signal: the source, its status and Signal's answer.
+	Coverage Event = "coverage"
+	// HeartbeatFailed is a source's heartbeat lease that Signal did not renew, with a fixed reason.
+	HeartbeatFailed Event = "heartbeat_failed"
 )
 
 // Reason is why something failed, as a fixed code. Errors are never logged as text: their text can name keys, paths
@@ -168,6 +174,22 @@ func Family(f string) Attr {
 }
 
 var family = regexp.MustCompile(`^[a-z][a-z_/{}-]{0,119}$`)
+
+// CoverageStatus is a source's coverage status: ok, failing or limited. Anything else is logged as "other".
+func CoverageStatus(s string) Attr {
+	switch s {
+	case "ok", "failing", "limited":
+	default:
+		s = "other"
+	}
+	return Attr{slog.String("status", s)}
+}
+
+// Millis is how long something took, in whole milliseconds, as "ms".
+func Millis(d time.Duration) Attr { return Attr{slog.Int64("ms", d.Milliseconds())} }
+
+// Seconds is a span of time in whole seconds.
+func Seconds(name string, d time.Duration) Attr { return Attr{slog.Int64(name, int64(d/time.Second))} }
 
 // Why is a failure's reason code.
 func Why(r Reason) Attr { return Attr{slog.String("reason", string(r))} }

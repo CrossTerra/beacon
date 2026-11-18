@@ -101,6 +101,32 @@ type Source struct {
 	// Channels are the Slack channels a Slack source reads: channel ids, and SlackMember for every channel the person
 	// is a member of. `channels: member` is the same as `channels: [member]`.
 	Channels SlackChannels `yaml:"channels,omitempty"`
+	// Interval is how long the source's loop waits after a pass before the next (DEC-41). Zero is the kind's default.
+	Interval Duration `yaml:"interval,omitempty"`
+}
+
+// DefaultIntervals are each kind's interval when the config sets none (DEC-41). A fixture takes poll_interval.
+var DefaultIntervals = map[string]time.Duration{
+	"slack":    15 * time.Second,
+	"gmail":    30 * time.Second,
+	"github":   time.Minute,
+	"jira":     time.Minute,
+	"calendar": 2 * time.Minute,
+	"drive":    2 * time.Minute,
+}
+
+// MinInterval is the shortest interval a source may set.
+const MinInterval = time.Second
+
+// SourceInterval is how long s's loop waits after a pass: its interval, else its kind's default, else poll_interval.
+func (c *Config) SourceInterval(s Source) time.Duration {
+	if s.Interval > 0 {
+		return time.Duration(s.Interval)
+	}
+	if d, ok := DefaultIntervals[s.Kind]; ok {
+		return d
+	}
+	return c.PollInterval()
 }
 
 // SlackMember in a Slack source's channels reads every public and private channel the person is a member of.
@@ -291,6 +317,9 @@ func (c *Config) validate() error {
 		} else {
 			names[name] = i
 		}
+		if s.Interval != 0 && (time.Duration(s.Interval) < MinInterval || time.Duration(s.Interval) > c.LeasePeriod()/2) {
+			errs = append(errs, fmt.Errorf("sources[%d]: interval must be at least %s and at most half of lease.period, so the lease is renewed in time", i, MinInterval))
+		}
 		if s.Kind != "slack" && s.slackKeys() {
 			errs = append(errs, fmt.Errorf("sources[%d]: workspace, user and channels are for a slack source", i))
 		}
@@ -469,7 +498,7 @@ func (c *Config) LeasePeriod() time.Duration {
 	return time.Duration(c.Lease.Period)
 }
 
-// PollInterval is how often `beacon run` collects, defaulted.
+// PollInterval is a fixture's interval, and the base of the wait after a pass that failed, defaulted.
 func (c *Config) PollInterval() time.Duration {
 	if c.Poll == 0 {
 		return DefaultPollInterval
