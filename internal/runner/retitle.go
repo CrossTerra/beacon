@@ -74,7 +74,8 @@ func (r *Runner) retitle(ctx context.Context, st lease.Status, rep *Report) erro
 	}
 	titlers := map[string]Titler{}
 	sealers := map[string]SealedTitler{}
-	for _, s := range r.Sources {
+	// Only the sources of this pass: another source may be collecting on its own loop, and a titler reads its state.
+	for _, s := range r.pass {
 		if r.Unaccepted[s.Name()] {
 			continue
 		}

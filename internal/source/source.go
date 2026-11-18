@@ -198,6 +198,22 @@ type Collected struct {
 	// Warning is a fixed code for something the pass did without (WarnNamesScope, WarnNamesFailed). The items are
 	// still complete and the cursor moves; the runner logs and prints it once.
 	Warning string
+	// Reach is how much of what the source reads this pass read, when the source reads in parts (Slack's channels).
+	// Nil when it reads everything each pass.
+	Reach *Reach
+}
+
+// Reach is how many of the conversations a source reads one pass read, and how long the least recently read one has
+// waited. Counts and a time only: no id, no name.
+type Reach struct {
+	// Total is how many conversations the source reads. Read is how many this pass read.
+	Total, Read int
+	// Never is how many have not been read yet. Waiting is how many were due this pass and were left for a later one
+	// by the per-pass limit. Gaps is how many have older messages left unread by a read that stopped at its page limit;
+	// the next read takes those first.
+	Never, Waiting, Gaps int
+	// Oldest is the oldest last read among those read at least once. Zero when none has been read.
+	Oldest time.Time
 }
 
 // ErrNoTitle is a thread a source cannot name: its conversation is gone or unreadable. Asking again will not help.

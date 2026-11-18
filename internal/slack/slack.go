@@ -331,6 +331,8 @@ type pass struct {
 	floorTS  string
 	observed string
 	cut      bool
+	// reach is how much of the channels this pass read.
+	reach *source.Reach
 	// sweep holds the channel threads this pass found with replies after their mark, by "<channel>/<root ts>".
 	sweep map[string]sweepThread
 }
@@ -416,7 +418,7 @@ func (s *Source) Collect(ctx context.Context, raw []byte) (source.Collected, err
 	}
 	// A retitle after this pass reads with the same token, and only when names may be read.
 	s.titling = &titling{tok: tok, names: s.names && len(id.MissingNames) == 0}
-	return source.Collected{Items: items, Next: data, Cut: p.cut, Dropped: dropped, Warning: warning}, nil
+	return source.Collected{Items: items, Next: data, Cut: p.cut, Dropped: dropped, Warning: warning, Reach: p.reach}, nil
 }
 
 // collect runs every read of a pass into p.msgs and moves p.cur's watermarks.
@@ -548,6 +550,7 @@ func (s *Source) readThreads(ctx context.Context, p *pass) error {
 // Each read also looks again at the last replyWindow of the channel's history for thread roots with new replies.
 func (s *Source) readChannels(ctx context.Context, p *pass) error {
 	keep := map[string]*watermark{}
+	read := 0
 	for _, c := range s.channels {
 		w := p.cur.Channels[c]
 		if w == nil || w.Kind == kindMPIM {
@@ -564,8 +567,13 @@ func (s *Source) readChannels(ctx context.Context, p *pass) error {
 			return err
 		}
 		w.Kind = kind
-		if err := s.readHistory(ctx, p, c, w, true); err != nil && !errors.Is(err, errGone) {
+		err = s.readHistory(ctx, p, c, w, true)
+		if err != nil && !errors.Is(err, errGone) {
 			return err
+		}
+		if err == nil {
+			w.Polled = p.observed
+			read++
 		}
 	}
 	marks := map[string]*watermark{}
@@ -580,9 +588,19 @@ func (s *Source) readChannels(ctx context.Context, p *pass) error {
 		w.Kind = kind
 		keep[c], marks[c] = w, w
 	}
-	for _, c := range dueOrder(marks, p.now, channelsPerPass) {
-		if err := s.readHistory(ctx, p, c, marks[c], true); err != nil && !errors.Is(err, errGone) {
+	due := dueOrder(marks, p.now, len(marks))
+	waiting := 0
+	if len(due) > channelsPerPass {
+		waiting = len(due) - channelsPerPass
+		due = due[:channelsPerPass]
+	}
+	for _, c := range due {
+		err := s.readHistory(ctx, p, c, marks[c], true)
+		if err != nil && !errors.Is(err, errGone) {
 			return err
+		}
+		if err == nil {
+			read++
 		}
 		marks[c].Polled = p.observed
 	}
@@ -592,6 +610,7 @@ func (s *Source) readChannels(ctx context.Context, p *pass) error {
 		}
 	}
 	p.cur.Channels = keep
+	p.reach = channelReach(keep, read, waiting)
 	// A thread's mark lasts as long as its root can be swept, and as long as its channel is read.
 	for k := range p.cur.Replies {
 		c, root, _ := strings.Cut(k, "/")
@@ -600,6 +619,31 @@ func (s *Source) readChannels(ctx context.Context, p *pass) error {
 		}
 	}
 	return nil
+}
+
+// channelReach is how many of the channels the source reads this pass read, how many it has never read, how many
+// waited for a later pass, how many have a gap below their watermark, and the oldest last read. Group direct messages
+// are not channels and are not counted.
+func channelReach(marks map[string]*watermark, read, waiting int) *source.Reach {
+	r := &source.Reach{Read: read, Waiting: waiting}
+	for _, w := range marks {
+		if w.Kind == kindMPIM {
+			continue
+		}
+		r.Total++
+		if w.Gap != "" {
+			r.Gaps++
+		}
+		polled, err := time.Parse(time.RFC3339, w.Polled)
+		if w.Polled == "" || err != nil {
+			r.Never++
+			continue
+		}
+		if r.Oldest.IsZero() || polled.Before(r.Oldest) {
+			r.Oldest = polled
+		}
+	}
+	return r
 }
 
 // readSweep reads the channel threads readHistory found with replies after their mark, oldest mark first, at most

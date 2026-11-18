@@ -1,5 +1,5 @@
 // Package signal is Beacon's client for Signal's HTTP API. It writes events with POST /api/events, holds its send
-// lease with POST /api/leases, reads the restricted subject prefixes with GET /api/restrictions, and checks a key with
+// lease and its sources' heartbeats with POST /api/leases, reads the restricted subject prefixes with GET /api/restrictions, and checks a key with
 // GET /api/me. To retitle a thread its
 // own event opened, it reads that event (GET /api/events/{id}) and that thread (GET /api/threads/{id}). It reads no
 // log.

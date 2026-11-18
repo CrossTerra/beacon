@@ -593,6 +593,23 @@ func FormatStatus(job Job, pass Pass, passErr error, identity string) string {
 			pid = strconv.Itoa(job.PID)
 		}
 	}
+	switch identity {
+	case "ok", "mismatch", "none", "unreadable":
+	default:
+		identity = "unreadable"
+	}
+	head, withheld := passLines(pass, passErr)
+	return fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\n", loaded, running, pid) + head + "identity: " + identity + "\n" + withheld
+}
+
+// FormatPass is the last pass as `beacon status` prints it: the pass.json lines of FormatStatus, without the job.
+func FormatPass(pass Pass, passErr error) string {
+	head, withheld := passLines(pass, passErr)
+	return head + withheld
+}
+
+// passLines are the last pass's time, outcome, lease and holder, and a line per personal source it withheld.
+func passLines(pass Pass, passErr error) (string, string) {
 	last, outcome, lease, holder := "none", "none", "none", "none"
 	switch {
 	case passErr == nil && !pass.At.IsZero():
@@ -610,19 +627,14 @@ func FormatStatus(job Job, pass Pass, passErr error, identity string) string {
 	case passErr != nil && !errors.Is(passErr, os.ErrNotExist):
 		last, outcome = "unreadable", "unreadable"
 	}
-	switch identity {
-	case "ok", "mismatch", "none", "unreadable":
-	default:
-		identity = "unreadable"
-	}
-	out := fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\nlast_pass: %s\noutcome: %s\nlease: %s\nholder: %s\nidentity: %s\n",
-		loaded, running, pid, last, outcome, lease, holder, identity)
+	head := fmt.Sprintf("last_pass: %s\noutcome: %s\nlease: %s\nholder: %s\n", last, outcome, lease, holder)
+	withheld := ""
 	if passErr == nil {
 		// One line per personal source the last pass did not send for, and why: ask Signal's admin to restrict the
 		// prefix, or give Beacon's key the read scope.
 		for _, w := range pass.Withheld {
-			out += fmt.Sprintf("withheld: %s %s %s\n", w.Source, w.Prefix, w.Reason)
+			withheld += fmt.Sprintf("withheld: %s %s %s\n", w.Source, w.Prefix, w.Reason)
 		}
 	}
-	return out
+	return head, withheld
 }

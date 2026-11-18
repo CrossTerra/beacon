@@ -22,7 +22,7 @@ state: state
 mode: dry-run                        # dry-run or send
 lease:
   period: 15m                        # optional; at least 1m
-poll_interval: 1m                    # optional; at most half the lease period
+poll_interval: 1m                    # optional; a fixture's interval and the base of the wait after a failure
 seal:                                # optional: raise items to owner on this machine (DEC-33)
   owner:
     words: [salary, offer, "background check", {exact: PIP}]
@@ -43,7 +43,7 @@ sources:
 | `state` | The state directory: outbox, hold queue, dropped record, instance id. |
 | `mode` | `dry-run` until the person turns sending on. `beacon run --dry-run` forces a dry run in either mode. |
 | `lease.period` | The lease period (DEC-25): how often the holder renews. It holds the lease for three periods in Signal's lease API (two with claim events), so another instance takes over within three periods of the holder stopping. Default `15m`. |
-| `poll_interval` | How often `beacon run` makes a pass. Default `1m`. The launchd agent runs this loop. |
+| `poll_interval` | A fixture source's interval, and the first wait after a pass that fails the run (doubling to 30 minutes). Default `1m`; at most half the lease period. Every other source has its own `interval` ([Sources](#sources)). |
 | `seal.owner` | Words, senders and labels that seal an item at `owner`. See [Seal](#seal). |
 | `sources` | Enabled sources. Kinds: `fixture`, `github`, `jira`, `gmail`, `calendar`, `drive`, `slack`. See [Sources](#sources). |
 
@@ -102,7 +102,34 @@ sources:
     channels: member                # optional; every channel you are in, or ids: ["C0123REVW"], or both
 ```
 
-`name` overrides the default, which is the kind. Two sources may not share a name. `person.identities` uses that
+`name` overrides the default, which is the kind. Two sources may not share a name.
+
+Every source may set `interval`, how long its loop waits after a pass before the next (DEC-41): at least `1s` and at
+most half the lease period. Each source runs on its own loop, so a slow or failing source delays no other. Without
+`interval` a source takes its kind's default:
+
+| Kind | Default `interval` |
+| --- | --- |
+| `slack` | `15s` |
+| `gmail` | `30s` |
+| `github`, `jira` | `1m` |
+| `calendar`, `drive` | `2m` |
+| `fixture` | `poll_interval` |
+
+A default longer than half the lease period is cut to half of it, so a pass renews the lease in time.
+
+The wait starts when a pass ends, so a source's passes are its pass time plus its interval apart. Each source's own
+rate limiting is unchanged: Slack spaces its calls by each method's tier and Gmail by its quota across passes, so a
+shorter interval cannot take a source over its API's limits; it only reads sooner. See
+[commands](commands.md#beacon-run).
+
+```yaml
+sources:
+  - kind: slack
+    workspace: T0123ABCD
+    user: U0123ABCD
+    interval: 30s                   # optional; default 15s
+``` `person.identities` uses that
 name: `github:user:<login>`, `jira:account:<account id>`, `email:<address>` for `gmail`, `calendar` and
 `drive`, and `slack:user:<user id>` for `slack`.
 

@@ -656,7 +656,9 @@ func TestRunLoopSeesAcceptFirst(t *testing.T) {
 	cfg := filepath.Join(dir, "config.yaml")
 	conf := strings.Replace(googleConfig, "https://signal.example.com", sig.URL+"\n  keychain_account: test", 1)
 	conf = strings.Replace(conf, "mode: dry-run", "mode: send", 1)
-	must(t, os.WriteFile(cfg, []byte(conf+googleSources+"poll_interval: 50ms\nlease:\n  period: 1m\n"), 0o600))
+	// Gmail's own loop, a second apart: the next pass after accept-first is soon, whatever the other sources do.
+	sources := strings.Replace(googleSources, "    account: winton@example.com\n", "    account: winton@example.com\n    interval: 1s\n", 1)
+	must(t, os.WriteFile(cfg, []byte(conf+sources+"poll_interval: 50ms\nlease:\n  period: 1m\n"), 0o600))
 	rulesFile, err := os.ReadFile(filepath.Join("..", "..", "examples", "rules.yaml"))
 	if err != nil {
 		t.Fatal(err)
