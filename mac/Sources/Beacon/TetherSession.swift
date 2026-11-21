@@ -8,6 +8,7 @@ import TetherSupport
 final class TetherSession {
     enum Event: Equatable {
         case active, legacyCollectorInstalled, busy
+        case collectorRunning, collectorRestarting, collectorExited
         /// Cleanup ended. `verified` is false when the helper closed the lease without confirming it.
         case stopped(verified: Bool)
     }
@@ -41,6 +42,9 @@ final class TetherSession {
         source.activate()
     }
 
+    /// The longest Quit waits for confirmation: tether's grace period plus its give-up margin, and a little more.
+    static let stopTimeout: TimeInterval = 15 + 5 + 3
+
     func stop() {
         // Close only the write half. The read half waits for the verified-clean acknowledgement.
         _ = shutdown(fd, SHUT_WR)
@@ -53,6 +57,9 @@ final class TetherSession {
         switch size == 1 ? byte : 0 {
         case UInt8(ascii: "A"): event(.active)
         case UInt8(ascii: "L"): event(.legacyCollectorInstalled)
+        case UInt8(ascii: "R"): event(.collectorRunning)
+        case UInt8(ascii: "W"): event(.collectorRestarting)
+        case UInt8(ascii: "X"): event(.collectorExited)
         default:
             source.cancel()
             if size == 1 && byte == UInt8(ascii: "B") {

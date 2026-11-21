@@ -10,4 +10,4 @@ xcrun --sdk macosx clang -std=c17 -Wall -Wextra -Werror -mmacosx-version-min=14.
 	mac/Tests/TetherFixture/fixture.c -o "$tmp/fixture"
 GOENV=off GOWORK=off GOAUTH=off GOTOOLCHAIN=local GOFLAGS='' CGO_ENABLED=1 \
 	go build -o "$tmp/collector" ./cmd/beacon
-TMPDIR="$tmp" python3 mac/Tests/TetherFixture/test_tether.py "$tmp/fixture" "$tmp/collector"
+TMPDIR="$tmp" PYTHONDONTWRITEBYTECODE=1 python3 -B mac/Tests/TetherFixture/test_tether.py "$tmp/fixture" "$tmp/collector"

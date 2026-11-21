@@ -6,7 +6,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int input) {
+pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int input, int output) {
     posix_spawn_file_actions_t files;
     posix_spawnattr_t attrs;
     if (posix_spawn_file_actions_init(&files) != 0) return -1;
@@ -20,8 +20,11 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
         int err = input < 0
             ? posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
             : posix_spawn_file_actions_adddup2(&files, input, STDIN_FILENO);
+        if (err == 0)
+            err = output < 0
+                ? posix_spawn_file_actions_addopen(&files, STDOUT_FILENO, "/dev/null", O_WRONLY, 0)
+                : posix_spawn_file_actions_adddup2(&files, output, STDOUT_FILENO);
         if (err == 0 &&
-            posix_spawn_file_actions_addopen(&files, STDOUT_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
             posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
             posix_spawnattr_setsigmask(&attrs, &clear) == 0 &&
             posix_spawnattr_setsigdefault(&attrs, &defaults) == 0 &&
@@ -44,7 +47,7 @@ int tether_open_session(const char *helper, pid_t *pid) {
     if (fcntl(pair[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(pair[1], F_SETFD, FD_CLOEXEC) == 0) {
         char *argv[] = {(char *)helper, "session", NULL};
         char *env[] = {"PATH=/usr/bin:/bin", "LANG=C", NULL};
-        *pid = tether_spawn(helper, argv, env, pair[1]);
+        *pid = tether_spawn(helper, argv, env, pair[1], -1);
     }
     close(pair[1]);
     if (*pid > 0) return pair[0];

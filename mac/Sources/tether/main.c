@@ -22,23 +22,27 @@ static int session(void) {
     if (uid == 0 || geteuid() != uid || !pw || !pw->pw_dir || pw->pw_dir[0] != '/') return 1;
 
     char self[PATH_MAX], resolved[PATH_MAX], collector[PATH_MAX], home[PATH_MAX + 8];
-    char support[PATH_MAX], state[PATH_MAX], legacy[PATH_MAX];
+    char support[PATH_MAX], state[PATH_MAX], legacy[PATH_MAX], library_logs[PATH_MAX], logs[PATH_MAX], log[PATH_MAX];
     uint32_t size = sizeof(self);
     if (_NSGetExecutablePath(self, &size) != 0 || !realpath(self, resolved) ||
         snprintf(collector, sizeof(collector), "%s/beacon", dirname(resolved)) >= (int)sizeof(collector) ||
         snprintf(home, sizeof(home), "HOME=%s", pw->pw_dir) >= (int)sizeof(home) ||
         snprintf(support, sizeof(support), "%s/Library/Application Support", pw->pw_dir) >= (int)sizeof(support) ||
         snprintf(state, sizeof(state), "%s/beacon", support) >= (int)sizeof(state) ||
+        snprintf(library_logs, sizeof(library_logs), "%s/Library/Logs", pw->pw_dir) >= (int)sizeof(library_logs) ||
+        snprintf(logs, sizeof(logs), "%s/Beacon", library_logs) >= (int)sizeof(logs) ||
+        snprintf(log, sizeof(log), "%s/collector.log", logs) >= (int)sizeof(log) ||
         snprintf(legacy, sizeof(legacy), "%s/Library/LaunchAgents/dev.beacon.agent.plist", pw->pw_dir) >=
             (int)sizeof(legacy)) return 1;
     if ((mkdir(support, 0700) != 0 && errno != EEXIST) || (mkdir(state, 0700) != 0 && errno != EEXIST) ||
+        (mkdir(library_logs, 0700) != 0 && errno != EEXIST) || (mkdir(logs, 0700) != 0 && errno != EEXIST) ||
         chdir(pw->pw_dir) != 0) return 1;
 
     // Two collectors would contend for one outbox. Leave the retired job to be removed first.
     struct stat st;
     bool legacy_installed = lstat(legacy, &st) == 0 || errno != ENOENT;
     char *collector_argv[] = {collector, "run", "--summary", NULL};
-    const struct tether_spec specs[] = {{.argv = collector_argv, .restart = true, .lifetime = true}};
+    const struct tether_spec specs[] = {{.argv = collector_argv, .restart = true, .lifetime = true, .log = log}};
     char *env[] = {home, "PATH=/usr/bin:/bin", "LANG=C", "BEACON_TETHERED=1", NULL};
     return tether_run(STDIN_FILENO, state, specs, legacy_installed ? 0 : 1, env, TETHER_GRACE_MS,
                       legacy_installed ? TETHER_LEGACY : TETHER_ACTIVE);

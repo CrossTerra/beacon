@@ -277,9 +277,9 @@ Migration commands for the retired macOS collector LaunchAgent (`dev.beacon.agen
 `beacon service install` no longer writes or starts a job. For the replacement, see [tether](tether.md).
 
 ```bash
-beacon service uninstall
-beacon service status
-beacon service logs [--stdout]
+beacon service uninstall [--config PATH]
+beacon service status [--config PATH]
+beacon service logs [--legacy [--config PATH]]
 ```
 
 `uninstall` stops the job and removes `~/Library/LaunchAgents/dev.beacon.agent.plist`. It does not delete the
@@ -294,8 +294,12 @@ When this instance held the lease, the holder is the instance id; the claim's `m
 `:lease`. Another holder is reported as `another instance`. A personal source the last pass did not send for is a
 `withheld: <source> <prefix> <reason>` line: `prefix_unrestricted` (ask Signal's admin to restrict the prefix) or
 `restrictions_unknown` (the restrictions could not be read; Beacon's key needs `read`). Status does not contact Signal, and it does not print a
-pass record that is not in that fixed set. `logs` prints the legacy JSON log. `--stdout` prints the other file.
-Neither follows. For the app-supervised collector's latest pass and coverage, use `beacon status --coverage`.
+pass record that is not in that fixed set. For the app-supervised collector's latest pass and coverage, use
+`beacon status --coverage`.
+
+`logs` prints the supervised collector's summary log, `~/Library/Logs/Beacon/collector.log` (see
+[tether](tether.md#what-it-runs)). `--legacy` prints the retired LaunchAgent's summary log,
+`service.stdout.log` in the state directory. Neither follows.
 
 Uninstall and legacy job status are only available on macOS.
 

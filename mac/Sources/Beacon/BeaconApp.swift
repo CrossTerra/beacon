@@ -59,18 +59,27 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func servicesChanged(_ event: TetherSession.Event) {
+        let running: String
         switch event {
-        case .active:
-            if !lifetime.stopping { servicesStatus = "Collector running" }
-            return
+        case .active: running = "Starting collector…"
+        case .collectorRunning: running = "Collector running"
+        case .collectorRestarting: running = "Collector stopped with an error; restarting soon"
+        case .collectorExited: running = "Collector stopped"
         case .legacyCollectorInstalled:
-            if !lifetime.stopping { servicesStatus = "Collector not started: run beacon service uninstall" }
-            return
+            running = "Collector not started: run beacon service uninstall, then reopen Beacon"
         case .busy:
             servicesStatus = "Another Beacon session is running"
+            finishServices()
+            return
         case .stopped(let verified):
             servicesStatus = verified ? "Services stopped" : "Services stopped without confirmation"
+            finishServices()
+            return
         }
+        if !lifetime.stopping { servicesStatus = running }
+    }
+
+    private func finishServices() {
         services = nil
         if awaitingQuit {
             awaitingQuit = false
@@ -85,6 +94,12 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         awaitingQuit = true
         servicesStatus = "Stopping services…"
         services.stop()
+        // Quit never hangs: tether gives up on its own, and this covers a helper that stops responding.
+        DispatchQueue.main.asyncAfter(deadline: .now() + TetherSession.stopTimeout) { [weak self] in
+            guard let self, self.awaitingQuit else { return }
+            self.servicesStatus = "Services stopped without confirmation"
+            self.finishServices()
+        }
         return .terminateLater
     }
 

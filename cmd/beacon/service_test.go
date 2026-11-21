@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -225,8 +226,9 @@ func TestStatusAndLogsIgnoreBrokenRules(t *testing.T) {
 	if !strings.Contains(h.stdout.String(), "last_pass: 2026-11-10T15:04:05Z\n") || !strings.Contains(h.stdout.String(), "holder: another instance\n") {
 		t.Fatalf("status hid the pass:\n%s", h.stdout.String())
 	}
+	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("Items: 0 send\n"), 0o600))
 	a = serviceApp(t, h, t.TempDir(), fl, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--config", cfg}); code != 0 || h.stdout.String() != "{\"msg\":\"run_finished\"}\n" {
+	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "Items: 0 send\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 }
@@ -239,19 +241,51 @@ func TestServiceLogs(t *testing.T) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(state, service.StderrName), []byte("{\"msg\":\"run_finished\"}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(state, service.StdoutName), []byte("stdout-line\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("legacy-line\n"), 0o600))
 	a := serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--config", cfg}); code != 0 || h.stdout.String() != "{\"msg\":\"run_finished\"}\n" {
+	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "no collector log yet\n" {
+		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	must(t, os.WriteFile(filepath.Join(h.logs, "collector.log"), []byte("collector-line\n"), 0o600))
+	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
+	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "collector-line\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--stdout", "--config", cfg}); code != 0 || h.stdout.String() != "stdout-line\n" {
-		t.Fatalf("stdout log: %d\n%s", code, h.stdout.String())
+	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "legacy-line\n" {
+		t.Fatalf("legacy log: %d\n%s", code, h.stdout.String())
+	}
+}
+
+// tether appends the collector's standard output to the collector log. The collector prints summaries only there,
+// and rotates the file in place once it reaches the size limit, keeping one previous file.
+func TestCollectorLogSummariesAndRotation(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "dry-run", "collector-log")
+	a := h.app(h.egressList(cfg))
+	path := filepath.Join(h.logs, "collector.log")
+	old := bytes.Repeat([]byte("old summary\n"), service.LogMaxBytes/12+1)
+	must(t, os.WriteFile(path, old, 0o600))
+	log, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	must(t, err)
+	t.Cleanup(func() { _ = log.Close() })
+	a.stdout = log
+	// No --summary: writing to the collector log alone keeps item details out of it.
+	if h.run(a, "run", "--once", "--bodies", "--config", cfg) != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if prev := mustRead(t, path+".1"); !bytes.Equal(prev, old) {
+		t.Fatalf("previous log not kept: %d bytes", len(prev))
+	}
+	out := string(mustRead(t, path))
+	if !strings.Contains(out, "Items:") || strings.Contains(out, "old summary") || strings.Contains(out, `"subject"`) {
+		t.Fatalf("collector log:\n%s", out)
+	}
+	for _, item := range want {
+		if strings.Contains(out, item.key) || (item.rule != "" && strings.Contains(out, item.rule)) {
+			t.Fatal("the collector log contains an item key or matched rule name")
+		}
 	}
 }
 

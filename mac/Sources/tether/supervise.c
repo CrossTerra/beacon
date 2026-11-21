@@ -40,6 +40,7 @@ struct job {
 };
 
 struct session {
+    int lease;
     struct job *jobs;
     size_t count;
     char *const *env;
@@ -49,6 +50,8 @@ struct session {
 };
 
 static volatile sig_atomic_t stopping;
+
+int (*tether_kill)(pid_t, int) = kill;
 
 static void stop(int sig) {
     (void)sig;
@@ -139,16 +142,24 @@ static size_t members(struct session *s, size_t j, int sig) {
     for (size_t i = 0; i < s->ntracked; i++) {
         if (s->tracked[i].job != j) continue;
         count++;
-        if (sig) kill(s->tracked[i].pid, sig);
+        if (sig) tether_kill(s->tracked[i].pid, sig);
     }
-    if (sig && s->jobs[j].pid > 0) killpg(s->jobs[j].pid, sig);
+    if (sig && s->jobs[j].pid > 0) tether_kill(-s->jobs[j].pid, sig);
     return count;
 }
 
-static void retry_later(struct job *job, uint64_t now) {
+static void report(struct session *s, size_t j, char state) {
+    if (j == 0 && live(s->lease)) send_byte(s->lease, state);
+}
+
+static void retry_later(struct session *s, size_t j, uint64_t now) {
+    struct job *job = &s->jobs[j];
     if (now - job->started_at > 60000) job->failures = 0;
-    // 1, 2, 4, 8, 16, then 30 seconds. The collector also has its own pass backoff.
-    job->retry_at = now + (job->failures < 5 ? (1000u << job->failures++) : 30000u);
+    // By default 1, 2, 4, 8, 16, then 30 seconds. The collector also has its own pass backoff.
+    uint64_t delay = (uint64_t)(job->spec->backoff_ms ? job->spec->backoff_ms : 1000u) << job->failures;
+    if (job->failures < 5) job->failures++;
+    job->retry_at = now + (delay < 30000 ? delay : 30000);
+    report(s, j, TETHER_WAITING);
 }
 
 static void start(struct session *s, size_t j, uint64_t now) {
@@ -157,26 +168,35 @@ static void start(struct session *s, size_t j, uint64_t now) {
     while (s->env[envc]) envc++;
     char **env = calloc(envc + 2, sizeof(*env));
     int pipefd[2] = {-1, -1};
-    if (env && (!job->spec->lifetime ||
+    int log = job->spec->log
+        ? open(job->spec->log, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600)
+        : -1;
+    if (env && (!job->spec->log || log >= 0) && (!job->spec->lifetime ||
                 (pipe(pipefd) == 0 && fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) == 0 &&
                  fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == 0))) {
         memcpy(env, s->env, envc * sizeof(*env));
         env[envc] = job->entry;
-        job->pid = tether_spawn(job->spec->argv[0], job->spec->argv, env, pipefd[0]);
+        job->pid = tether_spawn(job->spec->argv[0], job->spec->argv, env, pipefd[0], log);
     } else {
         job->pid = -1;
     }
     free(env);
+    if (log >= 0) close(log);
     if (pipefd[0] >= 0) close(pipefd[0]);
     job->started_at = now;
     if (job->pid > 0) {
         job->lifetime = pipefd[1];
+        report(s, j, TETHER_RUNNING);
         return;
     }
     job->pid = 0;
     if (pipefd[1] >= 0) close(pipefd[1]);
-    if (job->spec->restart) retry_later(job, now);
-    else job->retired = true;
+    if (job->spec->restart) {
+        retry_later(s, j, now);
+    } else {
+        job->retired = true;
+        report(s, j, TETHER_EXITED);
+    }
 }
 
 // One step of a job. Restarts happen only while `running`, so shutdown starts nothing.
@@ -198,8 +218,12 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
             job->cleaning = false;
             if (job->lifetime >= 0) close(job->lifetime);
             job->lifetime = -1;
-            if (!job->spec->restart || job->clean_exit) job->retired = true;
-            else retry_later(job, now);
+            if (!job->spec->restart || job->clean_exit) {
+                job->retired = true;
+                report(s, j, TETHER_EXITED);
+            } else {
+                retry_later(s, j, now);
+            }
         } else if (!job->term_sent) {
             members(s, j, SIGTERM);
             job->term_sent = true;
@@ -228,10 +252,12 @@ static bool refresh(struct session *s) {
 }
 
 // Stops what a session that died left behind: every process with its marker, and their descendants.
-static void sweep(const char *prefix, unsigned grace_ms) {
+// Returns false if some remain TETHER_GIVE_UP_MS after the grace period.
+static bool sweep(const char *prefix, unsigned grace_ms) {
     bool term_sent = false;
-    uint64_t kill_at = 0;
+    uint64_t kill_at = 0, give_up = now_ms() + grace_ms + TETHER_GIVE_UP_MS;
     for (;;) {
+        if (now_ms() >= give_up) return false;
         struct tether_proc *procs;
         int n = tether_list(&procs);
         if (n < 0) {
@@ -268,10 +294,10 @@ static void sweep(const char *prefix, unsigned grace_ms) {
             sig = SIGKILL;
         }
         for (int k = 0; sig && k < n; k++)
-            if (match[k]) kill(procs[k].pid, sig);
+            if (match[k]) tether_kill(procs[k].pid, sig);
         free(match);
         free(procs);
-        if (!count) return;
+        if (!count) return true;
         poll(NULL, 0, 100);
     }
 }
@@ -312,7 +338,7 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
     char token[TOKEN_SIZE], prefix[ENTRY_SIZE];
     if (read_token(dir, token)) {
         snprintf(prefix, sizeof(prefix), TETHER_MARKER "%s:", token);
-        sweep(prefix, grace_ms);
+        if (!sweep(prefix, grace_ms)) return 4;
     }
     uint8_t random[(TOKEN_SIZE - 1) / 2];
     arc4random_buf(random, sizeof(random));
@@ -325,7 +351,7 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         jobs[j] = (struct job){.spec = &specs[j], .lifetime = -1};
         snprintf(jobs[j].entry, sizeof(jobs[j].entry), TETHER_MARKER "%s:%zu", token, j);
     }
-    struct session s = {.jobs = jobs, .count = count, .env = env, .grace_ms = grace_ms};
+    struct session s = {.lease = lease, .jobs = jobs, .count = count, .env = env, .grace_ms = grace_ms};
     if (live(lease)) send_byte(lease, ready);
 
     struct pollfd fd = {.fd = lease, .events = POLLIN};
@@ -341,7 +367,9 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
             jobs[j].term_sent = false;
         }
     }
-    for (;;) {
+    uint64_t give_up = now_ms() + grace_ms + TETHER_GIVE_UP_MS;
+    bool verified = false;
+    while (now_ms() < give_up) {
         bool done = true;
         if (refresh(&s)) {
             for (size_t j = 0; j < count; j++) {
@@ -351,15 +379,22 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         } else {
             done = false;
         }
-        if (done) break;
+        if (done) {
+            verified = true;
+            break;
+        }
         poll(NULL, 0, 100);
     }
-    unlinkat(dir, "tether.session", 0);
-    fsync(dir);
-    send_byte(lease, TETHER_STOPPED);
+    if (verified) {
+        unlinkat(dir, "tether.session", 0);
+        fsync(dir);
+        send_byte(lease, TETHER_STOPPED);
+    }
+    for (size_t j = 0; j < count; j++)
+        if (jobs[j].lifetime >= 0) close(jobs[j].lifetime);
     free(s.tracked);
     free(jobs);
     close(lock);
     close(dir);
-    return 0;
+    return verified ? 0 : 4;
 }

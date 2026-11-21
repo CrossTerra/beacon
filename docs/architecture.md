@@ -123,6 +123,9 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `service.leaf` | The SHA-256 of the signing certificate recorded by the retired collector installer, if present. `beacon run` refuses a binary whose leaf does not match | No |
 | `service.stdout.log`, `service.stderr.log` | The retired LaunchAgent's logs. Standard error is the JSON log. Rotated by size, one generation kept | No |
 
+The supervised collector's pass summaries are outside the state directory, in `~/Library/Logs/Beacon/collector.log`
+and one previous file, `collector.log.1` ([tether](tether.md#what-it-runs)).
+
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue
 files are opened for writing only under that lock. A line torn by a crash is cut off when a send pass opens the

@@ -117,8 +117,8 @@ commands, paths, secrets or item content.
    missing a read scope, and stores it under the workspace and user (`slack:<workspace>:<user>`).
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
-   supervised collector prints pass summaries to discarded streams. It still writes pass and coverage state.
-   The retired LaunchAgent's logs are readable for migration. Logs exclude item content, rule matches, keys,
+   supervised collector writes pass summaries to `~/Library/Logs/Beacon/collector.log`, rotated by size with
+   one previous file kept. The retired LaunchAgent's logs are readable for migration. Logs exclude item content, rule matches, keys,
    bodies, tokens and error text. `beacon run` prints a fixed message for each reason.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
    person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and

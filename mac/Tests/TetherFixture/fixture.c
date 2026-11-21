@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,12 @@ static void record(void) {
     char name[64];
     snprintf(name, sizeof(name), "pids/%d", getpid());
     touch(name);
+}
+
+static int ignore_signal(pid_t pid, int sig) {
+    (void)pid;
+    (void)sig;
+    return 0; // A process that does not stop, as far as tether can tell.
 }
 
 static void forever(void) {
@@ -57,12 +64,17 @@ int main(int argc, char **argv) {
     if (argc < 3) return 2;
     dir = argv[2];
     if (strcmp(argv[1], "session") == 0) {
+        // Optional: "slow" makes the watch's first restart wait 30 seconds; "stubborn" drops every signal.
+        bool slow = argc > 3 && strcmp(argv[3], "slow") == 0;
+        if (argc > 3 && strcmp(argv[3], "stubborn") == 0) tether_kill = ignore_signal;
         char *idle[] = {argv[0], "idle", argv[2], NULL};
         char *flaky[] = {argv[0], "flaky", argv[2], NULL};
         char *detach[] = {argv[0], "detach", argv[2], NULL};
+        char log[PATH_MAX];
+        snprintf(log, sizeof(log), "%s/collector.log", dir);
         const struct tether_spec specs[] = {
-            {.argv = idle, .restart = true, .lifetime = true}, // the collector's role
-            {.argv = flaky, .restart = true},                  // a watch
+            {.argv = idle, .restart = true, .lifetime = true, .log = log}, // the collector's role
+            {.argv = flaky, .restart = true, .backoff_ms = slow ? 30000 : 0}, // a watch
             {.argv = detach},                                  // a runner tree: never restarted
         };
         char *env[] = {"PATH=/usr/bin:/bin", NULL};
@@ -70,6 +82,7 @@ int main(int argc, char **argv) {
     }
     record();
     if (strcmp(argv[1], "idle") == 0) {
+        if (printf("Items: 0 send\n") < 0 || fflush(stdout) != 0) return 1;
         char byte;
         return read(STDIN_FILENO, &byte, 1) == 0 ? 0 : 1; // EOF: tether died.
     }

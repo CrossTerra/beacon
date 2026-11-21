@@ -3,3 +3,4 @@
 /dist/
 /mac/.build/
 /mac/.swiftpm/
+__pycache__/

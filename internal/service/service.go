@@ -51,6 +51,16 @@ func AgentsDir() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents"), nil
 }
 
+// CollectorLog is ~/Library/Logs/Beacon/collector.log. tether appends the supervised collector's standard output,
+// its pass summaries, there.
+func CollectorLog() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "Logs", "Beacon", "collector.log"), nil
+}
+
 // Domain is the GUI launchd domain for uid. A LaunchAgent there runs as that user, in the graphical session, and
 // can read the login keychain. It is not the system domain.
 func Domain(uid int) string { return "gui/" + strconv.Itoa(uid) }
@@ -60,7 +70,7 @@ func Target(uid int) string { return Domain(uid) + "/" + Label }
 
 // Rotate copies path aside to path.1 and truncates it when it is at least limit bytes.
 //
-// launchd holds the log descriptor open and writes with append. A rename would leave that descriptor on the old
+// tether (and launchd before it) holds the log descriptor open and writes with append. A rename would leave that descriptor on the old
 // inode, so the file is truncated in place. The copy happens first. A file larger than rotateReadMax is truncated
 // without a copy.
 func Rotate(path string, limit int64) error {

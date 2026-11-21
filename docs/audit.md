@@ -86,7 +86,7 @@ reads, later passes, pagination and the request scope checks. Record the actual 
   Signal and other service origins. Check that repair and any platform or test overrides are unavailable to agents.
 - Trace JSON log fields back to their inputs in [`internal/logs/logs.go`](../internal/logs/logs.go).
   Check provider-derived error codes, client error paths, terminal dry-run and `explain` output, and what ends
-  up in local state or a retired LaunchAgent's stdout and stderr files. Check for secrets, item content, request
+  up in local state, `~/Library/Logs/Beacon/collector.log` or a retired LaunchAgent's stdout and stderr files. Check for secrets, item content, request
   bodies or matches on content. See [`cmd/beacon/app.go`](../cmd/beacon/app.go) and
   [`internal/service/service.go`](../internal/service/service.go). Keep live output off the agent's transcript.
 

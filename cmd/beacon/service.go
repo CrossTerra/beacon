@@ -21,7 +21,7 @@ import (
 
 const serviceUsage = `usage: beacon service uninstall [--config PATH]
        beacon service status [--config PATH]
-       beacon service logs [--config PATH] [--stdout]
+       beacon service logs [--legacy [--config PATH]]
 `
 
 // launcher inspects and retires the legacy collector job. It cannot start one.
@@ -232,21 +232,30 @@ func (a *app) identityStatus(ctx context.Context, state string) string {
 
 func (a *app) cmdServiceLogs(args []string) error {
 	fs, cfgPath := a.flags("service logs")
-	useStdout := fs.Bool("stdout", false, "print the standard output log instead of the JSON log")
+	legacy := fs.Bool("legacy", false, "print the retired LaunchAgent's summary log from the state directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := a.loadConfig(*cfgPath)
-	if err != nil {
-		return err
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: beacon service logs [--legacy [--config PATH]]")
 	}
-	name := service.StderrName
-	if *useStdout {
-		name = service.StdoutName
+	var path string
+	if *legacy {
+		cfg, err := a.loadConfig(*cfgPath)
+		if err != nil {
+			return err
+		}
+		path = filepath.Join(cfg.StatePath(), service.StdoutName)
+	} else {
+		p, err := a.collectorLogPath()
+		if err != nil {
+			return err
+		}
+		path = p
 	}
-	f, err := os.Open(filepath.Join(cfg.StatePath(), name))
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(a.stdout, "no service log yet")
+		fmt.Fprintln(a.stdout, "no collector log yet")
 		return nil
 	}
 	if err != nil {
@@ -352,9 +361,23 @@ func (a *app) sleepFor(interrupt context.Context, d time.Duration) error {
 	}
 }
 
+func (a *app) collectorLogPath() (string, error) {
+	if a.collectorLog != nil {
+		return a.collectorLog()
+	}
+	return service.CollectorLog()
+}
+
+// serviceStdout reports whether standard output is the collector log or the retired LaunchAgent's log.
 func (a *app) serviceStdout(state string) bool {
 	out, ok := a.stdout.(*os.File)
-	return ok && sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
+	if !ok {
+		return false
+	}
+	if p, err := a.collectorLogPath(); err == nil && sameFile(p, int(out.Fd())) {
+		return true
+	}
+	return sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
 }
 
 // refusePinned refuses to run when the retired installer recorded a certificate and this binary is not signed with it.
@@ -384,15 +407,19 @@ func (a *app) identityOf(ctx context.Context, path string) (service.Identity, er
 	return service.CodesignIdentity(ctx, path)
 }
 
-// rotateServiceLogs rotates the service logs when this process's standard output or error is that file, which is
-// how launchd runs the agent. A terminal run is left alone.
+// rotateServiceLogs rotates a log when this process's standard output or error is that file, which is how tether
+// (and the retired LaunchAgent) runs the collector. A terminal run is left alone.
 func (a *app) rotateServiceLogs(dir string) {
-	a.rotateIfOurs(filepath.Join(dir, service.StdoutName), 1)
-	a.rotateIfOurs(filepath.Join(dir, service.StderrName), 2)
+	if p, err := a.collectorLogPath(); err == nil {
+		a.rotateIfOurs(p, a.stdout)
+	}
+	a.rotateIfOurs(filepath.Join(dir, service.StdoutName), a.stdout)
+	a.rotateIfOurs(filepath.Join(dir, service.StderrName), a.stderr)
 }
 
-func (a *app) rotateIfOurs(path string, fd int) {
-	if !sameFile(path, fd) {
+func (a *app) rotateIfOurs(path string, w io.Writer) {
+	f, ok := w.(*os.File)
+	if !ok || !sameFile(path, int(f.Fd())) {
 		return
 	}
 	_ = service.Rotate(path, service.LogMaxBytes)

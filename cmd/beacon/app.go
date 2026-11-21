@@ -73,6 +73,8 @@ type app struct {
 	agentsDir func() (string, error)
 	launchctl launcher
 	identify  func(context.Context, string) (service.Identity, error)
+	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
+	collectorLog func() (string, error)
 	// sleep waits: the service's backoff, and a Slack source's spacing between calls. Nil sleeps on the clock. Tests
 	// record the duration and return.
 	sleep func(context.Context, time.Duration) error
