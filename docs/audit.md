@@ -13,9 +13,12 @@ Use synthetic fixtures and in-memory test credentials. Agents never use the logi
   [`cmd/beacon/app.go`](../cmd/beacon/app.go) and [`internal/config/config.go`](../internal/config/config.go).
 - Follow the CLI entry point in [`cmd/beacon/main.go`](../cmd/beacon/main.go) and dispatch in
   [`cmd/beacon/app.go`](../cmd/beacon/app.go). Inventory every subprocess and listener, including setup commands.
-  This tree's service runs the collector. For a future approval app also inspect the socket and peer identity,
-  Touch ID binding, provider reads and writes, vault and journal, and supervision on Quit and crash. Check that
-  the installed files and signer are outside the write access of the accounts they supervise.
+  This tree's service runs the collector. The [`Beacon.app` entry point](../mac/Sources/Beacon/BeaconApp.swift)
+  and [registered shortcut](../mac/Sources/Beacon/ApprovalShortcut.swift) only open a local window. Review the
+  [`Info.plist`](../mac/Info.plist) and [bundle staging script](../scripts/build-app.sh); the bundle contains a
+  separate collector executable that the shell does not launch. As the app gains approvals, inspect the socket
+  and peer identity, Touch ID binding, provider reads and writes, vault and journal, and supervision on Quit and
+  crash. Check that installed files and the signer are outside the write access of the accounts they supervise.
 
 ## 2. Trace what Beacon reads and where it connects
 

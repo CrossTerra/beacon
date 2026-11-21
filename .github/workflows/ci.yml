@@ -28,3 +28,11 @@ jobs:
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           scripts/gates.sh
+      - name: Build and test Beacon.app
+        if: runner.os == 'macOS'
+        run: |
+          swift build --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
+          swift test --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
+      - name: Stage the unsigned Beacon.app
+        if: runner.os == 'macOS'
+        run: scripts/build-app.sh "$GITHUB_SHA"

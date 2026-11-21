@@ -101,3 +101,25 @@ If the person intentionally changes the signing certificate of an existing insta
 [`beacon keychain repair`](commands.md#beacon-keychain-repair) and
 [`beacon service install --force`](commands.md#beacon-service) for updating the item access and the optional
 LaunchAgent's pinned certificate. Both are person-run operations on the verified signed binary.
+
+## macOS app
+
+The app uses macOS 14 or later and Swift 6. Use a toolchain with Swift Testing, such as Xcode 16 or later. On macOS,
+CI adds these gates without using a signing identity:
+
+```bash
+scratch=$(mktemp -d)
+swift build --package-path mac --scratch-path "$scratch"
+swift test --package-path mac --scratch-path "$scratch"
+```
+
+The shortcut test constructs local events without registering a global hot key or opening a window. To stage a
+bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a clean checkout (including no
+ignored build outputs). CI uses the commit under test. For an audited build, use the full ID from the approved
+report and follow [signing.md](signing.md#stage-the-macos-app-skeleton).
+
+On the Mac, open the staged `Beacon.app`, choose **Approvals…** from its menu, and check for **No pending
+approvals**. Close the window, focus Finder and press **⌥⌘B** to reopen it. The shortcut registers one key
+combination, requires no Accessibility or Input Monitoring access, and leaves the menu usable if registration
+fails. Opening the window repeatedly should not create duplicates. **Quit Beacon** removes the menu item. The
+bundle also contains `Contents/Helpers/beacon`, but the app does not start it or use credentials.

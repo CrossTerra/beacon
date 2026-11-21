@@ -5,6 +5,15 @@ locked while reviewing, building and staging. Verify the full commit ID and the 
 unlocking the signer (13.00-D15). Sign locally, relock immediately and verify the signature at the path
 you will run. Agents use ad-hoc builds and fixtures, and never run anything that uses the login keychain.
 
+## Stage the macOS app skeleton
+
+With the signer locked, run [`scripts/build-app.sh`](../scripts/build-app.sh) from a clean checkout at the full
+approved commit ID. It builds from a Git archive into a private staging directory and verifies a SHA-256 manifest
+of the three bundle files: `Info.plist`, the `dev.beacon.app` executable and the separate Go collector. It does
+not sign, install, launch or access the Keychain. The toolchain may ad-hoc sign the executables when linking them;
+there is no identity-signed app bundle. This stage is for a UI smoke test only, not for provisioning credentials
+or replacing an installation. The disposable rebuild test below is still required before using a real vault.
+
 ## Choose a local signing identity
 
 - **Apple Development.** With a free Apple ID (Apple Account), sign in to Xcode under **Settings → Accounts**.
