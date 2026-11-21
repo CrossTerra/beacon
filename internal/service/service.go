@@ -114,6 +114,7 @@ func Plist(spec Spec) ([]byte, error) {
 	b.WriteString("\t<array>\n")
 	b.WriteString("\t\t<string>" + binary + "</string>\n")
 	b.WriteString("\t\t<string>run</string>\n")
+	b.WriteString("\t\t<string>--summary</string>\n")
 	b.WriteString("\t\t<string>--config</string>\n")
 	b.WriteString("\t\t<string>" + config + "</string>\n")
 	b.WriteString("\t</array>\n")
@@ -345,18 +346,6 @@ func Backoff(poll time.Duration, failures int) time.Duration {
 		return BackoffCap
 	}
 	return d
-}
-
-// ReportBodies reports whether a pass prints item bodies. The launchd agent does not, unless asked: a dry run's
-// bodies would otherwise land in the service log.
-func ReportBodies(requested, serviceStdout, dry bool) bool {
-	if requested {
-		return true
-	}
-	if serviceStdout {
-		return false
-	}
-	return dry
 }
 
 func writeAtomic(dir, name string, data []byte) error {

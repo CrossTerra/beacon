@@ -48,66 +48,29 @@ review of the existing CLI item's ACLs and the LaunchAgent's pinned leaf if you 
 
 ## Stage and sign the audited collector
 
-Run this yourself in Bash from a fresh detached checkout of the approved fork commit. Substitute the full
-approved ID, the dedicated keychain's absolute path and the exact identity hash you recorded. Use the audited
-Go and macOS toolchain and its reviewed compiler settings. Keep this checkout and the staging directory
-outside the supervised accounts' write access. The signing helper in this tree chooses an identity and builds
-from the working directory. It does not enforce the audited-commit check.
+Run the helper yourself in a terminal from a fresh detached checkout of the approved fork commit. Supply
+the full approved ID, the dedicated keychain's absolute path and the exact certificate SHA-1 you recorded.
+Use the audited Go and macOS toolchain and its reviewed compiler settings. Keep the checkout and staging
+directory outside the supervised accounts' write access.
 
 ~~~bash
-(
-  set -euo pipefail
-  umask 077
-  audited_commit='FULL_COMMIT_FROM_THE_APPROVED_REPORT'
-  signing_keychain='/absolute/path/to/your-signing.keychain-db'
-  signing_cert='EXACT_CERTIFICATE_SHA1'
-  cli_requirement="identifier \"dev.beacon.cli\" and certificate leaf = H\"$signing_cert\""
-  verify_checkout() {
-    local current changes
-    current=$(git rev-parse --verify 'HEAD^{commit}') || return 1
-    changes=$(git status --porcelain=v1 --untracked-files=all --ignored) || return 1
-    if [ "$current" != "$audited_commit" ] || [ -n "$changes" ]; then
-      printf '%s\n' 'Stop: the checkout must be clean and match the full audited commit.' >&2
-      return 1
-    fi
-  }
-  verify_checkout
-  security lock-keychain "$signing_keychain"
-  export GOENV=off GOWORK=off GOTOOLCHAIN=local GOFLAGS= CGO_ENABLED=1
-  stage=$(mktemp -d "$HOME/.beacon-build.XXXXXXXX")
-  mkdir "$stage/src"
-  git archive "$audited_commit" | tar -x -C "$stage/src"
-  (
-    cd "$stage/src"
-    go mod verify
-    go build -trimpath -buildvcs=false \
-      -ldflags "-X main.version=dev -X main.commit=$audited_commit" \
-      -o "$stage/beacon" ./cmd/beacon
-  )
-  shasum -a 256 "$stage/beacon" > "$stage/unsigned.sha256"
-  verify_checkout
-  shasum -a 256 --check "$stage/unsigned.sha256"
-  printf 'Verified %s\nStaged artifact %s\n' "$audited_commit" "$stage/beacon"
-  (
-    trap 'security lock-keychain "$signing_keychain"' EXIT
-    set -e
-    security unlock-keychain "$signing_keychain"
-    codesign --force --sign "$signing_cert" --keychain "$signing_keychain" --timestamp=none \
-      --options runtime --identifier dev.beacon.cli --requirements "=designated => $cli_requirement" \
-      "$stage/beacon"
-  )
-  codesign --verify --strict -R "=$cli_requirement" "$stage/beacon"
-  codesign -d -r- "$stage/beacon"
-  "$stage/beacon" version
-  shasum -a 256 "$stage/beacon"
-)
+scripts/build-local.sh FULL_COMMIT_FROM_THE_APPROVED_REPORT \
+  /absolute/path/to/your-signing.keychain-db EXACT_CERTIFICATE_SHA1
 ~~~
 
-Check the printed commit against the report and record the signed hash and designated requirement. When
-placing the binary at its approved location, verify that same hash and signature there before using it.
+The helper requires a clean checkout at the full audited commit. It refuses untracked or ignored files
+and index flags that could hide changes. It locks the dedicated signer, builds from a Git archive of the
+approved commit in a private staging directory, and records the unsigned SHA-256. It checks the checkout
+and staged bytes before unlocking and again before signing. It then relocks the signer and verifies the
+signature against the specified certificate leaf and `dev.beacon.cli`. It installs the binary at
+`~/.local/bin/beacon` (or the path supplied as a fourth argument) and verifies the signed hash and signature
+at that path.
+
+Check the printed commit against the report and record the signed SHA-256 and designated requirement. If
+you move the binary, verify the same hash and signature at the new path before using it.
 A different commit, changed build input, or replaced artifact needs review with the signer locked. Run
-[`scripts/repro.sh`](../scripts/repro.sh) during the audit for the two-path build check. The staged binary is
-the input to signing. The check concerns those pre-signing bytes.
+[`scripts/repro.sh`](../scripts/repro.sh) during the audit for the two-path build check. It compares
+unsigned builds, not signed binaries.
 
 ## Part 1 manual rebuild test
 

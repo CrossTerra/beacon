@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -25,14 +26,15 @@ type repoSpec struct {
 }
 
 type scope struct {
-	host  string
-	repos []repoSpec
+	scheme  string
+	address string
+	repos   []repoSpec
 	// ids maps a repository's numeric id to the configured repository GitHub said has it, this pass.
 	ids map[string]repoSpec
 }
 
-func newScope(host string, repos []string) (scope, error) {
-	s := scope{host: strings.ToLower(host), ids: map[string]repoSpec{}}
+func newScope(base *url.URL, repos []string) (scope, error) {
+	s := scope{scheme: base.Scheme, address: egress.Address(base), ids: map[string]repoSpec{}}
 	for _, r := range repos {
 		owner, name, ok := strings.Cut(r, "/")
 		if !ok || owner == "" || name == "" {
@@ -40,7 +42,7 @@ func newScope(host string, repos []string) (scope, error) {
 		}
 		s.repos = append(s.repos, repoSpec{owner: owner, name: name})
 	}
-	if s.host == "" || len(s.repos) == 0 {
+	if len(s.repos) == 0 {
 		return scope{}, source.ErrScope
 	}
 	return s, nil
@@ -103,24 +105,18 @@ func (s scope) exactRepos() []string {
 	return out
 }
 
-// allow refuses a URL the configured repositories and host do not cover. The request is not sent. The error names
+// allow refuses a URL outside the configured API origin and repositories before authentication. The error names
 // the refused path's family, never the URL.
 func (s scope) allow(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || u.User != nil {
 		return denied("url")
 	}
-	if !strings.EqualFold(u.Hostname(), s.host) {
-		return denied("host")
-	}
-	switch u.Scheme {
-	case "https":
-	case "http":
-		if !loopback(u.Hostname()) {
-			return denied("scheme")
-		}
-	default:
+	if u.Scheme != s.scheme {
 		return denied("scheme")
+	}
+	if egress.Address(u) != s.address {
+		return denied("host")
 	}
 	path := strings.TrimPrefix(u.Path, "/api/v3")
 	path = strings.Trim(path, "/")
@@ -218,7 +214,7 @@ func segment(p string) string {
 }
 
 func loopback(host string) bool {
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

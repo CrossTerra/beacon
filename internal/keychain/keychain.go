@@ -5,9 +5,7 @@
 package keychain
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -70,7 +68,7 @@ func SlackUserToken(s Secret) error {
 	return nil
 }
 
-// FromString stores s as a secret. The caller must not log s. This is how `gh auth token` is imported.
+// FromString wraps a supplied value as a Secret. Setup commands use the credential readers.
 func FromString(s string) (Secret, error) {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.ContainsAny(s, "\r\n") {
@@ -213,45 +211,6 @@ func repairOne(s Store, account string) error {
 		return fmt.Errorf("keychain: removing the copy of %s: %w", account, err)
 	}
 	return nil
-}
-
-// echoOff turns terminal echo off for r and returns the function that restores it. Tests replace it.
-var echoOff = noEcho
-
-// ReadSecret reads one line from r as a secret, trimming surrounding space. When r is a terminal, echo is off while
-// it reads, and is restored before ReadSecret returns, also when ctx ends first (an interrupt): then it returns the
-// context's error without waiting for the line. An empty line is an error.
-func ReadSecret(ctx context.Context, r io.Reader) (Secret, error) {
-	restore := echoOff(r)
-	defer restore()
-	type read struct {
-		line string
-		err  error
-	}
-	done := make(chan read, 1)
-	go func() {
-		line, err := bufio.NewReader(r).ReadString('\n')
-		done <- read{line, err}
-	}()
-	var line string
-	var err error
-	select {
-	case <-ctx.Done():
-		return Secret{}, ctx.Err()
-	case got := <-done:
-		line, err = got.line, got.err
-	}
-	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
-		if errors.Is(err, io.EOF) {
-			return Secret{}, errors.New("keychain: no secret given")
-		}
-		return Secret{}, err
-	}
-	v := strings.TrimSpace(line)
-	if v == "" {
-		return Secret{}, errors.New("keychain: no secret given")
-	}
-	return Secret{value: []byte(v)}, nil
 }
 
 // Memory is an in-memory Store for tests.

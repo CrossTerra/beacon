@@ -4,7 +4,7 @@
 #
 # It does not stop keychain prompts across rebuilds. macOS files a build signed with a certificate Apple did not issue
 # under that build's hash (the item's partition list), so every rebuild asks once per Beacon item. An Apple
-# Development certificate does not have that problem; scripts/build-local.sh prefers one. See docs/development.md.
+# Development certificate does not have that problem. See docs/signing.md.
 # Release builds are signed with a Developer ID (Phase 7).
 #
 # This creates "Beacon Local Signing" in the login keychain and trusts it for code signing for this user only.
@@ -48,4 +48,4 @@ security set-key-partition-list -S apple-tool:,apple: -s -l "$name" "$keychain" 
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$tmp/cert.pem"
 
 security find-identity -v -p codesigning "$keychain" | grep "\"$name\""
-echo "Done. Build with scripts/build-local.sh. Each rebuild still asks once per Beacon item; see docs/development.md."
+echo "Done. See docs/signing.md for the dedicated keychain and audited build workflow."

@@ -6,9 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/source"
 )
 
@@ -113,8 +116,31 @@ func TestNextPageByOtherRepositoryIDRefused(t *testing.T) {
 	}
 }
 
+func TestNextPageOnAnotherAllowedPortIsRefused(t *testing.T) {
+	var requests atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(other.Close)
+	srv, _ := pagedServer(t, func(string) string {
+		return other.URL + "/repositories/4242/issues/9/timeline?page=2"
+	}, prRepo)
+	s := newTest(t, srv, []string{"acme/app"}, nil)
+	otherURL, err := url.Parse(other.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shared transport permits both services. GitHub still checks the origin before attaching its token.
+	s.SetHTTP(limitedClient(egress.Transport(append(s.Hosts(), egress.Address(otherURL)))))
+	_, err = s.Collect(context.Background(), []byte("2026-11-01T00:00:00Z"))
+	if !errors.Is(err, source.ErrScope) || requests.Load() != 0 {
+		t.Fatalf("collect error: %v, requests to the other service: %d", err, requests.Load())
+	}
+}
+
 func TestRepositoryIDScope(t *testing.T) {
-	sc, err := newScope("api.github.com", []string{"acme/app", "acme/*"})
+	sc, err := newScope(&url.URL{Scheme: "https", Host: "api.github.com"}, []string{"acme/app", "acme/*"})
 	if err != nil {
 		t.Fatal(err)
 	}

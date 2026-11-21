@@ -572,14 +572,21 @@ func TestLogsCarryNoContent(t *testing.T) {
 	h := newHarness(t)
 	cfg, want := writeSetup(t, t.TempDir(), h.server.URL, "send", "logs")
 	h.server.Seed(want[2].key, []byte(`{"other":1}`))
+	const privateCode = "private_item_content"
+	h.server.Script = func(_ int, req signaltest.Request) signaltest.Reply {
+		if req.Key == want[0].key {
+			return signaltest.Reply{Status: 422, Body: `{"error":{"code":"` + privateCode + `","message":"Add retries"}}`}
+		}
+		return signaltest.Reply{}
+	}
 	if code := h.run(h.app(h.egressList(cfg)), "run", "--once", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
 	logs := h.stderr.String()
-	if logs == "" {
-		t.Fatal("no logs")
+	if !strings.Contains(logs, `"code":"other"`) || !strings.Contains(logs, `"code":"idempotency_conflict"`) {
+		t.Fatal("the log did not preserve known codes and replace unknown ones")
 	}
-	banned := append([]string{token, "Add retries", "Rotate the keys", "fixture:user:", "acme/app", "@winton", `"subject"`, "rule"}, secrets...)
+	banned := append([]string{token, privateCode, "Add retries", "Rotate the keys", "fixture:user:", "acme/app", "@winton", `"subject"`, "rule"}, secrets...)
 	for _, w := range want {
 		banned = append(banned, w.key)
 	}
@@ -594,6 +601,9 @@ func TestLogsCarryNoContent(t *testing.T) {
 		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
 			t.Fatalf("log line is not JSON: %s", sc.Text())
 		}
+	}
+	if strings.Contains(h.stdout.String(), privateCode) {
+		t.Fatal("the run report contains an unknown error code")
 	}
 }
 
@@ -890,12 +900,15 @@ func TestRetryRejected(t *testing.T) {
 			return signaltest.Reply{}
 		}
 		if r.Key == want[1].key {
-			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"idempotency_conflict","message":"held"}}`}
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"Identity moved.","details":{"field":"/by/identity"}}}`}
 		}
 		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"SECRET-REASON"}}`}
 	}
 	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 1 {
+		t.Fatalf("identity conflict was attempted %d times, want one", n)
 	}
 	state := filepath.Join(dir, "state")
 	ob, err := outbox.Open(state, time.Now)
@@ -906,6 +919,12 @@ func TestRetryRejected(t *testing.T) {
 	ob.Close()
 
 	h.server.Script = nil
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 1 {
+		t.Fatalf("a later pass tried the conflicted key again: %d requests", n)
+	}
 	before := map[string]int{}
 	for _, w := range want {
 		before[w.key] = len(h.server.RequestsFor(w.key))
@@ -940,7 +959,7 @@ func TestRetryRejected(t *testing.T) {
 	if e, _ := obRead.Get(want[0].key); e.State != outbox.Sent || e.Status != 201 {
 		t.Fatalf("retried key: %+v", e)
 	}
-	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 {
+	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 || e.Code != "conflict" {
 		t.Fatalf("409 was rewritten: %+v", e)
 	}
 	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {

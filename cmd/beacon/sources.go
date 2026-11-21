@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -363,11 +362,7 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 	}
 	var client keychain.Secret
 	if *clientFile != "" {
-		data, err := os.ReadFile(*clientFile)
-		if err != nil {
-			return err
-		}
-		client, err = keychain.OAuthClient(data)
+		client, err = keychain.ReadOAuthClientFile(*clientFile)
 		if err != nil {
 			return err
 		}
@@ -467,11 +462,12 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	token, err := a.readGitHubToken(ctx, *fromGH, *host)
+	// Refuse an ad-hoc build before gh can read its own credential store.
+	store, err := a.keychain()
 	if err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	token, err := a.readGitHubToken(ctx, *fromGH, *host)
 	if err != nil {
 		return err
 	}
@@ -507,33 +503,11 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	// One reader for a pipe: a second bufio.Reader would miss the token, which the first reader already buffered.
-	in := bufio.NewReader(a.stdin)
-	fmt.Fprint(a.stderr, "Atlassian account email: ")
-	email, err := readLineFrom(in)
-	if err != nil {
-		return err
-	}
-	fmt.Fprint(a.stderr, "API token (input hidden): ")
-	var token keychain.Secret
-	if isTerminal(a.stdin) {
-		token, err = keychain.ReadSecret(ctx, a.stdin)
-		fmt.Fprintln(a.stderr)
-	} else {
-		var line string
-		line, err = readLineFrom(in)
-		if err == nil {
-			token, err = keychain.FromString(line)
-		}
-	}
-	if err != nil {
-		return err
-	}
-	secret, err := keychain.PairWith(email, token)
-	if err != nil {
-		return err
-	}
 	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	secret, err := keychain.ReadJiraCredential(ctx, a.stdin, a.stderr)
 	if err != nil {
 		return err
 	}
@@ -549,47 +523,13 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 }
 
 func (a *app) readGitHubToken(ctx context.Context, fromGH bool, host string) (keychain.Secret, error) {
-	if !fromGH {
-		fmt.Fprint(a.stderr, "GitHub token (input hidden): ")
-		s, err := keychain.ReadSecret(ctx, a.stdin)
-		fmt.Fprintln(a.stderr)
-		return s, err
+	if fromGH {
+		return keychain.ReadGitHubToken(ctx, host)
 	}
-	var raw string
-	var err error
-	if a.ghToken != nil {
-		raw, err = a.ghToken(ctx, host)
-	} else {
-		raw, err = ghAuthToken(ctx, host)
-	}
-	if err != nil {
-		return keychain.Secret{}, err
-	}
-	return keychain.FromString(raw)
-}
-
-func splitHost(host string) (string, string, error) {
-	if !strings.Contains(host, ":") {
-		return host, "", nil
-	}
-	return net.SplitHostPort(host)
-}
-
-func ghAuthToken(ctx context.Context, host string) (string, error) {
-	args := []string{"auth", "token"}
-	if host != "" {
-		h, _, err := splitHost(host)
-		if err != nil {
-			h = host
-		}
-		args = append(args, "--hostname", h)
-	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", errors.New("gh auth token failed; run gh auth login")
-	}
-	return strings.TrimSpace(string(out)), nil
+	fmt.Fprint(a.stderr, "GitHub token (input hidden): ")
+	s, err := keychain.ReadSecret(ctx, a.stdin)
+	fmt.Fprintln(a.stderr)
+	return s, err
 }
 
 func (a *app) confirm(prompt string, yes bool) error {
@@ -622,11 +562,7 @@ func isTerminal(r io.Reader) bool {
 }
 
 func readLine(r io.Reader) (string, error) {
-	return readLineFrom(bufio.NewReader(r))
-}
-
-func readLineFrom(r *bufio.Reader) (string, error) {
-	line, err := r.ReadString('\n')
+	line, err := bufio.NewReader(r).ReadString('\n')
 	if err != nil && line == "" {
 		return "", err
 	}
