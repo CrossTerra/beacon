@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"regexp"
 	"time"
+
+	"github.com/CrossTerra/beacon/internal/signal"
 )
 
 // Event is a log event name. Every name Beacon logs is declared here.
@@ -132,8 +134,13 @@ func Outcome(o string) Attr { return Attr{slog.String("outcome", o)} }
 // Status is an HTTP status.
 func Status(s int) Attr { return Attr{slog.Int("status", s)} }
 
-// Code is Signal's error code.
-func Code(c string) Attr { return Attr{slog.String("code", c)} }
+// Code records an allowlisted Signal error code, or an empty field when there was no error.
+func Code(c string) Attr {
+	if c != "" {
+		c = signal.SafeErrorCode(c)
+	}
+	return Attr{slog.String("code", c)}
+}
 
 // Period is a lease period number.
 func Period(p int64) Attr { return Attr{slog.Int64("period", p)} }

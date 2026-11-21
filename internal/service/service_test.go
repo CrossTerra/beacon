@@ -28,6 +28,7 @@ func TestPlistGolden(t *testing.T) {
 	<array>
 		<string>/Users/winton/.local/bin/beacon</string>
 		<string>run</string>
+		<string>--summary</string>
 		<string>--config</string>
 		<string>/Users/winton/Library/Application Support/beacon/config.yaml</string>
 	</array>
@@ -234,7 +235,7 @@ func TestFormatStatus(t *testing.T) {
 	}
 }
 
-func TestBackoffAndBodies(t *testing.T) {
+func TestBackoff(t *testing.T) {
 	poll := time.Minute
 	if Backoff(poll, 1) != poll || Backoff(poll, 2) != 2*poll || Backoff(poll, 3) != 4*poll {
 		t.Fatalf("backoff %s %s %s", Backoff(poll, 1), Backoff(poll, 2), Backoff(poll, 3))
@@ -244,9 +245,6 @@ func TestBackoffAndBodies(t *testing.T) {
 	}
 	if NextFailures(Pass{}, false) != 1 || NextFailures(Pass{Outcome: "ok"}, true) != 1 || NextFailures(Pass{Outcome: "unauthorized", Failures: 3}, true) != 4 {
 		t.Fatal("streak")
-	}
-	if ReportBodies(true, true, false) != true || ReportBodies(false, true, true) != false || ReportBodies(false, false, true) != true || ReportBodies(false, false, false) != false {
-		t.Fatal("bodies")
 	}
 	plist, err := Plist(Spec{
 		Binary: "/Users/winton/.local/bin/beacon",

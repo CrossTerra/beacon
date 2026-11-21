@@ -41,9 +41,25 @@ type Result struct {
 	Outcome Outcome
 	Status  int
 	EventID string
-	// Code and Message are Signal's error code and message, when it refused.
+	// Code is an allowlisted Signal error code, or other for an unrecognized refusal. Message is for local inspection.
 	Code    string
 	Message string
+}
+
+// SafeErrorCode returns a fixed code suitable for diagnostics. Signal's error.code is untrusted input.
+func SafeErrorCode(raw string) string {
+	switch raw {
+	case "unauthorized", "forbidden", "not_found", "invalid", "parent_not_found", "ask_not_found",
+		"link_not_found", "subject_not_found", "thread_not_found", "unthreaded_ask", "open_asks",
+		"run_required", "owners_differ", "not_visible", "not_restricted", "state_differs", "state_unchanged",
+		"instruction_not_found", "grant_not_found", "proposal_not_found", "payload_differs", "state_sealed",
+		"sealed_not_found", "actor_required", "identity_not_found", "conflict", "idempotency_conflict", "gone",
+		"rate_limited", "method_not_allowed", "too_large", "unsupported_media_type", "unavailable", "internal",
+		"unreadable":
+		return raw
+	default:
+		return "other"
+	}
 }
 
 // ErrUnauthorized means the key was refused (401). Nothing will succeed until the key is fixed, so sending stops.
@@ -178,7 +194,8 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(data, &parsed)
-	res := Result{Status: resp.StatusCode, EventID: parsed.Event.ID, Code: parsed.Error.Code, Message: parsed.Error.Message}
+	res := Result{Status: resp.StatusCode, EventID: parsed.Event.ID}
+	code := SafeErrorCode(parsed.Error.Code)
 
 	switch {
 	case resp.StatusCode == http.StatusCreated && res.EventID != "":
@@ -190,20 +207,18 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 	case resp.StatusCode == http.StatusUnauthorized:
 		return Result{}, 0, ErrUnauthorized
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return Result{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: res.Code}
+		return Result{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: code}
 	case resp.StatusCode >= 500:
-		return Result{}, 0, retryable{status: resp.StatusCode, code: res.Code}
-	case resp.StatusCode == http.StatusConflict && res.Code == "idempotency_conflict":
-		res.Outcome = Conflict
-		return res, 0, nil
-	case resp.StatusCode == http.StatusConflict && res.Code == "conflict" && identityMoved(data):
+		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
+	case resp.StatusCode == http.StatusConflict && code == "conflict" && identityMoved(data):
 		// The identity named in `by` moved while Signal wrote; Signal asks for the same request again.
-		return Result{}, 0, retryable{status: resp.StatusCode, code: res.Code}
+		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
 	default:
 		res.Outcome = Refused
-		if res.Code == "" {
-			res.Code = "http_" + strconv.Itoa(resp.StatusCode)
+		if resp.StatusCode == http.StatusConflict && code == "idempotency_conflict" {
+			res.Outcome = Conflict
 		}
+		res.Code, res.Message = code, parsed.Error.Message
 		return res, 0, nil
 	}
 }
@@ -534,6 +549,7 @@ func (c *Client) leaseOnce(ctx context.Context, body []byte) (LeaseResult, time.
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(data, &parsed)
+	code := SafeErrorCode(parsed.Error.Code)
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		exp, err := time.Parse(time.RFC3339, parsed.ExpiresAt)
@@ -542,20 +558,16 @@ func (c *Client) leaseOnce(ctx context.Context, body []byte) (LeaseResult, time.
 		}
 		return LeaseResult{Held: true, ExpiresAt: exp}, 0, nil
 	case resp.StatusCode == http.StatusConflict:
-		return LeaseResult{Status: resp.StatusCode, Code: parsed.Error.Code}, 0, nil
+		return LeaseResult{Status: resp.StatusCode, Code: code}, 0, nil
 	case resp.StatusCode == http.StatusNotFound:
 		return LeaseResult{}, 0, ErrNoLeases
 	case resp.StatusCode == http.StatusUnauthorized:
 		return LeaseResult{}, 0, ErrUnauthorized
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return LeaseResult{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: parsed.Error.Code}
+		return LeaseResult{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: code}
 	case resp.StatusCode >= 500:
-		return LeaseResult{}, 0, retryable{status: resp.StatusCode, code: parsed.Error.Code}
+		return LeaseResult{}, 0, retryable{status: resp.StatusCode, code: code}
 	default:
-		code := parsed.Error.Code
-		if code == "" {
-			code = "http_" + strconv.Itoa(resp.StatusCode)
-		}
 		return LeaseResult{}, 0, &LeaseRefused{Status: resp.StatusCode, Code: code}
 	}
 }

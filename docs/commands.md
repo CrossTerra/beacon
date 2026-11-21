@@ -34,8 +34,7 @@ Collects, applies rules and projection, and records what it decided.
 
 - With `mode: dry-run`, or with `--dry-run`, or with `--first`, it prints each item's tier, the rule that decided
   it and the body it would send, and writes nothing except `--first`, which records in `first.json` which sources
-  completed that summary. The launchd agent does not print bodies, unless `--bodies` is set: those lines are the
-  service log. It may contact source APIs to collect. It does not contact Signal.
+  completed that summary. It may contact source APIs to collect. It does not contact Signal.
 - `--first` is that dry run with a summary by source and type. A source with no cursor reads open state (DEC-23).
   Sending for that source stays off until `beacon accept-first`. A collect that failed is not written to `first.json`.
 - With `mode: send`, it appends send items to the outbox, holds and drops the rest locally, takes the lease, and
@@ -43,6 +42,8 @@ Collects, applies rules and projection, and records what it decided.
   recorded, and its cursor is not moved. It prints each new decision (tier, key, rule) without its body, the
   lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
   new decision. Decisions from earlier passes are not printed again.
+
+`--summary` shows pass totals and status. The LaunchAgent uses it for both dry runs and send passes.
 
 With a Google or Slack source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
 has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
@@ -293,8 +294,8 @@ and no credential; the agent reads keys from the keychain when a pass sends, the
 Its umask is 077.
 
 Standard output and the JSON log go to `service.stdout.log` and `service.stderr.log` in the state directory, mode
-`0600`. The service does not print item bodies there unless `run` was given `--bodies`. It still prints keys and
-rule names, as a terminal send pass does. The JSON log has neither. A file of a mebibyte or more is copied aside
+`0600`. The standard output log shows pass totals and status. The JSON log also records fixed result codes.
+A file of a mebibyte or more is copied aside
 (one generation, `*.1`) and truncated, as soon as the config is loaded and again before each pass, so a restart
 that fails its checks cannot grow the log without a cap. launchd holds the descriptor open, so the file is
 truncated in place rather than renamed.
