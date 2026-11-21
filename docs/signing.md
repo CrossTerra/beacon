@@ -1,10 +1,9 @@
 # Local build and signing on macOS
 
-The person builds and signs the exact commit named in the approved audit report for their checkout.
-Keep the signing key locked while reviewing, building and staging. Verify the full commit ID and the
-staged artifact before unlocking the signer (13.00-D15). Sign locally, relock immediately and verify
-the signature at the path you will run. Agents use ad-hoc builds and fixtures.
-See the [Part 1 audit](https://github.com/CrossTerra/beacon/pull/29#audit-of-the-proposed-head).
+The person builds and signs the exact commit named in the [audit report](audit.md). Keep the signing key
+locked while reviewing, building and staging. Verify the full commit ID and the staged artifact before
+unlocking the signer (13.00-D15). Sign locally, relock immediately and verify the signature at the path
+you will run. Agents use ad-hoc builds and fixtures, and never run anything that uses the login keychain.
 
 ## Choose a local signing identity
 
@@ -49,24 +48,29 @@ review of the existing CLI item's ACLs and the LaunchAgent's pinned leaf if you 
 
 ## Stage and sign the audited collector
 
-Run the helper yourself in a terminal from a fresh detached checkout. Use the full approved commit ID from
-the audit report, the dedicated keychain's absolute path, the exact certificate SHA-1, and the reviewed Go
-and macOS toolchain. Keep the checkout and staging directory outside supervised accounts' write access.
+Run the helper yourself in a terminal from a fresh detached checkout of the approved fork commit. Supply
+the full approved ID, the dedicated keychain's absolute path and the exact certificate SHA-1 you recorded.
+Use the audited Go and macOS toolchain and its reviewed compiler settings. Keep the checkout and staging
+directory outside the supervised accounts' write access.
 
 ~~~bash
 scripts/build-local.sh FULL_COMMIT_FROM_THE_APPROVED_REPORT \
   /absolute/path/to/your-signing.keychain-db EXACT_CERTIFICATE_SHA1
 ~~~
 
-The helper requires a clean checkout, including ignored and untracked files, at the full audited commit.
-It locks the dedicated signer, builds from a Git archive in a private staging directory, and records the
-unsigned SHA-256. It checks the checkout and staged bytes before unlocking and again before signing. It
-then relocks the signer, verifies the signature against the certificate leaf and `dev.beacon.cli`, and
-publishes the verified binary to `~/.local/bin/beacon`. A fourth argument sets the output path.
+The helper requires a clean checkout at the full audited commit. It refuses untracked or ignored files
+and index flags that could hide changes. It locks the dedicated signer, builds from a Git archive of the
+approved commit in a private staging directory, and records the unsigned SHA-256. It checks the checkout
+and staged bytes before unlocking and again before signing. It then relocks the signer and verifies the
+signature against the specified certificate leaf and `dev.beacon.cli`. It installs the binary at
+`~/.local/bin/beacon` (or the path supplied as a fourth argument) and verifies the signed hash and signature
+at that path.
 
-Compare the printed commit with the audit report and record the signed SHA-256 and designated requirement.
-If you move the binary, verify the hash and signature at the new path. Run
-[`scripts/repro.sh`](../scripts/repro.sh) during the audit for the two-path build check.
+Check the printed commit against the report and record the signed SHA-256 and designated requirement. If
+you move the binary, verify the same hash and signature at the new path before using it.
+A different commit, changed build input, or replaced artifact needs review with the signer locked. Run
+[`scripts/repro.sh`](../scripts/repro.sh) during the audit for the two-path build check. It compares
+unsigned builds, not signed binaries.
 
 ## Part 1 manual rebuild test
 
