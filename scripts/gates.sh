@@ -15,4 +15,6 @@ echo "go vet: ok"
 staticcheck ./...
 echo "staticcheck: ok"
 go test -race -count=1 ./...
+bash -n scripts/build-local.sh
+bash scripts/test-audited-build.sh
 scripts/repro.sh

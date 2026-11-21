@@ -138,7 +138,9 @@ same pull request.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
 11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
-    request). Signed releases, notarized macOS builds and an SBOM per release arrive in Phase 7.
+    request). The local signing helper builds from a clean checkout at the full audited commit and verifies the
+    staged artifact and installed signature. See [local build and signing](signing.md). Signed releases,
+    notarized macOS builds and an SBOM per release arrive in Phase 7.
 
 ## Known limits
 

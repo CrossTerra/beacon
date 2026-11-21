@@ -15,21 +15,20 @@ accounts; sending stays off until the first run is accepted. The plan is in [`pl
 
 ## Try it
 
+On macOS, follow [local build and signing](docs/signing.md) to put the audited build on your path.
+
 ```bash
-go build -trimpath -o beacon ./cmd/beacon
-./beacon init --signal-url https://signal.example.com --handle @you   # asks for the Signal key; stores it in the keychain
-./beacon key set                                                       # replace that key; checks it with Signal first
-./beacon rules check
-./beacon run --once            # a dry run until the config says mode: send
-./beacon explain <key>         # the rule, and the exact body
-./beacon egress                # every host Beacon may contact
-./beacon outbox                # what was sent
+beacon init --signal-url https://signal.example.com --handle @you   # asks for the Signal key; stores it in the keychain
+beacon key set                                                     # replace that key; checks it with Signal first
+beacon rules check
+beacon run --once            # a dry run until the config says mode: send
+beacon explain <key>         # the rule, and the exact body
+beacon egress                # every host Beacon may contact
+beacon outbox                # what was sent
 ```
 
-To run it continuously on macOS, build with [`scripts/build-local.sh`](scripts/build-local.sh) so the binary keeps a
-stable code signature (an Apple Development certificate keeps keychain access across rebuilds; see
-[`docs/development.md`](docs/development.md#local-builds-and-the-keychain)), then `beacon service install`. That is a per-user launchd agent, not root. See
-[`docs/commands.md`](docs/commands.md).
+To run the signed binary continuously on macOS as a per-user LaunchAgent, use `beacon service install`.
+See [service commands](docs/commands.md#beacon-service).
 
 | Read | For |
 | --- | --- |

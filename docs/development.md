@@ -87,44 +87,9 @@ Everything else is the standard library.
 
 ## Local builds and the keychain
 
-macOS checks two things before it lets a program read a Beacon item without asking:
+Follow [local build and signing](signing.md) to sign an audited commit in a terminal. The guide describes
+the Keychain access checks and the manual rebuild and denial test.
 
-- **The access list.** A new item trusts the designated requirement of the build that created it: the identifier
-  `dev.beacon.cli` and its signing certificate (`internal/keychain` creates every item with that access).
-- **The partition list.** On the login keychain, securityd also checks the reading program's partition. A program
-  signed with an Apple-issued certificate (Apple Development, Developer ID) has the partition `teamid:<team>`.
-  Any other signed program, the self-signed "Beacon Local Signing" included, has `cdhash:<hash of this build>`.
-  "Always Allow" adds that partition to the item. It does not add the certificate.
-
-So a rebuild signed with a self-signed certificate meets the requirement but has a new partition, and macOS asks
-again, once per item, whatever was answered before. `security dump-keychain -a` shows it: each Beacon item's
-`partition_id` entry grows one `cdhash:` per rebuild that was allowed. Only an Apple-issued certificate keeps access
-across rebuilds. A partition list can only be edited with the keychain password, and it has no wildcard.
-
-`go build`, `go run` and test binaries are signed ad hoc, with no certificate. Such a build refuses to use the login
-keychain (`keychain.ErrAdHocBuild`), so a test or scratch build can neither prompt nor add itself to an item.
-
-### Set up once
-
-1. In Xcode, Settings, Accounts: add your Apple ID, then Manage Certificates, +, Apple Development. A free Apple ID
-   is enough. `security find-identity -v -p codesigning` then lists `Apple Development: <you> (<id>)`.
-2. `scripts/build-local.sh` builds with the same flags as `scripts/repro.sh`, signs with that identity (or
-   `$BEACON_SIGN_IDENTITY`) and the identifier `dev.beacon.cli`, and installs to `~/.local/bin/beacon`. It prints
-   `keychain partition: teamid (stable across rebuilds)`. The first time, `codesign` may ask to use the key; choose
-   Always Allow. It runs only in a terminal, because the build it signs can read Beacon's credentials.
-3. `beacon service install --force`, because install pinned the previous certificate.
-4. `beacon keychain repair`: macOS asks once per item; choose Always Allow. Each item is re-created with the new
-   build's access and only its partition, which drops the hashes earlier builds added.
-
-Later rebuilds read the items without asking. Without an Apple Development identity, `scripts/build-local.sh` falls
-back to "Beacon Local Signing" from `scripts/dev-signing-setup.sh` and says that every rebuild will ask once per item.
-
-Do not work around the prompt by letting every application read the items (`security … -A`) or by reading them
-through `/usr/bin/security`: either lets any process running as you read Beacon's credentials without asking.
-Tests never touch the login keychain unless `BEACON_TEST_KEYCHAIN=1`, which a person sets by hand. Release builds
-are signed with a Developer ID (Phase 7).
-
-`beacon service install` refuses a binary that is not signed with a stable identity. `go build` is ad-hoc, so it is
-refused: the keychain would treat every rebuild as a different program, and a launchd agent cannot answer the
-prompt. Build with `scripts/build-local.sh`, then `beacon service install`. The tests inject the signature check and
-the launchd client. They do not write `~/Library/LaunchAgents` and they do not bootstrap a job.
+`go build`, `go run` and test binaries are signed ad hoc. They refuse to use the login keychain
+(`keychain.ErrAdHocBuild`). Tests inject the signature check and launchd client, and the signing preflight
+test uses a fixture checkout and unsigned build.

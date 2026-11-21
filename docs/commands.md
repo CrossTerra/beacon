@@ -295,17 +295,15 @@ Its umask is 077.
 
 Standard output and the JSON log go to `service.stdout.log` and `service.stderr.log` in the state directory, mode
 `0600`. The standard output log shows pass totals and status. The JSON log also records fixed result codes.
-A file of a mebibyte or more is copied aside
-(one generation, `*.1`) and truncated, as soon as the config is loaded and again before each pass, so a restart
+A file of a mebibyte or more is copied aside (one generation, `*.1`) and truncated as soon as the config is
+loaded and again before each pass, so a restart
 that fails its checks cannot grow the log without a cap. launchd holds the descriptor open, so the file is
 truncated in place rather than renamed.
 
 The binary must be code-signed with a stable identity. An ad-hoc signature, which is what `go build` produces, is
 refused and nothing is written: each rebuild would be a different program to the keychain.
-[`scripts/build-local.sh`](../scripts/build-local.sh) signs with your Apple Development identity, or the self-signed
-one from [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh), and the identifier `dev.beacon.cli`. A
-Developer ID signature is also a stable identity. Only an Apple-issued certificate keeps keychain access across
-rebuilds; see [Local builds and the keychain](development.md#local-builds-and-the-keychain). `--binary` names a binary other than the one running the command. The path
+Follow [local build and signing](signing.md) to prepare the signed binary.
+`--binary` names a binary other than the one running the command. The path
 in the plist is absolute and symlink-resolved, and it is the path that was checked. Install records the SHA-256 of
 that certificate's leaf in the state directory. A later `beacon run` refuses a binary whose leaf does not match, and
 does not contact Signal. `status` prints `identity: mismatch` when that is so, and does not print the hash.
