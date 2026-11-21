@@ -113,7 +113,7 @@ mode: dry-run
 sources:
   - kind: github
     repos: ["acme/app"]
-    host: ghe.example.com
+    host: ghe.example.com:8443
   - kind: jira
     site: acme
     projects: ["ENG"]
@@ -125,7 +125,7 @@ sources:
 		t.Fatal(out.String())
 	}
 	got := out.String()
-	for _, host := range []string{"ghe.example.com:443", "acme.atlassian.net:443", "signal.example.com:443"} {
+	for _, host := range []string{"ghe.example.com:8443", "acme.atlassian.net:443", "signal.example.com:443"} {
 		if !strings.Contains(got, host) {
 			t.Fatalf("missing %s in\n%s", host, got)
 		}

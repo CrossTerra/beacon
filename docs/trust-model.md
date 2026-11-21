@@ -79,7 +79,8 @@ same pull request.
 6. **Fixed egress.** Beacon connects only to the source APIs (and Google's token endpoint), the configured Signal
    host and, if configured, a hosted classifier. `beacon egress` prints the list, and every HTTP request goes through
    a transport that refuses any other host before connecting. Proxy settings from the environment are ignored and
-   redirects are not followed. Each Google source also refuses any URL outside the API paths it uses, because
+   redirects are not followed. GitHub checks every request, including pagination, against its configured scheme,
+   hostname and port before attaching the token. Each Google source also refuses any URL outside the API paths it uses, because
    `www.googleapis.com` serves other APIs too. The Slack source refuses any method but `auth.test`,
    `search.messages`, `conversations.replies`, `conversations.history`, `conversations.info`, `conversations.members`,
    `users.info`, `users.conversations` (group direct messages, and with `channels: member` the public and private
