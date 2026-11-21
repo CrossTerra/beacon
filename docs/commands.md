@@ -34,8 +34,7 @@ Collects, applies rules and projection, and records what it decided.
 
 - With `mode: dry-run`, or with `--dry-run`, or with `--first`, it prints each item's tier, the rule that decided
   it and the body it would send, and writes nothing except `--first`, which records in `first.json` which sources
-  completed that summary. The launchd agent does not print bodies, unless `--bodies` is set: those lines are the
-  service log. It may contact source APIs to collect. It does not contact Signal.
+  completed that summary. It may contact source APIs to collect. It does not contact Signal.
 - `--first` is that dry run with a summary by source and type. A source with no cursor reads open state (DEC-23).
   Sending for that source stays off until `beacon accept-first`. A collect that failed is not written to `first.json`.
 - With `mode: send`, it appends send items to the outbox, holds and drops the rest locally, takes the lease, and
@@ -43,6 +42,8 @@ Collects, applies rules and projection, and records what it decided.
   recorded, and its cursor is not moved. It prints each new decision (tier, key, rule) without its body, the
   lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
   new decision. Decisions from earlier passes are not printed again.
+
+`--summary` shows pass totals and status. The LaunchAgent uses it for both dry runs and send passes.
 
 With a Google or Slack source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
 has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
@@ -223,16 +224,19 @@ beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calen
 beacon source add slack [--channel ID|member]... [--name NAME]
 ```
 
-`--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
-asks for confirmation; `--yes` is that confirmation when input is not a terminal. Jira reads the account email, then
-the API token with echo off. On a pipe both lines are read by one reader, so the token is not lost. The keychain
-account is `source:<name>` under the service `beacon`. `--name` overrides the default, which is the kind.
+With `--from-gh`, the keychain package imports the output of `gh auth token`. With `--host`, that is
+`gh auth token --hostname <hostname>`, using the hostname portion of the flag. The command asks for confirmation.
+Use `--yes` to confirm when input is piped. Without `--from-gh`, enter the GitHub token at the hidden prompt. For Jira,
+enter the account email and API token. The keychain reader hides terminal token input and also accepts the two lines
+from a pipe. The keychain account is `source:<name>` under the service `beacon`. `--name` overrides the default,
+which is the kind.
 
 `google` enables Gmail, Calendar and Drive, or only those named with `--gmail`, `--calendar` and `--drive`, and
 authorises read-only access to the person's own OAuth client, for the Google account `--account` names (required;
 written to each source as `account`). `--client-file` is the JSON of a *Desktop app* client from the person's
-Google Cloud project; its id and secret are stored as `google:<account>:client`. Without it, that account's stored
-client is used. The command prints the consent URL (`--open` also opens it in the default browser; `login_hint` is
+Google Cloud project. The keychain package reads the file and stores its id and secret as `google:<account>:client`.
+Without it, the command uses that account's stored client. The command prints the consent URL
+(`--open` also opens it in the default browser; `login_hint` is
 the account), waits up to five minutes on `127.0.0.1` for the redirect, exchanges the code with PKCE, and stores the
 refresh token as `google:<account>:refresh`. The grant asks for the scopes of every Google source of that account
 in the config; `--bodies` asks for `gmail.readonly` instead of `gmail.metadata`. It prints the scopes granted, never a token. The token exchange goes
@@ -290,18 +294,16 @@ and no credential; the agent reads keys from the keychain when a pass sends, the
 Its umask is 077.
 
 Standard output and the JSON log go to `service.stdout.log` and `service.stderr.log` in the state directory, mode
-`0600`. The service does not print item bodies there unless `run` was given `--bodies`. It still prints keys and
-rule names, as a terminal send pass does. The JSON log has neither. A file of a mebibyte or more is copied aside
-(one generation, `*.1`) and truncated, as soon as the config is loaded and again before each pass, so a restart
+`0600`. The standard output log shows pass totals and status. The JSON log also records fixed result codes.
+A file of a mebibyte or more is copied aside (one generation, `*.1`) and truncated as soon as the config is
+loaded and again before each pass, so a restart
 that fails its checks cannot grow the log without a cap. launchd holds the descriptor open, so the file is
 truncated in place rather than renamed.
 
 The binary must be code-signed with a stable identity. An ad-hoc signature, which is what `go build` produces, is
 refused and nothing is written: each rebuild would be a different program to the keychain.
-[`scripts/build-local.sh`](../scripts/build-local.sh) signs with your Apple Development identity, or the self-signed
-one from [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh), and the identifier `dev.beacon.cli`. A
-Developer ID signature is also a stable identity. Only an Apple-issued certificate keeps keychain access across
-rebuilds; see [Local builds and the keychain](development.md#local-builds-and-the-keychain). `--binary` names a binary other than the one running the command. The path
+Follow [local build and signing](signing.md) to prepare the signed binary.
+`--binary` names a binary other than the one running the command. The path
 in the plist is absolute and symlink-resolved, and it is the path that was checked. Install records the SHA-256 of
 that certificate's leaf in the state directory. A later `beacon run` refuses a binary whose leaf does not match, and
 does not contact Signal. `status` prints `identity: mismatch` when that is so, and does not print the hash.

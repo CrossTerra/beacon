@@ -66,7 +66,9 @@ none was named) and, for Gmail, the units Beacon spent in the last minute. The a
 `gh auth token` prints, after confirmation (`--yes` when input is not a terminal). With `--host`, that command is
 `gh auth token --hostname <host>` (a port on `--host` is not passed).
 
-**Host.** `api.github.com`, or `host:` for GitHub Enterprise (`https://<host>/api/v3`). Listed by `beacon egress`.
+**Host.** `api.github.com`, or `host:` for GitHub Enterprise (`https://<host>/api/v3`). A port in `host:` is
+listed by `beacon egress`; the default is 443. GitHub requests, including links to later pages, must match the
+configured scheme, hostname and port before Beacon attaches the token.
 
 **Scope.** `repos`: `owner/name` or `owner/*`. Nothing outside them is requested. `owner/*` is searched as the
 owner's user or organization, and a result from any other repository is not fetched.

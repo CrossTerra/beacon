@@ -38,8 +38,6 @@ type Options struct {
 // Source reads GitHub.
 type Source struct {
 	name     string
-	host     string
-	hostPort string
 	base     string
 	scope    scope
 	projects map[string]bool
@@ -71,27 +69,20 @@ func New(o Options) (*Source, error) {
 	}
 	base := o.Base
 	if base == "" {
-		if strings.EqualFold(hostName, "api.github.com") {
-			base = "https://api.github.com"
-		} else {
-			base = "https://" + host + "/api/v3"
+		base = "https://" + host
+		if !strings.EqualFold(hostName, "api.github.com") {
+			base += "/api/v3"
 		}
 	}
 	base = strings.TrimRight(base, "/")
 	u, err := url.Parse(base)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Hostname() == "" || u.User != nil ||
+		(u.Scheme != "https" && !(u.Scheme == "http" && loopback(u.Hostname()))) {
 		return nil, fmt.Errorf("github: base URL is invalid")
 	}
-	sc, err := newScope(u.Hostname(), o.Repos)
+	sc, err := newScope(u, o.Repos)
 	if err != nil {
 		return nil, fmt.Errorf("github: repos are required")
-	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-		if u.Scheme == "http" {
-			port = "80"
-		}
 	}
 	projects := map[string]bool{}
 	for _, p := range o.Projects {
@@ -102,7 +93,7 @@ func New(o Options) (*Source, error) {
 		now = time.Now
 	}
 	return &Source{
-		name: name, host: u.Hostname(), hostPort: net.JoinHostPort(u.Hostname(), port), base: base,
+		name: name, base: base,
 		scope: sc, projects: projects, identity: o.Identity, token: o.Token, now: now,
 		http: &limited.Client{HTTP: o.HTTP, Sleep: o.Sleep, Now: now},
 	}, nil
@@ -118,7 +109,7 @@ func (s *Source) Fields() []string { return append([]string(nil), Fields...) }
 func (s *Source) StateFields() []string { return append([]string(nil), StateFields...) }
 
 // Hosts implements source.Source.
-func (s *Source) Hosts() []string { return []string{s.hostPort} }
+func (s *Source) Hosts() []string { return []string{s.scope.address} }
 
 // SetHTTP sets the client used to collect. The app sets it after the egress list, which is built from Hosts, exists.
 func (s *Source) SetHTTP(c *http.Client) {

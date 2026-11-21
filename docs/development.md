@@ -16,6 +16,9 @@ the checkout path or on timestamps, not that another machine reproduces the same
 (`.github/workflows/ci.yml`) runs the same script on macOS and Linux for every pull request, with its actions pinned
 to commit SHAs.
 
+The script also checks the signing preflight with a fixture checkout and an ad-hoc build. It uses no signing
+identity or keychain.
+
 On macOS with recent Xcode, `go test -race` prints `ld: warning: … malformed LC_DYSYMTAB`; it is a known warning
 from the linker and does not affect the tests.
 
@@ -92,10 +95,10 @@ Use `go build`, `go run` and `go test` with fixtures. Ad-hoc builds refuse the l
 checks and the launchd client without bootstrapping a job or writing `~/Library/LaunchAgents`.
 
 For a live installation, the person follows the [local signing guide](signing.md). It covers the Apple
-Development and self-signed identities, item ACLs and partition lists, and verifying the build against the
-full audited commit with the signer locked. Keep an item's access limited to Beacon's signing requirement.
-Granting access to all apps or to the general-purpose `security` tool would give other processes a way to
-read the credential.
+Development and self-signed identities, item ACLs and partition lists, verifying the build against the
+full audited commit with the signer locked, and the manual rebuild and denial test. Keep an item's access
+limited to Beacon's signing requirement. Granting access to all apps or to the general-purpose `security`
+tool would give other processes a way to read the credential.
 
 If the person intentionally changes the signing certificate of an existing installation, see
 [`beacon keychain repair`](commands.md#beacon-keychain-repair) and

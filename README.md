@@ -24,18 +24,18 @@ currently opens an empty approvals window. It does not start the collector, acce
 3. **Report and get agreement.** Give the person the report before any installation. Resolve blocking findings
    and audit the resulting commit. The person explicitly approves the full commit ID and the proposed setup.
    A clean checkout at a different commit needs its own approval.
-4. **Have the person build and sign.** They build in a clean, isolated checkout of the approved commit and
-   verify the commit and staged artifact before unlocking their own signer. They sign only that artifact,
-   relock the signer and verify the final signature. On a new Mac or signing setup, they run the
+4. **Have the person build and sign.** They run the [signing helper](docs/signing.md#stage-and-sign-the-audited-collector)
+   from a clean, isolated checkout of the approved commit. The helper verifies the full commit ID and staged
+   artifact before unlocking the signer, signs only that artifact, relocks the signer and verifies the
+   installed signature. On a new Mac or signing setup, the person runs the
    [disposable rebuild test](docs/signing.md#part-1-manual-rebuild-test) before provisioning real credentials.
 5. **Configure with sending off.** The person enters credentials directly in their terminal or Google's
    consent page. Use the workflow below, starting with `mode: dry-run` and rules that keep items local.
    The person reviews egress, audiences and sample output before allowing sends or starting a background job.
 
-Agents use `go build` or `go test` with fixtures and in-memory credentials. The person performs every operation
-that uses the login keychain, including signed builds, credential setup, live dry runs and any keychain repair.
-`scripts/build-local.sh` signs from the working tree and needs the separate commit and artifact checks in the
-signing guide to meet 13.00-D15.
+Agents use `go build` or `go test` with fixtures and in-memory credentials. Only the person runs
+`scripts/build-local.sh` with their dedicated signer or performs operations that use the login keychain,
+including credential setup, live dry runs and any keychain repair.
 
 ## Configure and try ingestion
 

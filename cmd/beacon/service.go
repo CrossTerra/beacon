@@ -544,7 +544,8 @@ func (a *app) sleepFor(interrupt context.Context, d time.Duration) error {
 }
 
 func (a *app) serviceStdout(state string) bool {
-	return sameFile(filepath.Join(state, service.StdoutName), 1)
+	out, ok := a.stdout.(*os.File)
+	return ok && sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
 }
 
 // refusePinned refuses to run when install recorded a certificate and this binary is not signed with it.

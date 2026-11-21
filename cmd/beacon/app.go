@@ -61,8 +61,6 @@ type app struct {
 	configureClient func(*signal.Client)
 	// afterAppend is passed to the runner (tests stop the process there).
 	afterAppend func(key string)
-	// ghToken reads a GitHub token. Nil runs `gh auth token`. Tests set it so the token is never printed.
-	ghToken func(context.Context, string) (string, error)
 
 	// interrupt cancels an in-flight send. Nil means the context passed to main does. main sets it to SIGINT only,
 	// so SIGTERM can finish the current send.
@@ -495,7 +493,8 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	dry := fs.Bool("dry-run", false, "print what would be sent, and send nothing (the default until the config says mode: send)")
 	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
-	bodies := fs.Bool("bodies", false, "print each decided item's body (a terminal dry run does; the launchd agent does not, unless this is set)")
+	bodies := fs.Bool("bodies", false, "print each decided item's body (the default for a dry run with item details)")
+	summary := fs.Bool("summary", false, "print pass summaries only (used by the launchd agent)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -529,6 +528,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		poll = e.cfg.PollInterval()
 		a.rotateServiceLogs(stateDir)
 	}
+	itemDetails := !*summary && !a.serviceStdout(stateDir)
 	if err := a.refusePinned(ctx, stateDir); err != nil {
 		return fail(logs.ReasonSigning, "refusing to run a binary whose signing identity does not match the one recorded by beacon service install")
 	}
@@ -579,7 +579,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		// --first is a summary, not a daemon. A dry run otherwise loops, each source on its own, and still writes
 		// nothing.
 		if !*once && !*first {
-			return a.sourceLoops(work, interrupt, e, r, loopRun{send: false, state: stateDir, poll: poll, bodies: *bodies, log: log})
+			return a.sourceLoops(work, interrupt, e, r, loopRun{state: stateDir, poll: poll, itemDetails: itemDetails, bodies: *bodies, log: log})
 		}
 		if a.termFired() {
 			log.Log(logs.RunStopped)
@@ -590,7 +590,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		if err != nil {
 			return fail(runner.Classify(err), failText(runner.Classify(err), e))
 		}
-		a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), true))
+		a.printReport(rep, itemDetails, *bodies)
 		if *first {
 			a.printFirst(rep)
 			if err := a.recordFirst(e, rep); err != nil {
@@ -642,7 +642,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	if !*once {
 		reporter := &coverage.Reporter{Outbox: ob, Writer: client, API: client, Person: e.cfg.Person.Handle, Run: instance + ":heartbeat",
 			Now: a.now, Log: log}
-		return a.sourceLoops(work, interrupt, e, r, loopRun{send: true, state: stateDir, poll: poll, bodies: *bodies, log: log,
+		return a.sourceLoops(work, interrupt, e, r, loopRun{send: true, state: stateDir, poll: poll, itemDetails: itemDetails, bodies: *bodies, log: log,
 			instance: instance, reporter: reporter})
 	}
 	if a.termFired() {
@@ -652,7 +652,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	a.rotateServiceLogs(stateDir)
 	rep, err := r.Run(work)
 	if rep != nil {
-		a.printReport(rep, service.ReportBodies(*bodies, a.serviceStdout(stateDir), false))
+		a.printReport(rep, itemDetails, *bodies)
 	}
 	outcome := passOutcome(err, a.termFired())
 	a.recordPass(stateDir, instance, rep, outcome, nil)
@@ -679,12 +679,13 @@ func sendFailure(err error, e *env) (logs.Reason, string) {
 
 // loopRun is what the source loops need besides the runner.
 type loopRun struct {
-	send     bool
-	state    string
-	poll     time.Duration
-	bodies   bool
-	log      *logs.Logger
-	instance string
+	send        bool
+	state       string
+	poll        time.Duration
+	itemDetails bool
+	bodies      bool
+	log         *logs.Logger
+	instance    string
 	// reporter writes coverage to Signal. Nil in a dry run, which writes nothing.
 	reporter *coverage.Reporter
 }
@@ -753,7 +754,7 @@ func (a *app) sourceLoops(work, interrupt context.Context, e *env, r *runner.Run
 		rep, err := r.Process(ctx, []runner.Gathered{g})
 		res := schedule.Result{Failed: g.Err != nil}
 		if rep != nil {
-			a.printReport(rep, service.ReportBodies(lr.bodies, a.serviceStdout(lr.state), !lr.send))
+			a.printReport(rep, lr.itemDetails, lr.bodies)
 		}
 		if !lr.send {
 			if err != nil {
@@ -815,7 +816,7 @@ func (a *app) sourcelessPass(ctx context.Context, e *env, r *runner.Runner, lr l
 	}
 	rep, err := r.Process(ctx, nil)
 	if rep != nil {
-		a.printReport(rep, service.ReportBodies(lr.bodies, a.serviceStdout(lr.state), !lr.send))
+		a.printReport(rep, lr.itemDetails, lr.bodies)
 	}
 	if !lr.send {
 		if err != nil {
@@ -910,7 +911,7 @@ func failText(reason logs.Reason, e *env) string {
 	return "the pass failed (" + string(reason) + "); beacon outbox shows what was recorded"
 }
 
-func (a *app) printReport(rep *runner.Report, bodies bool) {
+func (a *app) printReport(rep *runner.Report, itemDetails, bodies bool) {
 	w := a.stdout
 	if !rep.Send {
 		fmt.Fprintln(w, "Dry run: nothing is sent.")
@@ -948,6 +949,47 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 			fmt.Fprintf(w, "source %s: some display names could not be read this pass; those items carry no names or titles.\n", wr.Source)
 		}
 	}
+	if itemDetails {
+		printDecisions(w, rep, bodies || !rep.Send)
+	}
+	s, h, n, k := rep.Counts()
+	fmt.Fprintf(w, "Items: %d send, %d hold, %d never, %d already handled.\n", s, h, n, k)
+	for _, wh := range rep.Withheld {
+		switch wh.Reason {
+		case logs.ReasonUnrestricted:
+			fmt.Fprintf(w, "source %s: %d items held, not sent: %s is not restricted in Signal, so every reader could read them. Ask Signal's admin to restrict %s.\n", wh.Source, wh.Items, wh.Prefix, wh.Prefix)
+		default:
+			fmt.Fprintf(w, "source %s: %d items not sent and not recorded, and its cursor stays: Signal's restricted prefixes could not be read (%s). Beacon's key needs the read scope.\n", wh.Source, wh.Items, rep.RestrictionsReason)
+		}
+	}
+	if rep.WithheldPending > 0 {
+		fmt.Fprintf(w, "Pending bodies on personal subjects not sent: %d. Their prefix is not restricted in Signal, or the restrictions could not be read.\n", rep.WithheldPending)
+	}
+	if !rep.Send {
+		return
+	}
+	if rep.Lease != nil {
+		switch {
+		case rep.Lease.Held:
+			fmt.Fprintf(w, "Lease: held until %s.\n", rep.Lease.Until.UTC().Format(time.RFC3339))
+		case rep.LeaseReason == "":
+			fmt.Fprintln(w, "Lease: held by another instance; nothing was sent.")
+		default:
+			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
+		}
+	}
+	if itemDetails {
+		for _, res := range rep.Results {
+			fmt.Fprintf(w, "%-9s %s  %d %s %s\n", res.Outcome, res.Key, res.Status, res.EventID, res.Code)
+		}
+	}
+	fmt.Fprintf(w, "Sent: %d. Pending: %d.\n", len(rep.Results), rep.Pending)
+	if rep.Retitled > 0 {
+		fmt.Fprintf(w, "Retitled: %d threads Beacon opened.\n", rep.Retitled)
+	}
+}
+
+func printDecisions(w io.Writer, rep *runner.Report, bodies bool) {
 	for _, p := range rep.Items {
 		rule := p.Rule
 		if rule == "" {
@@ -994,39 +1036,6 @@ func (a *app) printReport(rep *runner.Report, bodies bool) {
 		case p.Tier == rules.Hold:
 			fmt.Fprintf(w, "       held; on approval: %s\n", p.Body)
 		}
-	}
-	s, h, n, k := rep.Counts()
-	fmt.Fprintf(w, "Items: %d send, %d hold, %d never, %d already handled.\n", s, h, n, k)
-	for _, wh := range rep.Withheld {
-		switch wh.Reason {
-		case logs.ReasonUnrestricted:
-			fmt.Fprintf(w, "source %s: %d items held, not sent: %s is not restricted in Signal, so every reader could read them. Ask Signal's admin to restrict %s.\n", wh.Source, wh.Items, wh.Prefix, wh.Prefix)
-		default:
-			fmt.Fprintf(w, "source %s: %d items not sent and not recorded, and its cursor stays: Signal's restricted prefixes could not be read (%s). Beacon's key needs the read scope.\n", wh.Source, wh.Items, rep.RestrictionsReason)
-		}
-	}
-	if rep.WithheldPending > 0 {
-		fmt.Fprintf(w, "Pending bodies on personal subjects not sent: %d. Their prefix is not restricted in Signal, or the restrictions could not be read.\n", rep.WithheldPending)
-	}
-	if !rep.Send {
-		return
-	}
-	if rep.Lease != nil {
-		switch {
-		case rep.Lease.Held:
-			fmt.Fprintf(w, "Lease: held until %s.\n", rep.Lease.Until.UTC().Format(time.RFC3339))
-		case rep.LeaseReason == "":
-			fmt.Fprintln(w, "Lease: held by another instance; nothing was sent.")
-		default:
-			fmt.Fprintf(w, "Lease: not taken (%s); nothing was sent.\n", rep.LeaseReason)
-		}
-	}
-	for _, res := range rep.Results {
-		fmt.Fprintf(w, "%-9s %s  %d %s %s\n", res.Outcome, res.Key, res.Status, res.EventID, res.Code)
-	}
-	fmt.Fprintf(w, "Sent: %d. Pending: %d.\n", len(rep.Results), rep.Pending)
-	if rep.Retitled > 0 {
-		fmt.Fprintf(w, "Retitled: %d threads Beacon opened.\n", rep.Retitled)
 	}
 }
 

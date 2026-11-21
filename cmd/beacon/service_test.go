@@ -113,7 +113,7 @@ func TestServiceInstallPlistAndRefusals(t *testing.T) {
 	if strings.Contains(string(data), secret) || strings.Contains(string(data), "EnvironmentVariables") || strings.Contains(string(data), "--once") || strings.Contains(string(data), "UserName") {
 		t.Fatalf("plist:\n%s", data)
 	}
-	if !strings.Contains(string(data), "\n\t\t<string>run</string>\n") || !strings.Contains(string(data), service.StdoutName) {
+	if !strings.Contains(string(data), "\n\t\t<string>run</string>\n\t\t<string>--summary</string>\n") || !strings.Contains(string(data), service.StdoutName) {
 		t.Fatalf("plist:\n%s", data)
 	}
 	leaf, err := os.ReadFile(filepath.Join(dir, "state", service.LeafName))
@@ -165,6 +165,51 @@ func TestServiceInstallPlistAndRefusals(t *testing.T) {
 	}
 	if fl4.joined() != "" {
 		t.Fatal("root called launchd")
+	}
+}
+
+func TestServiceRunPrintsOnlySummaries(t *testing.T) {
+	for _, mode := range []string{"send", "dry-run"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newHarness(t)
+			dir := t.TempDir()
+			cfg, want := writeSetup(t, dir, h.server.URL, mode, "service-summary")
+			a := h.app(h.egressList(cfg))
+			args := []string{"run", "--once", "--bodies", "--config", cfg}
+			readOutput := h.stdout.String
+			if mode == "send" {
+				args = append(args, "--summary")
+			} else {
+				// A plist installed before --summary was added still uses the standard stdout log.
+				state := filepath.Join(dir, "state")
+				must(t, os.MkdirAll(state, 0o700))
+				logPath := filepath.Join(state, service.StdoutName)
+				log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE, 0o600)
+				must(t, err)
+				t.Cleanup(func() { _ = log.Close() })
+				a.stdout = log
+				readOutput = func() string {
+					data, err := os.ReadFile(logPath)
+					must(t, err)
+					return string(data)
+				}
+			}
+			if h.run(a, args...) != 0 {
+				t.Fatal(h.stderr.String())
+			}
+			out := readOutput()
+			if !strings.Contains(out, "Items:") || (mode == "send" && !strings.Contains(out, "Pending:")) {
+				t.Fatalf("missing pass summary: %s", out)
+			}
+			for _, item := range want {
+				if strings.Contains(out, item.key) || (item.rule != "" && strings.Contains(out, item.rule)) {
+					t.Fatal("the service log contains an item key or matched rule name")
+				}
+			}
+			if strings.Contains(out, `"subject"`) {
+				t.Fatal("the service log contains an item body")
+			}
+		})
 	}
 }
 

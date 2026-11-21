@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -30,7 +31,16 @@ type oauthClient struct {
 	Secret string `json:"client_secret"`
 }
 
-// OAuthClient reads an OAuth client file as Google Cloud Console downloads it for a Desktop app, and keeps its id and
+// ReadOAuthClientFile imports a Desktop app OAuth client from a file.
+func ReadOAuthClientFile(path string) (Secret, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Secret{}, err
+	}
+	return OAuthClient(data)
+}
+
+// OAuthClient parses an OAuth client as Google Cloud Console downloads it for a Desktop app, and keeps its id and
 // secret as one secret. A web client is refused: Beacon's redirect is a loopback address.
 func OAuthClient(data []byte) (Secret, error) {
 	var f struct {

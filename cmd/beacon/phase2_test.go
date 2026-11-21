@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,13 @@ import (
 	"github.com/CrossTerra/beacon/internal/cursor"
 	"github.com/CrossTerra/beacon/internal/keychain"
 )
+
+func fakeGH(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\n"+script+"\n"), 0o700))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
 func TestSourceAddDoesNotWriteTheToken(t *testing.T) {
 	dir := t.TempDir()
@@ -28,11 +36,14 @@ sources: []
 `), 0o600))
 	store := keychain.NewMemory()
 	const tok = "ghp_PHASE2_SECRET_TOKEN"
+	ghCalled := filepath.Join(dir, "gh-called")
+	t.Setenv("BEACON_TEST_GH_CALLED", ghCalled)
+	fakeGH(t, `touch "$BEACON_TEST_GH_CALLED"
+printf '%s\n' `+tok)
 	var out, errOut strings.Builder
 	a := &app{
 		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
 		keychain: func() (keychain.Store, error) { return store, nil },
-		ghToken:  func(context.Context, string) (string, error) { return tok, nil },
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh"}); code == 0 {
 		t.Fatal("import without --yes succeeded")
@@ -40,6 +51,17 @@ sources: []
 	if _, err := store.Get("source:github"); err == nil {
 		t.Fatal("token stored without confirmation")
 	}
+	openStore := a.keychain
+	a.keychain = func() (keychain.Store, error) { return nil, keychain.ErrAdHocBuild }
+	out.Reset()
+	errOut.Reset()
+	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh", "--yes"}); code == 0 {
+		t.Fatal("an ad-hoc build imported a token")
+	}
+	if _, err := os.Stat(ghCalled); !os.IsNotExist(err) {
+		t.Fatal("gh was called before the keychain could be used")
+	}
+	a.keychain = openStore
 	out.Reset()
 	errOut.Reset()
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--project", "ENG", "--from-gh", "--yes"}); code != 0 {
@@ -65,6 +87,16 @@ sources: []
 	if h.Get("Authorization") != "Bearer "+tok {
 		t.Fatal("stored token does not authorize")
 	}
+
+	fakeGH(t, "printf '%s\\n' "+tok+" >&2; exit 1")
+	out.Reset()
+	errOut.Reset()
+	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh", "--yes"}); code == 0 {
+		t.Fatal("import succeeded despite gh failing")
+	}
+	if output := out.String() + errOut.String(); strings.Contains(output, tok) || !strings.Contains(output, "gh auth token failed") {
+		t.Fatal("failed import did not report a redacted error")
+	}
 }
 
 func TestEgressListsSourceHosts(t *testing.T) {
@@ -81,7 +113,7 @@ mode: dry-run
 sources:
   - kind: github
     repos: ["acme/app"]
-    host: ghe.example.com
+    host: ghe.example.com:8443
   - kind: jira
     site: acme
     projects: ["ENG"]
@@ -93,7 +125,7 @@ sources:
 		t.Fatal(out.String())
 	}
 	got := out.String()
-	for _, host := range []string{"ghe.example.com:443", "acme.atlassian.net:443", "signal.example.com:443"} {
+	for _, host := range []string{"ghe.example.com:8443", "acme.atlassian.net:443", "signal.example.com:443"} {
 		if !strings.Contains(got, host) {
 			t.Fatalf("missing %s in\n%s", host, got)
 		}
@@ -105,21 +137,15 @@ func TestFromGHUsesHost(t *testing.T) {
 	cfg := filepath.Join(dir, "config.yaml")
 	must(t, os.WriteFile(cfg, []byte("signal:\n  url: https://signal.example.com\nperson:\n  handle: \"@winton\"\nrules: rules.yaml\nstate: state\nmode: dry-run\nsources: []\n"), 0o600))
 	store := keychain.NewMemory()
-	var host string
+	fakeGH(t, `[ "$#" -eq 4 ] && [ "$1 $2 $3 $4" = 'auth token --hostname ghe.example.com' ] || exit 1
+printf '%s\n' ghe-token`)
 	var out, errOut strings.Builder
 	a := &app{
 		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
 		keychain: func() (keychain.Store, error) { return store, nil },
-		ghToken: func(_ context.Context, h string) (string, error) {
-			host = h
-			return "ghe-token", nil
-		},
 	}
-	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--host", "ghe.example.com", "--from-gh", "--yes"}); code != 0 {
+	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--host", "ghe.example.com:8443", "--from-gh", "--yes"}); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
-	}
-	if host != "ghe.example.com" {
-		t.Fatalf("gh auth token host %q", host)
 	}
 }
 
@@ -131,7 +157,7 @@ func TestPipedJiraKeepsTheToken(t *testing.T) {
 	const email, tok = "winton@example.com", "jira-piped-secret"
 	var out, errOut strings.Builder
 	a := &app{
-		stdin: strings.NewReader(email + "\n" + tok + "\n"), stdout: &out, stderr: &errOut, now: time.Now,
+		stdin: strings.NewReader(email + "\n" + tok), stdout: &out, stderr: &errOut, now: time.Now,
 		keychain: func() (keychain.Store, error) { return store, nil },
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "jira", "--config", cfg, "--site", "acme", "--project", "ENG"}); code != 0 {
@@ -139,6 +165,13 @@ func TestPipedJiraKeepsTheToken(t *testing.T) {
 	}
 	if strings.Contains(out.String()+errOut.String(), tok) {
 		t.Fatal("the token was printed")
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), tok) {
+		t.Fatal("the token was written to the config")
 	}
 	secret, err := store.Get("source:jira")
 	if err != nil {
@@ -148,8 +181,8 @@ func TestPipedJiraKeepsTheToken(t *testing.T) {
 	if err := secret.AuthorizeBasic(h); err != nil {
 		t.Fatal(err)
 	}
-	if h.Get("Authorization") == "" {
-		t.Fatal("piped token was not stored")
+	if h.Get("Authorization") != "Basic "+base64.StdEncoding.EncodeToString([]byte(email+":"+tok)) {
+		t.Fatal("piped Jira credential does not authorize")
 	}
 }
 

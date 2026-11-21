@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -421,12 +422,13 @@ func TestLongRateLimitEndsThePass(t *testing.T) {
 }
 
 func TestScopeAndEgress(t *testing.T) {
-	sc, err := newScope("api.github.com", []string{"acme/app", "acme/*"})
+	sc, err := newScope(&url.URL{Scheme: "https", Host: "api.github.com"}, []string{"acme/app", "acme/*"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, raw := range []string{
 		"https://api.github.com/user",
+		"https://API.GITHUB.COM:443/user",
 		"https://api.github.com/user/teams",
 		"https://api.github.com/user/repos?per_page=100&visibility=all&affiliation=owner",
 		"https://api.github.com/search/issues?q=1",
@@ -441,10 +443,12 @@ func TestScopeAndEgress(t *testing.T) {
 	}
 	for _, raw := range []string{
 		"https://evil.example/user",
+		"https://api.github.com:8443/user",
 		"https://api.github.com/repos/other/secret/pulls/1",
 		"https://api.github.com/repos/acme/app/contents/README",
 		"https://api.github.com/repos/acme/app/git/trees/x",
 		"http://api.github.com/user",
+		"http://api.github.com:443/user",
 		"https://api.github.com/user/repos",
 		"https://api.github.com/user/repos?visibility=all",
 		"https://api.github.com/user/repos?affiliation=collaborator",
@@ -460,6 +464,10 @@ func TestScopeAndEgress(t *testing.T) {
 	ghe, err := New(Options{Host: "ghe.example.com", Repos: []string{"acme/app"}})
 	if err != nil || ghe.Hosts()[0] != "ghe.example.com:443" || !strings.Contains(ghe.base, "/api/v3") {
 		t.Fatalf("%v %s", ghe.Hosts(), ghe.base)
+	}
+	customPort, err := New(Options{Host: "api.github.com:8443", Repos: []string{"acme/app"}})
+	if err != nil || customPort.Hosts()[0] != "api.github.com:8443" || customPort.base != "https://api.github.com:8443" {
+		t.Fatalf("configured port: %v %v", customPort, err)
 	}
 
 	hit := false
