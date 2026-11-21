@@ -43,7 +43,7 @@ Collects, applies rules and projection, and records what it decided.
   lease, each answer from Signal, and how many event bodies are still pending. `--bodies` adds the body of each
   new decision. Decisions from earlier passes are not printed again.
 
-`--summary` shows pass totals and status. The LaunchAgent uses it for both dry runs and send passes.
+`--summary` shows pass totals and status. The supervised collector uses it for both dry runs and send passes.
 
 With a Google or Slack source, a send pass first reads Signal's restricted prefixes. A source whose prefix is not restricted
 has its send items held, and `run` prints `source <name>: N items held, not sent: <prefix> is not restricted in
@@ -62,17 +62,17 @@ personal body plain) or `sensitive_shared` (it would be sealed on a shared subje
 error, a DEC-32 personal body without `seal` included, stops `run`.
 
 It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
-the outbox, the key is not in the keychain, the binary is not the signing identity `beacon service install` recorded,
+the outbox, the key is not in the keychain, the binary does not match a certificate pinned by the retired installer,
 or the config, rules or a source cannot be loaded. The message names the
 reason and the command that shows details (`beacon rules check`, `beacon outbox`); it never repeats an error's text,
 which can name item keys or rule patterns. An unreachable Signal is not an error: bodies stay pending for the next
 pass.
 
 Without `--once` or `--first`, that non-zero exit waits first. The wait is one `poll_interval`, then double that, up
-to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon service status` shows it. A rules or
-source error still has a config, so that record uses the state directory and the configured interval. launchd's
-10-second throttle is on top of that wait, not instead of it. SIGTERM during the wait exits 0. SIGINT does not: the
-failure is still reported. `--once` and `--first` do not wait.
+to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon status` shows it. A rules or
+source error still has a config, so that record uses the state directory and the configured interval. Tether's
+restart backoff is on top of that wait. SIGTERM during the wait exits 0. SIGINT does not: the failure is still
+reported. `--once` and `--first` do not wait.
 
 `--once` makes one pass over every source, one after another, and exits. `--first` does too. Without either, `run`
 runs each source on its own loop until interrupted, in dry-run and in send mode (DEC-41): a source makes a pass, waits
@@ -101,7 +101,7 @@ snapshot when the source's coverage changes. See [`beacon status`](#beacon-statu
 [events](events.md#coverage). `--once` does neither.
 
 On SIGTERM every loop finishes the pass it is making (the send already in progress is recorded), and the run exits 0
-without starting another send or another pass. That is the stop launchd uses. A lease renewal already underway
+without starting another send or another pass. Tether sends SIGTERM, then escalates if needed. A lease renewal already underway
 finishes; no further event send, coverage snapshot or heartbeat starts after it. SIGINT still cancels the in-flight
 request. `beacon run` refuses to start as root.
 
@@ -268,50 +268,24 @@ beacon accept-first [source...]
 Records that the named sources' first runs were accepted. With no names, every source but a fixture. Each named
 source must have a completed `beacon run --first` for that source; accepting without that summary is an error. A
 collect that failed is not a completed summary. The next send pass may send their open-state items and then commit
-a cursor. It does not send by itself. A running agent (`beacon service`) reads the acceptance before each pass, so
+a cursor. It does not send by itself. A running collector reads the acceptance before each pass, so
 it does not need a restart.
 
 ## `beacon service`
 
-A per-user launchd agent on macOS. It is not a LaunchDaemon, it sets no user name, and it refuses to install or to
-run as root. The job is `dev.beacon.agent`, in the GUI domain of the user who installed it
-(`~/Library/LaunchAgents/dev.beacon.agent.plist`).
+Migration commands for the retired macOS collector LaunchAgent (`dev.beacon.agent` in the GUI domain).
+`beacon service install` no longer writes or starts a job. For the replacement, see [tether](tether.md).
 
 ```bash
-beacon service install [--binary PATH] [--force]
 beacon service uninstall
 beacon service status
 beacon service logs [--stdout]
 ```
 
-`install` writes the plist and bootstraps it. The job runs the signed binary with `run` and `--config` set to the
-absolute config path: the poll loop, not `--once`. It starts at load. The process reads the config when it starts
-and does not reload it: there is no SIGHUP handler and no watch on the file. Restart the agent after a config
-change. The cursors and the first-run acceptance are state, not config: they are read again before every pass. An invalid config is not applied over a running one; the process exits, and launchd restarts it only when it exits
-non-zero, and not more than once every 10 seconds. A clean exit after SIGTERM stays stopped. launchd waits 180
-seconds after SIGTERM before killing the process, which covers one send. The plist sets no environment variables
-and no credential; the agent reads keys from the keychain when a pass sends, the same as a terminal `beacon run`.
-Its umask is 077.
-
-Standard output and the JSON log go to `service.stdout.log` and `service.stderr.log` in the state directory, mode
-`0600`. The standard output log shows pass totals and status. The JSON log also records fixed result codes.
-A file of a mebibyte or more is copied aside (one generation, `*.1`) and truncated as soon as the config is
-loaded and again before each pass, so a restart
-that fails its checks cannot grow the log without a cap. launchd holds the descriptor open, so the file is
-truncated in place rather than renamed.
-
-The binary must be code-signed with a stable identity. An ad-hoc signature, which is what `go build` produces, is
-refused and nothing is written: each rebuild would be a different program to the keychain.
-Follow [local build and signing](signing.md) to prepare the signed binary.
-`--binary` names a binary other than the one running the command. The path
-in the plist is absolute and symlink-resolved, and it is the path that was checked. Install records the SHA-256 of
-that certificate's leaf in the state directory. A later `beacon run` refuses a binary whose leaf does not match, and
-does not contact Signal. `status` prints `identity: mismatch` when that is so, and does not print the hash.
-
-`install` refuses to replace an existing plist without `--force`. `--force` stops the running job and waits until
-launchd reports it unloaded, up to the 180 seconds the agent is given to finish a send, then writes the new plist
-and bootstraps it. If that wait does not finish, the old plist is left in place. If bootstrap fails, the new plist is removed so the next login does not start a half-installed
-agent. `uninstall` stops the job and removes the plist. It does not delete the state directory.
+`uninstall` stops the job and removes `~/Library/LaunchAgents/dev.beacon.agent.plist`. It does not delete the
+state directory, change the certificate pin or remove other services. `beacon run` still refuses a binary whose
+certificate does not match a legacy pin. `status` prints `identity: mismatch` if the legacy job's binary does not
+match the pin, without printing the hash.
 
 `status` prints whether the job is loaded and running, and the last pass from `pass.json` in the state directory:
 the time, the outcome (`ok`, `stopped`, or a reason code), and the lease. A failed start records its reason there
@@ -320,11 +294,10 @@ When this instance held the lease, the holder is the instance id; the claim's `m
 `:lease`. Another holder is reported as `another instance`. A personal source the last pass did not send for is a
 `withheld: <source> <prefix> <reason>` line: `prefix_unrestricted` (ask Signal's admin to restrict the prefix) or
 `restrictions_unknown` (the restrictions could not be read; Beacon's key needs `read`). Status does not contact Signal, and it does not print a
-pass record that is not in that fixed set. `logs` prints the JSON log. `--stdout` prints the other file. Neither
-follows.
+pass record that is not in that fixed set. `logs` prints the legacy JSON log. `--stdout` prints the other file.
+Neither follows. For the app-supervised collector's latest pass and coverage, use `beacon status --coverage`.
 
-On a system that is not macOS, install, uninstall and status report that the agent is a launchd job and do nothing
-else.
+Uninstall and legacy job status are only available on macOS.
 
 ## `beacon keychain repair`
 

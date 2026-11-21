@@ -397,7 +397,7 @@ named, and tries that call once more, counted in the budget. A `Retry-After` ove
 the call fails, and later passes do not call Gmail until it is over (see [Rate limits](#rate-limits)). Beacon does
 not otherwise back off between passes: the limit is a one-minute window, the budget is kept across passes, so Gmail's
 30-second loop (DEC-41) spends no more than a slower one would, and waiting longer would only delay mail. A pass that waits for quota can be stopped
-by launchd's kill after SIGTERM; nothing of an unfinished collect is recorded, so the next pass reads it again.
+by the supervisor's kill after SIGTERM; nothing of an unfinished collect is recorded, so the next pass reads it again.
 
 **Pause and resume.** If a rate limit still stops an open-state scan after something has been read, the collect
 does not fail. On a send pass, after those items are recorded, it

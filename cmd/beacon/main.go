@@ -14,6 +14,15 @@ import (
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "run" && os.Getenv("BEACON_TETHERED") == "1" {
+		go func() {
+			// Tether holds the only writer and never writes. EOF means tether died. On Quit
+			// and app crash, tether still sends SIGTERM first and allows a grace period.
+			var unexpected [1]byte
+			_, _ = os.Stdin.Read(unexpected[:])
+			os.Exit(1)
+		}()
+	}
 	// SIGINT cancels the in-flight work. SIGTERM does not: the poll loop finishes the current send and exits 0.
 	// Other commands still stop on either signal.
 	interrupt, stopInt := signal.NotifyContext(context.Background(), os.Interrupt)

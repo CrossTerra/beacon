@@ -42,7 +42,7 @@ from the linker and does not affect the tests.
 | `internal/cursor`, `internal/seed`, `internal/limited` | Cursor commit, a completed first run, and acceptance; seed parse; rate-limit wait and early end, the status, reason code and `Retry-After` carried without body text, no sleep after the last attempt, and a long `Retry-After` holding later requests until it is over. |
 | `internal/schedule` | The sleep arithmetic (a long pass is not a sleep, a short nap under the threshold, a clock set back); a slow source not delaying another; a wake running every source at once, reported once; a failed pass after a wake tried again soon; a pass error stopping every loop; a stop waiting for the pass under way. Fake timers and clocks, no sleeping. |
 | `internal/coverage` | One failure not failing and two failing, recovery keeping the last failure, Slack's waiting and behind channels; `coverage.json` at `0600`, round trip, and free text refused; the `status --coverage` text; snapshots against the fake Signal written on change only, at most once in five minutes, not on one failure, a pending one sent first as stored, nothing after the lease; heartbeats only after a pass that collected, and a Signal without leases. |
-| `internal/service` | The plist, golden bytes, path escaping, log rotation under an append-mode descriptor, the pass record, `launchctl print` parsing, codesign output parsing. |
+| `internal/service` | Legacy plist path parsing, log rotation under an append-mode descriptor, pass records, launchd status and code-signing output parsing. |
 | `cmd/beacon` | The commands against a fake Signal, through the egress-recording transport wrapped around the production transport: tiers, nothing held or dropped on the wire, `beacon egress` covers every host seen, a crash between append and send, a crash after send, a retry after a rules change, 409, a second instance, logs, exit codes on refusal, bodies printed only on request, error text kept off standard error, a dry run and explain leaving the state directory byte-for-byte unchanged, an interrupt during `init` writing nothing, `source add` not printing or writing a token, a piped Jira token kept, `--from-gh --host` passing the host, `accept-first` requiring a completed `--first`, a running loop seeing `accept-first` on its next pass and storing the Gmail cursor without a restart, `beacon key set` verifying with `GET /api/me` before storing and not printing the key, a refused key left unstored, egress listing GitHub, Jira, Google and Slack hosts, `source add google` storing the client and the refresh token and printing neither, the Google starter rules on a first run and a later dry run, `source add slack` refusing a bot token, a refused token and one missing a scope, and storing a user token under the workspace and user without printing it, the Slack starter rules (direct and group direct messages and mentions as asks, own messages as links that close the conversation's asks, no references from a mention, everything else dropped, no text), Slack direct messages and private channels held until `slack:dm:*` is restricted while public channel items are sent, a deleted Slack ask closed, and a deleted reply in a thread closing only its own ask, a Google send pass committing cursors and not sending a key twice, personal sends held while their prefix is not restricted in Signal (or a longer stem would move the owner) and shown by `service status`, not recorded and not committed while the restrictions cannot be read, and pending personal bodies kept back when a restriction is lifted or the source is removed, a restriction lifted mid-pass re-read before send, `outbox retry --rejected` re-projecting a 400 and not touching a 409, a sent entry, or an entry with no stored item, `cursor reset` clearing a cursor without sending, a legacy `400` with no stored item sent once after cursor reset and `beacon run --once`, service install refusing an ad-hoc binary, root, and a second install, the plist carrying no environment and no credential, uninstall leaving state, status parsing, a broken rules file not hiding the pass or the log, a persistent failure backing off before a non-zero exit, a pinned signing identity refused on mismatch, `--force` waiting until the old job is unloaded, SIGTERM finishing the current send and exiting 0, and `keychain repair` printing account names and no value, and refused in an ad-hoc build. Slack thread titles from the starter rules with the event titles unchanged and no text; a token without the name scopes still sending with generic titles and one warning; threads Beacon opened before the rules listed `title` retitled once each through the outbox, and not one someone else opened or a person renamed, and none while no rule lists `title`; and threads waiting, unrecorded, until the token has the scopes. The source loops: a fixture keeps passing on its own interval while a Gmail grant is refused on every pass; Gmail failing with `source_unauthorized` in `coverage.json`, `beacon status --coverage` and a Signal snapshot, a heartbeat for the fixture and none for Gmail, and no token or item content in any of it; a dry-run loop writing no coverage. |
 | `examples` | The starter rules file checks clean against every source's field lists, and lists no `body`. |
 
@@ -101,9 +101,8 @@ limited to Beacon's signing requirement. Granting access to all apps or to the g
 tool would give other processes a way to read the credential.
 
 If the person intentionally changes the signing certificate of an existing installation, see
-[`beacon keychain repair`](commands.md#beacon-keychain-repair) and
-[`beacon service install --force`](commands.md#beacon-service) for updating the item access and the optional
-LaunchAgent's pinned certificate. Both are person-run operations on the verified signed binary.
+[`beacon keychain repair`](commands.md#beacon-keychain-repair). Also review any `service.leaf` left by the
+retired installer before trying to run the collector with the new certificate.
 
 ## macOS app
 
@@ -114,15 +113,18 @@ CI adds these gates without using a signing identity:
 scratch=$(mktemp -d)
 swift build --package-path mac --scratch-path "$scratch"
 swift test --package-path mac --scratch-path "$scratch"
+bash scripts/test-tether.sh
 ```
 
 The shortcut test constructs local events without registering a global hot key or opening a window. To stage a
 bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a clean checkout (including no
 ignored build outputs). CI uses the commit under test. For an audited build, use the full ID from the approved
-report and follow [signing.md](signing.md#stage-the-macos-app-skeleton).
+report and follow [signing.md](signing.md#stage-the-macos-app).
 
 On the Mac, open the staged `Beacon.app`, choose **Approvals…** from its menu, and check for **No pending
 approvals**. Close the window, focus Finder and press **⌥⌘B** to reopen it. The shortcut registers one key
 combination, requires no Accessibility or Input Monitoring access, and leaves the menu usable if registration
-fails. Opening the window repeatedly should not create duplicates. **Quit Beacon** removes the menu item. The
-bundle also contains `Contents/Helpers/beacon`, but the app does not start it or use credentials.
+fails. Opening the window repeatedly should not create duplicates. The menu shows the collector's state.
+**Quit Beacon** waits until `tether` confirms the collector stopped, then removes the menu item. A staged bundle
+is not signed with a certificate, so its collector cannot open the keychain: test it with a `mode: dry-run`
+config. `scripts/test-tether.sh` covers supervision with fixtures; see [tether.md](tether.md#tests).

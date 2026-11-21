@@ -1,7 +1,4 @@
-// Package service is the per-user launchd agent: the job definition, the last-pass record, and log rotation.
-//
-// It does not read a credential, and it does not send. The plist it writes names a binary, a config path and two log
-// paths. It has no environment variables, so it cannot carry a secret. Keys stay in the keychain.
+// Package service handles the collector's last-pass record and reads the retired LaunchAgent's status and logs.
 package service
 
 import (
@@ -10,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -36,25 +32,14 @@ const (
 	// LeafName is the certificate leaf hash recorded at install, in the state directory.
 	LeafName = "service.leaf"
 
-	// BackoffCap is the longest a poll loop waits before a non-zero exit. launchd would otherwise restart a
-	// persistent failure every throttle interval.
+	// BackoffCap is the longest a poll loop waits before a non-zero exit on a persistent failure.
 	BackoffCap = 30 * time.Minute
 
-	// ThrottleInterval is how long launchd waits before restarting a job that exited too quickly. It is launchd's
-	// own default, written into the plist so the bound is visible.
-	ThrottleInterval = 10
-	// ExitTimeOut is how long launchd waits after SIGTERM before SIGKILL. It covers one send, including one
-	// Retry-After of up to two minutes. It is not infinity: a send still waiting after this can be killed, and the
-	// outbox recovers that the same way it recovers a crash.
-	ExitTimeOut = 180
 	// LogMaxBytes is the size at which a service log is rotated.
 	LogMaxBytes = 1 << 20
 	// rotateReadMax is the largest log that is copied aside. A larger file is truncated without a copy, so a
 	// pathological file is not read into memory.
 	rotateReadMax = 8 << 20
-
-	// umaskDecimal is 077. Property lists have no octal integers.
-	umaskDecimal = 63
 )
 
 // AgentsDir is ~/Library/LaunchAgents.
@@ -72,89 +57,6 @@ func Domain(uid int) string { return "gui/" + strconv.Itoa(uid) }
 
 // Target is the service target in that domain.
 func Target(uid int) string { return Domain(uid) + "/" + Label }
-
-// Spec is everything the plist names. Paths are absolute. Nothing in it is a credential.
-type Spec struct {
-	Binary string
-	Config string
-	Stdout string
-	Stderr string
-}
-
-// Plist returns the launchd job definition. The bytes are stable for a given spec.
-func Plist(spec Spec) ([]byte, error) {
-	binary, err := xmlText(spec.Binary)
-	if err != nil {
-		return nil, err
-	}
-	config, err := xmlText(spec.Config)
-	if err != nil {
-		return nil, err
-	}
-	stdout, err := xmlText(spec.Stdout)
-	if err != nil {
-		return nil, err
-	}
-	stderr, err := xmlText(spec.Stderr)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range []string{spec.Binary, spec.Config, spec.Stdout, spec.Stderr} {
-		if !filepath.IsAbs(p) {
-			return nil, errors.New("service: paths must be absolute")
-		}
-	}
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString(`<plist version="1.0">` + "\n")
-	b.WriteString("<dict>\n")
-	writeKey(&b, "Label", "<string>"+Label+"</string>")
-	b.WriteString("\t<key>ProgramArguments</key>\n")
-	b.WriteString("\t<array>\n")
-	b.WriteString("\t\t<string>" + binary + "</string>\n")
-	b.WriteString("\t\t<string>run</string>\n")
-	b.WriteString("\t\t<string>--summary</string>\n")
-	b.WriteString("\t\t<string>--config</string>\n")
-	b.WriteString("\t\t<string>" + config + "</string>\n")
-	b.WriteString("\t</array>\n")
-	writeKey(&b, "RunAtLoad", "<true/>")
-	b.WriteString("\t<key>KeepAlive</key>\n")
-	b.WriteString("\t<dict>\n")
-	b.WriteString("\t\t<key>SuccessfulExit</key>\n")
-	b.WriteString("\t\t<false/>\n")
-	b.WriteString("\t</dict>\n")
-	writeKey(&b, "ThrottleInterval", "<integer>"+strconv.Itoa(ThrottleInterval)+"</integer>")
-	writeKey(&b, "ExitTimeOut", "<integer>"+strconv.Itoa(ExitTimeOut)+"</integer>")
-	writeKey(&b, "Umask", "<integer>"+strconv.Itoa(umaskDecimal)+"</integer>")
-	writeKey(&b, "ProcessType", "<string>Background</string>")
-	writeKey(&b, "StandardOutPath", "<string>"+stdout+"</string>")
-	writeKey(&b, "StandardErrorPath", "<string>"+stderr+"</string>")
-	b.WriteString("</dict>\n")
-	b.WriteString("</plist>\n")
-	return []byte(b.String()), nil
-}
-
-func writeKey(b *strings.Builder, key, value string) {
-	b.WriteString("\t<key>" + key + "</key>\n")
-	b.WriteString("\t" + value + "\n")
-}
-
-func xmlText(s string) (string, error) {
-	if s == "" {
-		return "", errors.New("service: empty path")
-	}
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return "", errors.New("service: path contains a control character")
-		}
-	}
-	var buf bytes.Buffer
-	if err := xml.EscapeText(&buf, []byte(s)); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
 
 // Rotate copies path aside to path.1 and truncates it when it is at least limit bytes.
 //
@@ -552,22 +454,6 @@ func BinaryFromPlist(data []byte) string {
 		return ""
 	}
 	return s
-}
-
-// EnsureLog creates path if needed, mode 0600, without truncating an existing file.
-func EnsureLog(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	cerr := f.Close()
-	if err := os.Chmod(path, 0o600); err != nil {
-		return err
-	}
-	return cerr
 }
 
 // FormatStatus is the fixed status text. Fields are already validated; this does not read a file.

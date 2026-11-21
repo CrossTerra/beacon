@@ -103,7 +103,7 @@ Commands:
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
   status        print the last pass; --coverage adds how well each source is being read
-  service       install, uninstall, status or logs of the per-user launchd agent
+  service       uninstall, status or logs of the retired per-user collector job
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
 
@@ -494,7 +494,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
 	bodies := fs.Bool("bodies", false, "print each decided item's body (the default for a dry run with item details)")
-	summary := fs.Bool("summary", false, "print pass summaries only (used by the launchd agent)")
+	summary := fs.Bool("summary", false, "print pass summaries only (used by tether)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -505,7 +505,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 	// From here on, an error's text never reaches standard error: it can name keys, paths and rule patterns. The
 	// person sees a fixed message for its reason, and the commands that show details. A poll loop records the reason
-	// and waits before the non-zero exit, so launchd does not restart a persistent failure every throttle interval.
+	// and waits before the non-zero exit, so a persistent failure does not cause rapid restarts.
 	var stateDir string
 	poll := config.DefaultPollInterval
 	// --once and --first are one-shot. Only the poll loop waits before a non-zero exit.
@@ -530,7 +530,7 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 	itemDetails := !*summary && !a.serviceStdout(stateDir)
 	if err := a.refusePinned(ctx, stateDir); err != nil {
-		return fail(logs.ReasonSigning, "refusing to run a binary whose signing identity does not match the one recorded by beacon service install")
+		return fail(logs.ReasonSigning, failText(logs.ReasonSigning, e))
 	}
 	var problems int
 	for _, p := range e.rules.Check(e.checkSources()) {
@@ -906,7 +906,7 @@ func failText(reason logs.Reason, e *env) string {
 	case logs.ReasonCanceled:
 		return "interrupted"
 	case logs.ReasonSigning:
-		return "refusing to run a binary whose signing identity does not match the one recorded by beacon service install"
+		return "refusing to run a binary whose signing identity does not match the certificate recorded by the retired installer"
 	}
 	return "the pass failed (" + string(reason) + "); beacon outbox shows what was recorded"
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time setup on a developer's Mac without an Apple Development certificate: a self-signed code-signing
-# identity, so local builds of beacon have a certificate and `beacon service install` accepts them.
+# identity, so a locally signed build can meet the collector's Keychain ACL.
 #
 # It does not stop keychain prompts across rebuilds. macOS files a build signed with a certificate Apple did not issue
 # under that build's hash (the item's partition list), so every rebuild asks once per Beacon item. An Apple
