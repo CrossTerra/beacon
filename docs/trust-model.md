@@ -4,6 +4,10 @@ Beacon sits between accounts that belong to one person and a store that many peo
 says what Beacon protects, from whom, and how. Code that changes any of these properties changes this file in the
 same pull request.
 
+The `Beacon.app` shell currently has no listener, network access, credential access or child process launches.
+Its menu and shortcut only open an empty approvals window. The rest of this document describes the separate Go
+collector and CLI.
+
 ## What crosses the boundary
 
 | Leaves the machine | Never leaves the machine |

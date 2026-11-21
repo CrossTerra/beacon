@@ -7,10 +7,9 @@ do, and what blocks installation. Give them the fork URL, the full audited commi
 Follow the [audit checklist](docs/audit.md) and the [local build and signing guide](docs/signing.md).
 
 Beacon runs on the person's Mac. Its Go collector reads GitHub, Jira, Gmail, Google Calendar, Google Drive and
-Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The current
-checkout provides a CLI and an optional per-user LaunchAgent. Signal plan 13.00 Part 1 covers the install brief
-and signing experiment. `Beacon.app`, Touch ID approvals, the action vault and runner supervision belong to
-later parts.
+Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The CLI and its
+optional per-user LaunchAgent still handle collection. The [macOS menu-bar app](docs/development.md#macos-app)
+currently opens an empty approvals window. It does not start the collector, accept proposals or execute actions.
 
 ## Install from the person's fork
 
