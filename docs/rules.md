@@ -1,38 +1,58 @@
 # Rules
 
-The rules file is YAML that the person owns and reviews like code (DEC-5). Rules are tried in order; the first
-that matches decides the item. An item no rule matches is `never` (DEC-3). Unknown keys are errors, and a key
-written with no value is an error rather than "no condition", so a typo cannot widen a rule.
+The rules file is YAML that the person owns and reviews like code (DEC-5). The first matching rule decides the
+item. An item no rule matches is `never` (DEC-3). The parser rejects unknown keys and conditions with no value.
+
+## Write and review rules
+
+1. Start at `never` (`rules: []` gives every item that default). Ask the person which changes matter and who may
+   see each field. Use the configured source name and narrow matches on type, repository, sender or channel.
+   Put specific exclusions first. A catch-all `match: {}` matches every remaining item, so put any catch-all
+   `never` rule last. Check [Sources](sources.md) for fields and state before listing them.
+2. Stage an exact diff with an initial `hold` rule and the smallest useful projection. Review the two titles,
+   state, references, identities and ask in addition to explicitly listed fields. For a personal subject,
+   confirm the intended Signal restriction, sealing level and plain envelope. A `hold` stays on the Mac in
+   the full-item queue during a send pass. Approval from the queue is planned.
+3. Use the [fixture config](configuration.md#fixture-source) in a private test directory, mode `dry-run`, with
+   synthetic matches and near misses, a sample missing a field and one that matches an earlier rule. Run
+   `beacon rules check --config PATH`, `beacon run --config PATH --once --dry-run` and
+   `beacon explain --config PATH KEY`. Compare the tier, matching rule, projected fields, sealed parts and
+   plain envelope to the proposed policy. For a synthetic sealed fixture use `explain --bodies` to check what
+   was sealed. Use a fixture-only config for these agent commands, because a live dry run reads provider
+   data and `explain` can collect when it cannot find the key locally.
+4. Show the person the diff and synthetic results, including which readers would see a plaintext body or link.
+   Have them review `beacon run --first` or `beacon run --once --dry-run` in their own terminal. Keep live
+   output on the Mac. Change a reviewed rule to `send` only with the person's agreement, and accept the first
+   run and turn on sending through the [install workflow](../README.md#configure-and-try-ingestion).
+   Existing pending entries may still send their stored bytes. Check them locally before resuming sends
+   with tighter rules.
+
+The starter rules include plaintext Slack public-channel bodies. Check the audience before adopting any of
+their sends. Personal rules belong outside the fork. If a general rule example or grammar change would help
+others, use synthetic examples, exercise [rules](../internal/rules), [projection](../internal/project) and
+[runner](../internal/runner) tests as applicable, and get the person's yes to the exact upstream diff.
+
+## Example
+
+This narrow rule previews a review request with its link and repository. It belongs above the fallback.
 
 ```yaml
 rules:
-  - name: own-acts
-    match: {own: true}
-    tier: send
-    fields: [title, url]
-
   - name: review-requests
     match:
       source: github
       type: review_requested
       addressed: true
       fields:
-        repository: {glob: "acme/*"}
-    tier: send
-    fields: [title, url, repository, actor]
+        repository: acme/app
+    tier: hold
+    fields: [url, repository]
     ask: me
     priority: high
 
-  - name: answers
-    match: {type: commented, fields: {label: answered}}
-    tier: send
-    fields: [title]
-    close_by_others: true
-
-  - name: everything-else-from-acme
-    match: {fields: {repository: {regex: "acme/.+"}}}
-    tier: hold
-    fields: [title]
+  - name: everything-else
+    match: {}
+    tier: never
 ```
 
 ## A rule
@@ -54,7 +74,7 @@ A `never` rule takes none of `fields`, `state`, `ask`, `priority`, `close_by_oth
 
 The file holds one YAML document. A second document (after `---`) is an error, not ignored.
 
-A seed file can drop a subject before these rules. See [`commands.md`](commands.md#beacon-seed). That drop is the built-in
+A seed file can drop a subject before these rules. See [`commands.md`](commands.md#beacon-seed-file). That drop is the built-in
 rule `seed`; it is not in this file, and a rule here cannot override it.
 
 ## Conditions
