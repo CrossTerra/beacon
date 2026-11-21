@@ -70,8 +70,11 @@ collector and CLI.
    decides.
 5. **The outbox is the record.** Every request body, lease claims included, is appended to the outbox and synced
    to disk before it is sent. A pending retry resends those exact bytes, which is what Signal requires of a key it
-   already holds. A body Signal accepted (`sent`, `replayed`) is never resent and never rewritten. A `409` is never
-   retried and never decided again. A `400` with no stored item is not a decision: `beacon run` may decide that key
+   already holds. A body Signal accepted (`sent`, `replayed`) is never resent or rewritten. The only retryable
+   `409` is `conflict` with `details.field` equal to `/by/identity`: the identity moved between Signal resolving
+   `by` and writing the event, so Signal asks for the same request again. Beacon retries the stored bytes with
+   backoff and leaves the body pending for the next pass if attempts run out. A recorded `409` is final and never
+   decided again. A `400` with no stored item is not a decision: `beacon run` may decide that key
    again when a source yields it, append a new attempt, and send it. The refused lines stay in the file. Any other
    refusal is not sent again by `beacon run`. `beacon outbox retry --rejected` runs the current rules on the stored
    item. It sends only when they still send, and only fields both the stored decision and the current rule list. If
@@ -202,8 +205,8 @@ collector and CLI.
   with the same care as other fields: they leave the machine, and Signal does not interpret them.
 - **A 400 from before the decided item was stored cannot be rebuilt from the outbox.** The refused body is not the
   item. `beacon cursor reset github`, then `beacon run --once`, re-collects open state and decides a key again if
-  that collect yields it. It does not re-read timeline history. A `409`, and anything Signal accepted, is not sent
-  again.
+  that collect yields it. It does not re-read timeline history. An entry with a recorded `409`, or one Signal
+  accepted, is not sent again.
 - **The hold queue holds content at rest.** Held items are stored in full in the state directory (`0600`) until
   reviewed.
 - **A public channel's messages, with a rule that lists `body`, go to everyone who reads Signal.** Slack channel

@@ -79,7 +79,7 @@ type Client struct {
 
 	// Attempts is how many times one call tries before it gives up with ErrUnavailable.
 	Attempts int
-	// Backoff is the wait before the second attempt after a 5xx or network error; it doubles up to MaxBackoff.
+	// Backoff is the initial retry wait for 5xx, network errors and identity-move conflicts. It doubles up to MaxBackoff.
 	Backoff    time.Duration
 	MaxBackoff time.Duration
 	// MaxRetryAfter caps how long a 429 makes the client wait.
@@ -118,8 +118,8 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Write sends body to POST /api/events, retrying 429 after Retry-After and 5xx or network errors with backoff.
-// Every 409 is final. The bytes are sent exactly as given on every attempt.
+// Write sends body to POST /api/events, retrying 429 after Retry-After and 5xx, network errors or an identity-move
+// conflict with backoff. Every other 409 is final. Each attempt sends the same bytes.
 func (c *Client) Write(ctx context.Context, body []byte) (Result, error) {
 	backoff := c.Backoff
 	var last error
@@ -210,6 +210,9 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 		return Result{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: code}
 	case resp.StatusCode >= 500:
 		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
+	case resp.StatusCode == http.StatusConflict && code == "conflict" && identityMoved(data):
+		// The identity moved between resolving `by` and writing the event. Signal asks for the same request again.
+		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
 	default:
 		res.Outcome = Refused
 		if resp.StatusCode == http.StatusConflict && code == "idempotency_conflict" {
@@ -218,6 +221,17 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 		res.Code, res.Message = code, parsed.Error.Message
 		return res, 0, nil
 	}
+}
+
+func identityMoved(data []byte) bool {
+	var parsed struct {
+		Error struct {
+			Details struct {
+				Field string `json:"field"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(data, &parsed) == nil && parsed.Error.Details.Field == "/by/identity"
 }
 
 func (c *Client) retryAfter(h string) time.Duration {

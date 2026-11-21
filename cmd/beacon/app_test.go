@@ -900,7 +900,7 @@ func TestRetryRejected(t *testing.T) {
 			return signaltest.Reply{}
 		}
 		if r.Key == want[1].key {
-			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"Identity moved.","details":{"field":"/by/identity"}}}`}
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"Ask already closed.","details":{"field":"/closes/0"}}}`}
 		}
 		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"SECRET-REASON"}}`}
 	}
@@ -908,7 +908,7 @@ func TestRetryRejected(t *testing.T) {
 		t.Fatal(h.stderr.String())
 	}
 	if n := len(h.server.RequestsFor(want[1].key)); n != 1 {
-		t.Fatalf("identity conflict was attempted %d times, want one", n)
+		t.Fatalf("ask conflict was attempted %d times, want one", n)
 	}
 	state := filepath.Join(dir, "state")
 	ob, err := outbox.Open(state, time.Now)
@@ -981,6 +981,78 @@ func TestRetryRejected(t *testing.T) {
 	}
 	if !strings.Contains(h.stdout.String(), "Retry: sent 0, replayed 0, refused 0, conflict 1, missing 1, failed 0, hold 0, never 0, withheld 0.") {
 		t.Fatalf("second retry:\n%s", h.stdout.String())
+	}
+}
+
+// An identity move retries the recorded own act, including the asks it closes.
+func TestIdentityMovedRetry(t *testing.T) {
+	moved := signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"IDENTITY-ERROR-TEXT. Send it again.","details":{"field":"/by/identity"}}}`}
+	for _, c := range []struct {
+		name     string
+		after    signaltest.Reply
+		state    outbox.State
+		status   int
+		code     string
+		attempts int
+	}{
+		{name: "written", state: outbox.Sent, status: 201, attempts: 2},
+		{name: "identity detached", state: outbox.Rejected, status: 422, code: "identity_not_found", attempts: 2,
+			after: signaltest.Reply{Status: 422, Body: `{"error":{"code":"identity_not_found","message":"IDENTITY-ERROR-TEXT","details":{"field":"/by/identity"}}}`}},
+		{name: "attempts exhausted", after: moved, state: outbox.Pending, attempts: 5},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			cfg, want := writeSetup(t, t.TempDir(), h.server.URL, "send", "identity-moved")
+			key := want[1].key
+			h.server.Script = func(_ int, r signaltest.Request) signaltest.Reply {
+				if r.Key != key {
+					return signaltest.Reply{}
+				}
+				if len(h.server.RequestsFor(key)) == 1 {
+					return moved
+				}
+				return c.after
+			}
+			allowed := h.egressList(cfg)
+			if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+				t.Fatal(h.stderr.String())
+			}
+			if output := h.stdout.String() + h.stderr.String(); strings.Contains(output, "IDENTITY-ERROR-TEXT") {
+				t.Fatalf("run printed untrusted Signal text:\n%s", output)
+			}
+			ob, _ := stateOf(t, cfg)
+			e, ok := ob.Get(key)
+			if !ok || e.State != c.state || e.Status != c.status || e.Code != c.code {
+				t.Fatalf("own act: state %q, status %d, code %q; want %q, %d, %q", e.State, e.Status, e.Code, c.state, c.status, c.code)
+			}
+			if !bytes.Contains(e.Body, []byte(`"by":{"identity":"fixture:user:winton"}`)) || len(e.Closes) != 1 || e.Closes[0] != want[0].key {
+				t.Fatalf("own act lacks its attribution or closure: %s", e.Body)
+			}
+			reqs := h.server.RequestsFor(key)
+			if len(reqs) != c.attempts {
+				t.Fatalf("sent %d times, want %d", len(reqs), c.attempts)
+			}
+			for i, req := range reqs {
+				if !bytes.Equal(req.Body, e.Body) {
+					t.Fatalf("attempt %d did not send the stored bytes", i+1)
+				}
+			}
+			if c.state != outbox.Pending {
+				return
+			}
+			h.server.Script = nil
+			if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+				t.Fatal(h.stderr.String())
+			}
+			ob, _ = stateOf(t, cfg)
+			if sent, _ := ob.Get(key); sent.State != outbox.Sent || sent.Status != 201 {
+				t.Fatalf("pending own act was not sent on the next pass: %+v", sent)
+			}
+			reqs = h.server.RequestsFor(key)
+			if len(reqs) != c.attempts+1 || !bytes.Equal(reqs[len(reqs)-1].Body, e.Body) {
+				t.Fatal("next pass did not send the pending body once, byte for byte")
+			}
+		})
 	}
 }
 
