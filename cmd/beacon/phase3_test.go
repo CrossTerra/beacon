@@ -157,10 +157,14 @@ func TestSourceAddGoogleNeedsClient(t *testing.T) {
 		t.Fatalf("exit %d\n%s", code, errOut.String())
 	}
 	web := filepath.Join(dir, "web.json")
-	must(t, os.WriteFile(web, []byte(`{"web":{"client_id":"a","client_secret":"b"}}`), 0o600))
+	const invalidClientSecret = "web-client-secret-fixture"
+	must(t, os.WriteFile(web, []byte(`{"web":{"client_id":"a","client_secret":"`+invalidClientSecret+`"}}`), 0o600))
 	errOut.Reset()
 	if code := a.main(context.Background(), []string{"source", "add", "google", "--config", cfg, "--account", googletest.Email, "--client-file", web}); code == 0 || !strings.Contains(errOut.String(), "Desktop app") {
 		t.Fatalf("exit %d\n%s", code, errOut.String())
+	}
+	if strings.Contains(out.String()+errOut.String(), invalidClientSecret) {
+		t.Fatal("the rejected OAuth client secret was printed")
 	}
 }
 

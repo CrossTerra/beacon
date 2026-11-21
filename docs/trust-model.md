@@ -91,7 +91,9 @@ same pull request.
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
 7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
-   never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted. A new
+   never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted.
+   During setup, the package reads hidden terminal input, both lines of a piped Jira credential, the output of
+   `gh auth token` and the Google Desktop client JSON. The CLI receives opaque secrets. A new
    item lets code read it without asking only when it meets the designated requirement of the build that created
    it (identifier `dev.beacon.cli` and that signing certificate) and its partition is on the item's list: the
    team, for an Apple-issued certificate, otherwise that build's hash. Any other program, an older build or a

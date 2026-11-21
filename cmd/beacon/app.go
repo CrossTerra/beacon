@@ -61,8 +61,6 @@ type app struct {
 	configureClient func(*signal.Client)
 	// afterAppend is passed to the runner (tests stop the process there).
 	afterAppend func(key string)
-	// ghToken reads a GitHub token. Nil runs `gh auth token`. Tests set it so the token is never printed.
-	ghToken func(context.Context, string) (string, error)
 
 	// interrupt cancels an in-flight send. Nil means the context passed to main does. main sets it to SIGINT only,
 	// so SIGTERM can finish the current send.

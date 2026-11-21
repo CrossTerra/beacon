@@ -223,16 +223,19 @@ beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calen
 beacon source add slack [--channel ID|member]... [--name NAME]
 ```
 
-`--from-gh` imports the token `gh auth token` prints. With `--host`, that is `gh auth token --hostname <host>`. It
-asks for confirmation; `--yes` is that confirmation when input is not a terminal. Jira reads the account email, then
-the API token with echo off. On a pipe both lines are read by one reader, so the token is not lost. The keychain
-account is `source:<name>` under the service `beacon`. `--name` overrides the default, which is the kind.
+With `--from-gh`, the keychain package imports the output of `gh auth token`. With `--host`, that is
+`gh auth token --hostname <hostname>`, using the hostname portion of the flag. The command asks for confirmation.
+Use `--yes` to confirm when input is piped. Without `--from-gh`, enter the GitHub token at the hidden prompt. For Jira,
+enter the account email and API token. The keychain reader hides terminal token input and also accepts the two lines
+from a pipe. The keychain account is `source:<name>` under the service `beacon`. `--name` overrides the default,
+which is the kind.
 
 `google` enables Gmail, Calendar and Drive, or only those named with `--gmail`, `--calendar` and `--drive`, and
 authorises read-only access to the person's own OAuth client, for the Google account `--account` names (required;
 written to each source as `account`). `--client-file` is the JSON of a *Desktop app* client from the person's
-Google Cloud project; its id and secret are stored as `google:<account>:client`. Without it, that account's stored
-client is used. The command prints the consent URL (`--open` also opens it in the default browser; `login_hint` is
+Google Cloud project. The keychain package reads the file and stores its id and secret as `google:<account>:client`.
+Without it, the command uses that account's stored client. The command prints the consent URL
+(`--open` also opens it in the default browser; `login_hint` is
 the account), waits up to five minutes on `127.0.0.1` for the redirect, exchanges the code with PKCE, and stores the
 refresh token as `google:<account>:refresh`. The grant asks for the scopes of every Google source of that account
 in the config; `--bodies` asks for `gmail.readonly` instead of `gmail.metadata`. It prints the scopes granted, never a token. The token exchange goes
