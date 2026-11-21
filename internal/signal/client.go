@@ -119,7 +119,7 @@ func sleep(ctx context.Context, d time.Duration) error {
 }
 
 // Write sends body to POST /api/events, retrying 429 after Retry-After and 5xx or network errors with backoff.
-// The bytes are sent exactly as given on every attempt.
+// Every 409 is final. The bytes are sent exactly as given on every attempt.
 func (c *Client) Write(ctx context.Context, body []byte) (Result, error) {
 	backoff := c.Backoff
 	var last error
@@ -210,9 +210,6 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 		return Result{}, c.retryAfter(resp.Header.Get("Retry-After")), retryable{status: resp.StatusCode, code: code}
 	case resp.StatusCode >= 500:
 		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
-	case resp.StatusCode == http.StatusConflict && code == "conflict" && identityMoved(data):
-		// The identity named in `by` moved while Signal wrote; Signal asks for the same request again.
-		return Result{}, 0, retryable{status: resp.StatusCode, code: code}
 	default:
 		res.Outcome = Refused
 		if resp.StatusCode == http.StatusConflict && code == "idempotency_conflict" {
@@ -221,17 +218,6 @@ func (c *Client) once(ctx context.Context, body []byte) (Result, time.Duration, 
 		res.Code, res.Message = code, parsed.Error.Message
 		return res, 0, nil
 	}
-}
-
-func identityMoved(data []byte) bool {
-	var p struct {
-		Error struct {
-			Details struct {
-				Field string `json:"field"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	return json.Unmarshal(data, &p) == nil && p.Error.Details.Field == "/by/identity"
 }
 
 func (c *Client) retryAfter(h string) time.Duration {

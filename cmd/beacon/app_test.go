@@ -900,12 +900,15 @@ func TestRetryRejected(t *testing.T) {
 			return signaltest.Reply{}
 		}
 		if r.Key == want[1].key {
-			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"idempotency_conflict","message":"held"}}`}
+			return signaltest.Reply{Status: 409, Body: `{"error":{"code":"conflict","message":"Identity moved.","details":{"field":"/by/identity"}}}`}
 		}
 		return signaltest.Reply{Status: 400, Body: `{"error":{"code":"invalid","message":"SECRET-REASON"}}`}
 	}
 	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 1 {
+		t.Fatalf("identity conflict was attempted %d times, want one", n)
 	}
 	state := filepath.Join(dir, "state")
 	ob, err := outbox.Open(state, time.Now)
@@ -916,6 +919,12 @@ func TestRetryRejected(t *testing.T) {
 	ob.Close()
 
 	h.server.Script = nil
+	if code := h.run(h.app(allowed), "run", "--once", "--config", cfg); code != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if n := len(h.server.RequestsFor(want[1].key)); n != 1 {
+		t.Fatalf("a later pass tried the conflicted key again: %d requests", n)
+	}
 	before := map[string]int{}
 	for _, w := range want {
 		before[w.key] = len(h.server.RequestsFor(w.key))
@@ -950,7 +959,7 @@ func TestRetryRejected(t *testing.T) {
 	if e, _ := obRead.Get(want[0].key); e.State != outbox.Sent || e.Status != 201 {
 		t.Fatalf("retried key: %+v", e)
 	}
-	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 {
+	if e, _ := obRead.Get(want[1].key); e.State != outbox.Rejected || e.Status != 409 || e.Code != "conflict" {
 		t.Fatalf("409 was rewritten: %+v", e)
 	}
 	if e, _ := obRead.Get(oldKey); e.State != outbox.Rejected || len(e.Decision) != 0 {

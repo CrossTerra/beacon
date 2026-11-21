@@ -175,8 +175,7 @@ body was never sent. The directory is synced when the outbox file is created, so
 | --- | --- |
 | `201` | `sent`. |
 | `200`, `replayed: true` | `replayed`. |
-| `409 idempotency_conflict` | `rejected`; reported by `run` and `outbox`. Never retried. |
-| `409 conflict` on `/by/identity` | Retried, while the body is still pending: the identity moved while Signal wrote, and Signal asks for the same request again. A recorded `409` is not retried. |
+| Any `409`, including `idempotency_conflict` and a conflict on `/by/identity` | Final. Recorded as `rejected` and reported by `run` and `outbox`. |
 | `429` | Waits for `Retry-After` (at most two minutes), then retries. |
 | `5xx`, network error | Retries with backoff (1 s doubling to 30 s, five attempts). Then the body stays pending and the pass stops sending. |
 | The lease runs out | Every write, with its retries and waits, runs under a deadline at the end of the lease. A write still waiting then is stopped, its body stays pending, and the pass ends (`lease_expired`). |
