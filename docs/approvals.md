@@ -450,7 +450,8 @@ lookups have a four-second deadline, so `beacon act propose` answers within its 
 reads, the write and read-back use their own client with a 25-second deadline, so a slow `chat.postMessage` is not
 cut short into an unknown outcome. Every answer is capped at 8 MiB, and no redirect is followed. The Swift fixture
 tests need Go on `PATH`; they use a loopback TLS server and a fixture vault key, not a live Slack token or the
-Keychain.
+Keychain. The fixture clients use generous deadlines, because the whole suite's fixtures run at once and a slow
+runner can take longer than the production deadlines to schedule a request.
 
 ## The vault
 

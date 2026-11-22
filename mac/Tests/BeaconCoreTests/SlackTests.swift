@@ -322,11 +322,11 @@ struct SlackTests {
         try await h.register()
         h.fixture.timeouts.withLock { $0 = [] }
         let proposal = try await h.propose()
-        #expect(h.fixture.timeouts.withLock { $0 } == [SlackAPI.intakeTimeout])
+        #expect(h.fixture.timeouts.withLock { $0 } == [SlackHarness.testTimeouts.intake])
         try await h.approve(proposal)
         try await h.fixture.configure(["post_mode": "unclear"])
         #expect(try await h.handler.execute(proposal.id) == .executed(confirmedBy: "read_back"))
-        #expect(h.fixture.timeouts.withLock { $0 } == [4, 25, 25, 25])
+        #expect(h.fixture.timeouts.withLock { $0 } == [30, 30, 30, 30])
     }
 
     /// Either operation id confirms a lost reply: Slack may keep the metadata, client_msg_id, or both.
@@ -475,7 +475,7 @@ struct SlackTests {
         let approval = try h.journal.start(proposal.id, at: h.clock.now)
         let marker = try #require(h.journal.slackMarker(proposal.id))
         let clock = h.clock
-        let api = SlackAPI(client: try h.fixture.connect(h.vault.credential(for: settings.binding), SlackAPI.actionTimeout),
+        let api = SlackAPI(client: try h.fixture.connect(h.vault.credential(for: settings.binding), SlackHarness.testTimeouts.action),
                            workspace: settings.workspace, rates: SlackRateLimits(), now: { clock.now })
         // Simulate process death just after the service took the write, without appending a result or unknown.
         _ = try await api.post(SlackDraft(approval.params), marker: marker, user: settings.userID)

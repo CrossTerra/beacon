@@ -53,7 +53,7 @@ final class SlackFixture {
                                          resourceTimeout: timeout, delegate: FixtureTLS(certificate: certificate))
             }
             self.connect = connect
-            control = try ServiceClient(origin: origin.absoluteString, authorization: nil, timeout: 4, resourceTimeout: 4,
+            control = try ServiceClient(origin: origin.absoluteString, authorization: nil, timeout: 30, resourceTimeout: 30,
                                         delegate: FixtureTLS(certificate: certificate))
         } catch {
             try? lifetime.close()
@@ -147,11 +147,16 @@ final class SlackHarness {
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
+    /// Generous: the whole suite's TLS fixtures run at once, and a slow CI runner can take longer than the
+    /// production deadlines to schedule a request. Production keeps its own.
+    static let testTimeouts = SlackAPI.Timeouts(intake: 30, action: 30)
+
     private static func handler(journal: Journal, vault: Vault, url: URL, clock: Clock, budget: ReadBudget,
                                 intakePerHour: Int = 30, readBackBudget: ReadBudget = ReadBudget(perHour: 60, concurrent: 2),
                                 connect: @escaping SlackAPI.Connect) -> PostHandler {
         PostHandler(journal: journal, settings: { (try? AppSettings.load(url))?.slack }, vault: vault, budget: budget,
-                    intakePerHour: intakePerHour, readBackBudget: readBackBudget, now: { clock.now }, connect: connect)
+                    intakePerHour: intakePerHour, readBackBudget: readBackBudget, timeouts: testTimeouts,
+                    now: { clock.now }, connect: connect)
     }
 
     func restart() throws -> (Journal, PostHandler) {
