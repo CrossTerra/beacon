@@ -21,6 +21,7 @@ const actUsage = `usage: beacon act types
        beacon act get ID
        beacon act wait ID [--after VERSION] [--timeout SECONDS]
        beacon act withdraw ID
+       beacon act quit
 `
 
 // actFrameMax is the largest frame either side sends, newline included (13.00, _The local API_).
@@ -76,7 +77,7 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 	request := map[string]any{"op": args[0]}
 	var wait time.Duration
 	switch args[0] {
-	case "types":
+	case "types", "quit":
 		if len(args) != 1 {
 			fmt.Fprint(a.stderr, actUsage)
 			return exitError{2}

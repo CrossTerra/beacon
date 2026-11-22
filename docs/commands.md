@@ -313,12 +313,15 @@ beacon act propose < REQUEST.json
 beacon act get ID
 beacon act wait ID [--after VERSION] [--timeout SECONDS]
 beacon act withdraw ID
+beacon act quit
 ```
 
 The client for Beacon.app's proposal socket ([approvals](approvals.md)). `propose` reads one JSON object from
 standard input, `{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
 Each command sends one request and prints the app's one-line JSON reply. A reply with `error` exits 1. `wait`
-defaults to `--after 0 --timeout 300`. There is no command to approve or list.
+defaults to `--after 0 --timeout 300`. There is no command to approve or list. `quit` asks the app to quit as its
+menu's Quit does; the app answers it only for its bundled CLI, and `scripts/install.sh` uses it to replace a running
+app.
 
 It reads the app's code requirement from `~/Library/Application Support/beacon/act.json`,
 `{ "requirement": "…" }`. The signed app writes that file on its first launch and refuses to listen if the file
@@ -326,6 +329,11 @@ names another signature. Before sending a byte, `beacon act` checks the socket's
 requirement using the kernel's audit token. A listener with another signature, or run by another user, receives
 nothing. It takes no `--config` and reads no credential. Until an action type is enabled, `propose` answers
 `type_disabled`.
+
+## `beacon keychain list`
+
+Prints the account of every keychain item under the service `beacon`, one per line, from the items' attributes. It
+reads no value, so it never prompts. `scripts/install.sh` counts them to say how many prompts a repair will ask.
 
 ## `beacon keychain repair`
 
