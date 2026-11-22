@@ -95,11 +95,13 @@ reads, later passes, pagination and the request scope checks. Record the actual 
 ## 5. Verify build, launch and updates
 
 - Review [`go.mod`](../go.mod), [`go.sum`](../go.sum), [`scripts/repro.sh`](../scripts/repro.sh),
-  [`scripts/build-local.sh`](../scripts/build-local.sh), [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh)
-  and the [CI workflow](../.github/workflows/ci.yml). Identify the toolchain, dependency pins, scripts and
-  artifact paths. Run the reproducibility check for the audited commit. It compares two builds in different
-  directories with the same toolchain. Report that scope and the outcome of the fixture tests or CI gates.
-  Follow [signing](signing.md) for the person's clean-checkout and staged-artifact verification and disposable rebuild test.
+  [`scripts/build-app.sh`](../scripts/build-app.sh), [`scripts/install.sh`](../scripts/install.sh),
+  [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh) and the [CI workflow](../.github/workflows/ci.yml).
+  Identify the toolchain, dependency pins, scripts and artifact paths. Run the reproducibility check for the
+  audited commit. It compares two builds in different directories with the same toolchain. Run
+  `scripts/install.sh --dry-run`: it builds, ad-hoc signs and installs into a temporary directory, without a
+  keychain. Report that scope and the outcome of the fixture tests or CI gates. Check what the person's real
+  install does in [installing and signing](signing.md): what it signs, replaces, links and removes.
 - Review [how tether starts, restarts and stops services](tether.md) in
   [`supervise.c`](../mac/Sources/tether/supervise.c) and [`procs.c`](../mac/Sources/tether/procs.c), and its
   [limits](tether.md#limits). Trace SIGTERM and the lifetime pipe in [`cmd/beacon/main.go`](../cmd/beacon/main.go),

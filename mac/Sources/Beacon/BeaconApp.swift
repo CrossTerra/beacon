@@ -58,6 +58,7 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var stopping = false
     private var awaitingQuit = false
     private var countTimer: Timer?
+    private var terminate: (any DispatchSourceSignal)?
 
     private lazy var approvalsWindow: NSWindow = {
         let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView(service: approvals)))
@@ -70,6 +71,13 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !stopping else { return }
+        // SIGTERM (scripts/install.sh replacing the app, logout) quits as the menu's Quit does: services stop and
+        // approvals without a start expire, instead of the process just ending.
+        signal(SIGTERM, SIG_IGN)
+        let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        terminate.setEventHandler { NSApp.terminate(nil) }
+        terminate.activate()
+        self.terminate = terminate
         // The journal's recovery expires every earlier approval without a start before anything is shown.
         approvals.start()
         countTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in

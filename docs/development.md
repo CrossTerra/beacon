@@ -96,9 +96,10 @@ Use `go build`, `go run` and `go test` with fixtures. Ad-hoc builds refuse the l
 (`keychain.ErrAdHocBuild`). Agents and CI leave `BEACON_TEST_KEYCHAIN` unset. Service tests inject signature
 checks and the launchd client without bootstrapping a job or writing `~/Library/LaunchAgents`.
 
-For a live installation, the person follows the [local signing guide](signing.md). It covers the Apple
-Development and self-signed identities, item ACLs and partition lists, verifying the build against the
-full audited commit with the signer locked, and the manual rebuild and denial test. Keep an item's access
+For a live installation, the person runs `scripts/install.sh` ([installing and signing](signing.md)). The guide
+covers Apple Development and self-signed identities, item access lists and partition lists, the prompts after a
+rebuild, and optional manual keychain checks. `scripts/test-install.sh` runs the installer's dry run (ad-hoc
+signed, into a temporary prefix, twice) and checks the result; agents and CI use only that. Keep an item's access
 limited to Beacon's signing requirement. Granting access to all apps or to the general-purpose `security`
 tool would give other processes a way to read the credential.
 
@@ -120,8 +121,8 @@ bash scripts/test-tether.sh
 
 The shortcut test constructs local events without registering a global hot key or opening a window. To stage a
 bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a clean checkout (including no
-ignored build outputs). CI uses the commit under test. For an audited build, use the full ID from the approved
-report and follow [signing.md](signing.md#stage-the-macos-app).
+ignored build outputs). CI uses the commit under test. To install it signed, the person runs `scripts/install.sh`
+([installing and signing](signing.md)).
 
 On the Mac, open the staged `Beacon.app`, choose **Approvals…** from its menu. An unsigned stage shows **No
 approvals** and **Approvals need Beacon.app signed with your Apple Development certificate**: it opens no vault,

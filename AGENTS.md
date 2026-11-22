@@ -12,7 +12,7 @@ The trust model is the product. A change that weakens one of its properties is w
 - Every host Beacon contacts is declared where `beacon egress` reads it. Adding a host without adding it there is
   a bug.
 - Agents and scripts never touch the login keychain. Test with `go test` or a `go build` binary: an ad-hoc build
-  refuses the keychain. Do not run `scripts/build-local.sh`, set `BEACON_TEST_KEYCHAIN`, or run the installed
+  refuses the keychain. Do not run `scripts/install.sh` (only `--dry-run`), set `BEACON_TEST_KEYCHAIN`, or run the installed
   `beacon` for a command that reads a credential; each can raise a prompt on the person's screen or add a build to
   an item's access.
 - No telemetry, update checks or crash reporting.

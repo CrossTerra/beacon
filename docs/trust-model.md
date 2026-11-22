@@ -148,9 +148,10 @@ commands, paths, secrets or item content.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
 11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
-     request). The local signing helper builds from a clean checkout at the full audited commit and verifies the
-     staged artifact and installed signature. See [local build and signing](signing.md). Signed releases,
-     notarized macOS builds and an SBOM per release arrive in Phase 7.
+     request). `scripts/install.sh` builds from a clean checkout, signs the app, the CLI and `tether` with the
+     person's own identity, each pinned to its identifier and that certificate, and verifies every signature before
+     and after installing. The signature identifies the signer, not the source (13.00-D15). See
+     [installing and signing](signing.md). Notarized release builds and an SBOM would come in Phase 7.
 12. **Services end with the app.** `tether` runs only commands compiled into it, each in its own process group.
     Quit or the app's death cancels pending restarts and stops every group and tracked descendant, including a
     detached one, and `tether` confirms that none remain. A session that `tether` could not clean up is stopped by

@@ -48,4 +48,4 @@ security set-key-partition-list -S apple-tool:,apple: -s -l "$name" "$keychain" 
 security add-trusted-cert -r trustRoot -p codeSign -k "$keychain" "$tmp/cert.pem"
 
 security find-identity -v -p codesigning "$keychain" | grep "\"$name\""
-echo "Done. See docs/signing.md for the dedicated keychain and audited build workflow."
+echo "Done. Install with scripts/install.sh; see docs/signing.md."

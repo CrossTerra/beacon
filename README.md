@@ -4,13 +4,27 @@ If someone gave you this repository's Git URL and asked you to install Beacon, t
 installing LLM. Your job is to establish that the exact software they will run meets the [trust model](docs/trust-model.md).
 Audit it before installation. Tell the person in plain language what it reads, where it sends data, what it can
 do, and what blocks installation. Give them the fork URL, the full audited commit ID and `file:line` evidence.
-Follow the [audit checklist](docs/audit.md) and the [local build and signing guide](docs/signing.md).
+Follow the [audit checklist](docs/audit.md) and the [install and signing guide](docs/signing.md).
 
 Beacon runs on the person's Mac. Its Go collector reads GitHub, Jira, Gmail, Google Calendar, Google Drive and
 Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The
 [macOS menu-bar app](docs/development.md#macos-app) runs the bundled collector through [tether](docs/tether.md)
 while the app is open. Signed, it takes proposals over an authenticated local socket into its journal and shows
-them in its [approval window](docs/approvals.md). No action type is enabled yet, so it executes nothing.
+them in its [approval window](docs/approvals.md). With a GitHub account in its Settings it merges approved pull
+requests, and it records what it did in Signal.
+
+## Quick start
+
+From a clean checkout of the person's fork, the person runs, in their own Terminal:
+
+```bash
+scripts/install.sh
+```
+
+It builds `Beacon.app` from that commit, signs it with their code-signing identity, installs it in
+`~/Applications`, points `~/.local/bin/beacon` at its CLI, removes the old collector LaunchAgent and opens the
+app. Then, in Beacon's **Settings…**, they add a GitHub token and Signal's origin, their `act_…` id and the app
+key. See [installing and signing](docs/signing.md).
 
 ## Install from the person's fork
 
@@ -19,24 +33,21 @@ them in its [approval window](docs/approvals.md). No action type is enabled yet,
    at that fork and record the supplied repository as `upstream`. Keep the config, private rules, downloaded
    OAuth files, credentials and state outside the clone. Record the fork URL and full commit ID
    (`git rev-parse --verify HEAD^{commit}`).
-2. **Audit with the signer locked.** Read [AGENTS.md](AGENTS.md) and the [trust model](docs/trust-model.md).
-   Review source, dependencies, build and signing inputs, the intended configuration and any existing state
-   you are asked to reuse. Work from code and synthetic fixtures. Keep credentials out of the agent session.
+2. **Audit.** Read [AGENTS.md](AGENTS.md) and the [trust model](docs/trust-model.md). Review source,
+   dependencies, the build and install scripts, the intended configuration and any existing state you are asked to
+   reuse. Work from code and synthetic fixtures. Keep credentials out of the agent session.
 3. **Report and get agreement.** Give the person the report before any installation. Resolve blocking findings
    and audit the resulting commit. The person explicitly approves the full commit ID and the proposed setup.
    A clean checkout at a different commit needs its own approval.
-4. **Have the person build and sign.** They run the [signing helper](docs/signing.md#stage-and-sign-the-audited-collector)
-   from a clean, isolated checkout of the approved commit. The helper verifies the full commit ID and staged
-   artifact before unlocking the signer, signs only that artifact, relocks the signer and verifies the
-   installed signature. On a new Mac or signing setup, the person runs the
-   [disposable rebuild test](docs/signing.md#part-1-manual-rebuild-test) before provisioning real credentials.
+4. **Have the person install.** They run `scripts/install.sh` from a clean checkout of the approved commit
+   ([installing and signing](docs/signing.md)). It builds, signs with their identity, verifies and installs.
 5. **Configure with sending off.** The person enters credentials directly in their terminal or Google's
    consent page. Use the workflow below, starting with `mode: dry-run` and rules that keep items local.
    The person reviews egress, audiences and sample output before allowing sends or starting a background job.
 
-Agents use `go build` or `go test` with fixtures and in-memory credentials. Only the person runs
-`scripts/build-local.sh` with their dedicated signer or performs operations that use the login keychain,
-including credential setup, live dry runs and any keychain repair.
+Agents use `go build`, `go test` and `scripts/install.sh --dry-run`, with fixtures and in-memory credentials. Only
+the person runs `scripts/install.sh` or performs operations that use the login keychain, including credential
+setup, live dry runs and any keychain repair.
 
 ## Configure and try ingestion
 
