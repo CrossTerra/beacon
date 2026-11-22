@@ -26,16 +26,26 @@ It:
    `identifier "dev.beacon.cli" and certificate leaf = H"<SHA-1>"`. `codesign` may ask once to use the identity's
    private key; choose **Always Allow**;
 4. verifies each signature against its requirement, before and after installing;
-5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It
-   then replaces `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;
+5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It asks
+   through the app's socket with the new CLI (`beacon act quit`, which only the bundled CLI may send), then, for an
+   app too old to know it, with SIGTERM; neither needs permission to control another app. It waits up to 30 seconds
+   for each and stops if Beacon is still running. It then replaces `~/Applications/Beacon.app`, moving the old copy
+   aside first and back if the move fails;
 6. points `~/.local/bin/beacon` at the app's CLI, so `beacon` and `beacon act` on your PATH are the app's. A plain
    file there from an older install is kept as `beacon.pre-app`;
 7. removes the old collector LaunchAgent (`dev.beacon.agent`) if it is installed, with `beacon service uninstall`:
    Beacon.app runs the collector now;
-8. opens Beacon (`--no-open` skips this), and prints what it did and what is next.
+8. with a self-signed identity, re-creates the collector's keychain items for this build with
+   `beacon keychain repair`, while no collector is running and before the app opens again (see
+   [prompts after a rebuild](#keychain-prompts-after-a-rebuild)). It says how many items there are and how many
+   prompts to expect, and how to switch to an Apple Development certificate. With an Apple Development certificate
+   it skips the repair; `--repair` runs it anyway (once, after changing certificates), and `--no-repair` skips it;
+9. opens Beacon (`--no-open` skips this), and prints what it did and the steps Settings still needs: GitHub only
+   when no account is set, Signal only when it is missing or names the app as the person.
 
-Run it again after every update: it is idempotent. Then, in Beacon's menu, open **Settings…** and add a GitHub token
-for your account ([which token](approvals.md#merges)), and the Beacon setup code from Signal's `/beacon` page.
+Run it again after every update: it is idempotent. The first time, in Beacon's menu, open **Settings…** and add a
+GitHub token for your account ([which token](approvals.md#merges)), and the Beacon setup code from Signal's `/beacon`
+page.
 
 ## Choosing an identity
 
@@ -57,9 +67,18 @@ identity meets that requirement.
 
 macOS also keeps a partition list per item. With an **Apple Development** certificate the partition is your team,
 which a rebuild keeps, so there is no prompt. With a **self-signed** certificate the partition is the build's own
-hash, which every rebuild changes. macOS then asks once per item, the first time the new build reads it. Choose
-**Always Allow**; the prompt names the program, so check that it is Beacon. **Deny** leaves that item unread: the
-collector reports it, and the app says its vault key is not available.
+hash, which every rebuild changes. macOS then asks the first time the new build reads each item. **Always Allow**
+asks for your login keychain password, every time. `install.sh` gathers these prompts into the repair it runs
+before the app opens: up to two per collector item (to read the item, and to replace it), so a few items mean
+several password prompts on every self-signed rebuild. The prompt names the program, so check that it is Beacon.
+**Deny** leaves that item unread: the collector reports it, and the app says its vault key is not available. The
+app's own vault key asks once more when the app opens.
+
+An **Apple Development** certificate ends this: rebuilds then ask nothing. To get one, in Xcode choose **Settings…
+→ Accounts**, click **+**, sign in with your Apple ID (a free one gives a Personal Team), select the team, then
+**Manage Certificates… → + → Apple Development**. `security find-identity -v -p codesigning` then lists
+"Apple Development: …"; install with `scripts/install.sh --identity "Apple Development: …"`, after the steps in
+[changing the certificate](#changing-the-certificate).
 
 The collector's existing items were made by a CLI signed with **Beacon Local Signing** and identifier
 `dev.beacon.cli`. The app's CLI keeps both, so the items stay readable; with that self-signed certificate, expect
@@ -70,8 +89,8 @@ the one-time prompt per item. [Apple on the file-based keychain](https://develop
 
 Everything pinned to the old certificate refuses the new one:
 
-- The collector's keychain items ask on every read. Run `beacon keychain repair` with the new build to re-create
-  them with its access.
+- The collector's keychain items ask on every read. Install the new build with `scripts/install.sh --repair` (or run
+  `beacon keychain repair` with it) to re-create them with its access.
 - The app refuses to open its socket while `~/Library/Application Support/beacon/act.json` names the old signature.
   Remove the file; the next launch writes the new one.
 - The vault key asks too, and the vault cannot be read if you deny. Before the vault holds credentials, delete the

@@ -25,7 +25,7 @@ var ErrNotFound = errors.New("keychain: item not found")
 
 // ErrAdHocBuild is returned by NewSystem in a build that is not signed with a certificate: go build, go run and test
 // binaries are signed ad hoc. Such a build never touches the login keychain.
-var ErrAdHocBuild = errors.New("keychain: this beacon is not signed with a certificate (go build, go run and test binaries are ad hoc), so it does not use the login keychain; build with scripts/build-local.sh")
+var ErrAdHocBuild = errors.New("keychain: this beacon is not signed with a certificate (go build, go run and test binaries are ad hoc), so it does not use the login keychain; install it with scripts/install.sh")
 
 // TestKeychainEnv, set to 1, lets an ad-hoc test binary use the login keychain. Only TestSystem needs it, and only a
 // person at the keyboard sets it.
@@ -217,6 +217,14 @@ func repairOne(s Store, account string) error {
 type Memory struct {
 	mu    sync.Mutex
 	items map[string][]byte
+	reads int
+}
+
+// Reads is how many values Get has read, so a test can show that listing reads none.
+func (m *Memory) Reads() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reads
 }
 
 // NewMemory returns an empty in-memory store.
@@ -252,6 +260,7 @@ func (m *Memory) Accounts() ([]string, error) {
 func (m *Memory) Get(account string) (Secret, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.reads++
 	v, ok := m.items[account]
 	if !ok {
 		return Secret{}, ErrNotFound

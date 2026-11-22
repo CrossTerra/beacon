@@ -364,8 +364,11 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 // cmdKeychain re-creates every Beacon item in the keychain, so each one carries the access a new item gets from this
 // build and none of the partitions earlier builds added. It reads each value once and prints only account names.
 func (a *app) cmdKeychain(args []string) error {
+	if len(args) == 1 && args[0] == "list" {
+		return a.keychainList()
+	}
 	if len(args) == 0 || args[0] != "repair" {
-		return errors.New("usage: beacon keychain repair")
+		return errors.New("usage: beacon keychain repair | beacon keychain list")
 	}
 	if len(args) > 1 {
 		return errors.New("keychain repair takes no arguments")
@@ -385,6 +388,28 @@ func (a *app) cmdKeychain(args []string) error {
 	}
 	if n == 0 {
 		fmt.Fprintln(a.stdout, "No Beacon items in the keychain.")
+	}
+	return nil
+}
+
+// keychainList prints the account of every Beacon item, one per line, from the items' attributes: it reads no value,
+// so it never prompts. scripts/install.sh counts them to say how many prompts a repair asks.
+func (a *app) keychainList() error {
+	store, err := a.keychain()
+	if err != nil {
+		return err
+	}
+	l, ok := store.(keychain.Lister)
+	if !ok {
+		return errors.New("keychain: this keychain cannot list its items")
+	}
+	accounts, err := l.Accounts()
+	if err != nil {
+		return err
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		fmt.Fprintln(a.stdout, account)
 	}
 	return nil
 }

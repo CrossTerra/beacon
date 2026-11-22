@@ -17,6 +17,9 @@ echo "staticcheck: ok"
 go test -race -count=1 ./...
 bash -n scripts/install.sh
 bash scripts/test-checkout.sh
+if [[ $(uname -s) == Darwin ]]; then
+	bash scripts/test-install-lib.sh
+fi
 if command -v shellcheck >/dev/null; then
 	shellcheck scripts/*.sh
 	echo "shellcheck: ok"
