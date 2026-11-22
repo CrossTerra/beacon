@@ -29,7 +29,8 @@ for example on a refused key, so the menu also shows the collector's health from
 ## Collector health in the menu
 
 Every five seconds the app reads `pass.json` and `coverage.json` from the state directory named by the default
-config's top-level `state:` (relative to the config's directory, as the collector resolves it). It reads nothing
+config's top-level `state:` (relative to the config's directory, as the collector resolves it; LF, CRLF and CR
+line endings alike). It reads nothing
 else, contacts nothing and reads no credential. Each record is capped at 64 KiB, and a field that is not a source
 name, a time or a fixed code makes the record unreadable rather than shown. The menu shows:
 

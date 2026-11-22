@@ -220,7 +220,9 @@ public struct CollectorHealth: Equatable, Sendable {
     /// directory. Only a plain top-level scalar is read; anything else is not guessed at.
     public static func stateDirectory(config: URL) -> URL? {
         guard let data = try? Data(contentsOf: config), data.count <= 1 << 20,
-              let text = String(data: data, encoding: .utf8) else { return nil }
+              let raw = String(data: data, encoding: .utf8) else { return nil }
+        // YAML allows CRLF and CR line breaks; read them as the collector's parser does.
+        let text = raw.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
             guard line.hasPrefix("state:") else { continue }
             var value = line.dropFirst("state:".count).trimmingCharacters(in: .whitespaces)

@@ -101,6 +101,21 @@ struct CollectorHealthTests {
         }
     }
 
+    /// Bugbot on #41: a config saved with CRLF (or CR) line endings names the same state directory.
+    @Test func crlfAndCRConfigsAreRead() throws {
+        for newline in ["\r\n", "\r"] {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: dir.appendingPathComponent("state"), withIntermediateDirectories: true)
+            let config = dir.appendingPathComponent("config.yaml")
+            try ["signal:", "  url: https://signal.example.com", "rules: rules.yaml", "state: state", "mode: send", ""]
+                .joined(separator: newline).write(to: config, atomically: true, encoding: .utf8)
+            #expect(CollectorHealth.stateDirectory(config: config) ==
+                    dir.appendingPathComponent("state", isDirectory: true).standardizedFileURL)
+            try held.write(to: dir.appendingPathComponent("state/pass.json"), atomically: true, encoding: .utf8)
+            #expect(CollectorHealth.read(config: config, now: now, timeZone: utc).status == .collecting)
+        }
+    }
+
     @Test func repairScriptRunsTheBundledCLIQuoted() {
         #expect(KeychainRepair.script(cli: "/Users/o'neil/Applications/Beacon.app/Contents/Helpers/beacon") ==
                 "#!/bin/sh\n'/Users/o'\\''neil/Applications/Beacon.app/Contents/Helpers/beacon' keychain repair\n")
