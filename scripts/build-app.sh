@@ -18,7 +18,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/checkout.sh
 verify_clean_checkout "$commit"
 
-stage=$(mktemp -d "${TMPDIR:-/tmp}/beacon-app.XXXXXXXX")
+tmp=${TMPDIR:-/tmp}
+stage=$(mktemp -d "${tmp%/}/beacon-app.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
 bundle="$stage/Beacon.app"
 mkdir -p "$stage/src" "$bundle/Contents/"{MacOS,Helpers}

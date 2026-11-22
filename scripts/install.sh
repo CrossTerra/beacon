@@ -41,6 +41,9 @@ if [[ "$dry_run" != true && (! -t 0 || ! -t 1) ]]; then
 	exit 1
 fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# A temporary directory without a trailing slash (GitHub's macOS runners set TMPDIR with one).
+tmp=${TMPDIR:-/tmp}
+tmp=${tmp%/}
 commit=$(git rev-parse --verify 'HEAD^{commit}')
 
 say() { printf '%s\n' "$*"; }
@@ -54,9 +57,10 @@ step() {
 if [[ "$dry_run" == true ]]; then
 	cert="-"
 	cert_name="ad hoc (dry run)"
-	[[ -n "$prefix" ]] || prefix=$(mktemp -d "${TMPDIR:-/tmp}/beacon-install.XXXXXXXX")
+	[[ -n "$prefix" ]] || prefix=$(mktemp -d "$tmp/beacon-install.XXXXXXXX")
 	mkdir -p "$prefix"
-	prefix=$(cd "$prefix" && pwd)
+	# The physical path: no symlinks (/var is /private/var) and no doubled slashes, so links and checks agree.
+	prefix=$(cd "$prefix" && pwd -P)
 else
 	identities=$(/usr/bin/security find-identity -v -p codesigning |
 		sed -nE 's/^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"(.*)"$/\1	\2/p')
@@ -81,7 +85,7 @@ fi
 say "Installing Beacon at $commit, signed with: $cert_name"
 
 # --- Build, then sign each part with its identifier and a requirement pinning the certificate.
-log=$(mktemp "${TMPDIR:-/tmp}/beacon-build.XXXXXXXX")
+log=$(mktemp "$tmp/beacon-build.XXXXXXXX")
 stage=
 cleanup() {
 	rm -f "$log"

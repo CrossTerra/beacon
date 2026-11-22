@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -817,7 +818,8 @@ func TestScopeFamilyIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	done()
-	if !strings.Contains(f.log.String(), `"reason":"scope_denied","family":"other"`) || strings.Contains(f.log.String(), "4242") {
+	// The id must not reach the log. Look only past each line's timestamp: its digits can spell 4242 by chance.
+	if !strings.Contains(f.log.String(), `"reason":"scope_denied","family":"other"`) || strings.Contains(withoutTimes(t, f.log.String()), "4242") {
 		t.Fatalf("log:\n%s", f.log.String())
 	}
 	f.log.Reset()
@@ -832,6 +834,26 @@ func TestScopeFamilyIsLogged(t *testing.T) {
 	if !strings.Contains(f.log.String(), `"family":"repos/{owner}/{name}/pulls/{n}/requested_reviewers"`) {
 		t.Fatalf("log:\n%s", f.log.String())
 	}
+}
+
+// withoutTimes is a JSON log with each line's "time" removed, so a check for content cannot match a timestamp.
+func withoutTimes(t *testing.T, log string) string {
+	t.Helper()
+	var out strings.Builder
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(line), &fields); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		delete(fields, "time")
+		b, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out.Write(b)
+		out.WriteByte('\n')
+	}
+	return out.String()
 }
 
 // A rate limit is logged with what the API said: the status, its reason code, the Retry-After and the source's

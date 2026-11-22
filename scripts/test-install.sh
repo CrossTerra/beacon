@@ -3,7 +3,10 @@
 # result. Uses no signing identity and no keychain, and must leave $HOME's Beacon untouched. Needs a clean checkout.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-prefix=$(mktemp -d "${TMPDIR:-/tmp}/beacon-install-test.XXXXXXXX")
+tmp=${TMPDIR:-/tmp}
+# The physical path, as install.sh resolves it: GitHub's runners set TMPDIR with a trailing slash, and /var is a
+# symlink to /private/var.
+prefix=$(cd "$(mktemp -d "${tmp%/}/beacon-install-test.XXXXXXXX")" && pwd -P)
 trap 'rm -rf "$prefix"' EXIT
 
 fingerprint() {
