@@ -5,15 +5,15 @@ window, and Beacon carries it out with its own credentials. This page describes 
 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
-ad-hoc build opens none of them. No action type is enabled, and nothing resolves an action, so nothing can be
-approved or executed. The handlers arrive in plan 13.00 part 3. The outbox is built and tested against a fake
-Signal, but the app does not send it yet: it has no Signal key or person id until the app actor is set up.
+ad-hoc build opens none of them. `github.merge` is enabled once a GitHub account is added in Settings
+([merges](#merges)). `slack.post` and `agent.run` have no handler yet. The outbox is built and tested against a
+fake Signal, but the app does not send it yet: it has no Signal key or person id until the app actor is set up.
 
 ## The contract with Signal
 
 Signal publishes what it accepts from the app in `docs/approval-app.md` and three fixture files. Beacon builds to
 them and tests against copies in `mac/Tests/BeaconCoreTests/Fixtures/approval-app`, taken from Signal at
-`0702e09ab2ba09e51d731972aaf8a47a1afca250`. Replace the copies when Signal changes them.
+`7a20b1d2cd11c99b23c17194705caa1a2295855f`. Replace the copies when Signal changes them.
 
 - **Canonical JSON and hashes.** Keys sorted by UTF-16 code unit, no insignificant whitespace, integers only
   (`1.0`, `1e0`, and integers beyond 2^53 − 1 are refused), strings escaped as `JSON.stringify` does. A hash is
@@ -127,6 +127,53 @@ on first delivery with the person's `act_…` id, and kept. A merge is about its
 its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
+
+## Merges
+
+`github.merge` (13.00, _Merge at the write_) is the first handler.
+
+**Settings.** The person pastes a GitHub token and the API origin (default `https://api.github.com`, or a GitHub
+Enterprise API origin) into Beacon's Settings window. Beacon calls `GET /user` with it and accepts only a user's
+token (`type: User`), never a bot or an app installation. The first account saved becomes the account: a token for
+another user is refused until that account is removed. The token goes straight into the [vault](#the-vault), bound
+to that origin and `github:user:{id}`. `settings.json` keeps only the origin, the account and the login. The token
+is never shown, logged, written elsewhere or passed to a child process.
+
+**Before approval** (the preflight that freezes the action), Beacon reads, with that token and nothing else:
+
+1. `GET /user`: the token is still the configured account's;
+2. `GET /repos/{owner}/{repo}/pulls/{n}`: open, not merged, base equal to the proposal's, head equal to the full
+   proposed SHA, `mergeable` true and `mergeable_state` `clean`, `unstable` or `has_hooks`;
+3. the reviews: no reviewer's latest review requests changes;
+4. the required checks on the base: contexts from repository rules and classic branch protection, where this
+   account can read them;
+5. the head's check runs and commit statuses: every required context completed successfully (or neutral or
+   skipped). A context that both passed and failed is not green.
+
+Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
+repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are
+bounded: two at once and 120 GitHub reads an hour, after which the answer is `busy` and nothing is read.
+
+**After approval**, Beacon records the durable start, then reads all of it again. A changed repository id, base,
+head, mergeability, review or check stops the merge as `failed` (`pre_dispatch`), with nothing sent. Otherwise it
+sends one `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with the frozen method and `sha: head`, so GitHub refuses it if
+the head moved and enforces its own branch rules for this account.
+
+| GitHub answers | Beacon records |
+| --- | --- |
+| `200` with the merge commit | `executed`, `confirmed_by: reply`, `native: github:merge:{sha}` |
+| `405`, `409`, `403`, `404`, `422`, another `4xx` | `failed` (`reply`): `not_mergeable`, `head_moved`, `forbidden`, `not_found`, `rejected`, `github_{status}` |
+| no answer, a `5xx`, a `2xx` without a merge | `outcome_unknown`, then a read-back |
+
+**Read-back** reads the PR, never merges again. Merged by this account with the approved head into the approved
+base is `executed` (`read_back`). Merged otherwise is `failed` (`merged_otherwise`), and closed unmerged is `failed`
+(`not_merged`). Still open is `not_merged` only a minute after the start, so a merge GitHub is still finishing is
+never recorded as failed. Any other result stays unknown and is read again every minute while the app runs, and at
+every launch. A start that recovery finds without a result is settled the same way.
+
+Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and
+SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an
+answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origin from the app's settings.
 
 ## The vault
 

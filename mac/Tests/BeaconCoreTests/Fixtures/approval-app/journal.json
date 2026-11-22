@@ -291,7 +291,7 @@
         "proposal": "apr_01m7wzhrg0frf9w7gy3rf1w7gy",
         "action": "slack.post",
         "confirmed_by": "read_back",
-        "native": "slack:msg:T0CROSS/C0SIGNAL/1794134100.000200",
+        "native": "slack:message:C0SIGNAL:1794134100.000200",
         "person": "act_01m6a6ft00e40r2081040g2081"
       },
       "sealed": {

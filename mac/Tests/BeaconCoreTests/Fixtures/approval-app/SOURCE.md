@@ -1,2 +1,2 @@
 Copied unchanged from Signal (CrossTerra/signal) `docs/approval-app/` at
-`0702e09ab2ba09e51d731972aaf8a47a1afca250`. Replace them when Signal changes its contract.
+`7a20b1d2cd11c99b23c17194705caa1a2295855f`. Replace them when Signal changes its contract.

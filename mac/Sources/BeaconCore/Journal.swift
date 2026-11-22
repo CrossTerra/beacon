@@ -78,6 +78,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var runnerID: String?
         var approval: FrozenApproval?
         var approvedAt: Date?
+        var startedAt: Date?
     }
 
     let db: SQLite
@@ -162,6 +163,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
 
     public func approval(_ id: String) -> FrozenApproval? {
         locked { states[id]?.approval }
+    }
+
+    /// When the durable start was recorded.
+    public func startedAt(_ id: String) -> Date? {
+        locked { states[id]?.startedAt }
     }
 
     public func runnerID(_ id: String) -> String? {
@@ -419,7 +425,9 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "declined": state.proposal.status = .declined
         case "withdrawn": state.proposal.status = .withdrawn
         case "expired": state.proposal.status = .expired
-        case "started": state.proposal.status = .started
+        case "started":
+            state.proposal.status = .started
+            state.startedAt = date
         case "outcome_unknown": state.proposal.status = .outcomeUnknown
         case "executed": state.proposal.status = .executed
         case "failed": state.proposal.status = .failed

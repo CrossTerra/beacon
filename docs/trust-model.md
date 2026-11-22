@@ -4,9 +4,10 @@ Beacon sits between accounts that belong to one person and a store that many peo
 says what Beacon protects, from whom, and how. Code that changes any of these properties changes this file in the
 same pull request.
 
-`Beacon.app` makes no network connection and uses no service credential yet. Its menu and shortcut open the
-approval window. When signed as `dev.beacon.app` with a certificate, it opens its vault key, its journal and the
-proposal socket ([approvals](approvals.md)). No action type is enabled, so nothing is executed. It starts [tether](tether.md), a helper in its bundle that runs the bundled
+`Beacon.app`'s menu and shortcut open the approval window. When signed as `dev.beacon.app` with a certificate, it
+opens its vault key, its journal and the proposal socket ([approvals](approvals.md)). With a GitHub account added
+in Settings, it merges approved pull requests through that account's API origin. That is its only network
+connection so far, and `beacon egress` lists it. It starts [tether](tether.md), a helper in its bundle that runs the bundled
 collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
 commands, paths, secrets or item content.
 
@@ -167,8 +168,9 @@ commands, paths, secrets or item content.
 14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
-    that binding. Nothing lists or prints a secret or passes one to a child process. The app opens the vault key at
-    launch, but no path reads a credential yet. The tests use only fixture keys and fixture secrets.
+    that binding. Nothing lists or prints a secret or passes one to a child process. The GitHub token is read only
+    by the merge handler's client for its own origin. That client builds paths from validated ids, refuses
+    redirects, ignores proxies and never retries. The tests use only fixture keys and fixture secrets.
 
 ## Known limits
 

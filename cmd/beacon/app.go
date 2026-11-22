@@ -75,6 +75,8 @@ type app struct {
 	identify  func(context.Context, string) (service.Identity, error)
 	// actSettingsFile replaces ~/Library/Application Support/beacon/act.json. Tests set it.
 	actSettingsFile string
+	// appSettingsFile replaces ~/Library/Application Support/beacon/app/settings.json. Tests set it.
+	appSettingsFile string
 	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
 	collectorLog func() (string, error)
 	// sleep waits: the service's backoff, and a Slack source's spacing between calls. Nil sleeps on the clock. Tests
@@ -1426,8 +1428,12 @@ func (a *app) cmdEgress(args []string) error {
 	if err != nil {
 		return err
 	}
+	app, err := a.appEgress()
+	if err != nil {
+		return err
+	}
 	tw := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
-	for _, h := range e.egress() {
+	for _, h := range egress.Sorted(append(e.egress(), app...)) {
 		fmt.Fprintf(tw, "%s\t%s\n", h.Address, h.Purpose)
 	}
 	return tw.Flush()

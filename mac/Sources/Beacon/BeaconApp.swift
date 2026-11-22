@@ -33,6 +33,9 @@ private struct BeaconMenu: View {
         if !delegate.shortcutAvailable {
             Text("⌥⌘B unavailable")
         }
+        Button("Settings…") {
+            delegate.showSettings()
+        }
         Divider()
         Text(delegate.servicesStatus)
         Text(delegate.approvals.status)
@@ -133,6 +136,20 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func updateCount() {
         approvals.desk?.refresh()
         pendingCount = approvals.desk?.pending.count ?? 0
+    }
+
+    private lazy var settingsWindow: NSWindow = {
+        let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(service: approvals)))
+        window.title = "Beacon Settings"
+        window.isReleasedWhenClosed = false
+        window.center()
+        return window
+    }()
+
+    func showSettings() {
+        guard !stopping else { return }
+        NSApp.activate()
+        settingsWindow.makeKeyAndOrderFront(nil)
     }
 
     func showApprovals() {
