@@ -79,6 +79,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var approval: FrozenApproval?
         var approvedAt: Date?
         var startedAt: Date?
+        var slackMarker: String?
         var unknownAt: Date?
         /// The executed or failed entry's body.
         var outcome: JSON?
@@ -187,6 +188,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         locked { states[id]?.startedAt }
     }
 
+    /// Local only: the UUID sent as Slack's client_msg_id, written before dispatch and recovered after a crash.
+    func slackMarker(_ id: String) -> String? {
+        locked { states[id]?.slackMarker }
+    }
+
     /// When the outcome was recorded unknown: after the write was sent, or at the relaunch that found the start.
     public func unknownAt(_ id: String) -> Date? {
         locked { states[id]?.unknownAt }
@@ -212,6 +218,12 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             ]
             body["session"] = proposal.session.map(JSON.string)
             body["subject"] = proposal.subject.map(JSON.string)
+            if proposal.type == .slackPost, let placement = proposal.slackPlacement {
+                body["slack_placement"] = placement.json
+                if placement.visibility == .public {
+                    body["public_slack_subject"] = .string(try SlackDraft(proposal.params).publicSubject(at: proposal.proposedAt))
+                }
+            }
             body["client_path"] = proposal.clientPath.map(JSON.string)
             body["client_requirement"] = proposal.clientRequirement.map(JSON.string)
             if proposal.type == .agentRun { body["runner_id"] = .string(makeID("run")) }
@@ -288,9 +300,16 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             }
             guard date.timeIntervalSince(at) <= Journal.startWindow else { throw JournalError.expired }
             approved = approval
-            return ["approved_hash": .string(approval.approvedHash)]
+            var body = ["approved_hash": JSON.string(approval.approvedHash)]
+            if approval.type == .slackPost { body["client_msg_id"] = .string(UUID().uuidString.lowercased()) }
+            return body
         }
         return approved!
+    }
+
+    /// The dispatch barrier after the final reads: Quit can win even if the action already had a durable start.
+    func mayDispatch(_ id: String) -> Bool {
+        locked { !shuttingDown && states[id]?.proposal.status == .started }
     }
 
     /// A start whose result is not known: a lost reply, or a start found by recovery.
@@ -467,7 +486,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                                     session: body["session"]?.stringValue, subject: body["subject"]?.stringValue,
                                     client: client, clientPath: body["client_path"]?.stringValue,
                                     clientRequirement: body["client_requirement"]?.stringValue,
-                                    proposedAt: date, expiresAt: Date(milliseconds: expires))
+                                    proposedAt: date, expiresAt: Date(milliseconds: expires),
+                                    slackPlacement: SlackPlacement(body["slack_placement"]))
             states[id] = State(proposal: proposal, runnerID: body["runner_id"]?.stringValue)
             order.append(id)
             return
@@ -492,6 +512,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "started":
             state.proposal.status = .started
             state.startedAt = date
+            state.slackMarker = body["client_msg_id"]?.stringValue
         case "outcome_unknown":
             state.proposal.status = .outcomeUnknown
             state.unknownAt = date

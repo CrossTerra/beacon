@@ -5,8 +5,8 @@ window, and Beacon carries it out with its own credentials. This page describes 
 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
-ad-hoc build opens none of them. `github.merge` is enabled once a GitHub account is added in Settings
-([merges](#merges)). `slack.post` and `agent.run` have no handler yet. Once Signal is added in Settings, the
+ad-hoc build opens none of them. Adding a service account in Settings enables [GitHub merges](#merges) or
+[Slack posts](#slack-posts), independently. `agent.run` has no handler yet. Once Signal is added in Settings, the
 outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
 ## The contract with Signal
@@ -63,7 +63,10 @@ sent to Signal. A self-reported agent name or session is recorded as such
 all and 60 proposals per identity per hour. Past a limit the reply is `busy`. An incomplete frame is dropped with
 its connection after 10 seconds, and an idle connection after 60. Errors are `{ error }`, or
 `{ error: "invalid", field }`: `invalid_frame`, `frame_too_large`, `type_disabled`, `busy`, `not_found`,
-`not_pending`. Preflight reads and their limits arrive with the handlers.
+`not_pending`, `unavailable`. A Slack proposal does a bounded account and channel lookup before it can be
+recorded. If Slack does not confirm the workspace, account and visibility, no proposal is stored; a rate limit
+returns `busy`. Intake and window preflights share two slots and 120 provider reads per hour across GitHub and
+Slack, including pages and _Read again_. At a limit Beacon returns `busy` rather than starting another read.
 
 A pending proposal expires after 24 hours.
 
@@ -88,11 +91,10 @@ Spotlight or `open` while it runs. Its **Settings…** button (⌘,) opens Setti
 
 The window lists pending proposals, oldest first. The right side names the selected action in Beacon's words:
 the account (for a merge, the GitHub login), origin, destination (`main · #147 · CrossTerra/signal`) and the
-provider facts Beacon resolved, such as **Checks: 3 passed**, with a link to the pull request, kept apart from the
-agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
-parameters_ shows the exact account (`github:user:{id}`), the destination and params as canonical JSON, and the
-approval hash. Once approved, the selected proposal stays shown with its result: _Started…_, **Merged as 18637a4**,
-_Not merged: head moved_, or an unknown outcome being read back, with the link to the pull request.
+provider facts Beacon resolved, such as **Checks: 3 passed** or a Slack conversation's visibility, kept apart from
+the agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
+parameters_ shows the stable account id, the destination and params as canonical JSON, and the approval hash.
+Once approved, the selected proposal stays shown with its result, including an unknown outcome being read back.
 
 **Approve** (or ⌘↩ in the window) is enabled only once Beacon has resolved the action and frozen a snapshot of
 the proposal id, its version, the final params, account, origin, destination and `approved_hash` (13.00-D29).
@@ -122,7 +124,7 @@ or delete of an entry. The journal has one `jrn_…` id. Entries are numbered fr
 | `approved` | a click or keystroke on the frozen snapshot |
 | `declined`, `withdrawn` | the person in the window; the proposer over the socket, while pending |
 | `expired` | 24 hours pending; ten minutes approved without a start; Quit (`quit_before_start`); relaunch (`restart_before_start`). Written only if the proposal is still in the state that expires, checked under the journal's lock, so the window and the socket can never write two |
-| `started` | the durable start, before any final provider read or write; only within ten minutes of the approval, and never after Quit |
+| `started` | the durable start, before any final provider read or write; only within ten minutes of the approval, and never after Quit; includes Slack's operation UUID locally |
 | `outcome_unknown` | a lost reply, or a start without a result found at relaunch (`app_restarted`) |
 | `executed`, `failed` | a definite result; after an unknown outcome only by read-back |
 
@@ -135,8 +137,12 @@ Each entry becomes one Signal record ([the contract](#the-contract-with-signal))
 on first delivery with the person's `act_…` id, and kept. A merge is about its pull request
 (`github:pr:{owner}/{repo}#{n}`), with the repository as the proposal spelled it, never lowercased. From the approval
 on, the records use GitHub's own spelling (`full_name`, read in the preflight and kept in the local approval entry)
-when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
-its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
+when it names the same repository, case aside; Signal compares merge subjects case-insensitively. For Slack the
+subject is fixed at intake for the entire lifecycle: `slack:{channel}:{thread_ts}` for a public reply or
+`slack:{channel}:{YYYY-MM-DD}` for a top-level public post, using the proposal's local day even if approval is
+after midnight. For private channels, DMs and group DMs it is the person's own `signal:actor:{act_…}` subject.
+Beacon never uses the proposer's `context.subject` to route these records. Signal seals the draft, reason and
+approved destination at `owner+agents`, even on a public subject. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
 
@@ -233,10 +239,8 @@ then, GitHub refuses the token's reads and Approve stays disabled.
    failed and which are pending.
 
 Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
-repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are
-bounded: two at once, and 120 GitHub reads an hour counted as each request is made, every page and _Read again_
-included. A preflight that reaches the limit stops there as `busy`, and a later one makes no read until the hour
-allows it.
+repository id, the PR and the base (the contract's `destination`), the account and the origin. Each request counts
+against the shared preflight read budget, including every page and _Read again_.
 
 **After approval**, Beacon records the durable start, then reads all of it again, and finally reads the PR once
 more right before the write. A changed repository id, base, head, mergeability, review or check stops the merge as
@@ -261,6 +265,50 @@ every launch. A start that recovery finds without a result is settled the same w
 Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and
 SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an
 answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origin from the app's settings.
+
+## Slack posts
+
+**Settings.** In [Slack apps](https://api.slack.com/apps), open your workspace app (or create one from scratch)
+and go to **OAuth & Permissions → User Token Scopes**. Add `chat:write`, `channels:read`, `groups:read`, `im:read`,
+`mpim:read` and `users:read`. For thread previews and recovery, also add the history scopes for the conversations
+you use: `channels:history`, `groups:history`, `im:history` and `mpim:history`. Install or reinstall the app in
+your workspace (an admin may need to approve it). Copy the **User OAuth Token** (`xoxp-…`) into **Beacon → Settings
+→ Slack** and save it. Use a non-rotating user token; Beacon does not refresh tokens. This is separate from the
+collector's read credential and authorizes posting as you, not as a bot.
+
+Beacon calls `auth.test` and shows the workspace and user names and ids it returned. To switch to a different
+workspace or user, remove the saved account first. Only the vault holds the token, bound to `https://slack.com`,
+the workspace id and `slack:user:{id}`. `settings.json` holds only the ids and names. The token is never printed,
+logged, put in an action record or passed to a child process.
+
+**Before approval.** The schema is `{ workspace, channel, thread_ts, text }`, with `thread_ts: null` for a
+top-level post. Beacon verifies the saved user and workspace, checks the conversation's visibility, archive state
+and membership, and for a reply confirms that `thread_ts` is a root in that conversation. Unverified destinations
+cannot be approved. The window shows the workspace, user, channel name and id, visibility, the root's first line,
+and a noninteractive plain preview. **Exact Slack mrkdwn** (when the preview differs) and **Show exact parameters**
+show what is frozen. Slack renders mentions and other Slack-specific formatting itself; the preview does not fetch
+or open links. To avoid Slack splitting longer messages, Beacon refuses drafts over 4,000 UTF-16 code units.
+
+**After approval.** Beacon durably records the start, rechecks the user, workspace, visibility, membership and root,
+then sends one `chat.postMessage` with the frozen text, channel and optional root, with link and media unfurls off.
+Slack may change the destination or its permissions after the last read; Slack enforces its own rules at the write.
+A verified success records `native: slack:message:{channel}:{ts}`. A definite refusal is a failure; a `429` uses
+`Retry-After` to block further calls to that Slack method for the workspace while Beacon runs. It does not sleep and
+resend the old post.
+
+**Read-back, never retry.** [Slack documents `metadata_must_be_sent_from_app`](https://docs.slack.dev/reference/methods/chat.postMessage/#errors)
+and does not guarantee message metadata for a user token. Beacon sends a fresh `client_msg_id` UUID, saved in `started` before the write, rather
+than message metadata or a marker inserted into the text. If the reply is lost or unclear, Beacon reads the approved
+conversation (`conversations.history` or `conversations.replies`) around the durable start, up to four pages of 15.
+Only one matching UUID with byte-exact text, the approved user and destination, and a timestamp in that window
+confirms the write. Missing markers, rewritten text, missing pages or multiple matches leave the outcome unknown.
+It can be checked again while the app runs or on relaunch, without another POST. The TLS fake tests that a dropped
+reply causes only one wire POST. User-token `client_msg_id` round-tripping has not been verified against live Slack;
+if Slack does not echo it, a lost reply may stay unknown indefinitely. The handler is not a live Bosun cutover.
+
+The app sends these requests only to `https://slack.com`; `beacon egress` lists it for the saved account. Requests
+have a four-second deadline and an 8 MiB response cap, with no redirects. The Swift fixture tests need Go on `PATH`;
+they use a loopback TLS server and a fixture vault key, not a live Slack token or the Keychain.
 
 ## The vault
 

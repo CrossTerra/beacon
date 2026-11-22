@@ -6,9 +6,10 @@ same pull request.
 
 `Beacon.app`'s menu and shortcut open the approval window. When signed as `dev.beacon.app` with a certificate, it
 opens its vault key, its journal and the proposal socket ([approvals](approvals.md)). With a GitHub account added
-in Settings, it merges approved pull requests through that account's API origin. With Signal added, it sends its
-journal's records to Signal's record API with its app actor's key. Those are its only network connections, and
-`beacon egress` lists both. It starts [tether](tether.md), a helper in its bundle that runs the bundled
+in Settings, it merges approved pull requests through that account's API origin. With Slack added, it reads
+destinations and posts approved messages at `https://slack.com`. With Signal added, it sends its journal's
+records to Signal's record API with its app actor's key. Those are its only network connections, and
+`beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
 collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
 commands, paths, secrets or item content.
 
@@ -21,6 +22,7 @@ commands, paths, secrets or item content.
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
+| Slack approvals: the Slack user token's bearer header and the conversation and thread ids go only to Slack. Only after approval does the frozen draft go to Slack, with an operation UUID and unfurls off. Signal gets the journal's records: the native message id is plain; the draft, reason and approval details are sealed by Signal | The thread root's preview and the app's operation UUID are never sent to Signal |
 | The lease: your Signal handle, a random instance id and the lease period, as a lease in Signal's lease API (not an event) or, where Signal does not offer one, as a claim event | Rule names, and why an item matched |
 | With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | The Slack name cache (display names and channel names by id) and the record of threads checked for a retitle |
 | With a rule that lists Slack's `title`, or a Google thread Beacon opened with a title that is now sealed: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
@@ -170,9 +172,19 @@ commands, paths, secrets or item content.
 14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
-    that binding. Nothing lists or prints a secret or passes one to a child process. The GitHub token is read only
-    by the merge handler's client for its own origin, and the Signal app key only by the record sender's. That client builds paths from validated ids, refuses
-    redirects, ignores proxies and never retries. The tests use only fixture keys and fixture secrets.
+     that binding. Nothing lists or prints a secret or passes one to a child process. The GitHub token is read by
+     the merge client's handler, the Slack user token by the post client's handler, and the Signal app key by the
+     record sender. The clients build paths from validated ids, refuse redirects, ignore proxies and do not retry
+     an action. The post client uses only `auth.test`, `conversations.info`, `conversations.members`, `users.info`,
+     `conversations.replies`, `conversations.history` and `chat.postMessage` at `https://slack.com`. The tests use
+     only fixture keys and fixture secrets.
+15. **Slack approval records use trusted visibility.** Beacon verifies the Slack user, workspace and visibility before
+     writing `proposed`. Only a conversation Slack confirms as public gets a conversation subject; private channels,
+     DMs and group DMs use the person's own Signal subject. Agent-supplied context cannot route records. The subject
+     stays fixed because Signal requires exact equality throughout the proposal. Beacon checks visibility, membership
+     and the thread root before it enables Approve and again at the write. A lost reply only permits read-back, never
+     another post. Without one matching operation UUID, exact text, approved user and destination in the bounded time
+     window, the outcome stays unknown.
 
 ## Known limits
 
@@ -212,6 +224,11 @@ commands, paths, secrets or item content.
   collection names, but the token itself is not narrower, and a token the person reuses may hold write scopes Beacon
   never calls. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
   [api.slack.com/apps](https://api.slack.com/apps).
+- **Slack approval checks are snapshots.** Visibility, membership, permissions and the root can change after
+  the final read; Slack alone enforces its rules when it accepts a post. A channel made private after intake keeps
+  the original public proposal record (sensitive fields are sealed). Slack can rewrite text or omit `client_msg_id`
+  on read-back; it is not a guaranteed user-token feature, and it has not been verified against live Slack. A
+  missing reply may stay unknown even when the message was posted.
 - **Slack is read by search and by watermark.** Search indexes with a delay, which the 15-minute lookback covers;
   mentions are searched over 7 days, which also finds one an edit added. A quiet followed thread or group direct
   message is read every 15 minutes, so a message there can arrive that late; a deletion is checked every 15 minutes,

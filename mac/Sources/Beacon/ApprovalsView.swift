@@ -96,9 +96,22 @@ private struct DeskView: View {
                         Text(visibleText(proposal.reason)).textSelection(.enabled)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if let text = proposal.params["text"]?.stringValue ?? proposal.params["prompt"]?.stringValue {
-                    GroupBox(proposal.type == .agentRun ? "Prompt" : "Message") {
-                        Text(visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
+                let params = token == nil ? proposal.params : desk.frozen?.approval.params ?? proposal.params
+                if proposal.type == .slackPost, let text = params["text"]?.stringValue {
+                    let preview = slackPlainPreview(text)
+                    GroupBox("Slack message (plain preview)") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(verbatim: visibleText(preview)).textSelection(.enabled)
+                            if !text.utf8.elementsEqual(preview.utf8) {
+                                DisclosureGroup("Exact Slack mrkdwn") {
+                                    Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
+                                }
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else if let text = params["prompt"]?.stringValue {
+                    GroupBox("Prompt") {
+                        Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }

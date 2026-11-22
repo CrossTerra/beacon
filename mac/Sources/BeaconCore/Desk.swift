@@ -193,6 +193,9 @@ public final class ApprovalDesk: ObservableObject {
             } catch let refusal as ChecksNotGreen {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: checks \(refusal.report.summary)."
+            } catch let refusal as SlackRefusal {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable: \(refusal.explanation)"
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Beacon cannot resolve this action yet."
@@ -218,9 +221,11 @@ public enum ActionOutcome {
         case .outcomeUnknown: return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
         case .executed:
             if let commit, proposal.type == .githubMerge { return ("Merged as \(commit)", link) }
+            if proposal.type == .slackPost { return ("Posted to Slack", nil) }
             return ("Done", link)
         case .failed:
             let error = result?["error"]?.stringValue?.replacingOccurrences(of: "_", with: " ") ?? "failed"
+            if proposal.type == .slackPost { return ("Not posted: \(result?["result"]?.stringValue ?? error)", nil) }
             return (proposal.type == .githubMerge ? "Not merged: \(error)" : "Failed: \(error)", link)
         default: return nil
         }

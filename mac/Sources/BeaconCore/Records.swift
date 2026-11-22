@@ -44,9 +44,11 @@ enum Record {
         default:
             throw Invalid(field: "/type")
         }
+        let publicSlack = action == ActionType.slackPost.rawValue && SlackPlacement(proposed["slack_placement"])?.visibility == .public
+            ? proposed["public_slack_subject"]?.stringValue : nil
         var record: [String: JSON] = [
             "version": .int(1), "key": .string(key), "type": .string("app.action." + kind),
-            "subject": .string(subject(action: action, params: proposed["params"]!, person: person, spelled: spelled)),
+            "subject": .string(publicSlack ?? subject(action: action, params: proposed["params"]!, person: person, spelled: spelled)),
             "occurred_at": .string(timestamp(date)), "metadata": .object(metadata),
         ]
         if !sealed.isEmpty {
@@ -57,8 +59,7 @@ enum Record {
 
     /// A merge is about its pull request, with the repository as the proposal spelled it, or, from the approval
     /// on, as GitHub spelled it (`spelled`, kept at approval; the same subject case aside, which is how Signal
-    /// compares them). A post or a run is about the person's own subject until its handler can tell whether the
-    /// conversation's subject is public (a private channel is under `slack:dm:`).
+    /// compares them). Except for a Slack subject verified as public at intake, posts use the person's own subject.
     static func subject(action: String, params: JSON, person: String, spelled: String? = nil) -> String {
         if action == ActionType.githubMerge.rawValue, let repo = params["repo"]?.stringValue,
            let number = params["number"]?.intValue {

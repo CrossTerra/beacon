@@ -20,6 +20,7 @@ public enum MergeRefusal: String, Error, Sendable {
 /// Bounds preflight reads (13.00, _The local API_): at most two preflights at once, and 120 provider reads an hour
 /// across all of them, pages and _Read again_ included. Past a limit the preflight fails as busy, without a read.
 public actor ReadBudget {
+    struct Exhausted: Error {}
     private let perHour: Int
     private let concurrent: Int
     private var reads: [Date] = []
@@ -32,7 +33,7 @@ public actor ReadBudget {
 
     /// A preflight begins: at most `concurrent` at once.
     func enter() throws {
-        guard running < concurrent else { throw MergeRefusal.busy }
+        guard running < concurrent else { throw Exhausted() }
         running += 1
     }
 
@@ -44,7 +45,7 @@ public actor ReadBudget {
     /// need be, and that read is not made.
     func take(at date: Date) throws {
         reads = reads.filter { date.timeIntervalSince($0) < 3600 }
-        guard reads.count < perHour else { throw MergeRefusal.busy }
+        guard reads.count < perHour else { throw Exhausted() }
         reads.append(date)
     }
 }
@@ -107,7 +108,7 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         guard let settings = settings() else { throw MergeRefusal.notConfigured }
         let pinned = try Pinned(proposal.params)
         let at = now()
-        try await budget.enter()
+        do { try await budget.enter() } catch { throw MergeRefusal.busy }
         do {
             var api = try connect(settings)
             let budget = self.budget, now = self.now
@@ -171,6 +172,8 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
             throw refusal
         } catch let refusal as ChecksNotGreen {
             throw refusal
+        } catch is ReadBudget.Exhausted {
+            throw MergeRefusal.busy
         } catch {
             throw MergeRefusal.unavailable
         }

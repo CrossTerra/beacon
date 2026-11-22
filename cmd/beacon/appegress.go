@@ -20,6 +20,7 @@ type appSettings struct {
 	Signal *struct {
 		Origin string `json:"origin"`
 	} `json:"signal"`
+	Slack *struct{} `json:"slack"` // presence enables Slack's fixed origin; settings cannot redirect it
 }
 
 // appEgress lists the hosts Beacon.app contacts under its settings, so `beacon egress` shows every host either
@@ -58,6 +59,10 @@ func (a *app) appEgress() ([]egress.Host, error) {
 			"Beacon.app: github.merge (reads before approval and before the merge, one merge per approval, read-back)"); err != nil {
 			return nil, err
 		}
+	}
+	if s.Slack != nil {
+		hosts = append(hosts, egress.Host{Address: "slack.com:443",
+			Purpose: "Beacon.app: slack.post (account, conversation and thread reads, one post per approval, read-back)"})
 	}
 	if s.Signal != nil {
 		if err := add("Signal", s.Signal.Origin, "Beacon.app: approval records, in journal order (POST /api/app-records); on saving the key, GET /api/me and the app actor and its person (GET /api/actors/{id})"); err != nil {
