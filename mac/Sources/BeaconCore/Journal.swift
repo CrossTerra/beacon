@@ -79,6 +79,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var approval: FrozenApproval?
         var approvedAt: Date?
         var startedAt: Date?
+        var unknownAt: Date?
     }
 
     let db: SQLite
@@ -119,9 +120,23 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                 BEGIN SELECT RAISE(ABORT, 'the journal is append-only'); END;
             CREATE TRIGGER IF NOT EXISTS entries_no_delete BEFORE DELETE ON entries
                 BEGIN SELECT RAISE(ABORT, 'the journal is append-only'); END;
-            CREATE TRIGGER IF NOT EXISTS outbox_bytes_once BEFORE UPDATE OF bytes, key, nonce ON outbox
-                WHEN OLD.bytes IS NOT NULL OR OLD.key IS NOT NEW.key OR OLD.nonce IS NOT NEW.nonce
+            """)
+        // `ambiguous`: a send of this record once had no definite answer (a lost reply, a 5xx), so Signal may hold
+        // its bytes and they must never change. Added after the first release, so an older journal gains it here.
+        if try !db.query("PRAGMA table_info(outbox)").contains(where: { $0[1].text == "ambiguous" }) {
+            try db.execute("ALTER TABLE outbox ADD COLUMN ambiguous INTEGER NOT NULL DEFAULT 0")
+        }
+        // Bytes are written once. They may be cleared to be rebuilt only for a stopped record that Signal answered
+        // definitely every time, so it never stored them.
+        try db.execute("""
+            DROP TRIGGER IF EXISTS outbox_bytes_once;
+            CREATE TRIGGER outbox_bytes_once BEFORE UPDATE OF bytes, key, nonce ON outbox
+                WHEN OLD.key IS NOT NEW.key OR OLD.nonce IS NOT NEW.nonce
+                    OR (OLD.bytes IS NOT NULL AND NOT (NEW.bytes IS NULL AND OLD.ambiguous = 0 AND OLD.state = 'stopped'))
                 BEGIN SELECT RAISE(ABORT, 'outbox bytes are written once'); END;
+            CREATE TRIGGER IF NOT EXISTS outbox_ambiguous_stays BEFORE UPDATE OF ambiguous ON outbox
+                WHEN OLD.ambiguous = 1 AND NEW.ambiguous = 0
+                BEGIN SELECT RAISE(ABORT, 'an ambiguous send stays ambiguous'); END;
             """)
         id = try db.transaction {
             if let existing = try db.query("SELECT value FROM meta WHERE name = 'journal_id'").first?.first?.text {
@@ -168,6 +183,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
     /// When the durable start was recorded.
     public func startedAt(_ id: String) -> Date? {
         locked { states[id]?.startedAt }
+    }
+
+    /// When the outcome was recorded unknown: after the write was sent, or at the relaunch that found the start.
+    public func unknownAt(_ id: String) -> Date? {
+        locked { states[id]?.unknownAt }
     }
 
     public func runnerID(_ id: String) -> String? {
@@ -315,12 +335,21 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             guard row[4].text == "pending" else { return nil }
             let seq = row[0].int!
             if let bytes = row[3].blob { return (seq, bytes) }
-            let proposed = try db.query(
-                "SELECT body FROM entries WHERE proposal = ? AND kind = 'proposed'", [.text(row[5].text!)]).first![0].text!
-            let bytes = try Record.bytes(
-                key: row[1].text!, nonce: row[2].text!, proposal: row[5].text!, kind: row[6].text!,
-                at: Date(milliseconds: row[7].int!), body: try JSON.parse(Data(row[8].text!.utf8)),
-                proposed: try JSON.parse(Data(proposed.utf8)), person: person)
+            let bytes: Data
+            do {
+                let proposed = try db.query(
+                    "SELECT body FROM entries WHERE proposal = ? AND kind = 'proposed'", [.text(row[5].text!)]).first![0].text!
+                bytes = try Record.bytes(
+                    key: row[1].text!, nonce: row[2].text!, proposal: row[5].text!, kind: row[6].text!,
+                    at: Date(milliseconds: row[7].int!), body: try JSON.parse(Data(row[8].text!.utf8)),
+                    proposed: try JSON.parse(Data(proposed.utf8)), person: person)
+            } catch {
+                // The record cannot be built (an invalid person id, an unreadable entry): stop here, visibly, until a
+                // resume. Nothing was sent, so it can be rebuilt then.
+                let reason = (error as? Invalid).map { "record:" + $0.field } ?? "record:unreadable"
+                try db.query("UPDATE outbox SET state = 'stopped', stopped = ? WHERE seq = ?", [.text(reason), .int(seq)])
+                return nil
+            }
             try db.query("UPDATE outbox SET bytes = ? WHERE seq = ?", [.blob(bytes), .int(seq)])
             return (seq, bytes)
         }
@@ -333,10 +362,27 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         }
     }
 
-    /// Delivery stops at this record until someone looks (a conflict, or a refusal that resending cannot fix).
+    /// Delivery stops at this record until someone resumes it (a conflict, or a refusal resending cannot fix).
     public func stopDelivery(_ seq: Int64, reason: String) throws {
         try locked {
             try db.query("UPDATE outbox SET state = 'stopped', stopped = ? WHERE seq = ?", [.text(reason), .int(seq)])
+        }
+    }
+
+    /// A send of this record had no definite answer: Signal may hold these bytes, so they never change.
+    public func markAmbiguous(_ seq: Int64) throws {
+        try locked { try db.query("UPDATE outbox SET ambiguous = 1 WHERE seq = ?", [.int(seq)]) }
+    }
+
+    /// Resume: stopped records go back to pending. One Signal definitely never stored (every answer a definite
+    /// refusal) is rebuilt on its next send, so a corrected person id takes effect. One that ever went without a
+    /// definite answer keeps its bytes.
+    public func resumeDelivery() throws {
+        try locked {
+            try db.transaction {
+                try db.query("UPDATE outbox SET bytes = NULL WHERE state = 'stopped' AND ambiguous = 0")
+                try db.query("UPDATE outbox SET state = 'pending', stopped = NULL WHERE state = 'stopped'")
+            }
         }
     }
 
@@ -428,7 +474,9 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "started":
             state.proposal.status = .started
             state.startedAt = date
-        case "outcome_unknown": state.proposal.status = .outcomeUnknown
+        case "outcome_unknown":
+            state.proposal.status = .outcomeUnknown
+            state.unknownAt = date
         case "executed": state.proposal.status = .executed
         case "failed": state.proposal.status = .failed
         default: return

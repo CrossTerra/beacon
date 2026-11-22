@@ -20,21 +20,42 @@ public struct SignalRecords: RecordTransport {
     }
 
     public func post(_ bytes: Data) async throws -> RecordAnswer {
-        let (status, body, _) = try await client.send("POST", "/api/app-records", raw: bytes)
+        let (status, body, response) = try await client.send("POST", "/api/app-records", raw: bytes)
         let answer = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let error = answer?["error"] as? [String: Any]
+        let details = error?["details"] as? [String: Any]
+        let field = details?["field"] as? String
+        return SignalRecords.classify(status: status, code: error?["code"] as? String, reason: details?["reason"] as? String,
+                                      field: field, retryAfter: response.value(forHTTPHeaderField: "Retry-After"),
+                                      eventID: answer?["event_id"] as? String, replayed: answer?["replayed"] as? Bool)
+    }
+
+    /// What to do with Signal's answer. Only refusals resending cannot fix stop delivery: a conflict, the subject,
+    /// an invalid record, a body too large. A refused key, a rate limit, a permission that may come back, a clock
+    /// ahead of Signal's and Signal's own failures are sent again later.
+    static func classify(status: Int, code: String?, reason: String?, field: String?, retryAfter: String?,
+                         eventID: String?, replayed: Bool?) -> RecordAnswer {
         switch status {
         case 200, 201:
-            guard let event = answer?["event_id"] as? String else { throw ServiceError.malformed }
-            return .stored(eventID: event, replayed: answer?["replayed"] as? Bool ?? (status == 200))
+            guard let eventID else { return .retry(after: nil, ambiguous: true) }
+            return .stored(eventID: eventID, replayed: replayed ?? (status == 200))
         case 409:
-            let error = answer?["error"] as? [String: Any]
-            let reason = (error?["details"] as? [String: Any])?["reason"] as? String ?? error?["code"] as? String ?? "conflict"
-            return .conflict(reason: reason)
-        case 500...:
-            // Sealing unavailable, or a server error: the same bytes go again later.
-            throw ServiceError.transport("status_\(status)")
+            return .stop(reason: "conflict:" + (reason ?? code ?? "conflict"))
+        case 401:
+            return .retry(after: nil, ambiguous: false)
+        case 429:
+            return .retry(after: retryAfter.flatMap(TimeInterval.init).map { max(0, min($0, 3600)) }, ambiguous: false)
+        case 403 where field == "/subject":
+            return .stop(reason: "refused:403:/subject")
+        case 403:
+            return .retry(after: nil, ambiguous: false)
+        case 400 where field == "/occurred_at":
+            return .retry(after: nil, ambiguous: false)
+        case 400..<500:
+            return .stop(reason: "refused:\(status)" + (field.map { ":" + $0 } ?? ""))
         default:
-            return .refused(status: status)
+            // Sealing unavailable, or a server error: Signal may have stored it.
+            return .retry(after: retryAfter.flatMap(TimeInterval.init).map { max(0, min($0, 3600)) }, ambiguous: true)
         }
     }
 }

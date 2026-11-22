@@ -144,11 +144,21 @@ to that origin, with no redirects, proxies or retries.
 | Signal answers | Beacon |
 | --- | --- |
 | `201`, or `200` with `replayed: true` | marks the record delivered and sends the next |
-| `409` (`idempotency_conflict`, `journal_order`, `transition`, …) or any other `4xx` | stops delivery at that record; nothing after it is sent until someone looks |
-| no answer, `5xx` (sealing unavailable included) | sends the same bytes again later |
+| `401`; `429` (not before `Retry-After`); `403` not about `/subject`; `400` about `/occurred_at` | sends the same record again later |
+| no answer; `5xx` (sealing unavailable included) | sends the same bytes again later, and never changes them: Signal may hold them |
+| `409` (`idempotency_conflict`, `journal_order`, `transition`, …); `403` about `/subject`; any other `400`; `413`; another `4xx` | stops delivery at that record, with the reason; nothing after it is sent until delivery is resumed |
 
-The menu and Settings show the result: delivered, waiting while Signal cannot be reached, or stopped at a record
-and why. Sending a record never executes an action. `beacon egress` lists the Signal origin from the app's
+A record that cannot be built (for example, the person in Settings is not an `act_…` id) also stops delivery at
+its sequence, with the reason. After a failed attempt the next waits for `Retry-After`, or a backoff doubling from
+30 seconds up to 15 minutes.
+
+**Resume delivery** (in the menu and Settings, and on saving Signal's key or person again) puts stopped records back
+to pending and sends them. A record Signal definitely never stored (every answer it got was a definite refusal, or
+it was never sent) has its bytes built again with the current settings, so a corrected person takes effect. A record
+that ever went without a definite answer (a lost reply, a `5xx`) keeps its exact bytes; a trigger refuses any
+change to them.
+
+The menu and Settings show the result: delivered, waiting to be sent again, or stopped at a record and why. Sending a record never executes an action. `beacon egress` lists the Signal origin from the app's
 settings.
 
 ## Merges
@@ -177,10 +187,13 @@ is never shown, logged, written elsewhere or passed to a child process.
 
 Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
 repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are
-bounded: two at once and 120 GitHub reads an hour, after which the answer is `busy` and nothing is read.
+bounded: two at once, and 120 GitHub reads an hour counted as each request is made, every page and _Read again_
+included. A preflight that reaches the limit stops there as `busy`, and a later one makes no read until the hour
+allows it.
 
-**After approval**, Beacon records the durable start, then reads all of it again. A changed repository id, base,
-head, mergeability, review or check stops the merge as `failed` (`pre_dispatch`), with nothing sent. Otherwise it
+**After approval**, Beacon records the durable start, then reads all of it again, and finally reads the PR once
+more right before the write. A changed repository id, base, head, mergeability, review or check stops the merge as
+`failed` (`pre_dispatch`), with nothing sent. Otherwise it
 sends one `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with the frozen method and `sha: head`, so GitHub refuses it if
 the head moved and enforces its own branch rules for this account.
 
@@ -190,10 +203,12 @@ the head moved and enforces its own branch rules for this account.
 | `405`, `409`, `403`, `404`, `422`, another `4xx` | `failed` (`reply`): `not_mergeable`, `head_moved`, `forbidden`, `not_found`, `rejected`, `github_{status}` |
 | no answer, a `5xx`, a `2xx` without a merge | `outcome_unknown`, then a read-back |
 
-**Read-back** reads the PR, never merges again. Merged by this account with the approved head into the approved
-base is `executed` (`read_back`). Merged otherwise is `failed` (`merged_otherwise`), and closed unmerged is `failed`
-(`not_merged`). Still open is `not_merged` only a minute after the start, so a merge GitHub is still finishing is
-never recorded as failed. Any other result stays unknown and is read again every minute while the app runs, and at
+**Read-back** reads the PR, never merges again, and only with the approved account at the approved origin. If
+Settings changed since, the outcome stays unknown. Merged by the approved account with the approved head into the
+approved base is `executed` (`read_back`). Merged otherwise is `failed` (`merged_otherwise`), and closed unmerged
+is `failed` (`not_merged`). Still open is `not_merged` only after two reads, both at least a minute after the
+unknown outcome was recorded (after the write was sent). So a merge GitHub is still finishing is never recorded as
+failed. Any other result stays unknown and is read again every minute while the app runs, and at
 every launch. A start that recovery finds without a result is settled the same way.
 
 Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and

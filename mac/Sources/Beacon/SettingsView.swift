@@ -58,6 +58,8 @@ struct SettingsView: View {
                 .disabled(appKey.isEmpty || signalOrigin.isEmpty || person.isEmpty || saving)
                 if !signalMessage.isEmpty { Text(signalMessage).font(.caption) }
                 Text(service.delivery).font(.caption)
+                Button("Resume delivery") { service.resumeDelivery() }
+                    .disabled(service.signal == nil)
             }
             Text(service.status).font(.caption).foregroundStyle(.secondary)
         }

@@ -17,6 +17,11 @@ final class FakeSignalServer: @unchecked Sendable {
     private(set) var stored: [(key: String, bytes: Data)] = []
     private(set) var authorizations: [String?] = []
     var transitionAt: String?
+    /// Answers given, in order, for a key before the usual rules: `(status, error code, field, Retry-After)`.
+    var scripted: [String: [(Int, String, String?, String?)]] = [:]
+    /// Refuse a record whose person is not this, as Signal does.
+    var requiredPerson: String?
+    private(set) var posts: [(key: String, bytes: Data)] = []
     var loseAnswerAt: String?
     var unavailable = false
     var me: [String: Any] = ["actor": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "name": "Beacon",
@@ -45,7 +50,7 @@ final class FakeSignalServer: @unchecked Sendable {
     }
 
     enum Answer {
-        case json(Int, Any)
+        case json(Int, Any, [String: String])
         case lost
     }
 
@@ -53,41 +58,53 @@ final class FakeSignalServer: @unchecked Sendable {
         lock.withLock {
             let authorization = request.value(forHTTPHeaderField: "Authorization")
             authorizations.append(authorization)
-            guard authorization == "Bearer " + key else { return .json(401, problem("unauthorized")) }
+            guard authorization == "Bearer " + key else { return .json(401, problem("unauthorized"), [:]) }
             switch (request.httpMethod, request.url?.path) {
             case ("GET", "/api/me"):
-                return .json(200, me)
+                return .json(200, me, [:])
             case ("POST", "/api/app-records"):
-                if unavailable { return .json(503, problem("unavailable")) }
+                if unavailable { return .json(503, problem("unavailable"), [:]) }
                 guard let record = try? JSON.parse(body), let key = record["key"]?.stringValue else {
-                    return .json(400, problem("invalid"))
+                    return .json(400, problem("invalid"), [:])
+                }
+                posts.append((key, body))
+                if var queue = scripted[key], !queue.isEmpty {
+                    let (status, code, field, retryAfter) = queue.removeFirst()
+                    scripted[key] = queue
+                    return .json(status, problem(code, field: field), retryAfter.map { ["Retry-After": $0] } ?? [:])
+                }
+                if let requiredPerson, record["metadata"]?["person"]?.stringValue != requiredPerson {
+                    return .json(400, problem("invalid", field: "/metadata/person"), [:])
                 }
                 if let existing = stored.first(where: { $0.key == key }) {
-                    return existing.bytes == body ? .json(200, ["event_id": "evt_\(key)", "replayed": true])
-                        : .json(409, problem("idempotency_conflict"))
+                    return existing.bytes == body ? .json(200, ["event_id": "evt_\(key)", "replayed": true], [:])
+                        : .json(409, problem("idempotency_conflict"), [:])
                 }
-                if transitionAt == key { return .json(409, problem("conflict", reason: "transition")) }
+                if transitionAt == key { return .json(409, problem("conflict", reason: "transition"), [:]) }
                 if let last = stored.last {
                     let parts = key.split(separator: ":"), lastParts = last.key.split(separator: ":")
                     let ok = parts[1] == lastParts[1] ? Int(parts[2])! > Int(lastParts[2])!
                         : (parts[2] == "1" && parts[1] > lastParts[1])
-                    if !ok { return .json(409, problem("conflict", reason: "journal_order")) }
+                    if !ok { return .json(409, problem("conflict", reason: "journal_order"), [:]) }
                 }
                 stored.append((key, body))
                 if loseAnswerAt == key {
                     loseAnswerAt = nil
                     return .lost
                 }
-                return .json(201, ["event_id": "evt_\(key)", "replayed": false])
+                return .json(201, ["event_id": "evt_\(key)", "replayed": false], [:])
             default:
-                return .json(404, problem("not_found"))
+                return .json(404, problem("not_found"), [:])
             }
         }
     }
 
-    private func problem(_ code: String, reason: String? = nil) -> [String: Any] {
+    private func problem(_ code: String, reason: String? = nil, field: String? = nil) -> [String: Any] {
         var error: [String: Any] = ["code": code, "message": "fake"]
-        if let reason { error["details"] = ["reason": reason] }
+        var details: [String: Any] = [:]
+        details["reason"] = reason
+        details["field"] = field
+        if !details.isEmpty { error["details"] = details }
         return ["error": error]
     }
 }
@@ -113,9 +130,9 @@ final class FakeSignalProtocol: URLProtocol {
             stream.close()
         }
         switch fake.handle(request, body: body) {
-        case .json(let status, let value):
+        case .json(let status, let value, let headers):
             let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
-                                           headerFields: ["Content-Type": "application/json"])!
+                                           headerFields: headers.merging(["Content-Type": "application/json"]) { a, _ in a })!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: value))
             client?.urlProtocolDidFinishLoading(self)
@@ -157,13 +174,13 @@ struct SignalDeliveryTests {
         let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000))
         signal.loseAnswerAt = "beacon:\(journal.id):2"
         let sender = OutboxSender(journal: journal, transport: try transport(signal), person: person)
-        #expect(try await sender.drain() == .retry(sent: 1))
+        #expect(try await sender.drain() == .retry(sent: 1, after: nil))
         #expect(try await sender.drain() == .done(sent: 2))
         #expect(signal.stored.map(\.key) == (1...3).map { "beacon:\(journal.id):\($0)" })
         signal.unavailable = true
         try journal.decline(journal.pending(at: Date(timeIntervalSince1970: 1_800_000_010)).first!.id, note: nil,
                             at: Date(timeIntervalSince1970: 1_800_000_010))
-        #expect(try await sender.drain() == .retry(sent: 0))
+        #expect(try await sender.drain() == .retry(sent: 0, after: nil))
         signal.unavailable = false
         #expect(try await sender.drain() == .done(sent: 1))
     }
@@ -194,6 +211,83 @@ struct SignalDeliveryTests {
                 == .stopped(sent: 0, reason: "conflict:journal_order"))
     }
 
+    @Test func classifiesSignalsAnswers() {
+        func answer(_ status: Int, _ code: String? = nil, reason: String? = nil, field: String? = nil,
+                    retryAfter: String? = nil) -> RecordAnswer {
+            SignalRecords.classify(status: status, code: code, reason: reason, field: field, retryAfter: retryAfter,
+                                   eventID: "evt_1", replayed: nil)
+        }
+        #expect(answer(201) == .stored(eventID: "evt_1", replayed: false))
+        #expect(answer(200) == .stored(eventID: "evt_1", replayed: true))
+        #expect(answer(401) == .retry(after: nil, ambiguous: false))
+        #expect(answer(429, retryAfter: "120") == .retry(after: 120, ambiguous: false))
+        #expect(answer(403, "forbidden") == .retry(after: nil, ambiguous: false))
+        #expect(answer(403, "forbidden", field: "/subject") == .stop(reason: "refused:403:/subject"))
+        #expect(answer(400, "invalid", field: "/occurred_at") == .retry(after: nil, ambiguous: false))
+        #expect(answer(400, "invalid", field: "/metadata/person") == .stop(reason: "refused:400:/metadata/person"))
+        #expect(answer(413) == .stop(reason: "refused:413"))
+        #expect(answer(409, "conflict", reason: "transition") == .stop(reason: "conflict:transition"))
+        #expect(answer(409, "idempotency_conflict") == .stop(reason: "conflict:idempotency_conflict"))
+        #expect(answer(503, "unavailable") == .retry(after: nil, ambiguous: true))
+        #expect(answer(500) == .retry(after: nil, ambiguous: true))
+    }
+
+    @Test func retriesWaitAndRefusalsWaitForResume() async throws {
+        let signal = FakeSignalServer()
+        let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: 2)
+        let first = "beacon:\(journal.id):1"
+        signal.scripted[first] = [(429, "rate_limited", nil, "120"), (401, "unauthorized", nil, nil),
+                                  (400, "invalid", "/occurred_at", nil), (403, "forbidden", nil, nil)]
+        let sender = OutboxSender(journal: journal, transport: try transport(signal), person: person)
+        #expect(try await sender.drain() == .retry(sent: 0, after: 120))
+        for _ in 0..<3 { #expect(try await sender.drain() == .retry(sent: 0, after: nil)) }
+        #expect(try await sender.drain() == .done(sent: 2))
+        #expect(Set(signal.posts.filter { $0.key == first }.map(\.bytes)).count == 1)
+    }
+
+    /// A record Signal refused because of the person id is rebuilt after the person is corrected and delivery
+    /// resumed.
+    @Test func resumeRebuildsARecordSignalNeverStored() async throws {
+        let signal = FakeSignalServer()
+        let corrected = "act_01m6a6ft00e40r2081040g2082"
+        signal.requiredPerson = corrected
+        let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: 2)
+        #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: person).drain()
+                == .stopped(sent: 0, reason: "refused:400:/metadata/person"))
+        #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: corrected).drain()
+                == .stopped(sent: 0, reason: "refused:400:/metadata/person"))
+        try journal.resumeDelivery()
+        #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: corrected).drain() == .done(sent: 2))
+        #expect(signal.stored.allSatisfy { (try? JSON.parse($0.bytes))?["metadata"]?["person"] == .string(corrected) })
+    }
+
+    /// A record that ever went without a definite answer keeps its exact bytes, even after a resume.
+    @Test func resumeNeverRebuildsARecordSignalMayHold() async throws {
+        let signal = FakeSignalServer()
+        let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: 1)
+        let key = "beacon:\(journal.id):1"
+        signal.scripted[key] = [(503, "unavailable", nil, nil), (400, "invalid", "/metadata/person", nil)]
+        let sender = OutboxSender(journal: journal, transport: try transport(signal), person: person)
+        #expect(try await sender.drain() == .retry(sent: 0, after: nil))
+        #expect(try await sender.drain() == .stopped(sent: 0, reason: "refused:400:/metadata/person"))
+        try journal.resumeDelivery()
+        let corrected = OutboxSender(journal: journal, transport: try transport(signal),
+                                     person: "act_01m6a6ft00e40r2081040g2082")
+        #expect(try await corrected.drain() == .done(sent: 1))
+        #expect(Set(signal.posts.map(\.bytes)).count == 1)
+    }
+
+    /// A record that cannot be built stops delivery at its sequence with the reason, and resumes once it can.
+    @Test func anUnbuildableRecordStopsAndResumes() async throws {
+        let signal = FakeSignalServer()
+        let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: 2)
+        #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: "@winton").drain()
+                == .stopped(sent: 0, reason: "record:/metadata/person"))
+        #expect(signal.posts.isEmpty)
+        try journal.resumeDelivery()
+        #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: person).drain() == .done(sent: 2))
+    }
+
     @Test func settingsAcceptOnlyTheAppActorsKey() async throws {
         let signal = FakeSignalServer()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("signal-" + randomHex(6))
@@ -222,5 +316,37 @@ struct SignalDeliveryTests {
         #expect(try await OutboxSender(journal: journal, transport: transport, person: settings.person).drain() == .done(sent: 1))
         try SignalSetup.remove(vault: vault, settings: url)
         #expect(throws: VaultError.notFound) { try vault.credential(for: try settings.binding) }
+    }
+}
+
+struct OutboxMigrationTests {
+    /// A journal from before the `ambiguous` column (#34) opens, gains it, and keeps the bytes-once rule.
+    @Test func anOlderOutboxGainsTheColumn() throws {
+        let path = scratchPath()
+        let directory = realpath((path as NSString).deletingLastPathComponent, nil)!
+        defer { free(directory) }
+        let resolved = String(cString: directory) + "/journal.sqlite"
+        do {
+            let old = try SQLite(path: resolved)
+            try old.execute("""
+                CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE entries (seq INTEGER PRIMARY KEY, proposal TEXT NOT NULL, kind TEXT NOT NULL,
+                    at INTEGER NOT NULL, body TEXT NOT NULL);
+                CREATE TABLE outbox (seq INTEGER PRIMARY KEY REFERENCES entries(seq), key TEXT NOT NULL UNIQUE,
+                    nonce TEXT NOT NULL, bytes BLOB, state TEXT NOT NULL DEFAULT 'pending', event_id TEXT, stopped TEXT);
+                CREATE TRIGGER outbox_bytes_once BEFORE UPDATE OF bytes, key, nonce ON outbox
+                    WHEN OLD.bytes IS NOT NULL OR OLD.key IS NOT NEW.key OR OLD.nonce IS NOT NEW.nonce
+                    BEGIN SELECT RAISE(ABORT, 'outbox bytes are written once'); END;
+                """)
+        }
+        let journal = try Journal(path: path, at: Date(timeIntervalSince1970: 1_800_000_000))
+        try journal.add(Proposal(request: request("github.merge", mergeParams), client: "c", at: Date(timeIntervalSince1970: 1_800_000_000)))
+        let (seq, _) = try #require(try journal.nextDelivery(person: person))
+        try journal.markAmbiguous(seq)
+        try journal.stopDelivery(seq, reason: "refused:400")
+        try journal.resumeDelivery()
+        #expect(try journal.db.query("SELECT bytes IS NOT NULL, ambiguous FROM outbox").first == [.int(1), .int(1)])
+        #expect(throws: SQLiteError.self) { try journal.db.execute("UPDATE outbox SET bytes = NULL") }
+        #expect(throws: SQLiteError.self) { try journal.db.execute("UPDATE outbox SET ambiguous = 0") }
     }
 }

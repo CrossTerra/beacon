@@ -53,6 +53,9 @@ final class FakeGitHub: @unchecked Sendable {
     /// More check runs, as GitHub reports them: `id`, `app`, `name`, `status`, `conclusion`, `started_at`.
     var runs: [[String: Any]] = []
     var merge = MergeBehaviour.normal
+    /// Counts reads of the PR, and may change it after the n-th (to move it between Beacon's reads).
+    var pullReads = 0
+    var afterPullRead: ((Int, FakeGitHub) -> Void)?
     var down = false
     /// Answer `GET /user` with a redirect to this URL.
     var redirectUser: String?
@@ -98,6 +101,8 @@ final class FakeGitHub: @unchecked Sendable {
                 if let redirectUser { return .redirect(redirectUser) }
                 return .json(200, ["id": user.id, "login": user.login, "type": user.type])
             case ("GET", repo + "/pulls/140"):
+                pullReads += 1
+                defer { afterPullRead?(pullReads, self) }
                 var answer: [String: Any] = [
                     "state": pull.state, "merged": pull.merged, "mergeable_state": pull.mergeableState,
                     "title": "Add the record API",
@@ -115,12 +120,12 @@ final class FakeGitHub: @unchecked Sendable {
             case ("GET", repo + "/branches/main"):
                 if protectionChecks.isEmpty { return .json(200, ["name": "main"]) }
                 return .json(200, ["name": "main", "protection": ["required_status_checks": ["contexts": protectionChecks]]])
-            case ("GET", repo + "/commits/\(pull.head)/check-runs"):
+            case ("GET", let p) where p.hasPrefix(repo + "/commits/") && p.hasSuffix("/check-runs"):
                 return .json(200, ["check_runs": checkRuns.map { name, conclusion in
                     ["name": name, "status": conclusion == nil ? "in_progress" : "completed",
                      "conclusion": conclusion ?? NSNull(), "app": ["id": 1]] as [String: Any]
                 } + runs])
-            case ("GET", repo + "/commits/\(pull.head)/status"):
+            case ("GET", let p) where p.hasPrefix(repo + "/commits/") && p.hasSuffix("/status"):
                 return .json(200, ["statuses": statuses.map { ["context": $0, "state": $1] }])
             case ("PUT", repo + "/pulls/140/merge"):
                 return mergeRequest(parsed ?? [:])

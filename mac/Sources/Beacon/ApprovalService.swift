@@ -13,6 +13,8 @@ final class ApprovalService: ObservableObject {
     private var deliverer: Timer?
     private var delivering = false
     private var deliverAgain = false
+    private var failures = 0
+    private var notBefore: Date?
     private(set) var desk: ApprovalDesk?
     private var server: ProposalServer?
     private var vault: Vault?
@@ -107,7 +109,8 @@ final class ApprovalService: ObservableObject {
         do {
             signal = try await SignalSetup.register(key: Secret(key), origin: origin, person: person, vault: vault,
                                                     settings: paths.settings)
-            deliver()
+            // A new key or person may be what a stopped record needed.
+            resumeDelivery()
             return "Records go to \(signal!.origin) as \(signal!.handle)"
         } catch SignalSetup.Refusal.person {
             return "Not saved: the person is an act_… id."
@@ -130,33 +133,68 @@ final class ApprovalService: ObservableObject {
     }
 
     /// Sends the outbox in journal order, one drain at a time. A drain asked for while one runs runs again after.
-    func deliver() {
+    /// After a failed attempt the next waits: Signal's `Retry-After`, else a doubling backoff up to 15 minutes.
+    func deliver(force: Bool = false) {
         guard let journal, let vault, let signal else { return }
         if delivering {
             deliverAgain = true
             return
         }
+        if !force, let notBefore, Date() < notBefore { return }
         delivering = true
         Task {
             var message: String
+            let transport: SignalRecords
             do {
-                let transport = try SignalRecords.connect(signal, vault: vault)
+                transport = try SignalRecords.connect(signal, vault: vault)
+            } catch {
+                // The vault or its key: nothing about any record. Tried again on the next timer.
+                finish("Records are not sent: the Signal key is not available in the vault")
+                return
+            }
+            do {
                 let outcome = try await OutboxSender(journal: journal, transport: transport, person: signal.person).drain()
                 let status = try journal.deliveryStatus()
                 switch outcome {
-                case .done: message = "Records delivered (\(status.delivered))"
-                case .retry: message = "Signal not reachable; \(status.waiting) records waiting"
-                case .stopped(_, let reason): message = "Delivery stopped at a record (\(reason)); \(status.waiting) waiting"
+                case .done:
+                    message = "Records delivered (\(status.delivered))"
+                    failures = 0
+                    notBefore = nil
+                case .retry(_, let after):
+                    failures += 1
+                    let backoff = min(30 * pow(2, Double(min(failures - 1, 5))), 900)
+                    notBefore = Date().addingTimeInterval(max(after ?? 0, backoff))
+                    message = "Signal did not take records just now; \(status.waiting) waiting, sending again soon"
+                case .stopped(_, let reason):
+                    message = "Delivery stopped at a record (\(reason)); \(status.waiting) waiting. Resume after fixing it."
                 }
             } catch {
-                message = "Records are not sent: the Signal key is not available"
+                message = "Delivery error in the journal: \(error)"
             }
-            delivery = message
-            delivering = false
-            if deliverAgain {
-                deliverAgain = false
-                deliver()
-            }
+            finish(message)
+        }
+    }
+
+    private func finish(_ message: String) {
+        delivery = message
+        delivering = false
+        if deliverAgain {
+            deliverAgain = false
+            deliver()
+        }
+    }
+
+    /// Resume: records stopped at a refusal go back to pending and are sent now. One Signal never stored is rebuilt
+    /// with the current settings; one it may hold keeps its exact bytes.
+    func resumeDelivery() {
+        guard let journal else { return }
+        do {
+            try journal.resumeDelivery()
+            failures = 0
+            notBefore = nil
+            deliver(force: true)
+        } catch {
+            delivery = "Delivery error in the journal: \(error)"
         }
     }
 

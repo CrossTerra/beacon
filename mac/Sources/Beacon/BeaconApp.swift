@@ -40,6 +40,7 @@ private struct BeaconMenu: View {
         Text(delegate.servicesStatus)
         Text(delegate.approvals.status)
         Text(delegate.approvals.delivery)
+        Button("Resume delivery") { delegate.approvals.resumeDelivery() }
         Button("Quit Beacon") {
             NSApp.terminate(nil)
         }

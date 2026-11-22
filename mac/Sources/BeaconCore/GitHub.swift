@@ -19,9 +19,17 @@ public struct PullRequestState: Equatable, Sendable {
 /// repository, number, branch and SHA; nothing from an agent becomes a URL.
 public struct GitHubAPI: Sendable {
     public let client: ServiceClient
+    /// Called before every read, each page included: the preflight's read budget.
+    public var meter: (@Sendable () async throws -> Void)?
 
     public init(client: ServiceClient) {
         self.client = client
+    }
+
+    /// One read, counted by the meter before it is made.
+    private func get(_ path: String, query: [URLQueryItem] = []) async throws -> (status: Int, value: Any?) {
+        try await meter?()
+        return try await client.json("GET", path, query: query)
     }
 
     public static let headers = ["Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
@@ -47,7 +55,7 @@ public struct GitHubAPI: Sendable {
     }
 
     private func object(_ path: String, query: [URLQueryItem] = []) async throws -> [String: Any] {
-        let (status, value) = try await client.json("GET", path, query: query)
+        let (status, value) = try await get(path, query: query)
         guard let object = value as? [String: Any] else { throw Failure(status: status) }
         return object
     }
@@ -78,7 +86,7 @@ public struct GitHubAPI: Sendable {
     public func changesRequested(_ repo: String, _ number: Int64) async throws -> Bool {
         var latest: [Int64: String] = [:]
         for page in 1...10 {
-            let (status, value) = try await client.json("GET", "/repos/\(try GitHubAPI.segments(repo))/pulls/\(number)/reviews",
+            let (status, value) = try await get("/repos/\(try GitHubAPI.segments(repo))/pulls/\(number)/reviews",
                                                         query: [.init(name: "per_page", value: "100"), .init(name: "page", value: "\(page)")])
             guard let reviews = value as? [[String: Any]] else { throw Failure(status: status) }
             for review in reviews {
@@ -96,7 +104,7 @@ public struct GitHubAPI: Sendable {
     public func requiredChecks(_ repo: String, base: String) async throws -> Set<String> {
         let segments = try GitHubAPI.segments(repo), branch = GitHubAPI.encode(base)
         var required = Set<String>()
-        let (rulesStatus, rules) = try await client.json("GET", "/repos/\(segments)/rules/branches/\(branch)")
+        let (rulesStatus, rules) = try await get("/repos/\(segments)/rules/branches/\(branch)")
         if let rules = rules as? [[String: Any]] {
             for rule in rules where rule["type"] as? String == "required_status_checks" {
                 let checks = (rule["parameters"] as? [String: Any])?["required_status_checks"] as? [[String: Any]] ?? []
@@ -105,7 +113,7 @@ public struct GitHubAPI: Sendable {
         } else if ![403, 404].contains(rulesStatus) {
             throw Failure(status: rulesStatus)
         }
-        let (branchStatus, branchValue) = try await client.json("GET", "/repos/\(segments)/branches/\(branch)")
+        let (branchStatus, branchValue) = try await get("/repos/\(segments)/branches/\(branch)")
         if let protection = (branchValue as? [String: Any])?["protection"] as? [String: Any],
            let checks = protection["required_status_checks"] as? [String: Any] {
             required.formUnion(checks["contexts"] as? [String] ?? [])

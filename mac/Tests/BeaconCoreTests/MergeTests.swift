@@ -204,12 +204,81 @@ struct MergeTests {
         try await h.approve(id)
         h.github.merge = .loseReplyWithoutMerging
         #expect(try await h.handler.execute(id) == .unknown)
+        // Open reads within the minute after the unknown outcome do not count.
+        h.clock.advance(30)
+        #expect(try await h.handler.reconcile(id) == .unknown)
+        #expect(try await h.handler.reconcile(id) == .unknown)
         h.github.down = true
-        h.clock.advance(MergeHandler.settleTime + 1)
+        h.clock.advance(MergeHandler.settleTime)
         #expect(try await h.handler.reconcile(id) == .unknown)
         h.github.down = false
+        // Two reads past the minute, both open.
+        #expect(try await h.handler.reconcile(id) == .unknown)
         #expect(try await h.handler.reconcile(id) == .failed(error: "not_merged", confirmedBy: "read_back"))
         #expect(h.merges.count == 1)
+    }
+
+    /// Read-back uses only the approved account and origin; with Settings changed since, it stays unknown.
+    @Test func readBackNeedsTheApprovedAccount() async throws {
+        let h = try MergeHarness()
+        let id = try h.propose()
+        try await h.approve(id)
+        // GitHub goes away right after the last read: the PUT and the immediate read-back get no answer.
+        h.github.update { github in
+            github.pullReads = 0
+            github.afterPullRead = { n, g in if n == 2 { g.down = true } }
+        }
+        #expect(try await h.handler.execute(id) == .unknown)
+        h.github.update {
+            $0.down = false
+            $0.pull.merged = true
+            $0.pull.mergedBy = 123
+            $0.pull.mergeCommit = String(repeating: "c", count: 40)
+        }
+        let approved = try AppSettings.load(h.settingsURL)
+        for other in [GitHubSettings(origin: h.github.origin, account: "github:user:124", login: "x"),
+                      GitHubSettings(origin: FakeGitHub().origin, account: "github:user:123", login: "winton")] {
+            try AppSettings(github: other).save(h.settingsURL)
+            let before = h.github.requests.count
+            #expect(try await h.handler.reconcile(id) == .unknown)
+            #expect(h.github.requests.count == before)
+        }
+        try approved.save(h.settingsURL)
+        #expect(try await h.handler.reconcile(id) == .executed(confirmedBy: "read_back"))
+    }
+
+    /// The PR is read once more right before the PUT: a change after the full read still stops the merge.
+    @Test func theLastReadBeforeThePutStopsAChange() async throws {
+        let cases: [(String, (FakeGitHub) -> Void)] = [
+            ("head_moved", { $0.pull.head = String(repeating: "b", count: 40) }),
+            ("base_changed", { $0.pull.base = "release" }),
+            ("repository_changed", { $0.repositoryID = 789 }),
+            ("already_merged", { $0.pull.merged = true }),
+        ]
+        for (error, change) in cases {
+            let h = try MergeHarness()
+            let id = try h.propose()
+            try await h.approve(id)
+            h.github.update { github in
+                github.pullReads = 0
+                github.afterPullRead = { n, g in if n == 1 { change(g) } }
+            }
+            #expect(try await h.handler.execute(id) == .failed(error: error, confirmedBy: "pre_dispatch"))
+            #expect(h.merges.isEmpty && h.github.pullReads == 2)
+        }
+    }
+
+    /// Every read counts against the hourly budget as it is made; past it the preflight stops mid-way.
+    @Test func theBudgetStopsAPreflightMidWay() async throws {
+        let h = try MergeHarness(budget: ReadBudget(perHour: 5))
+        let id = try h.propose()
+        await #expect(throws: MergeRefusal.busy) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
+        #expect(h.github.requests.count == 5)
+        await #expect(throws: MergeRefusal.busy) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
+        #expect(h.github.requests.count == 5)
+        h.clock.advance(3601)
+        await #expect(throws: MergeRefusal.busy) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
+        #expect(h.github.requests.count == 10)
     }
 
     @Test func someoneElsesMergeIsNotThisApprovals() async throws {

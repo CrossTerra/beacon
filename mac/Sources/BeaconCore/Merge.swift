@@ -30,15 +30,22 @@ public actor ReadBudget {
         self.concurrent = concurrent
     }
 
-    func begin(reads count: Int, at date: Date) throws {
-        reads = reads.filter { date.timeIntervalSince($0) < 3600 }
-        guard running < concurrent, reads.count + count <= perHour else { throw MergeRefusal.busy }
+    /// A preflight begins: at most `concurrent` at once.
+    func enter() throws {
+        guard running < concurrent else { throw MergeRefusal.busy }
         running += 1
-        reads.append(contentsOf: Array(repeating: date, count: count))
     }
 
-    func end() {
+    func leave() {
         running -= 1
+    }
+
+    /// One provider read, counted as it is made. Past the hourly limit the preflight stops as busy, mid-way if
+    /// need be, and that read is not made.
+    func take(at date: Date) throws {
+        reads = reads.filter { date.timeIntervalSince($0) < 3600 }
+        guard reads.count < perHour else { throw MergeRefusal.busy }
+        reads.append(date)
     }
 }
 
@@ -55,9 +62,10 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
     private let connect: Connect
     private let budget: ReadBudget
     private let now: @Sendable () -> Date
-    /// A start with no reply is decided as not merged only after this long, so a merge GitHub is still finishing
-    /// is never recorded as failed.
+    /// A start with no reply is decided as not merged only after this long, and two reads, so a merge GitHub is
+    /// still finishing is never recorded as failed.
     public static let settleTime: TimeInterval = 60
+    private let openReads = Locked<[String: Int]>([:])
 
     public init(journal: Journal, settings: @escaping @Sendable () -> GitHubSettings?, connect: @escaping Connect,
                 budget: ReadBudget = ReadBudget(), now: @escaping @Sendable () -> Date = { Date() }) {
@@ -99,11 +107,13 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         guard let settings = settings() else { throw MergeRefusal.notConfigured }
         let pinned = try Pinned(proposal.params)
         let at = now()
-        try await budget.begin(reads: 7, at: at)
+        try await budget.enter()
         do {
-            let api = try connect(settings)
+            var api = try connect(settings)
+            let budget = self.budget, now = self.now
+            api.meter = { try await budget.take(at: now()) }
             let (pull, checks) = try await read(api, settings, pinned, repositoryID: nil)
-            await budget.end()
+            await budget.leave()
             return ResolvedAction(
                 origin: try CredentialBinding.normalize(settings.origin), account: settings.account,
                 destination: .object(["repository_id": .int(pull.repositoryID), "pr": .int(pinned.number),
@@ -113,7 +123,7 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
                         "Head": pinned.head],
                 readAt: at)
         } catch {
-            await budget.end()
+            await budget.leave()
             throw error
         }
     }
@@ -148,6 +158,21 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         }
     }
 
+    /// The pull request once more, right before the write: the same repository, open, unmerged, base and head.
+    func lastRead(_ api: GitHubAPI, _ pinned: Pinned, repositoryID: Int64) async throws {
+        let pull: PullRequestState
+        do {
+            pull = try await api.pull(pinned.repo, pinned.number)
+        } catch {
+            throw MergeRefusal.unavailable
+        }
+        if pull.repositoryID != repositoryID { throw MergeRefusal.repositoryChanged }
+        if pull.merged { throw MergeRefusal.alreadyMerged }
+        guard pull.state == "open" else { throw MergeRefusal.notOpen }
+        guard pull.base == pinned.base else { throw MergeRefusal.baseChanged }
+        guard pull.head == pinned.head else { throw MergeRefusal.headMoved }
+    }
+
     // MARK: After approval
 
     public enum Outcome: Equatable, Sendable {
@@ -170,6 +195,7 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         do {
             api = try connect(settings)
             _ = try await read(api, settings, pinned, repositoryID: repositoryID)
+            try await lastRead(api, pinned, repositoryID: repositoryID)
         } catch let refusal as MergeRefusal {
             return try fail(id, refusal.rawValue, by: "pre_dispatch")
         } catch {
@@ -207,8 +233,11 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
     /// enough after the start; otherwise it stays unknown, to be read again later.
     @discardableResult
     public func reconcile(_ id: String) async throws -> Outcome {
+        // Read back only as the account and origin that were approved; settings changed since leave it unknown.
         guard let proposal = journal.proposal(id, at: now()), proposal.status == .outcomeUnknown,
-              let approval = journal.approval(id), let settings = settings() else { return .unknown }
+              let approval = journal.approval(id), let settings = settings(), settings.account == approval.account,
+              (try? CredentialBinding.normalize(settings.origin)) == approval.origin,
+              let userID = Int64(approval.account.dropFirst("github:user:".count)) else { return .unknown }
         let pinned = try Pinned(approval.params)
         let pull: PullRequestState
         do {
@@ -216,9 +245,8 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         } catch {
             return .unknown
         }
-        let started = journal.startedAt(id) ?? now()
         if pull.merged {
-            guard pull.mergedBy == settings.userID, pull.head == pinned.head, pull.base == pinned.base,
+            guard pull.mergedBy == userID, pull.head == pinned.head, pull.base == pinned.base,
                   let sha = pull.mergeCommit, Field.matches(sha, "[0-9a-f]{40}") else {
                 return try fail(id, "merged_otherwise", by: "read_back")
             }
@@ -229,7 +257,15 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
             return .executed(confirmedBy: "read_back")
         }
         if pull.state != "open" { return try fail(id, "not_merged", by: "read_back") }
-        if now().timeIntervalSince(started) >= MergeHandler.settleTime { return try fail(id, "not_merged", by: "read_back") }
+        // Still open: not merged only once two reads, both at least a minute after the unknown outcome was
+        // recorded (after the write was sent), show it open.
+        let since = journal.unknownAt(id) ?? now()
+        guard now().timeIntervalSince(since) >= MergeHandler.settleTime else { return .unknown }
+        let reads = openReads.withLock { reads -> Int in
+            reads[id, default: 0] += 1
+            return reads[id]!
+        }
+        if reads >= 2 { return try fail(id, "not_merged", by: "read_back") }
         return .unknown
     }
 
@@ -287,5 +323,21 @@ public enum GitHubSetup {
         if let github = settings.github { try vault.remove(try github.binding) }
         settings.github = nil
         try settings.save(url)
+    }
+}
+
+/// A value behind a lock.
+final class Locked<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func withLock<T>(_ body: (inout Value) throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&value)
     }
 }
