@@ -21,14 +21,15 @@ private struct MenuTitle: View {
     var body: some View {
         // An icon, not a title: a crowded menu bar (or the notch) hides wide items first.
         let pending = delegate.pendingCount
+        let unhealthy = delegate.health.unhealthy
         HStack(spacing: 2) {
             Image(systemName: MenuBarItem.symbol(pending: pending))
-            if let badge = MenuBarItem.badge(pending: pending) {
+            if let badge = MenuBarItem.badge(pending: pending, unhealthy: unhealthy) {
                 Text(badge).monospacedDigit()
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(MenuBarItem.accessibilityLabel(pending: pending))
+        .accessibilityLabel(MenuBarItem.accessibilityLabel(pending: pending, unhealthy: unhealthy))
     }
 }
 
@@ -47,6 +48,17 @@ private struct BeaconMenu: View {
         }
         Divider()
         Text(delegate.servicesStatus)
+        let health = delegate.health
+        Text(health.statusLine)
+        ForEach(health.failing) { source in
+            Text("\(source.name): \(source.reasonClass)")
+        }
+        ForEach(health.details, id: \.self) { Text($0) }
+        if health.repairKeychain {
+            Button("Run beacon keychain repair…") { delegate.openKeychainRepair() }
+                .disabled(!delegate.repairAvailable)
+        }
+        Divider()
         Text(delegate.approvals.status)
         Text(delegate.approvals.delivery)
         Button("Resume delivery") { delegate.approvals.resumeDelivery() }
@@ -63,7 +75,10 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var shortcut: ApprovalShortcut?
     private var services: TetherSession?
     @Published private(set) var pendingCount = 0
+    @Published private(set) var health = CollectorHealth(status: .unknown("Checking collector…"))
     let approvals = ApprovalService()
+    private let cli = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/beacon")
+    var repairAvailable: Bool { FileManager.default.isExecutableFile(atPath: cli.path) }
     private var stopping = false
     private var awaitingQuit = false
     private var countTimer: Timer?
@@ -163,6 +178,21 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private func updateCount() {
         approvals.desk?.refresh()
         pendingCount = approvals.desk?.pending.count ?? 0
+        let next = CollectorHealth.read()
+        if next != health { health = next }
+    }
+
+    /// Opens Terminal on a script that runs the bundled CLI's `keychain repair`, so the person answers its prompts.
+    func openKeychainRepair() {
+        guard !stopping, repairAvailable,
+              let dir = try? FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                                                     appropriateFor: FileManager.default.homeDirectoryForCurrentUser,
+                                                     create: true) else { return }
+        let script = dir.appendingPathComponent("beacon-keychain-repair.command")
+        guard FileManager.default.createFile(atPath: script.path, contents: Data(KeychainRepair.script(cli: cli.path).utf8),
+                                             attributes: [.posixPermissions: 0o700]) else { return }
+        let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
+        NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
     }
 
     private lazy var settingsWindow: NSWindow = {

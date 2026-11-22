@@ -112,6 +112,10 @@ type Pass struct {
 	Outcome string    `json:"outcome"`
 	Lease   string    `json:"lease,omitempty"`
 	Holder  string    `json:"holder,omitempty"`
+	// LeaseUntil is the held lease's local deadline. Older records did not store it.
+	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
+	LeaseReason string     `json:"lease_reason,omitempty"`
+	SendReason  string     `json:"send_reason,omitempty"`
 	// Failures is the streak of failed starts. It sets the backoff. A clean pass leaves it zero.
 	Failures int `json:"failures,omitempty"`
 	// Withheld are personal sources whose send items the pass did not send, because Signal does not restrict their
@@ -212,6 +216,14 @@ func validate(p Pass) error {
 	}
 	if p.Lease != LeaseHeld && p.Holder != "" {
 		return ErrPass
+	}
+	if p.LeaseUntil != nil && (p.Lease != LeaseHeld || p.LeaseUntil.IsZero()) {
+		return ErrPass
+	}
+	for _, reason := range []string{p.LeaseReason, p.SendReason} {
+		if reason != "" && !outcomePattern.MatchString(reason) {
+			return ErrPass
+		}
 	}
 	if p.Failures < 0 {
 		return ErrPass

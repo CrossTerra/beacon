@@ -112,7 +112,9 @@ beacon status [--coverage]
 ```
 
 Prints the last pass from `pass.json` (`last_pass`, `outcome`, `lease`, `holder`, and a `withheld:` line per personal
-source), as `beacon service status` does, without asking launchd. With the source loops, the last pass is the last
+source), as `beacon service status` does, without asking launchd. `pass.json` also records, for Beacon.app's menu,
+when a held lease runs out (`lease_until`), why a lease was not taken (`lease_reason`), and why sending stopped part
+way through an otherwise clean pass (`send_reason`: `unavailable` or `lease_expired`), all as fixed codes. With the source loops, the last pass is the last
 source's pass; a personal source's `withheld:` line stays until that source's next pass.
 
 `--coverage` adds each source's coverage from `coverage.json`, which a send loop writes after every source pass:
@@ -381,7 +383,8 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `heartbeat_failed` | Signal did not renew a source's heartbeat lease: the source and a reason (`lease_refused` with Signal's status and code, `unauthorized`, `unavailable`, `lease_expired`). Not a failure of the pass. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
-`egress_denied`, `outbox_locked`, `state_files`, `keychain`, `canceled`, `internal`, `rate_limited`,
+`egress_denied`, `outbox_locked`, `state_files`, `keychain`, `keychain_read_refused` (macOS denied, cancelled or
+could not show a keychain access prompt; `beacon keychain repair` fixes it), `canceled`, `internal`, `rate_limited`,
 `source_unauthorized`, `scope_denied`, `identity_mismatch`, `signing_mismatch`, `item_invalid`, `project_failed`,
 `prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`, `names_scope`, `names_failed`, `body_needs_seal`,
 `sensitive_shared`. A source that was not collected is also printed by

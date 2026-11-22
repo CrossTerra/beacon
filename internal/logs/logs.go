@@ -88,6 +88,7 @@ const (
 	ReasonLocked       Reason = "outbox_locked"
 	ReasonState        Reason = "state_files"
 	ReasonKeychain     Reason = "keychain"
+	ReasonKeychainRead Reason = "keychain_read_refused"
 	ReasonCanceled     Reason = "canceled"
 	ReasonInternal     Reason = "internal"
 	ReasonRateLimit    Reason = "rate_limited"

@@ -175,13 +175,20 @@ func status(op string, s C.OSStatus) error {
 	}
 }
 
+func readStatus(s C.OSStatus) error {
+	if readRefused(int(s)) {
+		return ErrReadRefused
+	}
+	return status("read", s)
+}
+
 // Get implements Store.
 func (System) Get(account string) (Secret, error) {
 	svc, acct := C.CString(Service), C.CString(account)
 	defer C.free(unsafe.Pointer(svc))
 	defer C.free(unsafe.Pointer(acct))
 	var data C.CFDataRef
-	if err := status("read", C.beacon_get(svc, acct, &data)); err != nil {
+	if err := readStatus(C.beacon_get(svc, acct, &data)); err != nil {
 		return Secret{}, err
 	}
 	defer C.CFRelease(C.CFTypeRef(data))
