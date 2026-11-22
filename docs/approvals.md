@@ -51,6 +51,7 @@ it is closed with `frame_too_large`, which frees its wait.
 | `get` | `id` | `{ id, status, version }` |
 | `wait` | `id`, `after`, `timeout` (1 to 300 seconds) | the same, once `version` is past `after` or the timeout ends |
 | `withdraw` | `id` | the same, while pending; otherwise `not_pending` |
+| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for the bundled CLI (`scripts/install.sh`), and never from a run Beacon launched |
 
 The proposals live in the [journal](#the-journal-and-the-outbox). There is no operation to approve, list proposals, read history or see runners. `get`, `wait` and `withdraw` answer
 only the client identity that made the proposal, and the same run: a connection from a process in the process group

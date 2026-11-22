@@ -246,6 +246,39 @@ struct ProposalServerTests {
         #expect(reopened.proposal(fromRun.id, at: t)?.runner == "run_01m7x1v080ec1r60r30c1g60r3")
     }
 
+    /// `quit` answers only the client the app names, and only once the app has set what quitting does.
+    @Test func quitIsForTheNamedClientOnly() throws {
+        let h = try Harness()
+        let client = try h.connect()
+        #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
+        let asked = NSLock()
+        nonisolated(unsafe) var quits = 0
+        h.server.quit = (client: "someone-else", action: { asked.withLock { quits += 1 } })
+        #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
+        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        #expect(client.call(.object(["op": "quit", "now": .bool(true)]))?["error"] == "invalid")
+        #expect(asked.withLock { quits } == 0)
+        #expect(client.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
+        #expect(asked.withLock { quits } == 1)
+    }
+
+    /// A run Beacon launched connects with the same CLI, but cannot quit the app that supervises it. The install
+    /// script can, also while recovery has not yet attributed its peers.
+    @Test func aRunCannotQuitTheApp() throws {
+        let attribution = RunAttribution()
+        let h = try Harness(attribution: attribution)
+        let asked = NSLock()
+        nonisolated(unsafe) var quits = 0
+        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        let beforeSweep = try h.connect()
+        #expect(beforeSweep.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
+        #expect(attribution.completeSweep())
+        attribution.add(leader: getpgrp(), runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        let run = try h.connect()
+        #expect(run.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
+        #expect(asked.withLock { quits } == 1)
+    }
+
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {
         let h = try Harness(clients: [AdmittedClient(name: "other", requirement: "identifier \"dev.beacon.nobody\"")])
         let client = try h.connect()

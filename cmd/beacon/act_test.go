@@ -138,3 +138,19 @@ func TestActRefusesBadInputWithoutConnecting(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, h.stderr.String())
 	}
 }
+
+func TestActQuitSendsTheOneOp(t *testing.T) {
+	f, a, h := newFakeApp(t, selfRequirement(t), `{"status":"quitting"}`)
+	if code := a.main(context.Background(), []string{"act", "quit"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if got := strings.TrimSpace(string(<-f.received)); got != `{"op":"quit"}` {
+		t.Fatalf("sent %s", got)
+	}
+	if strings.TrimSpace(h.stdout.String()) != `{"status":"quitting"}` {
+		t.Fatalf("stdout %q", h.stdout.String())
+	}
+	if code := a.main(context.Background(), []string{"act", "quit", "now"}); code != 2 {
+		t.Fatalf("an argument was accepted: %d", code)
+	}
+}

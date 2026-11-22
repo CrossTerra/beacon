@@ -1422,11 +1422,29 @@ func TestKeychainRepair(t *testing.T) {
 	}
 }
 
+// keychain list prints the accounts, never a value, and reads none.
+func TestKeychainList(t *testing.T) {
+	store := keychain.NewMemory()
+	store.Put("source:github", "gho_listsecret")
+	store.Put("signal:signal.example.com:443", "sig_listsecret")
+	var out, errOut bytes.Buffer
+	a := &app{stdout: &out, stderr: &errOut, now: time.Now, keychain: func() (keychain.Store, error) { return store, nil }}
+	if code := a.main(context.Background(), []string{"keychain", "list"}); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if out.String() != "signal:signal.example.com:443\nsource:github\n" || strings.Contains(out.String(), "listsecret") {
+		t.Fatalf("stdout %q", out.String())
+	}
+	if store.Reads() != 0 {
+		t.Fatalf("list read %d values", store.Reads())
+	}
+}
+
 // A build the keychain refuses (an ad-hoc one) repairs nothing and says why.
 func TestKeychainRepairAdHoc(t *testing.T) {
 	var out, errOut bytes.Buffer
 	a := &app{stdout: &out, stderr: &errOut, now: time.Now, keychain: func() (keychain.Store, error) { return nil, keychain.ErrAdHocBuild }}
-	if code := a.main(context.Background(), []string{"keychain", "repair"}); code != 1 || !strings.Contains(errOut.String(), "scripts/build-local.sh") {
+	if code := a.main(context.Background(), []string{"keychain", "repair"}); code != 1 || !strings.Contains(errOut.String(), "scripts/install.sh") {
 		t.Fatalf("exit %d: %s", code, errOut.String())
 	}
 }
