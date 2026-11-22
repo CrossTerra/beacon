@@ -154,6 +154,17 @@ commands, paths, secrets or item content.
     the next one before it starts anything. The [limits](tether.md#limits) say what can still escape. Services
     run as the person: supervision is not isolation.
 
+13. **Proposals arrive only over the authenticated local socket.** Beacon.app's proposal socket and `beacon act`
+    each check the other end with the kernel's audit token before sending anything. The app admits only the code
+    requirements configured at setup; the client sends only to the configured app's signature. The socket has no
+    operation that approves, lists or reads history. Its frames, waits and pending proposals are bounded
+    ([approvals](approvals.md)). The app does not open it yet.
+14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
+    holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
+    reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
+    that binding. Nothing lists or prints a secret or passes one to a child process. No path uses the vault yet,
+    and the tests use only fixture keys and fixture secrets.
+
 ## Known limits
 
 - **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in

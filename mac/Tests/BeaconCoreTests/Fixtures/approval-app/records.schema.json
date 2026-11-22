@@ -1,0 +1,3459 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Beacon app record, version 1",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.proposed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "proposer": {
+              "type": "object",
+              "properties": {
+                "agent": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "session": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "verified": {
+                  "type": "boolean"
+                },
+                "runner_id": {
+                  "type": "string",
+                  "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                }
+              },
+              "required": [
+                "agent",
+                "verified"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "params_hash",
+            "expires_at",
+            "proposer"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "repo": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                    },
+                    "number": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "base": {
+                      "type": "string",
+                      "pattern": "^[\\x21-\\x7e]{1,255}$"
+                    },
+                    "head": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "merge",
+                        "squash",
+                        "rebase"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "repo",
+                    "number",
+                    "base",
+                    "head",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "preflight": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.approved"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "approved_params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "edited": {
+              "maxItems": 0,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "const": "model"
+              }
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_params_hash",
+            "approved_hash",
+            "edited"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "repo": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.-]{1,100}\\/[A-Za-z0-9_.-]{1,100}$"
+                    },
+                    "number": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "base": {
+                      "type": "string",
+                      "pattern": "^[\\x21-\\x7e]{1,255}$"
+                    },
+                    "head": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    },
+                    "method": {
+                      "type": "string",
+                      "enum": [
+                        "merge",
+                        "squash",
+                        "rebase"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "repo",
+                    "number",
+                    "base",
+                    "head",
+                    "method"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "origin": {
+                  "type": "string",
+                  "pattern": "^https:\\/\\/[a-z0-9.-]{1,253}(:[0-9]{1,5})?$"
+                },
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "destination": {
+                  "type": "object",
+                  "properties": {
+                    "repository_id": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "pr": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "base": {
+                      "type": "string",
+                      "pattern": "^[\\x21-\\x7e]{1,255}$"
+                    }
+                  },
+                  "required": [
+                    "repository_id",
+                    "pr",
+                    "base"
+                  ],
+                  "additionalProperties": false
+                },
+                "original_model": {
+                  "not": {}
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "origin",
+                "account",
+                "destination"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.declined"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.withdrawn"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.expired"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.started"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_hash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.outcome_unknown"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.executed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back"
+              ]
+            },
+            "native": {
+              "type": "string",
+              "pattern": "^github:merge:[0-9a-f]{40}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "native"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.failed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "github.merge"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back",
+                "pre_dispatch"
+              ]
+            },
+            "error": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.proposed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "proposer": {
+              "type": "object",
+              "properties": {
+                "agent": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "session": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "verified": {
+                  "type": "boolean"
+                },
+                "runner_id": {
+                  "type": "string",
+                  "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                }
+              },
+              "required": [
+                "agent",
+                "verified"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "params_hash",
+            "expires_at",
+            "proposer"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "workspace": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "thread_ts": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,16}\\.[0-9]{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                    }
+                  },
+                  "required": [
+                    "workspace",
+                    "channel",
+                    "thread_ts",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "preflight": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.approved"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "approved_params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "edited": {
+              "maxItems": 0,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "const": "model"
+              }
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_params_hash",
+            "approved_hash",
+            "edited"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "workspace": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "thread_ts": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,16}\\.[0-9]{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "text": {
+                      "type": "string",
+                      "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                    }
+                  },
+                  "required": [
+                    "workspace",
+                    "channel",
+                    "thread_ts",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "origin": {
+                  "type": "string",
+                  "pattern": "^https:\\/\\/[a-z0-9.-]{1,253}(:[0-9]{1,5})?$"
+                },
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "destination": {
+                  "type": "object",
+                  "properties": {
+                    "workspace": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "channel": {
+                      "type": "string",
+                      "pattern": "^[A-Z0-9]{1,32}$"
+                    },
+                    "thread_ts": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]{1,16}\\.[0-9]{6}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "workspace",
+                    "channel",
+                    "thread_ts"
+                  ],
+                  "additionalProperties": false
+                },
+                "original_model": {
+                  "not": {}
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "origin",
+                "account",
+                "destination"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.declined"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.withdrawn"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.expired"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.started"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_hash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.outcome_unknown"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.executed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back"
+              ]
+            },
+            "native": {
+              "type": "string",
+              "pattern": "^slack:msg:[A-Z0-9]{1,32}\\/[A-Z0-9]{1,32}\\/[0-9]{1,16}\\.[0-9]{6}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "native"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.failed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "slack.post"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back",
+                "pre_dispatch"
+              ]
+            },
+            "error": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.proposed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "expires_at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "proposer": {
+              "type": "object",
+              "properties": {
+                "agent": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "session": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "verified": {
+                  "type": "boolean"
+                },
+                "runner_id": {
+                  "type": "string",
+                  "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+                }
+              },
+              "required": [
+                "agent",
+                "verified"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id",
+            "params_hash",
+            "expires_at",
+            "proposer"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "checkout": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+                    },
+                    "prompt": {
+                      "type": "string",
+                      "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                    },
+                    "model": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:@-]{1,80}\\/[A-Za-z0-9_.:@/-]{1,120}$"
+                    }
+                  },
+                  "required": [
+                    "checkout",
+                    "prompt",
+                    "model"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "preflight": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.approved"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "approved_params_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "edited": {
+              "maxItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "const": "model"
+              }
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_params_hash",
+            "approved_hash",
+            "edited"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "params": {
+                  "type": "object",
+                  "properties": {
+                    "checkout": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+                    },
+                    "prompt": {
+                      "type": "string",
+                      "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                    },
+                    "model": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:@-]{1,80}\\/[A-Za-z0-9_.:@/-]{1,120}$"
+                    }
+                  },
+                  "required": [
+                    "checkout",
+                    "prompt",
+                    "model"
+                  ],
+                  "additionalProperties": false
+                },
+                "salt": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{32,128}$"
+                },
+                "origin": {
+                  "type": "null"
+                },
+                "account": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                },
+                "destination": {
+                  "type": "object",
+                  "properties": {
+                    "checkout_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_.:@/-]{1,200}$"
+                    },
+                    "branch": {
+                      "type": "string",
+                      "pattern": "^[\\x21-\\x7e]{1,255}$"
+                    }
+                  },
+                  "required": [
+                    "checkout_id",
+                    "branch"
+                  ],
+                  "additionalProperties": false
+                },
+                "original_model": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:@-]{1,80}\\/[A-Za-z0-9_.:@/-]{1,120}$"
+                }
+              },
+              "required": [
+                "params",
+                "salt",
+                "origin",
+                "account",
+                "destination"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.declined"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.withdrawn"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.expired"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "note": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "required": [
+                "note"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.started"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "approved_hash": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "approved_hash"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.outcome_unknown"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "reason": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.executed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back"
+              ]
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "runner_id"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.action.failed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "confirmed_by": {
+              "type": "string",
+              "enum": [
+                "reply",
+                "read_back",
+                "pre_dispatch"
+              ]
+            },
+            "error": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "confirmed_by",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "evidence": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                },
+                "result": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,4000}$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.working"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.waiting"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "from": {
+              "type": "string",
+              "const": "runner"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id",
+            "from"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "question": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                }
+              },
+              "required": [
+                "question"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.stalled"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "from": {
+              "type": "string",
+              "const": "runner"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id",
+            "from"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "last_output": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                }
+              },
+              "required": [
+                "last_output"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.finished"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "from": {
+              "type": "string",
+              "const": "runner"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id",
+            "from"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "report": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                }
+              },
+              "required": [
+                "report"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata",
+        "sealed"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.failed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "from": {
+              "type": "string",
+              "const": "runner"
+            },
+            "error": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id",
+            "from",
+            "error"
+          ],
+          "additionalProperties": false
+        },
+        "sealed": {
+          "type": "object",
+          "properties": {
+            "level": {
+              "type": "string",
+              "const": "owner+agents"
+            },
+            "replay_nonce": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
+            },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "detail": {
+                  "type": "string",
+                  "pattern": "^[^\\uD800-\\uDFFF]{1,32000}$"
+                }
+              },
+              "required": [
+                "detail"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "level",
+            "replay_nonce",
+            "metadata"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "number",
+          "const": 1
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^beacon:jrn_[0-7][0-9a-hjkmnp-tv-z]{25}:[1-9][0-9]{0,17}$"
+        },
+        "type": {
+          "type": "string",
+          "const": "app.runner.closed"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,200}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        },
+        "metadata": {
+          "type": "object",
+          "properties": {
+            "proposal": {
+              "type": "string",
+              "pattern": "^apr_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "person": {
+              "type": "string",
+              "pattern": "^act_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            },
+            "action": {
+              "type": "string",
+              "const": "agent.run"
+            },
+            "runner_id": {
+              "type": "string",
+              "pattern": "^run_[0-7][0-9a-hjkmnp-tv-z]{25}$"
+            }
+          },
+          "required": [
+            "proposal",
+            "person",
+            "action",
+            "runner_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "version",
+        "key",
+        "type",
+        "subject",
+        "occurred_at",
+        "metadata"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

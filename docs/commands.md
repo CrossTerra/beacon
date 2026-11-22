@@ -303,6 +303,27 @@ pass record that is not in that fixed set. For the app-supervised collector's la
 
 Uninstall and legacy job status are only available on macOS.
 
+## `beacon act`
+
+```bash
+beacon act types
+beacon act propose < REQUEST.json
+beacon act get ID
+beacon act wait ID [--after VERSION] [--timeout SECONDS]
+beacon act withdraw ID
+```
+
+The client for Beacon.app's proposal socket ([approvals](approvals.md)). `propose` reads one JSON object from
+standard input, `{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
+Each command sends one request and prints the app's one-line JSON reply. A reply with `error` exits 1. `wait`
+defaults to `--after 0 --timeout 300`. There is no command to approve or list.
+
+It reads the app's code requirement from `~/Library/Application Support/beacon/act.json`,
+`{ "requirement": "…" }`. Before sending a byte, it checks the socket's listener against that requirement using
+the kernel's audit token. A listener with another signature, or run by another user, receives nothing. It takes
+no `--config` and reads no credential. The app does not open the socket yet; until it does, `beacon act` reports
+that Beacon.app is not running.
+
 ## `beacon keychain repair`
 
 Re-creates every keychain item under the service `beacon`, so each one has the access a new item gets from the

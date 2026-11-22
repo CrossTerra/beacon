@@ -97,7 +97,8 @@ and a state snapshot when the coverage changes ([events](events.md#coverage)).
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
 | `internal/service` | The last-pass record and the retired LaunchAgent's status and log rotation. It does not read a credential and it does not send. |
-| `mac` | The menu-bar app and [tether](tether.md), the helper that runs the collector while the app is open and stops it on Quit or when the app dies. |
+| `mac` | The menu-bar app and [tether](tether.md), the helper that runs the collector while the app is open and stops it on Quit or when the app dies. `BeaconCore` holds the [approval](approvals.md) contract with Signal (canonical JSON, hashes, ids, action schemas), the proposal socket and the vault. `BeaconSecurity` checks a socket peer's code signature and holds the vault key. |
+| `internal/peer` | `beacon act`'s check of the proposal socket's listener: the kernel audit token, this user, the configured code requirement. |
 
 Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
 `internal/egress/egresstest` (a transport that fails the test on any host not on the egress list),
