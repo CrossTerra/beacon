@@ -37,3 +37,6 @@ jobs:
       - name: Stage the unsigned Beacon.app
         if: runner.os == 'macOS'
         run: scripts/build-app.sh "$GITHUB_SHA"
+      - name: Install Beacon.app into a temporary prefix (dry run, ad-hoc signed)
+        if: runner.os == 'macOS'
+        run: bash scripts/test-install.sh

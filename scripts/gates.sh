@@ -15,6 +15,12 @@ echo "go vet: ok"
 staticcheck ./...
 echo "staticcheck: ok"
 go test -race -count=1 ./...
-bash -n scripts/build-local.sh
-bash scripts/test-audited-build.sh
+bash -n scripts/install.sh
+bash scripts/test-checkout.sh
+if command -v shellcheck >/dev/null; then
+	shellcheck scripts/*.sh
+	echo "shellcheck: ok"
+else
+	echo "shellcheck: not installed here; CI runs it on Linux"
+fi
 scripts/repro.sh
