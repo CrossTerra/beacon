@@ -118,6 +118,12 @@ anything. If they are still there 5 seconds after the SIGKILL, it gives up and s
 **Services stopped without confirmation**. A lock (`tether.lock` in the same directory) allows one session at a time. A second app gets
 **Another Beacon session is running** and starts nothing.
 
+The ready signal follows the marker sweep, even when the old LaunchAgent prevents starting the collector. After an
+unconfirmed stop, Beacon keeps the known run groups until that signal and a kernel check confirm the groups are
+gone. It does not approve a new run or let an unattributed socket peer act as a proposal owner while recovery is
+unconfirmed. The app rechecks group existence without sending a signal if a known group is still present. A
+session opened at Quit only to sweep closes the old runs once their groups are gone, but never enables approval.
+
 Quit also expires every approval that was not durably started. Recovery applies the same rule to approvals
 already recorded. The journal connects that rule to stored proposals in a later pull request.
 

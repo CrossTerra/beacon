@@ -53,7 +53,8 @@ public struct NoResolver: ActionResolver {
 /// The approval window's one state owner (13.00-D3, D29). Approve is enabled only while `frozen` holds a
 /// snapshot of the selected, pending proposal at its current version, with the resolved account, origin and
 /// destination. The control carries that snapshot's token. A selection change, model change, _Read again_,
-/// withdrawal, expiry or Quit clears the snapshot first, so input bound to the old view finds nothing to approve.
+/// withdrawal, expiry, loss of the run supervisor or Quit clears the affected snapshot first, so input bound to the
+/// old view finds nothing to approve.
 /// Approving consumes the snapshot before the journal commits, so a second click or a repeated key does nothing,
 /// and the selection never moves to another row by itself.
 @MainActor
@@ -80,14 +81,17 @@ public final class ApprovalDesk: ObservableObject {
     public var claim: ((FrozenApproval) -> String?)?
     public var release: ((String) -> Void)?
     private let resolver: any ActionResolver
+    private let runServicesReady: () -> Bool
     private let now: @Sendable () -> Date
     private var generation = 0
     /// The resolve in flight, for tests.
     public private(set) var freezing: Task<Void, Never>?
 
-    public init(journal: Journal, resolver: any ActionResolver, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(journal: Journal, resolver: any ActionResolver, runServicesReady: @escaping () -> Bool = { true },
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.journal = journal
         self.resolver = resolver
+        self.runServicesReady = runServicesReady
         self.now = now
         journal.observe { [weak self] _ in
             Task { @MainActor [weak self] in self?.refresh() }
@@ -127,13 +131,24 @@ public final class ApprovalDesk: ObservableObject {
     /// _Read again_: drop the snapshot and resolve afresh.
     public func readAgain() {
         invalidate()
+        problem = nil
         freeze()
+    }
+
+    /// A pending run cannot use a snapshot from a session that ended. Resolve it afresh once the new session is ready.
+    public func runAvailabilityChanged() {
+        guard !stopping, selected?.type == .agentRun else { return }
+        readAgain()
     }
 
     /// Approves the snapshot `token` names, once. False when it is no longer the current snapshot.
     @discardableResult
     public func approve(_ token: UUID) -> Bool {
         guard !stopping, let frozen, frozen.token == token, frozen.approval.id == selection else { return false }
+        if frozen.approval.type == .agentRun && !runServicesReady() {
+            runAvailabilityChanged()
+            return false
+        }
         invalidate()
         if let refusal = claim?(frozen.approval) {
             problem = refusal
@@ -186,6 +201,10 @@ public final class ApprovalDesk: ObservableObject {
 
     private func freeze() {
         guard !stopping, let proposal = selected, proposal.status == .pending else { return }
+        if proposal.type == .agentRun && !runServicesReady() {
+            problem = RunRefusal.runServicesProblem
+            return
+        }
         let generation = self.generation
         let model = self.model
         let resolver = self.resolver
@@ -206,7 +225,7 @@ public final class ApprovalDesk: ObservableObject {
                 self.problem = "Not approvable: checks \(refusal.report.summary)."
             } catch RunRefusal.supervisorNotReady {
                 guard let self, generation == self.generation else { return }
-                self.problem = "Not approvable yet: Beacon's services are starting. It stays pending; this updates once they run."
+                self.problem = RunRefusal.runServicesProblem
             } catch let refusal as RunRefusal {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."

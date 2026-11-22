@@ -62,6 +62,11 @@ sent to Signal. A self-reported agent name or session is recorded as such (`veri
 run is recorded with `verified: true` and the run's `runner_id` in `proposer`, and the window shows which run it came
 from.
 
+Before the startup sweep and after an unconfirmed tether stop, Beacon keeps any known run assignments, but a peer
+it cannot attribute to a run cannot `propose`, `get`, `wait` or `withdraw`. It gets `busy`, including for waits
+already in flight; `types` is still available. After the sweep and the check that the old run groups are gone,
+external clients must reconnect. A connection that was not cleared does not gain access by staying open.
+
 **Limits.** At most 32 connections, 16 concurrent waits, 20 pending proposals per client identity, 40 pending in
 all and 60 proposals per identity per hour. Past a limit the reply is `busy`. An incomplete frame is dropped with
 its connection after 10 seconds, and an idle connection after 60. Errors are `{ error }`, or
@@ -292,9 +297,10 @@ proposed model; the model is the one field the person may change (D7), recorded 
 original. It says when the checkout has its own `bin/run`: Beacon runs bare opencode without it, as Bosun's plain
 mode does. The account is the macOS user (`macos:user:{name}`) and the origin `null`.
 
-**Only while tether is up.** Until tether reports its session ready (at launch it first stops whatever a crashed
-session left), a run cannot be approved: the window says Beacon's services are starting, the proposal stays pending,
-and it is resolved again once they run. Nothing is consumed or recorded as failed meanwhile.
+**Only while tether is ready.** Before the startup sweep or if tether stops, Approve is disabled for runs. The desk
+drops any run snapshot, rejects clicks or keystrokes bound to it, and shows that the supervisor is not ready. The
+proposal stays pending; nothing is consumed or recorded as failed. Once the new session has swept and the old run
+groups are gone, the desk resolves the selected run again. Merge snapshots do not depend on tether.
 
 **Approval claims the checkout.** One run per checkout, under any of its names; runs in different checkouts run in
 parallel. Approving a proposal for a busy checkout is refused with the reason, and it stays pending until approved
@@ -324,8 +330,9 @@ otherwise). With no answer (tether ended), the outcome is unknown until the next
 process group from the kernel's audit token for the connection; one that is the group of a run it launched (tether
 keeps each run's leader unreaped until the whole group is gone, so that group id cannot name another) makes the
 proposal that run's: `verified: true` with its `runner_id` in the record, "from run …" in the window, and readable
-only by the same run. A process that left the run's group is treated as anyone else. Approving a run's proposal is a
-separate approval (D22).
+only by the same run. Beacon keeps that assignment after an unconfirmed stop until the next session's sweep and a
+kernel check confirm the old groups are gone. A process outside a known group is treated as an ordinary client only
+outside recovery. Approving a run's proposal is a separate approval (D22).
 
 **`--auto`.** Nobody is at a terminal to answer a permission prompt, so every run passes `--auto`: opencode approves
 any permission the checkout's opencode configuration does not explicitly deny, and cancels questions. The person

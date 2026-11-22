@@ -49,12 +49,7 @@ public final class ProposalServer: @unchecked Sendable {
     private let book: ProposalBook
     private let enabledLock = NSLock()
     private var enabledTypes: [ActionType]
-    /// Which live run, if any, a connecting process belongs to (by its process group); set by the app.
-    public var runnerOf: (@Sendable (pid_t) -> String?)? {
-        get { enabledLock.withLock { attribute } }
-        set { enabledLock.withLock { attribute = newValue } }
-    }
-    private var attribute: (@Sendable (pid_t) -> String?)?
+    private let attribution: RunAttribution?
     /// The types `types` lists and `propose` accepts. The app changes it when an account is added or removed.
     public var enabled: [ActionType] {
         get { enabledLock.withLock { enabledTypes } }
@@ -72,12 +67,14 @@ public final class ProposalServer: @unchecked Sendable {
     private var proposed: [String: [Date]] = [:]
 
     public init(path: String, clients: [AdmittedClient], book: ProposalBook, enabled: [ActionType],
-                limits: ServerLimits = ServerLimits(), now: @escaping @Sendable () -> Date = { Date() },
+                attribution: RunAttribution? = nil, limits: ServerLimits = ServerLimits(),
+                now: @escaping @Sendable () -> Date = { Date() },
                 queue: DispatchQueue = DispatchQueue(label: "dev.beacon.proposals")) {
         self.path = path
         self.clients = clients
         self.book = book
         enabledTypes = enabled
+        self.attribution = attribution
         self.limits = limits
         self.now = now
         self.queue = queue
@@ -172,8 +169,8 @@ public final class ProposalServer: @unchecked Sendable {
                 close(fd)
                 continue
             }
-            let connection = Connection(fd: fd, client: client, pid: pid, executable: executable,
-                                        runner: runnerOf?(pid), queue: queue, now: now)
+            let peer = attribution?.peer(of: pid) ?? .external(0)
+            let connection = Connection(fd: fd, client: client, executable: executable, peer: peer, queue: queue, now: now)
             connection.onFrame = { [weak self, weak connection] frame in
                 guard let self, let connection else { return }
                 self.handle(frame, on: connection)
@@ -212,10 +209,12 @@ public final class ProposalServer: @unchecked Sendable {
     private func tick() {
         let date = now()
         for connection in Array(connections.values) {
-            if let wait = connection.wait, date >= wait.deadline {
-                connection.wait = nil
-                if let proposal = book.proposal(wait.id, at: date) { connection.reply(status(proposal)) }
-                connection.resume()
+            if let wait = connection.wait {
+                if !canAccessProposals(connection) {
+                    finishWait(on: connection, with: Self.error("busy"))
+                } else if date >= wait.deadline {
+                    finishWait(on: connection, with: book.proposal(wait.id, at: date).map(status))
+                }
             } else if connection.expired(at: date, frame: limits.frameTimeout, idle: limits.idleTimeout) {
                 connection.close()
             }
@@ -225,12 +224,23 @@ public final class ProposalServer: @unchecked Sendable {
     private func answerWaits(for id: String) {
         let date = now()
         for connection in connections.values {
-            guard let wait = connection.wait, wait.id == id, let proposal = book.proposal(id, at: date),
-                  proposal.version > wait.after else { continue }
-            connection.wait = nil
-            connection.reply(status(proposal))
-            connection.resume()
+            guard let wait = connection.wait, wait.id == id else { continue }
+            if !canAccessProposals(connection) {
+                finishWait(on: connection, with: Self.error("busy"))
+            } else if let proposal = book.proposal(id, at: date), proposal.version > wait.after {
+                finishWait(on: connection, with: status(proposal))
+            }
         }
+    }
+
+    private func finishWait(on connection: Connection, with reply: JSON?) {
+        connection.wait = nil
+        if let reply { connection.reply(reply) }
+        connection.resume()
+    }
+
+    private func canAccessProposals(_ connection: Connection) -> Bool {
+        attribution?.canAccessProposals(connection.peer) ?? true
     }
 
     private func handle(_ frame: Data, on connection: Connection) {
@@ -270,6 +280,7 @@ public final class ProposalServer: @unchecked Sendable {
     }
 
     private func propose(_ request: [String: JSON], on connection: Connection, at date: Date) {
+        guard canAccessProposals(connection) else { return connection.reply(Self.error("busy")) }
         let parsed: ProposalRequest
         do {
             parsed = try ProposalRequest(request)
@@ -288,7 +299,7 @@ public final class ProposalServer: @unchecked Sendable {
             return connection.reply(ProposalServer.error("busy"))
         }
         let proposal = Proposal(request: parsed, client: client, at: date, clientPath: connection.executable,
-                                clientRequirement: connection.client.requirement, runner: connection.runner)
+                                clientRequirement: connection.client.requirement, runner: connection.peer.runner)
         do {
             try book.add(proposal)
         } catch {
@@ -321,6 +332,10 @@ public final class ProposalServer: @unchecked Sendable {
     /// The proposal named by `id`, only if this connection's client identity proposed it. Any other id reads
     /// as not found, so one client cannot learn another's ids.
     private func owned(_ request: [String: JSON], keys: Set<String>, by connection: Connection, at date: Date) -> Proposal? {
+        guard canAccessProposals(connection) else {
+            connection.reply(Self.error("busy"))
+            return nil
+        }
         if let extra = request.keys.first(where: { !keys.contains($0) }) {
             connection.reply(ProposalServer.invalid("/" + extra))
             return nil
@@ -331,7 +346,7 @@ public final class ProposalServer: @unchecked Sendable {
         }
         // Ownership is the client and the run: Bosun cannot read a run's proposals, nor a run Bosun's or another run's.
         guard let proposal = book.proposal(id, at: date), proposal.client == connection.client.name,
-              proposal.runner == connection.runner else {
+              proposal.runner == connection.peer.runner else {
             connection.reply(ProposalServer.error("not_found"))
             return nil
         }
@@ -362,11 +377,10 @@ final class Connection {
 
     let fd: Int32
     let client: AdmittedClient
-    let pid: pid_t
     /// The executable the kernel's code reference for the peer names.
     let executable: String?
-    /// The run Beacon launched that this peer belongs to, found when it connected; nil otherwise.
-    let runner: String?
+    /// The peer's run or external identity, assigned when it connected. Unknown peers may only call `types`.
+    let peer: RunAttribution.Peer
     var onFrame: ((Data) -> Void)?
     var onClose: (() -> Void)?
     var wait: Wait?
@@ -380,13 +394,12 @@ final class Connection {
     private var closed = false
     private var limit = 0
 
-    init(fd: Int32, client: AdmittedClient, pid: pid_t, executable: String?, runner: String? = nil,
+    init(fd: Int32, client: AdmittedClient, executable: String?, peer: RunAttribution.Peer,
          queue: DispatchQueue, now: @escaping () -> Date) {
         self.fd = fd
         self.client = client
-        self.pid = pid
         self.executable = executable
-        self.runner = runner
+        self.peer = peer
         self.now = now
         lastActive = now()
         source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)

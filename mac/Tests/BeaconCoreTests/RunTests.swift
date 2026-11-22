@@ -181,8 +181,8 @@ final class RunHarness {
                     duringRefresh?()
                     return models ?? OpencodeModels.list(opencode: opencode, environment: environment, timeout: 20) }))
         holder = self
-        handler.launcher = launcher
         launcher.handler = handler
+        handler.servicesReady(launcher)
     }
 
     func propose(_ prompt: String, checkout: String = "signal", model: String = "anthropic/claude-opus-5") throws -> String {
@@ -431,7 +431,7 @@ struct RunTests {
         let late = RunHandler(journal: h.journal, checkouts: { h.checkouts },
                               runs: h.root.appendingPathComponent("runs"), account: "macos:user:winton",
                               tools: .init(environment: { [env = h.environment] in env }, models: { _, _ in ["openai/gpt-6"] }))
-        late.launcher = h.launcher
+        late.servicesReady(h.launcher)
         try await late.execute(id)
         #expect(h.journal.outcome(id)?["error"] == "model_unavailable")
         #expect(h.launcher.pids.isEmpty)
@@ -470,17 +470,20 @@ struct RunTests {
     }
 
     /// tether ending while a run works: it failed (`supervisor_ended`), then closed once tether confirmed; without
-    /// confirmation it is not closed, and the session's claims and running set end either way.
+    /// confirmation it is not closed. A confirmed stop leaves no run ownership to recover.
     @Test func tetherEndingWhileARunWorks() async throws {
         for verified in [true, false] {
             let h = try RunHarness()
             let id = try await h.run("hang")
             try await h.until("the run to start") { h.handler.isRunning(id) }
+            let runner = try #require(h.journal.runnerID(id))
+            let pid = try #require(h.launcher.pids[runner])
             h.handler.servicesStopped(verified: verified)
             #expect(h.journal.runnerWords(id)?["error"] == "supervisor_ended")
             #expect(h.journal.runnerState(id) == (verified ? "runner_closed" : "runner_failed"))
             #expect(!h.handler.isRunning(id))
-            #expect(try await h.approve(try h.propose("succeed")) == nil, "the claim ended with the session")
+            #expect(!h.handler.isReady)
+            #expect(h.handler.attribution.peer(of: pid).runner == (verified ? nil : runner))
             h.launcher.stopAll()
         }
     }
@@ -489,12 +492,44 @@ struct RunTests {
     /// reason, and nothing is consumed or recorded as failed.
     @Test func noApprovalBeforeTetherIsUp() async throws {
         let h = try RunHarness()
-        h.handler.launcher = nil
+        h.handler.servicesStopped(verified: true)
         let id = try h.propose("succeed")
         await #expect(throws: RunRefusal.supervisorNotReady) { try await h.approve(id) }
         #expect(h.journal.proposal(id, at: Date())?.status == .pending)
-        h.handler.launcher = h.launcher
+        h.handler.servicesReady(h.launcher)
         #expect(try await h.approve(id) == nil)
+    }
+
+    @Test func tetherStoppingDiscardsTheFrozenRunAndReadyResolvesItAgain() async throws {
+        let h = try RunHarness(models: ["anthropic/claude-opus-5", "openai/gpt-6"])
+        let desk = ApprovalDesk(journal: h.journal, resolver: h.handler, runServicesReady: { h.handler.isReady })
+        h.handler.onAvailabilityChanged = { [weak desk] in desk?.runAvailabilityChanged() }
+        desk.claim = { h.handler.claim($0) }
+        var approved: [String] = []
+        desk.onApproved = { approved.append($0) }
+        let id = try h.propose("succeed")
+        desk.select(id)
+        await desk.freezing?.value
+        let original = try #require(desk.frozen)
+
+        h.handler.servicesStopped(verified: false)
+        #expect(desk.frozen == nil)
+        #expect(desk.problem?.contains("supervisor is not ready") == true)
+        #expect(!desk.approve(original.token))
+        desk.readAgain()
+        desk.choose(model: "openai/gpt-6")
+        #expect(desk.freezing == nil && desk.frozen == nil)
+        #expect(desk.pending.map(\.id) == [id])
+        #expect(h.journal.proposal(id, at: Date())?.status == .pending && approved.isEmpty)
+        #expect(try h.records(id).map { $0["type"] } == ["app.action.proposed"])
+
+        h.handler.servicesReady(h.launcher)
+        await desk.freezing?.value
+        let refreshed = try #require(desk.frozen)
+        #expect(refreshed.approval.params["model"] == "openai/gpt-6")
+        #expect(desk.problem == nil && refreshed.token != original.token)
+        #expect(!desk.approve(original.token))
+        #expect(desk.approve(refreshed.token) && approved == [id])
     }
 
     /// tether ending without confirming: an unanswered launch is unknown (`supervisor_ended`); a launched run is
@@ -502,22 +537,58 @@ struct RunTests {
     @Test func anUnconfirmedEndLeavesRunsForTheSweep() async throws {
         let h = try RunHarness()
         let working = try await h.run("hang")
+        var swept = false
+        defer { if !swept { h.launcher.stopAll() } }
         try await h.until("the run to start") { h.handler.isRunning(working) }
+        let runner = try #require(h.journal.runnerID(working))
+        let pid = try #require(h.launcher.pids[runner])
         h.launcher.silent = true
         h.checkouts.append(CheckoutSettings(name: "other", path: h.root.appendingPathComponent("log").path))
         let unanswered = try h.propose("succeed", checkout: "other")
         try await h.approve(unanswered)
         try await h.handler.execute(unanswered)
-        h.handler.launcher = nil
-        h.handler.supervisorEnded()
         h.handler.servicesStopped(verified: false)
         #expect(h.journal.proposal(unanswered, at: Date())?.status == .outcomeUnknown)
         #expect(try h.records(unanswered).last?["metadata"]?["reason"] == "supervisor_ended")
         #expect(h.handler.hasUnclosedRuns)
+        #expect(h.handler.attribution.peer(of: pid) == .run(runner))
+        #expect(h.handler.attribution.peer(of: getpid()) == .unknown)
+
+        // A ready signal alone isn't proof that the old group is gone: its members may not have had the marker.
+        h.handler.servicesReady(h.launcher)
+        #expect(!h.handler.isReady && h.handler.hasUnclosedRuns)
+        #expect(h.handler.attribution.peer(of: pid) == .run(runner))
         h.launcher.stopAll()
-        h.handler.recover()
+        swept = true
+        try await h.until("the old process group to be gone") { kill(-pid, 0) == -1 && errno == ESRCH }
+        h.handler.checkOutput() // the handler retries this check until recovery can finish
         #expect(h.journal.runnerState(working) == "runner_closed")
         #expect(!h.handler.hasUnclosedRuns)
+        #expect(h.handler.isReady)
+        let external = h.handler.attribution.peer(of: getpid())
+        #expect(external.runner == nil && h.handler.attribution.canAccessProposals(external))
+    }
+
+    /// Quit after an unconfirmed stop opens a session only to sweep: its ready signal closes the old runs, but
+    /// approvals stay off.
+    @Test func aQuitOnlySweepClosesOldRunsWithoutReenablingApproval() async throws {
+        let h = try RunHarness()
+        let working = try await h.run("hang")
+        try await h.until("the run to start") { h.handler.isRunning(working) }
+        let runner = try #require(h.journal.runnerID(working))
+        let pid = try #require(h.launcher.pids[runner])
+        h.handler.servicesStopped(verified: false)
+        h.launcher.stopAll()
+        try await h.until("the old process group to be gone") { kill(-pid, 0) == -1 && errno == ESRCH }
+
+        h.handler.beginShutdown()
+        h.handler.servicesReady(h.launcher)
+        #expect(h.journal.runnerState(working) == "runner_closed")
+        #expect(!h.handler.hasUnclosedRuns)
+        #expect(!h.handler.isReady)
+        let id = try h.propose("succeed")
+        await #expect(throws: RunRefusal.supervisorNotReady) { try await h.approve(id) }
+        #expect(h.journal.proposal(id, at: Date())?.status == .pending)
     }
 
     @Test func errorsCountTowardTheOutputLimit() async throws {
@@ -539,11 +610,11 @@ struct RunTests {
         try await h.until("the run and its child") { h.calls == 1 }
         let runner = h.journal.runnerID(id)!
         let leader = h.launcher.pids[runner]!
-        #expect(h.handler.attribution.runner(of: leader) == runner)
-        #expect(h.handler.attribution.runner(of: getpid()) == nil)
+        #expect(h.handler.attribution.peer(of: leader) == .run(runner))
+        #expect(h.handler.attribution.peer(of: getpid()).runner == nil)
         h.handler.stop(id)
         try await h.until("the run to end") { h.journal.runnerState(id) == "runner_closed" }
-        #expect(h.handler.attribution.runner(of: leader) == nil)
+        #expect(h.handler.attribution.peer(of: leader).runner == nil)
     }
 
     /// After a crash: a launched run not closed failed as interrupted; a start with no answer is read back.

@@ -133,26 +133,20 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let running: String
         let runs = approvals.runs
         switch event {
-        case .active:
-            // tether has stopped anything a crashed session left: runs can start, and interrupted ones are settled.
-            runs?.launcher = services
-            runs?.recover()
-            // A run shown before tether was up could not be approved; resolve it again now that it can.
-            if let desk = approvals.desk, desk.selected?.type == .agentRun { desk.readAgain() }
-            running = "Starting collector…"
+        case .active, .legacyCollectorInstalled:
+            // Both indicate the startup sweep completed. Only the collector is held back by the old LaunchAgent.
+            if let services { runs?.servicesReady(services) }
+            running = event == .active ? "Starting collector…"
+                : "Collector not started: run beacon service uninstall, then reopen Beacon"
         case .collectorRunning: running = "Collector running"
         case .collectorRestarting: running = "Collector stopped with an error; restarting soon"
         case .collectorExited: running = "Collector stopped"
-        case .legacyCollectorInstalled:
-            running = "Collector not started: run beacon service uninstall, then reopen Beacon"
         case .busy:
             servicesStatus = "Another Beacon session is running"
             finishServices()
             return
         case .stopped(let verified):
             servicesStatus = verified ? "Services stopped" : "Services stopped without confirmation"
-            runs?.launcher = nil
-            runs?.supervisorEnded()
             runs?.servicesStopped(verified: verified)
             finishServices()
             if !stopping {

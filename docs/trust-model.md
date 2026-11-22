@@ -172,8 +172,11 @@ checkout's opencode configuration does not deny.
     ([approvals](approvals.md)). The app writes the client's trust (`act.json`, its own designated requirement)
     on first launch and refuses to open the socket if the file names another signature. An approval is one
     click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
-    proposal once. Quit and relaunch expire every approval that has no durable start, and a start without a result
-    is never dispatched again. The journal and outbox hold prompts and messages in plain text in a `0700` directory.
+    proposal once. A run's snapshot is dropped when its supervisor stops. After an unconfirmed stop, known run
+    groups keep their ownership, and other peers cannot create, read or withdraw proposals until the sweep and
+    group checks confirm recovery. Quit and relaunch expire every approval that has no durable start, and a start
+    without a result is never dispatched again. The journal and outbox hold prompts and messages in plain text in
+    a `0700` directory.
 14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by

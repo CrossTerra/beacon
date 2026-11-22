@@ -38,12 +38,13 @@ final class Harness: @unchecked Sendable {
     let server: ProposalServer
 
     init(clients: [AdmittedClient] = [AdmittedClient(name: "beacon-act", requirement: selfRequirement())],
-         enabled: [ActionType] = ActionType.allCases, limits: ServerLimits = ServerLimits()) throws {
+         enabled: [ActionType] = ActionType.allCases, attribution: RunAttribution? = nil,
+         limits: ServerLimits = ServerLimits()) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("sock-" + randomHex(4)).path
         path = directory + "/run/act.sock"
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         let clock = self.clock
-        server = ProposalServer(path: path, clients: clients, book: book, enabled: enabled, limits: limits,
+        server = ProposalServer(path: path, clients: clients, book: book, enabled: enabled, attribution: attribution, limits: limits,
                                 now: { clock.now }, queue: queue)
         try server.start()
     }
@@ -156,26 +157,73 @@ struct ProposalServerTests {
     /// A proposal from a process in a run's group is that run's: verified, with its runner id, and only that run
     /// reads it. Bosun's proposals are not the run's to read or withdraw, nor another run's.
     @Test func aRunsProposalsAreItsOwn() throws {
-        let h = try Harness(enabled: [.githubMerge])
-        let current = RunnerBox()
-        h.server.runnerOf = { _ in current.value }
+        let attribution = RunAttribution()
+        #expect(attribution.completeSweep())
+        let h = try Harness(enabled: [.githubMerge], attribution: attribution)
         let bosun = try h.connect()
         let bosunID = try #require(bosun.call(mergeProposal())?["id"]?.stringValue)
 
-        current.value = "run_01m7x1v080ec1r60r30c1g60r3"
+        let runner = "run_01m7x1v080ec1r60r30c1g60r3"
+        attribution.add(leader: getpgrp(), runner: runner)
         let run = try h.connect()
         #expect(run.call(.object(["op": "get", "id": .string(bosunID)]))?["error"] == "not_found")
         #expect(run.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
         let runID = try #require(run.call(mergeProposal(number: 141))?["id"]?.stringValue)
         let stored = try #require(h.queue.sync { h.book.proposal(runID, at: h.clock.now) })
-        #expect(stored.runner == "run_01m7x1v080ec1r60r30c1g60r3")
+        #expect(stored.runner == runner)
         #expect(run.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
 
-        current.value = "run_01m7x1v080ec1r60r30c1g60r4"
+        attribution.add(leader: getpgrp(), runner: "run_01m7x1v080ec1r60r30c1g60r4")
         let other = try h.connect()
         #expect(other.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
         #expect(bosun.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
         #expect(bosun.call(.object(["op": "get", "id": .string(bosunID)]))?["status"] == "pending")
+
+        // A fresh connection from a known group still belongs to that run while the sweep is pending.
+        attribution.add(leader: getpgrp(), runner: runner)
+        attribution.sessionEnded(verified: false)
+        let duringSweep = try h.connect()
+        #expect(duringSweep.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
+        #expect(duringSweep.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
+        let anotherID = try #require(duringSweep.call(mergeProposal(number: 142))?["id"]?.stringValue)
+        #expect(h.queue.sync { h.book.proposal(anotherID, at: h.clock.now)?.runner } == runner)
+    }
+
+    @Test func unknownPeersCannotUseProposalOwnershipUntilTheSweep() throws {
+        let attribution = RunAttribution()
+        let h = try Harness(attribution: attribution)
+        let beforeFirstSweep = try h.connect()
+        #expect(beforeFirstSweep.call(mergeProposal())?["error"] == "busy")
+        #expect(attribution.completeSweep())
+
+        let bosun = try h.connect()
+        let id = try #require(bosun.call(mergeProposal())?["id"])
+        let get: JSON = .object(["op": "get", "id": id])
+        let withdraw: JSON = .object(["op": "withdraw", "id": id])
+        let wait: JSON = .object(["op": "wait", "id": id, "after": .int(1), "timeout": .int(30)])
+        let waiter = try h.connect()
+        #expect(waiter.call(get)?["status"] == "pending")
+        waiter.send(wait)
+
+        attribution.sessionEnded(verified: false)
+        let unclassified = try h.connect()
+        for peer in [unclassified, bosun] {
+            #expect(peer.call(.object(["op": "types"]))?["types"] != nil)
+            for request in [get, withdraw, wait, mergeProposal(number: 141)] {
+                #expect(peer.call(request) == .object(["error": "busy"]))
+            }
+        }
+        #expect(waiter.receive()?["error"] == "busy", "a wait in flight cannot see the result during recovery")
+        #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 1)
+
+        #expect(attribution.completeSweep())
+        // None of the old sockets can acquire Bosun's identity by outlasting the sweep.
+        for peer in [beforeFirstSweep, unclassified, bosun] {
+            #expect(peer.call(get)?["error"] == "busy")
+        }
+        let reconnected = try h.connect()
+        #expect(reconnected.call(get)?["status"] == "pending")
+        #expect(reconnected.call(withdraw)?["status"] == "withdrawn")
     }
 
     /// The proposed record says who proposed: a run, verified, with its id; anyone else unverified, without one.
@@ -349,14 +397,5 @@ struct ProposalServerTests {
         let second = ProposalServer(path: h.path, clients: [], book: MemoryBook(), enabled: [])
         #expect(throws: ServerError.inUse) { try second.start() }
         #expect(a.call(.object(["op": "types"])) != nil)
-    }
-}
-
-final class RunnerBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var current: String?
-    var value: String? {
-        get { lock.withLock { current } }
-        set { lock.withLock { current = newValue } }
     }
 }

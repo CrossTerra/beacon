@@ -20,6 +20,8 @@ public enum RunRefusal: String, Error, Sendable {
     /// tether is not up yet (starting, or sweeping what a crashed session left): the proposal stays pending.
     case supervisorNotReady = "supervisor_not_ready"
     case launchFailed = "launch_failed"
+
+    static let runServicesProblem = "Not approvable yet: Beacon's run supervisor is not ready. This proposal stays pending."
 }
 
 /// Starts and stops runs. The app's is `tether`; tests use a stand-in that keeps the same contract: a launch reads
@@ -74,8 +76,9 @@ public final class RunHandler: ObservableObject, ActionResolver {
     @Published public private(set) var models: [String] = []
     /// Runs launched in this session and not yet gone, by proposal id.
     @Published public private(set) var running: Set<String> = []
-    /// Set once tether is up; nil while it is not.
-    public weak var launcher: RunLauncher?
+    public var isReady: Bool { !quitting && launcher != nil }
+    /// Called synchronously when the desk must drop or re-resolve a run snapshot.
+    public var onAvailabilityChanged: (() -> Void)?
     /// A run whose output grows past this is stopped (`output_too_large`).
     public var outputLimit: UInt64 = 64 << 20
 
@@ -92,6 +95,11 @@ public final class RunHandler: ObservableObject, ActionResolver {
     private var pending: [String: String] = [:]
     private var runs: [String: Run] = [:]
     private var quitting = false
+    private weak var launcher: RunLauncher? {
+        didSet { onAvailabilityChanged?() }
+    }
+    /// A new helper that has swept for the old marker, but is not yet clear of every known run group.
+    private weak var sweptLauncher: RunLauncher?
     private var watch: Timer?
     /// Read by the proposal socket, from its own queue.
     public nonisolated let attribution = RunAttribution()
@@ -112,13 +120,14 @@ public final class RunHandler: ObservableObject, ActionResolver {
     public func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
         guard proposal.type == .agentRun else { throw NoResolver.Unsupported() }
         // Approve stays off until tether is up, so an approval is never consumed for a run that cannot start.
-        guard launcher != nil else { throw RunRefusal.supervisorNotReady }
+        guard isReady else { throw RunRefusal.supervisorNotReady }
         let p = proposal.params
         guard let name = p["checkout"]?.stringValue, let prompt = p["prompt"]?.stringValue,
               let proposed = p["model"]?.stringValue else { throw Invalid(field: "/params") }
         guard let checkout = checkouts().first(where: { $0.name == name }) else { throw RunRefusal.unknownCheckout }
         guard let identity = CheckoutIdentity.read(checkout.path) else { throw RunRefusal.checkoutMissing }
         let context = try await self.context(refresh: false)
+        guard isReady else { throw RunRefusal.supervisorNotReady }
         let chosen = model ?? proposed
         guard context.models.contains(chosen) else { throw RunRefusal.modelUnavailable }
         var facts = [
@@ -139,7 +148,9 @@ public final class RunHandler: ObservableObject, ActionResolver {
     /// Claims the approved checkout, or says why not. Called by the window before the journal consumes the
     /// approval; a refused claim leaves the proposal pending.
     public func claim(_ approval: FrozenApproval) -> String? {
-        guard approval.type == .agentRun, let checkout = approval.destination["checkout_id"]?.stringValue else { return nil }
+        guard approval.type == .agentRun else { return nil }
+        guard isReady else { return RunRefusal.runServicesProblem }
+        guard let checkout = approval.destination["checkout_id"]?.stringValue else { return nil }
         if let holder = claims[checkout], holder != approval.id {
             return "Not approved: another run is using this checkout. It stays pending; approve it once that run ends."
         }
@@ -182,7 +193,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
               let pinned = approval.destination["checkout_id"]?.stringValue, let pin = CheckoutIdentity.pin(pinned) else {
             return try fail(id, .launchFailed, by: "pre_dispatch")
         }
-        guard let launcher else { return try fail(id, .supervisorUnavailable, by: "pre_dispatch") }
+        guard !quitting, let launcher else { return try fail(id, .supervisorUnavailable, by: "pre_dispatch") }
         guard let checkout = checkouts().first(where: { $0.name == name }),
               let identity = CheckoutIdentity.read(checkout.path) else { return try fail(id, .checkoutMissing, by: "pre_dispatch") }
         guard identity.id == pinned else { return try fail(id, .checkoutChanged, by: "pre_dispatch") }
@@ -192,6 +203,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
         } catch let refusal as RunRefusal {
             return try fail(id, refusal, by: "pre_dispatch")
         }
+        guard !quitting, self.launcher === launcher else { return try fail(id, .supervisorUnavailable, by: "pre_dispatch") }
         guard context.models.contains(model) else { return try fail(id, .modelUnavailable, by: "pre_dispatch") }
         do {
             try prepare(runner, in: checkout.path, pin: pin, prompt: prompt, model: model, context: context)
@@ -327,9 +339,17 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     /// tether's session ended: at Quit, or because tether itself stopped. A run still working when tether ended on
     /// its own failed (`supervisor_ended`). If tether confirmed every process gone, each run is closed; if not, the
-    /// next launch closes them once its sweep is done. Either way this session's runs, claims and attributions end:
-    /// nothing more can start or be reported in it.
+    /// next session closes them after its sweep. Keep their attribution until then, and don't let an unknown peer
+    /// act as Bosun in the meantime.
     public func servicesStopped(verified: Bool) {
+        // A Quit-only session may have swept while an old group was still exiting: check once more before it ends.
+        if verified, quitting { finishRecovery() }
+        attribution.sessionEnded(verified: verified)
+        sweptLauncher = nil
+        launcher = nil
+        watch?.invalidate()
+        watch = nil
+        supervisorEnded()
         let quitting = self.quitting
         for (runner, run) in runs where journal.proposal(run.proposal, at: now())?.status == .executed {
             after(runner) { [weak self] in
@@ -347,14 +367,33 @@ public final class RunHandler: ObservableObject, ActionResolver {
         runs.removeAll()
         running.removeAll()
         claims.removeAll()
-        attribution.removeAll()
+    }
+
+    /// The new helper reports ready only after its startup sweep. Don't resume runs or external proposal clients until
+    /// the old process groups are gone too: the marker sweep alone may not see every member of a group.
+    public func servicesReady(_ launcher: RunLauncher) {
+        guard self.launcher == nil else { return }
+        sweptLauncher = launcher
+        finishRecovery()
+    }
+
+    private func finishRecovery() {
+        guard let sweptLauncher else { return }
+        guard attribution.completeSweep() else {
+            if !quitting { startWatching() }
+            return
+        }
+        self.sweptLauncher = nil
+        // A session started just to sweep at Quit can close old runs, but never re-enable approvals.
+        recover()
+        if !quitting { launcher = sweptLauncher }
     }
 
     /// After a relaunch, once tether has stopped anything a crashed session left. Every run directory loses its
     /// `launch` and `prompt` (a crash can leave them). A launched run that was not closed failed as `interrupted`
     /// and is closed now. A start whose launch is unknown is read back: tether writes `started`, with the pid, only
     /// after it started the run, so with it the run started, and without it nothing did.
-    public func recover() {
+    func recover() {
         let directories = (try? FileManager.default.contentsOfDirectory(atPath: runsDirectory.path)) ?? []
         for runner in directories where pending[runner] == nil { forgetLaunch(runner) }
         for proposal in journal.all() where proposal.type == .agentRun && !isRunning(proposal.id) {
@@ -405,7 +444,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     /// tether ended while launches waited for its answer: whether they started is unknown until the next session
     /// reads back tether's `started` mark.
-    public func supervisorEnded() {
+    func supervisorEnded() {
         for (runner, id) in pending {
             record { try journal.outcomeUnknown(id, reason: "supervisor_ended", at: now()) }
             runs[runner] = nil
@@ -472,6 +511,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
     }
 
     func checkOutput() {
+        // A group's last member might still have been present when the marker sweep completed.
+        finishRecovery()
         func size(_ url: URL) -> UInt64 {
             (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
         }
@@ -485,23 +526,74 @@ public final class RunHandler: ObservableObject, ActionResolver {
     }
 }
 
-/// Which run a connecting process belongs to: the process group of a run Beacon launched. tether keeps each run's
-/// leader unreaped until its whole group is gone, so while a run is listed here its group id cannot name another
-/// group. A process that left the group (setsid) is not attributed, and is treated as anyone else.
+/// Which run a connecting process belongs to: the process group of a run Beacon launched. During a live session,
+/// tether keeps each run's leader unreaped until its whole group is gone. Before a successful sweep, a peer not in
+/// a known group cannot be assumed to be external (e.g. Bosun).
 public final class RunAttribution: @unchecked Sendable {
+    enum Peer: Equatable {
+        case run(String)
+        case external(UInt64)
+        case unknown
+
+        var runner: String? {
+            if case .run(let id) = self { return id }
+            return nil
+        }
+    }
+
     private let lock = NSLock()
     private var leaders: [pid_t: String] = [:]
+    private var awaitingSweep = true
+    // A connection admitted as external before an unconfirmed stop must reconnect after the sweep.
+    private var epoch: UInt64 = 0
 
     public init() {}
 
-    func add(leader: pid_t, runner: String) { lock.withLock { leaders[leader] = runner } }
+    func add(leader: pid_t, runner: String) {
+        guard leader > 0 else { return }
+        lock.withLock { leaders[leader] = runner }
+    }
     func remove(runner: String) { lock.withLock { leaders = leaders.filter { $0.value != runner } } }
-    func removeAll() { lock.withLock { leaders.removeAll() } }
 
-    /// The run `pid` belongs to, by its process group, or nil.
-    public func runner(of pid: pid_t) -> String? {
-        let group = getpgid(pid)
-        guard group > 0 else { return nil }
-        return lock.withLock { leaders[group] }
+    func sessionEnded(verified: Bool) {
+        lock.withLock {
+            if !verified {
+                awaitingSweep = true
+                epoch &+= 1
+            } else if !awaitingSweep {
+                // An ack from a replacement helper need not account for the old retained groups.
+                leaders.removeAll()
+            }
+        }
+    }
+
+    /// Call only after tether's ready signal. Probe group existence without sending a signal; a leader can be
+    /// gone while its group still has members. Anything but ESRCH leaves ownership restricted.
+    func completeSweep() -> Bool {
+        lock.withLock {
+            if !awaitingSweep { return true }
+            leaders = leaders.filter { group, _ in kill(-group, 0) == 0 || errno != ESRCH }
+            guard leaders.isEmpty else { return false }
+            awaitingSweep = false
+            return true
+        }
+    }
+
+    func peer(of pid: pid_t) -> Peer {
+        lock.withLock {
+            guard pid > 0 else { return .unknown }
+            let group = getpgid(pid)
+            guard group > 0 else { return .unknown }
+            if let runner = leaders[group] { return .run(runner) }
+            return awaitingSweep ? .unknown : .external(epoch)
+        }
+    }
+
+    func canAccessProposals(_ peer: Peer) -> Bool {
+        switch peer {
+        case .run: return true
+        case .external(let connected): return lock.withLock { !awaitingSweep && connected == epoch }
+        case .unknown: return false
+        }
     }
 }

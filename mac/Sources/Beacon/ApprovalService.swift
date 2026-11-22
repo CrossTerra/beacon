@@ -63,7 +63,9 @@ final class ApprovalService: ObservableObject {
             let runs = RunHandler(journal: journal, checkouts: { (try? AppSettings.load(settingsURL))?.checkouts ?? [] },
                                   runs: paths.runs)
             self.runs = runs
-            let desk = ApprovalDesk(journal: journal, resolver: ActionRouter(merges: merges, runs: runs))
+            let desk = ApprovalDesk(journal: journal, resolver: ActionRouter(merges: merges, runs: runs),
+                                    runServicesReady: { runs.isReady })
+            runs.onAvailabilityChanged = { [weak desk] in desk?.runAvailabilityChanged() }
             desk.claim = { runs.claim($0) }
             desk.release = { runs.release($0) }
             desk.onApproved = { [weak journal] id in
@@ -88,10 +90,7 @@ final class ApprovalService: ObservableObject {
                 return
             }
             let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
-                                        book: journal, enabled: [])
-            // A proposal from a process in a run's group is that run's: verified, and readable only by that run.
-            let attribution = runs.attribution
-            server.runnerOf = { attribution.runner(of: $0) }
+                                        book: journal, enabled: [], attribution: runs.attribution)
             try server.start()
             self.server = server
             updateEnabled()
