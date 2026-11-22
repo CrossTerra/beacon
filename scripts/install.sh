@@ -215,7 +215,8 @@ esac
 cat <<EOF
 
 Next:
-  1. Beacon's menu → Settings… → GitHub: paste a GitHub token for your own account.
+  1. Beacon's menu → Settings… → GitHub: "Create a token on GitHub" (classic, repo scope), then paste it. If
+     your organization uses SAML SSO, click Configure SSO → Authorize next to the new token.
   2. Settings… → Signal: paste the Beacon setup code from Signal's /beacon page. If you connected Signal
      before, paste the code again.
   3. Approvals… (⌥⌘B) shows proposals as they arrive. Beacon is the beacon-light icon in the menu bar, with a

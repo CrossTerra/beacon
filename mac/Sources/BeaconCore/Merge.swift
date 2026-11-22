@@ -291,6 +291,20 @@ public enum GitHubSetup {
         case unreachable
     }
 
+    /// GitHub's page for a new classic token with the `repo` scope, on the web host for this API origin:
+    /// `api.github.com` → `github.com`, `api.{host}` → `{host}` (GitHub Enterprise Cloud), any other host as is.
+    /// An origin that is not `https://host` gives github.com's page. Beacon opens it in the browser; Beacon itself
+    /// does not contact it.
+    public static func newTokenURL(apiOrigin: String) -> URL {
+        var web = "https://github.com"
+        if let normalized = try? CredentialBinding.normalize(apiOrigin), let parts = URLComponents(string: normalized),
+           let host = parts.host {
+            let site = host.hasPrefix("api.") ? String(host.dropFirst(4)) : host
+            web = "https://" + site + (parts.port.map { ":\($0)" } ?? "")
+        }
+        return URL(string: web + "/settings/tokens/new?scopes=repo&description=Beacon%20(merges)")!
+    }
+
     public static func register(token: Secret, origin: String, vault: Vault, settings url: URL,
                                 configuration: URLSessionConfiguration = .ephemeral) async throws -> GitHubSettings {
         let normalized = try CredentialBinding.normalize(origin)

@@ -358,3 +358,15 @@ struct MergeTests {
         #expect(try AppSettings.load(url).github == nil)
     }
 }
+
+struct GitHubTokenPageTests {
+    @Test func theNewTokenPageIsOnTheOriginsWebHost() {
+        let query = "/settings/tokens/new?scopes=repo&description=Beacon%20(merges)"
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://api.github.com").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://API.github.com/").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://api.acme.ghe.com").absoluteString == "https://acme.ghe.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://git.example.com:8443").absoluteString == "https://git.example.com:8443" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "not an origin").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "http://api.evil.test").absoluteString == "https://github.com" + query)
+    }
+}

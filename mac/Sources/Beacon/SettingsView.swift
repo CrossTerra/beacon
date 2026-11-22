@@ -5,6 +5,7 @@ import SwiftUI
 /// code fields are secure and cleared once used; neither is shown again.
 struct SettingsView: View {
     @ObservedObject var service: ApprovalService
+    @Environment(\.openURL) private var openURL
     @State private var origin = "https://api.github.com"
     @State private var token = ""
     @State private var message = ""
@@ -21,6 +22,20 @@ struct SettingsView: View {
                     Button("Remove", role: .destructive) { service.removeGitHub() }
                 }
                 TextField("API origin", text: $origin)
+                Text("Create a classic token for your own account with the repo scope, then paste it here. Beacon merges as you.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Create a token on GitHub") { openURL(GitHubSetup.newTokenURL(apiOrigin: origin)) }
+                Text("If your organization uses SAML single sign-on, click Configure SSO → Authorize next to the new token.")
+                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Or a fine-grained token") {
+                    Text("""
+                        Resource owner: the organization that owns the repositories, with access to them. Repository \
+                        permissions: Metadata read; Contents read and write; Pull requests read and write; Checks read; \
+                        Commit statuses read; Administration read (branch protection). The organization may need to \
+                        approve the token first.
+                        """)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 SecureField("Personal access token", text: $token)
                 Button(service.github == nil ? "Save" : "Replace token") {
                     let value = token

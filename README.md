@@ -23,8 +23,16 @@ scripts/install.sh
 
 It builds `Beacon.app` from that commit, signs it with their code-signing identity, installs it in
 `~/Applications`, points `~/.local/bin/beacon` at its CLI, removes the old collector LaunchAgent and opens the
-app. Then, in Beacon's **Settings…**, they add a GitHub token, and paste the Beacon setup code from Signal's `/beacon`
-page. See [installing and signing](docs/signing.md).
+app. Then, in Beacon's **Settings…**:
+
+- **GitHub:** **Create a token on GitHub** opens GitHub's page for a classic token with the `repo` scope, for their
+  own account; they paste it back. If the organization uses SAML single sign-on, they click **Configure SSO →
+  Authorize** next to the new token. A fine-grained token also works: the organization as resource owner, with
+  Metadata read, Contents and Pull requests read and write, and Checks, Commit statuses and Administration read
+  ([which token](docs/approvals.md#merges)).
+- **Signal:** they paste the Beacon setup code from Signal's `/beacon` page.
+
+See [installing and signing](docs/signing.md).
 
 ## Install from the person's fork
 

@@ -193,6 +193,19 @@ another user is refused until that account is removed. The token goes straight i
 to that origin and `github:user:{id}`. `settings.json` keeps only the origin, the account and the login. The token
 is never shown, logged, written elsewhere or passed to a child process.
 
+**Which token.** Settings → GitHub says what to create and has a **Create a token on GitHub** button. It opens, in
+the browser, GitHub's page for a new **classic** token with the `repo` scope, for your own account:
+`https://github.com/settings/tokens/new?scopes=repo&description=Beacon%20(merges)`. For GitHub Enterprise it opens
+`/settings/tokens/new` on the configured origin's web host (`api.{host}` becomes `{host}`). If the organization uses
+SAML single sign-on, click **Configure SSO → Authorize** next to the new token, or GitHub refuses it on that
+organization's repositories. The token acts as you: GitHub applies your own permissions and branch rules to the merge.
+
+A **fine-grained** token works too (under _Or a fine-grained token_ in Settings): the organization that owns the
+repositories as its resource owner, with access to them, and these repository permissions: Metadata read; Contents
+read and write; Pull requests read and write; Checks read; Commit statuses read; Administration read (branch
+protection's required checks). The organization may need to approve fine-grained tokens before they work; until
+then, GitHub refuses the token's reads and Approve stays disabled.
+
 **Before approval** (the preflight that freezes the action), Beacon reads, with that token and nothing else:
 
 1. `GET /user`: the token is still the configured account's;
