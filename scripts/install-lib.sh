@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # What scripts/install.sh does around the build: quitting a running Beacon, repairing the keychain items after a
 # rebuild, and the next steps. Sourced; scripts/test-install-lib.sh exercises each with fakes.
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Exercise scripts/install-lib.sh with fake processes and a fake CLI: quitting through the socket, the SIGTERM
 # fallback and a process that will not quit; the keychain repair's count and when it runs; the next steps for each
 # state of the settings. No keychain, no real Beacon.
@@ -8,9 +8,12 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/install-lib.sh
 tmp=$(mktemp -d "${TMPDIR:-/tmp}"/beacon-install-lib.XXXXXXXX)
 tmp=$(cd "$tmp" && pwd -P)
-pids=()
+fake_pid=
 cleanup() {
-	for pid in "${pids[@]}"; do kill -KILL "$pid" 2>/dev/null || true; done
+	if [[ -n "$fake_pid" ]]; then
+		kill -KILL "$fake_pid" 2>/dev/null || true
+		wait "$fake_pid" 2>/dev/null || true
+	fi
 	rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -24,11 +27,11 @@ marker="beacon-fake-app-$$"
 export BEACON_APP_PATTERN="$marker\$"
 fake_app() { # $1: "term" quits on TERM; "stubborn" ignores it
 	if [[ $1 == stubborn ]]; then
-		bash -c 'trap "" TERM; while :; do sleep 0.1; done' "$marker" &
+		/bin/bash -c 'trap "" TERM; while :; do sleep 0.1; done' "$marker" &
 	else
-		bash -c 'trap "exit 0" TERM; while :; do sleep 0.1; done' "$marker" &
+		/bin/bash -c 'trap "exit 0" TERM; while :; do sleep 0.1; done' "$marker" &
 	fi
-	pids+=($!)
+	fake_pid=$!
 	sleep 0.3
 	[[ -n "$(beacon_pids)" ]] || fail "the fake app did not start"
 }
@@ -37,7 +40,7 @@ fake_app() { # $1: "term" quits on TERM; "stubborn" ignores it
 # prints FAKE_ITEMS lines; `keychain repair` records that it ran.
 cli="$tmp/beacon"
 cat > "$cli" <<SCRIPT
-#!/usr/bin/env bash
+#!/bin/bash
 case "\$1 \$2" in
 "act quit")
 	[[ "\${FAKE_QUIT:-}" == socket ]] || exit 1
@@ -53,12 +56,15 @@ chmod +x "$cli"
 [[ $(quit_beacon "$cli" 2) == "not running" ]] || fail "quit with nothing running"
 fake_app term
 [[ $(FAKE_QUIT=socket quit_beacon "$cli" 2) == "quit through its socket" ]] || fail "the socket quit"
+wait "$fake_pid"
 fake_app term
 [[ $(quit_beacon "$cli" 2) == "quit with SIGTERM" ]] || fail "the SIGTERM fallback"
+wait "$fake_pid"
 fake_app stubborn
 if quit_beacon "$cli" 1 >/dev/null; then fail "reported a stubborn app as quit"; fi
-kill -KILL "${pids[-1]}"
-wait "${pids[-1]}" 2>/dev/null || true
+kill -KILL "$fake_pid"
+wait "$fake_pid" 2>/dev/null || true
+fake_pid=
 echo "ok quit_beacon"
 
 apple_issued "Apple Development: Winton Welsh (ABCDE12345)" || fail "Apple Development not recognised"

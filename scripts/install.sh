@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Install Beacon from this checkout, in one command (plan 13.00-D15): build Beacon.app, sign it with your code-signing
 # identity, quit a running Beacon, install it in ~/Applications, point ~/.local/bin/beacon at its CLI, retire the old
 # collector LaunchAgent, repair the collector's keychain items for a self-signed build, and open the app. Run it
@@ -53,9 +53,7 @@ tmp=${tmp%/}
 commit=$(git rev-parse --verify 'HEAD^{commit}')
 
 say() { printf '%s\n' "$*"; }
-done_steps=()
 step() {
-	done_steps+=("$*")
 	say "• $*"
 }
 

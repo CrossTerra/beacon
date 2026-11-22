@@ -99,7 +99,8 @@ checks and the launchd client without bootstrapping a job or writing `~/Library/
 For a live installation, the person runs `scripts/install.sh` ([installing and signing](signing.md)). The guide
 covers Apple Development and self-signed identities, item access lists and partition lists, the prompts after a
 rebuild, and optional manual keychain checks. `scripts/test-install.sh` runs the installer's dry run (ad-hoc
-signed, into a temporary prefix, twice) and checks the result; agents and CI use only that. Keep an item's access
+signed, into a temporary prefix, twice) and checks the result; agents and CI use only that. The installer and
+its tests run with macOS's `/bin/bash` (Bash 3.2), even when a newer Bash is on `PATH`. Keep an item's access
 limited to Beacon's signing requirement. Granting access to all apps or to the general-purpose `security`
 tool would give other processes a way to read the credential.
 

@@ -15,10 +15,13 @@ echo "go vet: ok"
 staticcheck ./...
 echo "staticcheck: ok"
 go test -race -count=1 ./...
-bash -n scripts/install.sh
+# Use macOS's system Bash 3.2 even if PATH has a newer bash.
+for script in scripts/install.sh scripts/install-lib.sh scripts/test-install{,-lib}.sh; do
+	/bin/bash -n "$script"
+done
 bash scripts/test-checkout.sh
 if [[ $(uname -s) == Darwin ]]; then
-	bash scripts/test-install-lib.sh
+	/bin/bash scripts/test-install-lib.sh
 fi
 if command -v shellcheck >/dev/null; then
 	shellcheck scripts/*.sh
