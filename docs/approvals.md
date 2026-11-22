@@ -135,8 +135,12 @@ Each entry becomes one Signal record ([the contract](#the-contract-with-signal))
 on first delivery with the person's `act_…` id, and kept. A merge is about its pull request
 (`github:pr:{owner}/{repo}#{n}`), with the repository as the proposal spelled it, never lowercased. From the approval
 on, the records use GitHub's own spelling (`full_name`, read in the preflight and kept in the local approval entry)
-when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
-its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
+when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A run is about
+itself, `agent-run:{handle}:{runner id without run_}`, with the person's Signal handle from Settings; without the
+handle its records cannot be built, and delivery stops there until Signal is connected again. A post is about the
+person's own subject (`signal:actor:{act_…}`) until its handler can tell whether the conversation is public. A
+launched run's later life is recorded as runner events (`app.runner.working`, `finished`, `failed`, `closed`, …),
+each in the journal and the outbox like any entry. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
 

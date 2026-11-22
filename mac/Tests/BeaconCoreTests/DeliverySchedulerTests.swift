@@ -40,7 +40,7 @@ final class GatedTransport: RecordTransport, @unchecked Sendable {
 struct DeliverySchedulerTests {
     func scheduler(_ transport: GatedTransport, count: Int = 2) throws -> (DeliveryScheduler, Journal) {
         let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: count)
-        let scheduler = DeliveryScheduler(journal: journal, connect: { (transport, person) })
+        let scheduler = DeliveryScheduler(journal: journal, connect: { (transport, person, "winton") })
         return (scheduler, journal)
     }
 
@@ -126,5 +126,40 @@ struct DeliverySchedulerTests {
         #expect(!SignalSettings(origin: "https://s.test", person: app, actor: app, handle: "b").usable)
         #expect(!SignalSettings(origin: "https://s.test", person: "@winton", actor: app, handle: "b").usable)
         #expect(SignalSettings(origin: "https://s.test", person: person, actor: app, handle: "b").usable)
+    }
+}
+
+struct CheckoutSettingsTests {
+    @Test func checkoutsAreNamedDirectories() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("checkout-" + randomHex(6))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("file")
+        FileManager.default.createFile(atPath: file.path, contents: Data())
+        #expect(throws: CheckoutSettings.Refusal.name) { try CheckoutSettings.make(name: "Signal", path: directory.path) }
+        #expect(throws: CheckoutSettings.Refusal.name) { try CheckoutSettings.make(name: "../x", path: directory.path) }
+        #expect(throws: CheckoutSettings.Refusal.path) { try CheckoutSettings.make(name: "signal", path: "relative") }
+        #expect(throws: CheckoutSettings.Refusal.path) { try CheckoutSettings.make(name: "signal", path: file.path) }
+        #expect(throws: CheckoutSettings.Refusal.path) {
+            try CheckoutSettings.make(name: "signal", path: directory.appendingPathComponent("missing").path)
+        }
+        // The path is kept resolved: /var is a symlink to /private/var.
+        let checkout = try CheckoutSettings.make(name: "signal", path: directory.path)
+        #expect(checkout.path == "/private" + directory.path || checkout.path == directory.path)
+        #expect(!checkout.path.hasPrefix("/var/"))
+
+        let url = directory.appendingPathComponent("settings.json")
+        var settings = AppSettings()
+        try settings.add(checkout)
+        try settings.add(try CheckoutSettings.make(name: "signal-2", path: directory.path))
+        #expect(throws: CheckoutSettings.Refusal.taken) { try settings.add(checkout) }
+        try settings.save(url)
+        #expect(try AppSettings.load(url).checkout("signal") == checkout)
+        settings.removeCheckout("signal")
+        settings.removeCheckout("signal-2")
+        #expect(settings.checkouts == nil)
+
+        // Settings from before agent runs have no checkouts.
+        try Data(#"{"version":1}"#.utf8).write(to: url)
+        #expect(try AppSettings.load(url).checkouts == nil)
     }
 }

@@ -79,6 +79,8 @@ enum Field {
     static let slackTS = "[0-9]{1,16}\\.[0-9]{6}"
     static let model = "[A-Za-z0-9_.:@-]{1,80}/[A-Za-z0-9_.:@/-]{1,120}"
     static let checkout = "[a-z0-9][a-z0-9_.-]{0,63}"
+    /// A Signal handle, as it appears in a run's subject.
+    static let handle = "[a-z0-9][a-z0-9_.-]{0,63}"
     static let subject = "[\\x21-\\x7e]{1,200}"
 }
 

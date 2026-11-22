@@ -38,10 +38,13 @@ func freeze(_ journal: Journal, _ id: String, at date: Date, model: String? = ni
                               destination: mergeDestination, model: model)
 }
 
+/// The fixture person's handle, which a run's subject names.
+let handle = "winton"
+
 /// Replays Signal's fixture journal through Beacon's journal with the fixture's ids, salts, nonces and times,
-/// skipping its runner events (no runner handler yet). Returns the journal and the fixture entries it replayed.
+/// runner events included. Returns the journal and the fixture entries it replayed.
 func replaySignalFixture() throws -> (Journal, [JSON]) {
-    let entries = array(try fixture("journal.json")).filter { !$0["body"]!["type"]!.stringValue!.hasPrefix("app.runner.") }
+    let entries = array(try fixture("journal.json"))
     var nonces = entries.map { $0["body"]?["sealed"]?["replay_nonce"]?.stringValue ?? randomHex(16) }
     let nonce = { nonces.removeFirst() }
     let ids = { (prefix: String) in prefix == "jrn" ? "jrn_01m6a6ft00e81840g2081040g2" : "run_01m7x1v080ec1r60r30c1g60r3" }
@@ -88,6 +91,13 @@ func replaySignalFixture() throws -> (Journal, [JSON]) {
             for name in ["evidence", "result"] { fields[name] = sealed?[name] }
             try journal.result(id, executed: body["type"] == "app.action.executed",
                                confirmedBy: metadata["confirmed_by"]!.stringValue!, fields: fields, at: at)
+        case "app.runner.working": try journal.runner(id, .working, at: at)
+        case "app.runner.waiting": try journal.runner(id, .waiting(question: sealed!["question"]!.stringValue!), at: at)
+        case "app.runner.stalled": try journal.runner(id, .stalled(lastOutput: sealed!["last_output"]!.stringValue!), at: at)
+        case "app.runner.finished": try journal.runner(id, .finished(report: sealed!["report"]!.stringValue!), at: at)
+        case "app.runner.failed":
+            try journal.runner(id, .failed(error: metadata["error"]!.stringValue!, detail: sealed?["detail"]?.stringValue), at: at)
+        case "app.runner.closed": try journal.runner(id, .closed, at: at)
         default:
             Issue.record("unexpected type")
         }
@@ -98,16 +108,16 @@ func replaySignalFixture() throws -> (Journal, [JSON]) {
 
 struct JournalTests {
     /// Signal's fixture journal, replayed through Beacon's journal with the fixture's ids, salts, nonces and
-    /// times. Every record Beacon would send is the fixture's body, except the subject Beacon chooses for posts and
-    /// runs (the person's own) and the keys (Beacon's sequence skips the fixture's runner events).
+    /// times, runner events included. Every record Beacon would send is the fixture's body, except the subject
+    /// Beacon chooses for posts (the person's own) and its spelling of a repository.
     @Test func reproducesSignalsFixtureJournal() throws {
         let (journal, entries) = try replaySignalFixture()
         var keys: [Int64] = []
         for entry in entries {
-            let (seq, bytes) = try #require(try journal.nextDelivery(person: person))
+            let (seq, bytes) = try #require(try journal.nextDelivery(person: person, handle: handle))
             var expected = entry["body"]!.objectValue!
             let action = expected["metadata"]!["action"]!.stringValue!
-            if action != "github.merge" { expected["subject"] = .string("signal:actor:\(person)") }
+            if action == "slack.post" { expected["subject"] = .string("signal:actor:\(person)") }
             // Beacon keeps the repository as spelled (CrossTerra/signal); Signal's fixture lowercases it, and Signal
             // compares merge subjects case-insensitively.
             if action == "github.merge" {
@@ -121,7 +131,7 @@ struct JournalTests {
             try journal.delivered(seq, eventID: "evt_\(seq)")
         }
         #expect(keys == Array(1...Int64(entries.count)))
-        #expect(try journal.nextDelivery(person: person) == nil)
+        #expect(try journal.nextDelivery(person: person, handle: handle) == nil)
     }
 
     @Test func entriesAreAppendOnly() throws {
@@ -245,9 +255,9 @@ struct JournalTests {
 }
 
 /// Every undelivered record, parsed, marking each delivered.
-func deliverAll(_ journal: Journal) throws -> [JSON] {
+func deliverAll(_ journal: Journal, handle: String? = handle) throws -> [JSON] {
     var records: [JSON] = []
-    while let (seq, bytes) = try journal.nextDelivery(person: person) {
+    while let (seq, bytes) = try journal.nextDelivery(person: person, handle: handle) {
         records.append(try JSON.parse(bytes))
         try journal.delivered(seq, eventID: "evt_\(seq)")
     }
@@ -352,5 +362,71 @@ struct JournalFileTests {
         FileManager.default.createFile(atPath: elsewhere, contents: Data())
         try FileManager.default.createSymbolicLink(atPath: path + "-wal", withDestinationPath: elsewhere)
         #expect(throws: SQLiteError.self) { try Journal(path: path, at: Date()) }
+    }
+}
+
+struct RunnerEventTests {
+    func launched() throws -> (Journal, String) {
+        let journal = try Journal(path: scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000))
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        let proposal = Proposal(request: request("agent.run", runParams), client: "beacon-act", at: t)
+        try journal.add(proposal)
+        #expect(try throwsTransition { try journal.runner(proposal.id, .working, at: t) })
+        let approval = try FrozenApproval(proposal, origin: nil, account: "macos:user:winton",
+                                          destination: .object(["checkout_id": "vol:1/inode:42", "branch": "main"]))
+        try journal.approve(approval, at: t)
+        _ = try journal.start(proposal.id, at: t)
+        #expect(try throwsTransition { try journal.runner(proposal.id, .working, at: t) })
+        try journal.result(proposal.id, executed: true, confirmedBy: "reply",
+                           fields: ["runner_id": .string(journal.runnerID(proposal.id)!)], at: t)
+        return (journal, proposal.id)
+    }
+
+    func throwsTransition(_ body: () throws -> Void) throws -> Bool {
+        do { try body() } catch JournalError.transition { return true }
+        return false
+    }
+
+    /// Runner events only after the launch; only `closed` after `finished` or `failed`; nothing after `closed`.
+    @Test func runnerEventsFollowTheContract() throws {
+        let (journal, id) = try launched()
+        let t = Date(timeIntervalSince1970: 1_800_000_100)
+        let version = journal.proposal(id, at: t)!.version
+        try journal.runner(id, .working, at: t)
+        try journal.runner(id, .stalled(lastOutput: "still going"), at: t)
+        try journal.runner(id, .finished(report: "Done."), at: t)
+        #expect(journal.runnerState(id) == "runner_finished")
+        #expect(try throwsTransition { try journal.runner(id, .working, at: t) })
+        #expect(try throwsTransition { try journal.runner(id, .failed(error: "stopped", detail: nil), at: t) })
+        try journal.runner(id, .closed, at: t)
+        #expect(try throwsTransition { try journal.runner(id, .closed, at: t) })
+        #expect(journal.proposal(id, at: t)!.version == version, "runner events do not change the proposal")
+
+        let records = try deliverAll(journal, handle: "winton").suffix(4)
+        #expect(records.map { $0["type"]!.stringValue! } ==
+                ["app.runner.working", "app.runner.stalled", "app.runner.finished", "app.runner.closed"])
+        let runner = journal.runnerID(id)!
+        #expect(records.allSatisfy { $0["subject"]!.stringValue! == "agent-run:winton:" + runner.dropFirst(4) })
+        #expect(records.allSatisfy { $0["metadata"]!["runner_id"]!.stringValue! == runner })
+        #expect(Array(records)[2]["metadata"]!["from"] == "runner")
+        #expect(Array(records)[2]["sealed"]!["metadata"]!["report"] == "Done.")
+    }
+
+    @Test func runnerWordsAndCodesAreChecked() throws {
+        let (journal, id) = try launched()
+        let t = Date(timeIntervalSince1970: 1_800_000_100)
+        #expect(throws: Invalid.self) { try journal.runner(id, .finished(report: ""), at: t) }
+        #expect(throws: Invalid.self) {
+            try journal.runner(id, .finished(report: String(repeating: "é", count: Limits.text + 1)), at: t)
+        }
+        #expect(throws: Invalid.self) { try journal.runner(id, .failed(error: "Exit 1", detail: nil), at: t) }
+        try journal.runner(id, .finished(report: String(repeating: "é", count: Limits.text)), at: t)
+    }
+
+    /// A run's records cannot be built without the person's handle; delivery stops there, visibly.
+    @Test func aRunNeedsThePersonsHandle() throws {
+        let (journal, _) = try launched()
+        #expect(try journal.nextDelivery(person: person, handle: nil) == nil)
+        #expect(try journal.deliveryStatus().stopped == "record:/subject")
     }
 }

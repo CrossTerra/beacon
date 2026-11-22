@@ -46,6 +46,30 @@ public struct FrozenApproval: Equatable, Sendable {
     }
 }
 
+/// What a run launched by Beacon did after its launch (`app.runner.*`, docs/approval-app.md). The words are the
+/// runner's own, 1 to 32,000 Unicode scalar values, delivered sealed and marked `from: "runner"`.
+public enum RunnerEvent: Equatable, Sendable {
+    case working
+    case waiting(question: String)
+    case stalled(lastOutput: String)
+    case finished(report: String)
+    /// `error` is a lowercase code (`exit_1`, `stopped`, `interrupted`); `detail` the runner's words, if any.
+    case failed(error: String, detail: String?)
+    /// The run's process group is gone: nothing of it is left running.
+    case closed
+
+    var kind: String {
+        switch self {
+        case .working: "runner_working"
+        case .waiting: "runner_waiting"
+        case .stalled: "runner_stalled"
+        case .finished: "runner_finished"
+        case .failed: "runner_failed"
+        case .closed: "runner_closed"
+        }
+    }
+}
+
 public enum JournalError: Error, Equatable, Sendable {
     case notFound
     /// The proposal is not in a state that allows this step.
@@ -82,6 +106,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var unknownAt: Date?
         /// The executed or failed entry's body.
         var outcome: JSON?
+        /// A launched run's latest runner event (`runner_working` … `runner_closed`).
+        var runner: String?
     }
 
     let db: SQLite
@@ -197,6 +223,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         locked { states[id]?.outcome }
     }
 
+    /// A launched run's latest runner event: `runner_working`, `runner_finished`, `runner_closed`, …; nil before one.
+    public func runnerState(_ id: String) -> String? {
+        locked { states[id]?.runner }
+    }
+
     public func runnerID(_ id: String) -> String? {
         locked { states[id]?.runnerID }
     }
@@ -257,7 +288,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                 "edited": .array(approval.edited.map(JSON.string)),
             ]
             body["original_model"] = approval.originalModel.map(JSON.string)
-            let proposed = Record.subject(action: proposal.type.rawValue, params: proposal.params, person: "")
+            let proposed = (try? Record.subject(action: proposal.type.rawValue, params: proposal.params, person: "")) ?? ""
             if let subject, subject != proposed, subject.lowercased() == proposed.lowercased(), subject.hasPrefix("github:pr:") {
                 body["subject"] = .string(subject)
             }
@@ -315,6 +346,37 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         }
     }
 
+    /// A runner event for a launched run (docs/approval-app.md, _Transitions_): only after the run's
+    /// `app.action.executed`, nothing after `closed`, and only `closed` after `finished` or `failed`.
+    public func runner(_ id: String, _ event: RunnerEvent, at date: Date) throws {
+        func words(_ text: String, _ field: String) throws -> JSON {
+            guard (1...Limits.text).contains(text.unicodeScalars.count) else { throw Invalid(field: field) }
+            return .string(text)
+        }
+        var body: [String: JSON] = [:]
+        switch event {
+        case .working, .closed: break
+        case .waiting(let question): body["question"] = try words(question, "/question")
+        case .stalled(let output): body["last_output"] = try words(output, "/last_output")
+        case .finished(let report): body["report"] = try words(report, "/report")
+        case .failed(let error, let detail):
+            guard Field.matches(error, "[a-z][a-z0-9_]{0,63}") else { throw Invalid(field: "/error") }
+            body["error"] = .string(error)
+            if let detail { body["detail"] = try words(detail, "/detail") }
+        }
+        try append(id, kind: event.kind, at: date) { state in
+            guard state.proposal.type == .agentRun, state.proposal.status == .executed, state.runnerID != nil else {
+                throw JournalError.transition
+            }
+            switch state.runner {
+            case "runner_closed": throw JournalError.transition
+            case "runner_finished", "runner_failed": guard event == .closed else { throw JournalError.transition }
+            default: break
+            }
+            return body
+        }
+    }
+
     /// Quit: no approval or start from now on, and every approval without a start expires (13.00-D9).
     public func shutdown(at date: Date) throws {
         locked { shuttingDown = true }
@@ -339,7 +401,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
 
     /// The next record to send, in journal order, with its exact bytes. The bytes are built once, at the first
     /// call, and kept. Nil when everything is delivered or delivery stopped at a conflict.
-    public func nextDelivery(person: String) throws -> (seq: Int64, bytes: Data)? {
+    public func nextDelivery(person: String, handle: String? = nil) throws -> (seq: Int64, bytes: Data)? {
         try locked {
             guard let row = try db.query("""
                 SELECT o.seq, o.key, o.nonce, o.bytes, o.state, e.proposal, e.kind, e.at, e.body
@@ -360,7 +422,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                 bytes = try Record.bytes(
                     key: row[1].text!, nonce: row[2].text!, proposal: row[5].text!, kind: row[6].text!,
                     at: Date(milliseconds: row[7].int!), body: try JSON.parse(Data(row[8].text!.utf8)),
-                    proposed: try JSON.parse(Data(proposed.utf8)), person: person, subject: subject)
+                    proposed: try JSON.parse(Data(proposed.utf8)), person: person, handle: handle, subject: subject)
             } catch {
                 // The record cannot be built (an invalid person id, an unreadable entry): stop here, visibly, until a
                 // resume. Nothing was sent, so it can be rebuilt then.
@@ -501,6 +563,10 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "failed":
             state.proposal.status = .failed
             state.outcome = body
+        case let kind where kind.hasPrefix("runner_"):
+            // A runner event changes the run's life, not the proposal: its version stays.
+            state.proposal.version -= 1
+            state.runner = kind
         default: return
         }
         states[id] = state

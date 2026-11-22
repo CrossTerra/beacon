@@ -41,7 +41,7 @@ final class ApprovalService: ObservableObject {
             let scheduler = DeliveryScheduler(journal: journal, connect: {
                 guard let signal = try AppSettings.load(settingsURL0).signal else { throw VaultError.notFound }
                 guard signal.usable else { throw SignalSetup.Refusal.noPerson }
-                return (try SignalRecords.connect(signal, vault: vault), signal.person)
+                return (try SignalRecords.connect(signal, vault: vault), signal.person, signal.personHandle)
             }, message: delivery)
             scheduler.onMessage = { [weak self] message in self?.delivery = message }
             self.scheduler = scheduler

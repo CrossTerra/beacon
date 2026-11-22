@@ -4,7 +4,7 @@ import Foundation
 /// are canonical JSON, built once and kept, so a resend is byte for byte the same.
 enum Record {
     static func bytes(key: String, nonce: String, proposal: String, kind: String, at date: Date, body: JSON,
-                      proposed: JSON, person: String, subject spelled: String? = nil) throws -> Data {
+                      proposed: JSON, person: String, handle: String? = nil, subject spelled: String? = nil) throws -> Data {
         guard PublicID.isValid(person, prefix: "act") else { throw Invalid(field: "/metadata/person") }
         let action = proposed["type"]!.stringValue!
         var metadata: [String: JSON] = ["proposal": .string(proposal), "person": .string(person), "action": .string(action)]
@@ -41,12 +41,21 @@ enum Record {
         case "failed":
             copy(["confirmed_by", "error"], into: &metadata)
             copy(["evidence", "result"], into: &sealed)
+        case "runner_working", "runner_closed":
+            metadata["runner_id"] = proposed["runner_id"]
+        case "runner_waiting", "runner_stalled", "runner_finished", "runner_failed":
+            metadata["runner_id"] = proposed["runner_id"]
+            metadata["from"] = "runner"
+            copy(["error"], into: &metadata)
+            copy(["question", "last_output", "report", "detail"], into: &sealed)
         default:
             throw Invalid(field: "/type")
         }
+        let type = kind.hasPrefix("runner_") ? "app.runner." + kind.dropFirst("runner_".count) : "app.action." + kind
         var record: [String: JSON] = [
-            "version": .int(1), "key": .string(key), "type": .string("app.action." + kind),
-            "subject": .string(subject(action: action, params: proposed["params"]!, person: person, spelled: spelled)),
+            "version": .int(1), "key": .string(key), "type": .string(type),
+            "subject": .string(try subject(action: action, params: proposed["params"]!, person: person, handle: handle,
+                                           runnerID: proposed["runner_id"]?.stringValue, spelled: spelled)),
             "occurred_at": .string(timestamp(date)), "metadata": .object(metadata),
         ]
         if !sealed.isEmpty {
@@ -57,14 +66,21 @@ enum Record {
 
     /// A merge is about its pull request, with the repository as the proposal spelled it, or, from the approval
     /// on, as GitHub spelled it (`spelled`, kept at approval; the same subject case aside, which is how Signal
-    /// compares them). A post or a run is about the person's own subject until its handler can tell whether the
-    /// conversation's subject is public (a private channel is under `slack:dm:`).
-    static func subject(action: String, params: JSON, person: String, spelled: String? = nil) -> String {
+    /// compares them). A run is about itself, `agent-run:{handle}:{runner id body}`, restricted to the person in
+    /// Signal; without the person's handle it cannot be built. A post is about the person's own subject until its
+    /// handler can tell whether the conversation's subject is public (a private channel is under `slack:dm:`).
+    static func subject(action: String, params: JSON, person: String, handle: String? = nil, runnerID: String? = nil,
+                        spelled: String? = nil) throws -> String {
         if action == ActionType.githubMerge.rawValue, let repo = params["repo"]?.stringValue,
            let number = params["number"]?.intValue {
             let proposed = "github:pr:\(repo)#\(number)"
             if let spelled, spelled.lowercased() == proposed.lowercased() { return spelled }
             return proposed
+        }
+        if action == ActionType.agentRun.rawValue {
+            guard let handle, Field.matches(handle, Field.handle), let runnerID, PublicID.isValid(runnerID, prefix: "run")
+            else { throw Invalid(field: "/subject") }
+            return "agent-run:\(handle):\(runnerID.dropFirst("run_".count))"
         }
         return "signal:actor:\(person)"
     }

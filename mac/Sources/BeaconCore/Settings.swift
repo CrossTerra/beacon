@@ -63,16 +63,69 @@ public struct SignalSettings: Codable, Equatable, Sendable {
     }
 }
 
+/// A checkout an agent run may use (13.00-D35): the name Bosun and Signal use, and the directory the person chose.
+/// Only Settings adds one; a proposal names it and never a path.
+public struct CheckoutSettings: Codable, Equatable, Sendable {
+    public var name: String
+    /// Absolute, without symlinks, as resolved when the person added it.
+    public var path: String
+
+    public init(name: String, path: String) {
+        self.name = name
+        self.path = path
+    }
+
+    public enum Refusal: Error, Equatable, Sendable {
+        /// Not a checkout name: lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit.
+        case name
+        /// Not an existing directory.
+        case path
+        /// Another checkout has this name.
+        case taken
+    }
+
+    /// The checkout `name` at `path`, with the path resolved, or why not.
+    public static func make(name: String, path: String) throws -> CheckoutSettings {
+        guard Field.matches(name, Field.checkout) else { throw Refusal.name }
+        var isDirectory: ObjCBool = false
+        guard path.hasPrefix("/"), let real = realpath(path, nil) else { throw Refusal.path }
+        defer { free(real) }
+        let resolved = String(cString: real)
+        guard FileManager.default.fileExists(atPath: resolved, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw Refusal.path
+        }
+        return CheckoutSettings(name: name, path: resolved)
+    }
+}
+
 /// `~/Library/Application Support/beacon/app/settings.json`: the person's choices, never a secret. `beacon
 /// egress` reads it to list the hosts the app contacts.
 public struct AppSettings: Codable, Equatable, Sendable {
     public var version = 1
     public var github: GitHubSettings?
     public var signal: SignalSettings?
+    /// Absent in settings from before agent runs.
+    public var checkouts: [CheckoutSettings]?
 
-    public init(github: GitHubSettings? = nil, signal: SignalSettings? = nil) {
+    public init(github: GitHubSettings? = nil, signal: SignalSettings? = nil, checkouts: [CheckoutSettings]? = nil) {
         self.github = github
         self.signal = signal
+        self.checkouts = checkouts
+    }
+
+    /// Adds a checkout; a second checkout with the same name is refused. Two names may share a directory.
+    public mutating func add(_ checkout: CheckoutSettings) throws {
+        guard !(checkouts ?? []).contains(where: { $0.name == checkout.name }) else { throw CheckoutSettings.Refusal.taken }
+        checkouts = ((checkouts ?? []) + [checkout]).sorted { $0.name < $1.name }
+    }
+
+    public mutating func removeCheckout(_ name: String) {
+        checkouts = (checkouts ?? []).filter { $0.name != name }
+        if checkouts?.isEmpty == true { checkouts = nil }
+    }
+
+    public func checkout(_ name: String) -> CheckoutSettings? {
+        checkouts?.first { $0.name == name }
     }
 
     public static func load(_ url: URL) throws -> AppSettings {
