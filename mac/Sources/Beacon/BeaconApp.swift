@@ -1,4 +1,5 @@
 import AppKit
+import BeaconCore
 import SwiftUI
 
 @main
@@ -6,9 +7,19 @@ struct BeaconApp: App {
     @NSApplicationDelegateAdaptor(BeaconDelegate.self) private var delegate
 
     var body: some Scene {
-        MenuBarExtra("Beacon · 0") {
+        MenuBarExtra {
             BeaconMenu(delegate: delegate)
+        } label: {
+            MenuTitle(delegate: delegate)
         }
+    }
+}
+
+private struct MenuTitle: View {
+    @ObservedObject var delegate: BeaconDelegate
+
+    var body: some View {
+        Text("Beacon · \(delegate.pendingCount)")
     }
 }
 
@@ -24,6 +35,7 @@ private struct BeaconMenu: View {
         }
         Divider()
         Text(delegate.servicesStatus)
+        Text(delegate.approvals.status)
         Button("Quit Beacon") {
             NSApp.terminate(nil)
         }
@@ -36,20 +48,29 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @Published private(set) var servicesStatus = "Services not installed"
     private var shortcut: ApprovalShortcut?
     private var services: TetherSession?
-    private var lifetime = AppLifetime.recovering([:])
+    @Published private(set) var pendingCount = 0
+    let approvals = ApprovalService()
+    private var stopping = false
     private var awaitingQuit = false
+    private var countTimer: Timer?
 
     private lazy var approvalsWindow: NSWindow = {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView()))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView(service: approvals)))
         window.title = "Beacon Approvals"
         window.isReleasedWhenClosed = false
-        window.setContentSize(NSSize(width: 480, height: 260))
+        window.setContentSize(NSSize(width: 820, height: 520))
         window.center()
         return window
     }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard !lifetime.stopping else { return }
+        guard !stopping else { return }
+        // The journal's recovery expires every earlier approval without a start before anything is shown.
+        approvals.start()
+        countTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateCount() }
+        }
+        updateCount()
         shortcut = ApprovalShortcut { [weak self] in self?.showApprovals() }
         shortcutAvailable = shortcut != nil
         services = TetherSession.open { [weak self] event in
@@ -76,7 +97,7 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             finishServices()
             return
         }
-        if !lifetime.stopping { servicesStatus = running }
+        if !stopping { servicesStatus = running }
     }
 
     private func finishServices() {
@@ -88,7 +109,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        lifetime.beginShutdown()
+        stopping = true
+        approvals.stop()
+        countTimer?.invalidate()
         shortcut = nil
         guard let services else { return .terminateNow }
         awaitingQuit = true
@@ -107,20 +130,14 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         shortcut = nil
     }
 
+    private func updateCount() {
+        approvals.desk?.refresh()
+        pendingCount = approvals.desk?.pending.count ?? 0
+    }
+
     func showApprovals() {
-        guard !lifetime.stopping else { return }
+        guard !stopping else { return }
         NSApp.activate()
         approvalsWindow.makeKeyAndOrderFront(nil)
-    }
-}
-
-private struct ApprovalsView: View {
-    var body: some View {
-        ContentUnavailableView(
-            "No pending approvals",
-            systemImage: "checkmark.shield",
-            description: Text("This build does not accept or execute proposals.")
-        )
-        .frame(minWidth: 420, minHeight: 220)
     }
 }

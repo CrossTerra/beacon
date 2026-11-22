@@ -16,6 +16,8 @@ Use synthetic fixtures and in-memory test credentials. Agents never use the logi
   Follow the [`Beacon.app` entry point](../mac/Sources/Beacon/BeaconApp.swift) through its lifetime lease to
   [`tether`](../mac/Sources/tether/main.c). Review [`Info.plist`](../mac/Info.plist) and the
   [bundle staging script](../scripts/build-app.sh). The app has no proposal intake or action dispatch yet.
+  Review the [proposal socket and vault](approvals.md) in `mac/Sources/BeaconCore` and `mac/Sources/BeaconSecurity`,
+  and `beacon act` in [`cmd/beacon/act.go`](../cmd/beacon/act.go) with [`internal/peer`](../internal/peer/peer.go).
   Check the fixed service list in [`tether`](../mac/Sources/tether/main.c) and that nothing the app sends can
   change a command.
 

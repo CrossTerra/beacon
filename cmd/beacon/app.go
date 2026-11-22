@@ -73,6 +73,8 @@ type app struct {
 	agentsDir func() (string, error)
 	launchctl launcher
 	identify  func(context.Context, string) (service.Identity, error)
+	// actSettingsFile replaces ~/Library/Application Support/beacon/act.json. Tests set it.
+	actSettingsFile string
 	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
 	collectorLog func() (string, error)
 	// sleep waits: the service's backoff, and a Slack source's spacing between calls. Nil sleeps on the clock. Tests
@@ -106,10 +108,11 @@ Commands:
   accept-first  allow sending for sources whose first run has been reviewed
   status        print the last pass; --coverage adds how well each source is being read
   service       uninstall, status or logs of the retired per-user collector job
+  act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
 
-Every command but version and keychain repair takes --config PATH (default: $BEACON_CONFIG, else the user config
+Every command but version, act and keychain repair takes --config PATH (default: $BEACON_CONFIG, else the user config
 directory).
 `
 
@@ -160,6 +163,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdService(ctx, rest)
 	case "keychain":
 		err = a.cmdKeychain(rest)
+	case "act":
+		err = a.cmdAct(ctx, rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "help", "-h", "--help":
