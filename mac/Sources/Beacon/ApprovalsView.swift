@@ -6,13 +6,20 @@ import SwiftUI
 /// frozen snapshot, and carries that snapshot's token.
 struct ApprovalsView: View {
     @ObservedObject var service: ApprovalService
+    let openSettings: () -> Void
 
     var body: some View {
         Group {
             if let desk = service.desk {
-                DeskView(desk: desk, status: service.status)
+                DeskView(desk: desk, status: service.status, openSettings: openSettings)
             } else {
-                ContentUnavailableView("No approvals", systemImage: "checkmark.shield", description: Text(service.status))
+                ContentUnavailableView {
+                    Label("No approvals", systemImage: "checkmark.shield")
+                } description: {
+                    Text(service.status)
+                } actions: {
+                    SettingsButton(action: openSettings)
+                }
             }
         }
         .frame(minWidth: 720, minHeight: 420)
@@ -22,6 +29,7 @@ struct ApprovalsView: View {
 private struct DeskView: View {
     @ObservedObject var desk: ApprovalDesk
     let status: String
+    let openSettings: () -> Void
     @State private var note = ""
 
     var body: some View {
@@ -35,7 +43,14 @@ private struct DeskView: View {
             .overlay {
                 if desk.pending.isEmpty { ContentUnavailableView("No pending approvals", systemImage: "checkmark.shield") }
             }
-            .safeAreaInset(edge: .bottom) { Text(status).font(.caption).foregroundStyle(.secondary).padding(6) }
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(status).font(.caption).foregroundStyle(.secondary)
+                    SettingsButton(action: openSettings)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(6)
+            }
         } detail: {
             if let proposal = desk.selected {
                 detail(proposal)
@@ -112,6 +127,15 @@ private struct DeskView: View {
             Text(label).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
             Text(visibleText(value)).textSelection(.enabled)
         }
+    }
+}
+
+/// Opens Beacon's Settings window; ⌘, as in other Mac apps.
+private struct SettingsButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button("Settings…", action: action).keyboardShortcut(",", modifiers: .command)
     }
 }
 

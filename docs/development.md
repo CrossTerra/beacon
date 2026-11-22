@@ -124,11 +124,13 @@ bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a
 changes to tracked files; it builds from `git archive`, so untracked and ignored files are allowed. CI uses the commit under test. To install it signed, the person runs `scripts/install.sh`
 ([installing and signing](signing.md)).
 
-On the Mac, open the staged `Beacon.app`, choose **Approvals…** from its menu. An unsigned stage shows **No
+On the Mac, open the staged `Beacon.app`: a beacon icon appears in the menu bar, with a number beside it only
+while proposals are pending. Choose **Approvals…** from its menu. An unsigned stage shows **No
 approvals** and **Approvals need Beacon.app signed with your Apple Development certificate**: it opens no vault,
 journal or socket. The signed test is in [signing.md](signing.md#signed-beaconapp-the-vault-key-and-the-sockets-trust). Close the window, focus Finder and press **⌥⌘B** to reopen it. The shortcut registers one key
 combination, requires no Accessibility or Input Monitoring access, and leaves the menu usable if registration
-fails. Opening the window repeatedly should not create duplicates. The menu shows the collector's state.
+fails. Opening the window repeatedly should not create duplicates. Opening `Beacon.app` again while it runs (Finder,
+Spotlight, `open`) shows the window, and its **Settings…** button opens Settings. The menu shows the collector's state.
 **Quit Beacon** waits until `tether` confirms the collector stopped, then removes the menu item. A staged bundle
 is not signed with a certificate, so its collector cannot open the keychain: test it with a `mode: dry-run`
 config. `scripts/test-tether.sh` covers supervision with fixtures; see [tether.md](tether.md#tests).

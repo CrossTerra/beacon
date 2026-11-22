@@ -82,6 +82,10 @@ user's, receives no bytes. `"socket"` overrides the path.
 
 ## The approval window
 
+Beacon's menu-bar item is an icon (a beacon light), filled and followed by the number of pending proposals when any
+are waiting. The window opens from the menu's **Approvals…**, with ⌥⌘B, or by opening Beacon.app again from Finder,
+Spotlight or `open` while it runs. Its **Settings…** button (⌘,) opens Settings.
+
 The window lists pending proposals, oldest first. The right side names the selected action in Beacon's words:
 the account, origin, destination and provider facts Beacon resolved, kept apart from the agent's reason. The
 message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`, and _Show exact parameters_ shows the
