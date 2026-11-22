@@ -209,15 +209,20 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
             job->cleaning = true;
             job->term_sent = false;
             job->clean_exit = info.si_code == CLD_EXITED && info.si_status == 0;
+            // Decide on the next step, after a refresh has adopted the job's marked processes:
+            // a detached descendant may have no tracked parent.
+            return;
         }
     }
     if (job->cleaning) {
         if (members(s, j, 0) == 0) {
-            if (waitpid(job->pid, NULL, WNOHANG) != job->pid) return;
+            bool reaped = job->pid > 0;
+            if (reaped && waitpid(job->pid, NULL, WNOHANG) != job->pid) return;
             job->pid = 0;
             job->cleaning = false;
             if (job->lifetime >= 0) close(job->lifetime);
             job->lifetime = -1;
+            if (!reaped) return; // A sweep at shutdown of a job with no leader.
             if (!job->spec->restart || job->clean_exit) {
                 job->retired = true;
                 report(s, j, TETHER_EXITED);
@@ -360,9 +365,11 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
             for (size_t j = 0; j < count; j++) step(&s, j, live(lease), now_ms());
         poll(&fd, 1, 100);
     }
-    // No restart from here. Stop every job at once so their grace periods overlap.
+    // No restart from here. Stop every job at once so their grace periods overlap. Jobs without a
+    // leader (in backoff, or retired) are swept too: their marked processes are adopted on the next
+    // refresh, and the session file is kept unless every job is confirmed empty after that.
     for (size_t j = 0; j < count; j++) {
-        if (jobs[j].pid > 0 && !jobs[j].cleaning) {
+        if (!jobs[j].cleaning) {
             jobs[j].cleaning = true;
             jobs[j].term_sent = false;
         }
@@ -374,7 +381,7 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         if (refresh(&s)) {
             for (size_t j = 0; j < count; j++) {
                 step(&s, j, false, now_ms());
-                if (jobs[j].pid > 0) done = false;
+                if (jobs[j].pid > 0 || jobs[j].cleaning) done = false;
             }
         } else {
             done = false;

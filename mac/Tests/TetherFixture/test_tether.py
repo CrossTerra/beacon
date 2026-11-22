@@ -133,6 +133,33 @@ def quit_with_restart_pending(fixture, state):
     assert not (state / "watch-restarted").exists(), "a watch restarted during shutdown"
 
 
+def leaky_watch(fixture, state):
+    """A watch that leaves a detached grandchild and exits into a 30 second restart backoff."""
+    session, port = started(fixture, state, "leaky")
+    wait_for(lambda: (state / "watch-ran").exists(), "the leaking watch")
+    leader = {int(p.name.removeprefix("watch-leader-")) for p in state.glob("watch-leader-*")}
+    leaked = {int(p.name.removeprefix("leaked-")) for p in state.glob("leaked-*")}
+    assert len(leader) == 1 and len(leaked) == 1
+    wait_for(lambda: not live(leader), "the watch to exit")
+    time.sleep(0.5)  # tether checks every 100 ms: let it reap the leader and enter the backoff.
+    return session, port, leaked
+
+
+def leaked_grandchild_stopped_at_quit(fixture, state):
+    session, port, leaked = leaky_watch(fixture, state)
+    session.quit()
+    assert not live(leaked), "the detached grandchild of a watch in backoff survived Quit"
+    assert_clean(state, port)
+
+
+def leaked_grandchild_stopped_before_restart(fixture, state):
+    session, port, leaked = leaky_watch(fixture, state)
+    # TERM is ignored, so this takes the 1 second grace period and a KILL, well inside the 30 second backoff.
+    wait_for(lambda: not live(leaked), "the watch's leftover to be stopped", timeout=4)
+    session.quit()
+    assert_clean(state, port)
+
+
 def app_crash(fixture, state):
     session, port = started(fixture, state)
     session.crash_app()
@@ -235,7 +262,8 @@ def collector_lifetime(collector, scratch):
 
 if __name__ == "__main__":
     fixture, collector = sys.argv[1:3]
-    for case in (quit_after_restart, quit_with_restart_pending, app_crash, helper_crash_then_recovery,
+    for case in (quit_after_restart, quit_with_restart_pending, leaked_grandchild_stopped_at_quit,
+                 leaked_grandchild_stopped_before_restart, app_crash, helper_crash_then_recovery,
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
                  stubborn_sweep_gives_up):
         state = Path(tempfile.mkdtemp(prefix="tether-"))

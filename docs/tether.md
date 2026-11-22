@@ -90,7 +90,9 @@ once its whole tree is gone. A restart of the collector or a watch waits for tha
 A descendant can leave its process group with `setsid`. `tether` still tracks it in three ways:
 
 - every 100 ms, it adds each new process whose parent it already tracks;
-- while stopping, it adds any process with the service's `BEACON_SUPERVISOR` marker;
+- while cleaning up a service, it adds any process with that service's `BEACON_SUPERVISOR` marker. A service is
+  cleaned up when its leader exits, before any restart, and at Quit. Quit cleans up every service, including
+  one waiting to restart or not restarting, and keeps the session file unless all of them are confirmed empty;
 - every process in the service's process group is a member.
 
 If `tether` itself dies, the collector's standard input pipe reaches EOF and the collector exits. Other services
@@ -126,6 +128,8 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
   restarting, then running;
 - when a process ignores every signal, Quit and the startup sweep give up within the limit, without confirming
   cleanup and without starting anything;
+- a watch that leaves a detached grandchild and exits into its restart backoff has that grandchild stopped
+  before the restart, and at Quit if Quit comes first;
 - Quit after the restart, Quit with the restart pending, and a killed app stop every process and close the
   listener, and nothing restarts during shutdown;
 - a killed `tether` leaves processes that the next session stops before it reports ready;
