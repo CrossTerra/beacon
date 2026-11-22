@@ -137,9 +137,13 @@ resends the same bytes later, and a `409` or another refusal stops delivery at t
 
 ## Delivery to Signal
 
-**Settings.** The person enters the Signal origin (`https://host[:port]`) and the key of their app actor (13.00-D25:
-an integration actor marked `approval_app` that works for them, with a key of exactly `read` and `write`), both from
-Signal's `/beacon` page. Beacon does not ask whom the records are about; it asks Signal:
+**Settings.** Settings → Signal has one field, **Beacon setup code**, which the person pastes from Signal's `/beacon`
+page. The code is `beacon-setup:v1:` followed by base64url (padded or not) of the JSON `{ "origin", "key" }`: the
+Signal origin (`https://host[:port]`) and the key of their app actor (13.00-D25: an integration actor marked
+`approval_app` that works for them, with a key of exactly `read` and `write`). A code with another prefix, that is
+not base64url of a JSON object, or that lacks a usable origin or key is refused before anything is sent, and the
+refusal never repeats the code. Beacon never asks for an `act_…` id. It asks Signal (`/api/me` does not include
+`works_for` or `approval_app`, so the actor is read too):
 
 1. `GET /api/me` with the key: the actor must be an integration, and the key's scopes exactly `read` and `write`;
 2. `GET /api/actors/{app}`: the actor must be active and marked `approval_app`, and its `works_for` must name
@@ -147,10 +151,11 @@ Signal's `/beacon` page. Beacon does not ask whom the records are about; it asks
 3. `GET /api/actors/{works_for}`: that actor must be an active person (`human`). It is the person, every record's
    `metadata.person`.
 
-Any other answer saves nothing and says why. The key goes to the vault, bound to the origin and
-`signal:actor:{act_…}`. `settings.json` keeps the origin, the person and their handle, the actor and its handle.
-Settings saved by an earlier build, which asked for the person, could name the app actor itself; Beacon sends
-nothing under them, and Settings asks for the app key again.
+Any other answer saves nothing and says why. Settings then shows **Connected to {origin} as {name} (@{handle})**.
+The key goes only to the vault, bound to the origin and `signal:actor:{act_…}`; the code is not kept.
+`settings.json` keeps the origin, the person with their name and handle, and the actor and its handle. Settings
+saved by an earlier build, which asked for the person, could name the app actor itself; Beacon sends nothing under
+them, and Settings asks for the setup code again.
 
 **Sending.** After every journal entry, and every 30 seconds, the app drains the outbox in journal order with
 `POST /api/app-records`. Each request carries the record's exact stored bytes and the app actor's key, sent only

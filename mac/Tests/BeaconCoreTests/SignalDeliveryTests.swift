@@ -31,7 +31,7 @@ final class FakeSignalServer: @unchecked Sendable {
         "act_01m6a6ft00e81840g2081040g3": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration",
                                            "handle": "beacon-winton", "approval_app": true, "works_for": person,
                                            "deactivated_at": NSNull()],
-        person: ["id": person, "type": "human", "handle": "winton", "approval_app": false, "works_for": NSNull(),
+        person: ["id": person, "type": "human", "name": "Winton", "handle": "winton", "approval_app": false, "works_for": NSNull(),
                  "deactivated_at": NSNull()],
     ]
 
@@ -299,6 +299,50 @@ struct SignalDeliveryTests {
         #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: person).drain() == .done(sent: 2))
     }
 
+    /// A setup code as Signal's /beacon page writes it.
+    static func setupCode(_ fields: [String: Any], prefix: String = SignalSetupCode.prefix) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: fields)
+        let base64url = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return prefix + base64url
+    }
+
+    @Test func readsTheSetupCode() throws {
+        let decoded = try SignalSetupCode.decode("  " + Self.setupCode(["origin": "https://Signal.Example.com/", "key": "sig_k"]) + "\n")
+        #expect(decoded.origin == "https://signal.example.com" && decoded.key.value == "sig_k")
+        // Padded base64url is read too.
+        let padded = SignalSetupCode.prefix + Data(#"{"origin":"https://s.test","key":"sig_k1"}"#.utf8).base64EncodedString()
+        #expect(try SignalSetupCode.decode(padded).key.value == "sig_k1")
+
+        let problems: [(SignalSetupCode.Problem, String)] = [
+            (.prefix, ""),
+            (.prefix, "sig_k"),
+            (.prefix, Self.setupCode(["origin": "https://s.test", "key": "k"], prefix: "beacon-setup:v2:")),
+            (.prefix, Self.setupCode(["origin": "https://s.test", "key": "k"], prefix: "Beacon-Setup:v1:")),
+            (.encoding, SignalSetupCode.prefix),
+            (.encoding, SignalSetupCode.prefix + "not base64!"),
+            (.encoding, SignalSetupCode.prefix + "a"),
+            (.encoding, SignalSetupCode.prefix + Data("[1]".utf8).base64EncodedString()),
+            (.encoding, SignalSetupCode.prefix + Data("origin=https://s.test".utf8).base64EncodedString()),
+            (.fields, Self.setupCode(["key": "sig_k"])),
+            (.fields, Self.setupCode(["origin": "https://s.test"])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": ""])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": 7])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": "sig k"])),
+            (.fields, Self.setupCode(["origin": "http://s.test", "key": "sig_k"])),
+            (.fields, Self.setupCode(["origin": "https://s.test/api", "key": "sig_k"])),
+        ]
+        for (problem, code) in problems {
+            #expect(throws: problem, "\(problem)") { try SignalSetupCode.decode(code) }
+        }
+        // A refusal never carries the key.
+        do {
+            _ = try SignalSetupCode.decode(Self.setupCode(["origin": "http://s.test", "key": "sig_secret"]))
+        } catch {
+            #expect(!"\(error)".contains("sig_secret"))
+        }
+    }
+
     @Test func settingsAcceptOnlyTheAppActorsKey() async throws {
         let signal = FakeSignalServer()
         let app = "act_01m6a6ft00e81840g2081040g3"
@@ -306,9 +350,22 @@ struct SignalDeliveryTests {
         let vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
         let url = directory.appendingPathComponent("app/settings.json")
         func register(_ key: String = "sig_app_fixture_key") async throws -> SignalSettings {
-            try await SignalSetup.register(key: Secret(key), origin: signal.origin, vault: vault,
+            try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": key]), vault: vault,
                                            settings: url, configuration: FakeSignalServer.configuration)
         }
+        await #expect(throws: SignalSetup.Refusal.code(.prefix)) {
+            try await SignalSetup.register(code: "sig_app_fixture_key", vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        await #expect(throws: SignalSetup.Refusal.code(.encoding)) {
+            try await SignalSetup.register(code: SignalSetupCode.prefix + "%%%", vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        await #expect(throws: SignalSetup.Refusal.code(.fields)) {
+            try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin]), vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        #expect(signal.authorizations.isEmpty)
         await #expect(throws: SignalSetup.Refusal.rejected) { try await register("wrong") }
         signal.me["scopes"] = ["read", "write", "relay"]
         await #expect(throws: SignalSetup.Refusal.scopes) { try await register() }
@@ -322,6 +379,7 @@ struct SignalDeliveryTests {
         let cases: [(SignalSetup.Refusal, [String: Any])] = [
             (.notAnApp, ["deactivated_at": "2026-11-20T00:00:00Z"]),
             (.notApprovalApp, ["approval_app": false]),
+            (.notApprovalApp, ["approval_app": NSNull()]),
             (.noPerson, ["works_for": NSNull()]),
             (.noPerson, ["works_for": app]),
             (.noPerson, ["works_for": "act_01m6a6ft00e81840g2081040g9"]),
@@ -330,6 +388,8 @@ struct SignalDeliveryTests {
             signal.actors[app] = good.merging(change) { $1 }
             await #expect(throws: refusal, "\(change)") { try await register() }
         }
+        signal.actors[app] = good.filter { $0.key != "works_for" }
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
         signal.actors[app] = good
         signal.actors[person]!["type"] = "agent"
         await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
@@ -339,9 +399,11 @@ struct SignalDeliveryTests {
         signal.actors[person]!["deactivated_at"] = NSNull()
         #expect(try AppSettings.load(url).signal == nil)
 
-        // The person comes from Signal's works_for, never from what was typed.
+        // The actor and the person come from Signal, never from anything typed.
         let settings = try await register()
-        #expect(settings.actor == app && settings.person == person && settings.personHandle == "winton" && settings.usable)
+        #expect(settings.actor == app && settings.person == person && settings.usable)
+        #expect(settings.origin == signal.origin)
+        #expect(settings.connected == "Connected to \(signal.origin) as Winton (@winton)")
         #expect(try AppSettings.load(url).signal == settings)
         #expect(try vault.credential(for: try settings.binding).value == signal.key)
         #expect(try String(contentsOf: url, encoding: .utf8).contains(signal.key) == false)

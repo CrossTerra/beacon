@@ -51,7 +51,7 @@ public final class DeliveryScheduler {
                     message = "Delivery error in the journal: \(error)"
                 }
             } catch SignalSetup.Refusal.noPerson {
-                message = "Records are not sent: Signal's settings do not name the person. Save the app key again in Settings"
+                message = "Records are not sent: Signal's settings do not name the person. Paste the setup code again in Settings"
             } catch {
                 // The vault or its key: nothing about any record. Tried again on the next request.
                 message = "Records are not sent: the Signal key is not available in the vault"

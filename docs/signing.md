@@ -35,7 +35,7 @@ It:
 8. opens Beacon (`--no-open` skips this), and prints what it did and what is next.
 
 Run it again after every update: it is idempotent. Then, in Beacon's menu, open **Settings…** and add a GitHub token
-for your account, and the Signal origin and the app key from Signal's `/beacon` page.
+for your account, and the Beacon setup code from Signal's `/beacon` page.
 
 ## Choosing an identity
 

@@ -60,6 +60,39 @@ public struct SignalRecords: RecordTransport {
     }
 }
 
+/// Signal's `/beacon` page gives the person one setup code to paste into Settings:
+/// `beacon-setup:v1:` + base64url(JSON `{ "origin", "key" }`). It holds the app actor's key, so it is read once into a
+/// `Secret`, never kept, shown or logged; a refusal says what was wrong without echoing any of it.
+public enum SignalSetupCode {
+    public static let prefix = "beacon-setup:v1:"
+
+    public enum Problem: Error, Equatable, Sendable {
+        /// Not a `beacon-setup:v1:` code.
+        case prefix
+        /// The rest is not base64url, or not a JSON object.
+        case encoding
+        /// `origin` or `key` is missing, empty, not a string, or not usable (an origin other than `https://host`).
+        case fields
+    }
+
+    public static func decode(_ text: String) throws -> (origin: String, key: Secret) {
+        let code = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard code.hasPrefix(prefix) else { throw Problem.prefix }
+        let body = code.dropFirst(prefix.count)
+        guard !body.isEmpty, body.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "=") })
+        else { throw Problem.encoding }
+        var base64 = body.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 = base64.trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw Problem.encoding }
+        guard let origin = object["origin"] as? String, let normalized = try? CredentialBinding.normalize(origin),
+              let key = object["key"] as? String, !key.isEmpty,
+              key.unicodeScalars.allSatisfy({ $0.isASCII && $0.value > 0x20 && $0.value < 0x7f }) else { throw Problem.fields }
+        return (normalized, Secret(key))
+    }
+}
+
 /// Registers the app actor's key in Settings (13.00-D16, D25). Signal must answer `GET /api/me` with an integration
 /// actor whose key has exactly `read` and `write`, and `GET /api/actors/{id}` must show that actor active, marked
 /// `approval_app`, and working for an active person (`works_for`). That person is who the records are about: Beacon
@@ -73,12 +106,27 @@ public enum SignalSetup {
         case notApprovalApp
         /// The actor works for nobody, or not for an active person.
         case noPerson
+        /// The setup code could not be read.
+        case code(SignalSetupCode.Problem)
         case scopes
         case rejected
         case unreachable
     }
 
-    public static func register(key: Secret, origin: String, vault: Vault, settings url: URL,
+    /// Registers from the setup code the person pasted.
+    public static func register(code: String, vault: Vault, settings url: URL,
+                                configuration: URLSessionConfiguration = .ephemeral) async throws -> SignalSettings {
+        let decoded: (origin: String, key: Secret)
+        do {
+            decoded = try SignalSetupCode.decode(code)
+        } catch let problem as SignalSetupCode.Problem {
+            throw Refusal.code(problem)
+        }
+        return try await register(key: decoded.key, origin: decoded.origin, vault: vault, settings: url,
+                                  configuration: configuration)
+    }
+
+    static func register(key: Secret, origin: String, vault: Vault, settings url: URL,
                                 configuration: URLSessionConfiguration = .ephemeral) async throws -> SignalSettings {
         let normalized = try CredentialBinding.normalize(origin)
         let client = try ServiceClient(origin: normalized, authorization: key, headers: ["User-Agent": "beacon-app"],
@@ -112,7 +160,7 @@ public enum SignalSetup {
         if let existing = settings.signal { try? vault.remove(try existing.binding) }
         let signal = SignalSettings(origin: normalized, person: person, actor: id,
                                     handle: actor?["handle"] as? String ?? id,
-                                    personHandle: human["handle"] as? String)
+                                    personHandle: human["handle"] as? String, personName: human["name"] as? String)
         try vault.store(key, for: try signal.binding)
         settings.signal = signal
         try settings.save(url)

@@ -117,7 +117,7 @@ struct DeliverySchedulerTests {
         let scheduler = DeliveryScheduler(journal: journal, connect: { throw SignalSetup.Refusal.noPerson })
         scheduler.deliver()
         await scheduler.idle()
-        #expect(scheduler.message.contains("Save the app key again"))
+        #expect(scheduler.message.contains("Paste the setup code again"))
         #expect(try journal.deliveryStatus().waiting == 1)
     }
 

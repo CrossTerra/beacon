@@ -108,26 +108,31 @@ final class ApprovalService: ObservableObject {
         }
     }
 
-    /// Registers the app actor's key. It goes to the vault; this never shows or keeps it.
-    func registerSignal(key: String, origin: String) async -> String {
+    /// Registers Signal from the setup code on Signal's /beacon page. The key in it goes to the vault; this never
+    /// shows or keeps it.
+    func registerSignal(code: String) async -> String {
         guard let vault else { return status }
         do {
-            signal = try await SignalSetup.register(key: Secret(key), origin: origin, vault: vault, settings: paths.settings)
+            signal = try await SignalSetup.register(code: code, vault: vault, settings: paths.settings)
             // A new key or person may be what a stopped record needed.
             resumeDelivery()
-            return "Records go to \(signal!.origin) as \(signal!.handle), for \(signal!.personHandle ?? signal!.person)"
+            return signal!.connected
+        } catch SignalSetup.Refusal.code(.prefix) {
+            return "Not saved: that is not a Beacon setup code. Copy it from Signal's /beacon page."
+        } catch SignalSetup.Refusal.code {
+            return "Not saved: the setup code is damaged or incomplete. Copy it again from Signal's /beacon page."
         } catch SignalSetup.Refusal.notAnApp {
             return "Not saved: that key is not an active integration actor's."
         } catch SignalSetup.Refusal.notApprovalApp {
-            return "Not saved: that actor is not marked as an approval app. Use the key from Signal's /beacon page."
+            return "Not saved: that actor is not marked as an approval app in Signal."
         } catch SignalSetup.Refusal.noPerson {
             return "Not saved: that app does not work for an active person in Signal."
         } catch SignalSetup.Refusal.scopes {
             return "Not saved: the app's key must have exactly read and write."
         } catch SignalSetup.Refusal.rejected {
-            return "Not saved: Signal refused the key."
+            return "Not saved: Signal refused the key. Rotate it on Signal's /beacon page and paste the new code."
         } catch {
-            return "Not saved: Signal could not be reached, or the origin is not https://host."
+            return "Not saved: Signal could not be reached."
         }
     }
 

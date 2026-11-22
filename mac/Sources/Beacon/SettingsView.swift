@@ -1,16 +1,15 @@
 import BeaconCore
 import SwiftUI
 
-/// Settings: the GitHub account Beacon merges as. The token field is secure, cleared once saved, and the token is
-/// never shown again.
+/// Settings: the GitHub account Beacon merges as, and the Signal it records to, from Signal's setup code. The token and
+/// code fields are secure and cleared once used; neither is shown again.
 struct SettingsView: View {
     @ObservedObject var service: ApprovalService
     @State private var origin = "https://api.github.com"
     @State private var token = ""
     @State private var message = ""
     @State private var saving = false
-    @State private var signalOrigin = ""
-    @State private var appKey = ""
+    @State private var setupCode = ""
     @State private var signalMessage = ""
 
     var body: some View {
@@ -37,27 +36,27 @@ struct SettingsView: View {
             }
             Section("Signal") {
                 if let signal = service.signal {
+                    Text(signal.connected)
                     LabeledContent("App actor", value: "\(signal.handle) (\(signal.actor))")
-                    LabeledContent("Person", value: signal.personHandle.map { "\($0) (\(signal.person))" } ?? signal.person)
                     if !signal.usable {
-                        Text("These settings name the app as the person. Paste the app key again and save.")
+                        Text("These settings name the app as the person. Paste the setup code again.")
                             .font(.caption).foregroundStyle(.red)
                     }
-                    LabeledContent("Origin", value: signal.origin)
                     Button("Remove", role: .destructive) { service.removeSignal() }
                 }
-                TextField("Signal origin, https://…", text: $signalOrigin)
-                SecureField("App actor's key", text: $appKey)
-                Button(service.signal == nil ? "Save" : "Replace key") {
-                    let value = appKey
-                    appKey = ""
+                SecureField("Beacon setup code", text: $setupCode)
+                Text("From Signal's /beacon page. It holds the app's key, which goes to the vault.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(service.signal == nil ? "Connect" : "Replace") {
+                    let value = setupCode
+                    setupCode = ""
                     saving = true
                     Task {
-                        signalMessage = await service.registerSignal(key: value, origin: signalOrigin)
+                        signalMessage = await service.registerSignal(code: value)
                         saving = false
                     }
                 }
-                .disabled(appKey.isEmpty || signalOrigin.isEmpty || saving)
+                .disabled(setupCode.isEmpty || saving)
                 if !signalMessage.isEmpty { Text(signalMessage).font(.caption) }
                 Text(service.delivery).font(.caption)
                 Button("Resume delivery") { service.resumeDelivery() }

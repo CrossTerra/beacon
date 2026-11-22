@@ -27,19 +27,35 @@ public struct SignalSettings: Codable, Equatable, Sendable {
     public var actor: String
     /// The app actor's handle, for display.
     public var handle: String
-    /// The person's handle, for display.
+    /// The person's handle and name, for display.
     public var personHandle: String?
+    public var personName: String?
 
-    public init(origin: String, person: String, actor: String, handle: String, personHandle: String? = nil) {
+    public init(origin: String, person: String, actor: String, handle: String, personHandle: String? = nil,
+                personName: String? = nil) {
         self.origin = origin
         self.person = person
         self.actor = actor
         self.handle = handle
         self.personHandle = personHandle
+        self.personName = personName
     }
 
+    /// The person as Settings shows them: "Winton (@winton)", or whatever part Signal gave.
+    public var personLabel: String {
+        switch (personName, personHandle) {
+        case let (name?, handle?): "\(name) (@\(handle))"
+        case let (name?, nil): name
+        case let (nil, handle?): "@\(handle)"
+        default: person
+        }
+    }
+
+    /// "Connected to https://signal.example as Winton (@winton)".
+    public var connected: String { "Connected to \(origin) as \(personLabel)" }
+
     /// Records can go out under these settings: the person is an `act_…` other than the app itself. Settings saved
-    /// before Beacon took the person from Signal could name the app; those are re-saved in Settings.
+    /// before Beacon took the person from Signal could name the app; those are set up again in Settings.
     public var usable: Bool { PublicID.isValid(person, prefix: "act") && person != actor }
 
     public var binding: CredentialBinding {
