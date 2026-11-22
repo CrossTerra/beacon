@@ -1,17 +1,16 @@
 import BeaconCore
 import SwiftUI
 
-/// Settings: the GitHub account Beacon merges as. The token field is secure, cleared once saved, and the token is
-/// never shown again.
+/// Settings: the GitHub account Beacon merges as, and the Signal it records to, from Signal's setup code. The token and
+/// code fields are secure and cleared once used; neither is shown again.
 struct SettingsView: View {
     @ObservedObject var service: ApprovalService
+    @Environment(\.openURL) private var openURL
     @State private var origin = "https://api.github.com"
     @State private var token = ""
     @State private var message = ""
     @State private var saving = false
-    @State private var signalOrigin = ""
-    @State private var person = ""
-    @State private var appKey = ""
+    @State private var setupCode = ""
     @State private var signalMessage = ""
 
     var body: some View {
@@ -23,6 +22,20 @@ struct SettingsView: View {
                     Button("Remove", role: .destructive) { service.removeGitHub() }
                 }
                 TextField("API origin", text: $origin)
+                Text("Create a classic token for your own account with the repo scope, then paste it here. Beacon merges as you.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Create a token on GitHub") { openURL(GitHubSetup.newTokenURL(apiOrigin: origin)) }
+                Text("If your organization uses SAML single sign-on, click Configure SSO → Authorize next to the new token.")
+                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Or a fine-grained token") {
+                    Text("""
+                        Resource owner: the organization that owns the repositories, with access to them. Repository \
+                        permissions: Metadata read; Contents read and write; Pull requests read and write; Checks read; \
+                        Commit statuses read; Administration read (branch protection). The organization may need to \
+                        approve the token first.
+                        """)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 SecureField("Personal access token", text: $token)
                 Button(service.github == nil ? "Save" : "Replace token") {
                     let value = token
@@ -38,24 +51,27 @@ struct SettingsView: View {
             }
             Section("Signal") {
                 if let signal = service.signal {
+                    Text(signal.connected)
                     LabeledContent("App actor", value: "\(signal.handle) (\(signal.actor))")
-                    LabeledContent("Person", value: signal.person)
-                    LabeledContent("Origin", value: signal.origin)
+                    if !signal.usable {
+                        Text("These settings name the app as the person. Paste the setup code again.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                     Button("Remove", role: .destructive) { service.removeSignal() }
                 }
-                TextField("Signal origin, https://…", text: $signalOrigin)
-                TextField("Person, act_…", text: $person)
-                SecureField("App actor's key", text: $appKey)
-                Button(service.signal == nil ? "Save" : "Replace key") {
-                    let value = appKey
-                    appKey = ""
+                SecureField("Beacon setup code", text: $setupCode)
+                Text("From Signal's /beacon page. It holds the app's key, which goes to the vault.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button(service.signal == nil ? "Connect" : "Replace") {
+                    let value = setupCode
+                    setupCode = ""
                     saving = true
                     Task {
-                        signalMessage = await service.registerSignal(key: value, origin: signalOrigin, person: person)
+                        signalMessage = await service.registerSignal(code: value)
                         saving = false
                     }
                 }
-                .disabled(appKey.isEmpty || signalOrigin.isEmpty || person.isEmpty || saving)
+                .disabled(setupCode.isEmpty || saving)
                 if !signalMessage.isEmpty { Text(signalMessage).font(.caption) }
                 Text(service.delivery).font(.caption)
                 Button("Resume delivery") { service.resumeDelivery() }

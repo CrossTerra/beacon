@@ -114,24 +114,41 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
             api.meter = { try await budget.take(at: now()) }
             let (pull, checks) = try await read(api, settings, pinned, repositoryID: nil)
             await budget.leave()
+            let origin = try CredentialBinding.normalize(settings.origin)
+            let name = MergeHandler.canonicalName(pull.fullName, for: pinned.repo)
             return ResolvedAction(
-                origin: try CredentialBinding.normalize(settings.origin), account: settings.account,
+                origin: origin, account: settings.account,
                 destination: .object(["repository_id": .int(pull.repositoryID), "pr": .int(pinned.number),
                                       "base": .string(pinned.base)]),
                 facts: ["Title": pull.title, "Mergeable": pull.mergeableState, "Reviews": "no changes requested",
-                        "Required checks": checks.isEmpty ? "none" : "\(checks.count) green: " + checks.sorted().joined(separator: ", "),
-                        "Head": pinned.head],
-                readAt: at)
+                        "Checks": checks.summary, "Head": pinned.head],
+                readAt: at, accountLabel: settings.login,
+                destinationLabel: "\(pinned.base) · #\(pinned.number) · \(name)",
+                subject: "github:pr:\(name)#\(pinned.number)",
+                link: MergeHandler.pullURL(origin: origin, repo: name, number: pinned.number))
         } catch {
             await budget.leave()
             throw error
         }
     }
 
+    /// GitHub's spelling of the repository when it names the same one (case aside); else the pinned name.
+    static func canonicalName(_ fullName: String?, for repo: String) -> String {
+        guard let fullName, fullName.lowercased() == repo.lowercased(), Field.matches(fullName, Field.repo) else { return repo }
+        return fullName
+    }
+
+    /// The pull request's page on the origin's web host.
+    public static func pullURL(origin: String, repo: String, number: Int64) -> URL? {
+        guard Field.matches(repo, Field.repo), number > 0 else { return nil }
+        return URL(string: GitHubSetup.webOrigin(apiOrigin: origin) + "/\(repo)/pull/\(number)")
+    }
+
     /// Reads the account, PR, reviews and checks, and refuses anything that differs from the pinned values or
-    /// does not allow the merge. Returns the PR and its green required checks.
+    /// does not allow the merge. Every check run and commit status on the head must have completed and passed, and
+    /// every required check must be among them; a repository with no required checks is no exception.
     func read(_ api: GitHubAPI, _ settings: GitHubSettings, _ pinned: Pinned, repositoryID: Int64?) async throws
-        -> (PullRequestState, Set<String>)
+        -> (PullRequestState, ChecksReport)
     {
         do {
             guard try await api.user().id == settings.userID else { throw MergeRefusal.accountMismatch }
@@ -147,11 +164,12 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
             }
             if try await api.changesRequested(pinned.repo, pinned.number) { throw MergeRefusal.changesRequested }
             let required = try await api.requiredChecks(pinned.repo, base: pinned.base)
-            guard required.isSubset(of: try await api.greenChecks(pinned.repo, sha: pinned.head)) else {
-                throw MergeRefusal.checksNotGreen
-            }
-            return (pull, required)
+            let checks = try await api.checks(pinned.repo, sha: pinned.head, required: required)
+            guard checks.green else { throw ChecksNotGreen(report: checks) }
+            return (pull, checks)
         } catch let refusal as MergeRefusal {
+            throw refusal
+        } catch let refusal as ChecksNotGreen {
             throw refusal
         } catch {
             throw MergeRefusal.unavailable
@@ -198,6 +216,8 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
             try await lastRead(api, pinned, repositoryID: repositoryID)
         } catch let refusal as MergeRefusal {
             return try fail(id, refusal.rawValue, by: "pre_dispatch")
+        } catch is ChecksNotGreen {
+            return try fail(id, MergeRefusal.checksNotGreen.rawValue, by: "pre_dispatch")
         } catch {
             return try fail(id, MergeRefusal.unavailable.rawValue, by: "pre_dispatch")
         }
@@ -289,6 +309,21 @@ public enum GitHubSetup {
         case otherUser(login: String)
         case rejected
         case unreachable
+    }
+
+    /// GitHub's page for a new classic token with the `repo` scope, on the origin's web host. Beacon opens it in the
+    /// browser; Beacon itself does not contact it.
+    public static func newTokenURL(apiOrigin: String) -> URL {
+        URL(string: webOrigin(apiOrigin: apiOrigin) + "/settings/tokens/new?scopes=repo&description=Beacon%20(merges)")!
+    }
+
+    /// The web host for an API origin: `api.github.com` → `github.com`, `api.{host}` → `{host}`, any other host as
+    /// is; github.com for an origin that is not `https://host`.
+    public static func webOrigin(apiOrigin: String) -> String {
+        guard let normalized = try? CredentialBinding.normalize(apiOrigin), let parts = URLComponents(string: normalized),
+              let host = parts.host else { return "https://github.com" }
+        let site = host.hasPrefix("api.") ? String(host.dropFirst(4)) : host
+        return "https://" + site + (parts.port.map { ":\($0)" } ?? "")
     }
 
     public static func register(token: Secret, origin: String, vault: Vault, settings url: URL,

@@ -19,7 +19,16 @@ private struct MenuTitle: View {
     @ObservedObject var delegate: BeaconDelegate
 
     var body: some View {
-        Text("Beacon · \(delegate.pendingCount)")
+        // An icon, not a title: a crowded menu bar (or the notch) hides wide items first.
+        let pending = delegate.pendingCount
+        HStack(spacing: 2) {
+            Image(systemName: MenuBarItem.symbol(pending: pending))
+            if let badge = MenuBarItem.badge(pending: pending) {
+                Text(badge).monospacedDigit()
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(MenuBarItem.accessibilityLabel(pending: pending))
     }
 }
 
@@ -61,7 +70,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var terminate: (any DispatchSourceSignal)?
 
     private lazy var approvalsWindow: NSWindow = {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView(service: approvals)))
+        let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView(service: approvals) { [weak self] in
+            self?.showSettings()
+        }))
         window.title = "Beacon Approvals"
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 820, height: 520))
@@ -119,6 +130,12 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             awaitingQuit = false
             NSApp.reply(toApplicationShouldTerminate: true)
         }
+    }
+
+    /// Opening Beacon.app again (Finder, Spotlight, `open`) while it runs shows the approval window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showApprovals()
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

@@ -13,6 +13,32 @@ public struct PullRequestState: Equatable, Sendable {
     public var title: String
     public var mergeCommit: String?
     public var mergedBy: Int64?
+    /// The base repository's `full_name` as GitHub spells it (`CrossTerra/signal`), if it said.
+    public var fullName: String?
+}
+
+/// Every check on a head, by name, after taking each check's latest run (see `GitHubAPI.report`).
+public struct ChecksReport: Equatable, Sendable {
+    public var passed: [String]
+    public var pending: [String]
+    public var failed: [String]
+
+    /// Every check reported, and every required one, completed and passed.
+    public var green: Bool { pending.isEmpty && failed.isEmpty }
+
+    /// "3 passed", or "1 failed: lint · 1 pending: deploy · 2 passed", or "none reported".
+    public var summary: String {
+        var parts: [String] = []
+        if !failed.isEmpty { parts.append("\(failed.count) failed: " + failed.joined(separator: ", ")) }
+        if !pending.isEmpty { parts.append("\(pending.count) pending: " + pending.joined(separator: ", ")) }
+        if !passed.isEmpty { parts.append("\(passed.count) passed") }
+        return parts.isEmpty ? "none reported" : parts.joined(separator: " · ")
+    }
+}
+
+/// The checks on the head are not all completed and passing; the report says which.
+public struct ChecksNotGreen: Error, Equatable, Sendable {
+    public let report: ChecksReport
 }
 
 /// GitHub's REST API for the reads and the one write a merge needs. Every path is built from the validated
@@ -79,7 +105,8 @@ public struct GitHubAPI: Sendable {
             mergeable: pull["mergeable"] as? Bool, mergeableState: pull["mergeable_state"] as? String ?? "unknown",
             base: baseRef, head: headSHA, title: pull["title"] as? String ?? "",
             mergeCommit: pull["merge_commit_sha"] as? String,
-            mergedBy: ((pull["merged_by"] as? [String: Any])?["id"] as? NSNumber)?.int64Value)
+            mergedBy: ((pull["merged_by"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
+            fullName: (base?["repo"] as? [String: Any])?["full_name"] as? String)
     }
 
     /// Whether any reviewer's latest review requests changes.
@@ -135,15 +162,16 @@ public struct GitHubAPI: Sendable {
         var conclusion: String
     }
 
-    static let failing: Set<String> = ["failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure"]
-    static let statusFailing: Set<String> = ["failure", "error"]
+    /// The conclusions of a completed check run that pass. Any other (failure, cancelled, timed_out,
+    /// action_required, stale, startup_failure, or one GitHub adds later) fails.
+    static let passing: Set<String> = ["success", "neutral", "skipped"]
 
     /// 0 passing, 1 not finished, 2 failing: between checks of one name from different apps, failing wins, then a
     /// check still running, else passing (as Signal's executor reads them, #131).
     static func rank(_ check: Check) -> Int {
         guard check.completed else { return 1 }
-        if check.kind == "status" { return statusFailing.contains(check.conclusion) ? 2 : (check.conclusion == "success" ? 0 : 1) }
-        return failing.contains(check.conclusion) ? 2 : 0
+        if check.kind == "status" { return check.conclusion == "success" ? 0 : 2 }
+        return passing.contains(check.conclusion) ? 0 : 2
     }
 
     /// Whether `a` is a later run than `b` of the same check. GitHub numbers runs as it creates them, so a re-run has
@@ -158,10 +186,12 @@ public struct GitHubAPI: Sendable {
         return rank(a) > rank(b)
     }
 
-    /// The names that are green: only the latest run of each name and app counts, so a re-run that passes clears an
-    /// older failure, and a newer failure is not cleared by an older pass. A name is green when its latest run from
-    /// every app, and its commit status if any, passed (success, neutral or skipped).
-    static func green(_ reported: [Check]) -> Set<String> {
+    /// Every reported name, and every required one, as passed, pending or failed. Only the latest run of each name
+    /// and app counts, so a re-run that passes clears an older failure, and a newer failure is not cleared by an older
+    /// pass. A name passed when its latest run from every app, and its commit status if any, passed (success, neutral
+    /// or skipped); it failed when any of them failed; otherwise it is pending. A required name nobody reported is
+    /// pending.
+    static func report(_ reported: [Check], required: Set<String>) -> ChecksReport {
         var latest: [String: Check] = [:]
         for check in reported {
             let key = check.kind == "status" ? "status\u{0}\(check.name)" : "check\u{0}\(check.app ?? -1)\u{0}\(check.name)"
@@ -170,11 +200,13 @@ public struct GitHubAPI: Sendable {
         }
         var worst: [String: Int] = [:]
         for check in latest.values { worst[check.name] = max(worst[check.name] ?? 0, rank(check)) }
-        return Set(worst.filter { $0.value == 0 }.keys)
+        for name in required where worst[name] == nil { worst[name] = 1 }
+        func names(_ rank: Int) -> [String] { worst.filter { $0.value == rank }.keys.sorted() }
+        return ChecksReport(passed: names(0), pending: names(1), failed: names(2))
     }
 
-    /// The contexts that passed on `sha`, from its check runs and its combined commit status.
-    public func greenChecks(_ repo: String, sha: String) async throws -> Set<String> {
+    /// Every check on `sha`, from its check runs and its combined commit status, with the `required` names.
+    public func checks(_ repo: String, sha: String, required: Set<String>) async throws -> ChecksReport {
         let segments = try GitHubAPI.segments(repo)
         let dates = ISO8601DateFormatter()
         var reported: [Check] = []
@@ -201,7 +233,7 @@ public struct GitHubAPI: Sendable {
             reported.append(Check(kind: "status", name: context, app: nil, id: nil, startedAt: nil,
                                   completed: state != "pending", conclusion: state))
         }
-        return GitHubAPI.green(reported)
+        return GitHubAPI.report(reported, required: required)
     }
 
     /// `PUT …/merge` with the frozen method and `sha: head`. GitHub refuses if the head moved.

@@ -56,9 +56,13 @@ struct MergeTests {
         let resolved = try await h.handler.resolve(proposal, model: nil)
         #expect(resolved.account == "github:user:123" && resolved.origin == h.github.origin)
         #expect(resolved.destination == .object(["repository_id": .int(456), "pr": .int(140), "base": "main"]))
-        #expect(resolved.facts["Required checks"] == "1 green: ci")
+        #expect(resolved.facts["Checks"] == "1 passed")
+        #expect(resolved.facts["Required checks"] == nil)
+        #expect(resolved.accountLabel == "winton")
+        #expect(resolved.destinationLabel == "main · #140 · CrossTerra/signal")
+        #expect(resolved.link == URL(string: h.github.origin + "/CrossTerra/signal/pull/140"))
         try h.journal.approve(try FrozenApproval(proposal, origin: resolved.origin, account: resolved.account,
-                                                 destination: resolved.destination), at: h.clock.now)
+                                                 destination: resolved.destination), subject: resolved.subject, at: h.clock.now)
 
         #expect(try await h.handler.execute(id) == .executed(confirmedBy: "reply"))
         #expect(h.merges.count == 1)
@@ -72,6 +76,12 @@ struct MergeTests {
         #expect(records[3]["metadata"]?["confirmed_by"] == "reply")
         let bytes = records.map { $0.canonical }.joined()
         #expect(!bytes.contains(h.token))
+        #expect(records.allSatisfy { $0["subject"] == "github:pr:CrossTerra/signal#140" })
+        // The window says what happened, and links to the pull request.
+        let done = h.journal.proposal(id, at: h.clock.now)!
+        let outcome = ActionOutcome.describe(done, approval: h.journal.approval(id), result: h.journal.outcome(id))
+        #expect(outcome?.text == "Merged as ccccccc")
+        #expect(outcome?.link == URL(string: h.github.origin + "/CrossTerra/signal/pull/140"))
         // Nothing runs twice: a second execute cannot start.
         await #expect(throws: JournalError.transition) { try await h.handler.execute(id) }
         #expect(h.merges.count == 1)
@@ -80,10 +90,6 @@ struct MergeTests {
     @Test func preflightRefusesWhatCannotBeMerged() async throws {
         let cases: [(MergeRefusal, (FakeGitHub) -> Void)] = [
             (.headMoved, { $0.pull.head = String(repeating: "b", count: 40) }),
-            (.checksNotGreen, { $0.checkRuns = ["ci": "failure"] }),
-            (.checksNotGreen, { $0.checkRuns = ["ci": nil] }),
-            (.checksNotGreen, { $0.checkRuns = [:]; $0.statuses = ["deploy": "pending"]; $0.ruleChecks = ["deploy"] }),
-            (.checksNotGreen, { $0.protectionChecks = ["lint"] }),
             (.changesRequested, { $0.reviews = [(9, "APPROVED"), (10, "CHANGES_REQUESTED")] }),
             (.alreadyMerged, { $0.pull.merged = true; $0.pull.state = "closed" }),
             (.notOpen, { $0.pull.state = "closed" }),
@@ -99,6 +105,26 @@ struct MergeTests {
             h.github.update(change)
             await #expect(throws: refusal) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
             #expect(h.merges.isEmpty)
+        }
+        let checks: [(String, (FakeGitHub) -> Void)] = [
+            ("1 failed: ci", { $0.checkRuns = ["ci": "failure"] }),
+            ("1 pending: ci", { $0.checkRuns = ["ci": nil] }),
+            ("1 pending: deploy", { $0.checkRuns = [:]; $0.statuses = ["deploy": "pending"]; $0.ruleChecks = ["deploy"] }),
+            ("1 failed: deploy", { $0.checkRuns = [:]; $0.statuses = ["deploy": "error"]; $0.ruleChecks = [] }),
+            ("1 pending: lint · 1 passed", { $0.protectionChecks = ["lint"] }),
+        ]
+        for (summary, change) in checks {
+            let h = try MergeHarness()
+            let id = try h.propose()
+            h.github.update(change)
+            await #expect(throws: ChecksNotGreen.self, "\(summary)") {
+                try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil)
+            }
+            do {
+                _ = try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil)
+            } catch let refusal as ChecksNotGreen {
+                #expect(refusal.report.summary == summary)
+            }
         }
         // A changed request later approved overrides an older one by the same reviewer.
         let h = try MergeHarness()
@@ -137,9 +163,85 @@ struct MergeTests {
             if green {
                 _ = try await h.handler.resolve(proposal, model: nil)
             } else {
-                await #expect(throws: MergeRefusal.checksNotGreen, "\(name)") { try await h.handler.resolve(proposal, model: nil) }
+                await #expect(throws: ChecksNotGreen.self, "\(name)") { try await h.handler.resolve(proposal, model: nil) }
             }
         }
+    }
+
+    /// Without any required check, every check run and commit status on the head must still have passed: a red
+    /// check that branch protection does not require stops the merge, before approval and at the final read.
+    @Test func everyCheckCountsWithoutRequiredChecks() async throws {
+        func harness(_ change: @escaping (FakeGitHub) -> Void) throws -> (MergeHarness, String) {
+            let h = try MergeHarness()
+            h.github.update { $0.ruleChecks = []; $0.protectionChecks = [] }
+            h.github.update(change)
+            return (h, try h.propose())
+        }
+        var (h, id) = try harness { $0.checkRuns = ["ci": "success", "e2e": "failure"] }
+        do {
+            _ = try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil)
+            Issue.record("resolved with a failing check")
+        } catch let refusal as ChecksNotGreen {
+            #expect(refusal.report.summary == "1 failed: e2e · 1 passed")
+        }
+        (h, id) = try harness { $0.checkRuns = ["ci": "success"]; $0.statuses = ["vercel": "failure"] }
+        await #expect(throws: ChecksNotGreen.self) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
+        (h, id) = try harness { $0.checkRuns = ["ci": "success", "e2e": nil] }
+        await #expect(throws: ChecksNotGreen.self) { try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil) }
+        (h, id) = try harness { $0.checkRuns = ["ci": "success", "docs": "skipped", "lint": "neutral"] }
+        #expect(try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil).facts["Checks"] == "3 passed")
+        (h, id) = try harness { $0.checkRuns = [:] }
+        #expect(try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil).facts["Checks"] == "none reported")
+
+        // A non-required check that fails after approval stops the merge at the final read.
+        (h, id) = try harness { _ in }
+        try await h.approve(id)
+        h.github.update { $0.checkRuns["e2e"] = "failure" }
+        #expect(try await h.handler.execute(id) == .failed(error: "checks_not_green", confirmedBy: "pre_dispatch"))
+        #expect(h.merges.isEmpty)
+    }
+
+    /// The record subject keeps GitHub's spelling of the repository from the approval on; a full_name for another
+    /// repository is not taken.
+    @Test func subjectsKeepGitHubsSpelling() async throws {
+        let h = try MergeHarness()
+        var params = mergeParams.objectValue!
+        params["repo"] = "crossterra/signal"
+        let proposal = Proposal(request: request("github.merge", .object(params)), client: "beacon-act", at: h.clock.now)
+        try h.journal.add(proposal)
+        let resolved = try await h.handler.resolve(proposal, model: nil)
+        #expect(resolved.subject == "github:pr:CrossTerra/signal#140")
+        try h.journal.approve(try FrozenApproval(proposal, origin: resolved.origin, account: resolved.account,
+                                                 destination: resolved.destination), subject: resolved.subject, at: h.clock.now)
+        let records = try h.records()
+        #expect(records.map { $0["subject"]!.stringValue! } == ["github:pr:crossterra/signal#140", "github:pr:CrossTerra/signal#140"])
+
+        #expect(MergeHandler.canonicalName("Someone/else", for: "crossterra/signal") == "crossterra/signal")
+        #expect(MergeHandler.canonicalName(nil, for: "crossterra/signal") == "crossterra/signal")
+        // A subject for another target is not kept.
+        let other = try MergeHarness()
+        let id = try other.propose()
+        let p = other.journal.proposal(id, at: other.clock.now)!
+        try other.journal.approve(try FrozenApproval(p, origin: other.github.origin, account: "github:user:123",
+                                                     destination: mergeDestination), subject: "github:pr:CrossTerra/other#140",
+                                  at: other.clock.now)
+        #expect(try other.records().allSatisfy { $0["subject"] == "github:pr:CrossTerra/signal#140" })
+    }
+
+    @Test func theWindowDescribesEachOutcome() throws {
+        let h = try MergeHarness()
+        let id = try h.propose()
+        let p = h.journal.proposal(id, at: h.clock.now)!
+        #expect(ActionOutcome.describe(p, approval: nil, result: nil) == nil)
+        var failed = p
+        failed.status = .failed
+        let approval = try FrozenApproval(p, origin: "https://api.github.com", account: "github:user:123", destination: mergeDestination)
+        let described = ActionOutcome.describe(failed, approval: approval, result: .object(["error": "head_moved"]))
+        #expect(described?.text == "Not merged: head moved")
+        #expect(described?.link == URL(string: "https://github.com/CrossTerra/signal/pull/140"))
+        var unknown = p
+        unknown.status = .outcomeUnknown
+        #expect(ActionOutcome.describe(unknown, approval: approval, result: nil)?.text.hasPrefix("Outcome unknown") == true)
     }
 
     /// Anything that changed after approval stops the merge at the final read, with nothing sent.
@@ -356,5 +458,17 @@ struct MergeTests {
         try GitHubSetup.remove(vault: vault, settings: url)
         #expect(throws: VaultError.notFound) { try vault.credential(for: try settings.binding) }
         #expect(try AppSettings.load(url).github == nil)
+    }
+}
+
+struct GitHubTokenPageTests {
+    @Test func theNewTokenPageIsOnTheOriginsWebHost() {
+        let query = "/settings/tokens/new?scopes=repo&description=Beacon%20(merges)"
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://api.github.com").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://API.github.com/").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://api.acme.ghe.com").absoluteString == "https://acme.ghe.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "https://git.example.com:8443").absoluteString == "https://git.example.com:8443" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "not an origin").absoluteString == "https://github.com" + query)
+        #expect(GitHubSetup.newTokenURL(apiOrigin: "http://api.evil.test").absoluteString == "https://github.com" + query)
     }
 }

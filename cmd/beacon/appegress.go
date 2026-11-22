@@ -60,7 +60,7 @@ func (a *app) appEgress() ([]egress.Host, error) {
 		}
 	}
 	if s.Signal != nil {
-		if err := add("Signal", s.Signal.Origin, "Beacon.app: approval records, in journal order (POST /api/app-records)"); err != nil {
+		if err := add("Signal", s.Signal.Origin, "Beacon.app: approval records, in journal order (POST /api/app-records); on saving the key, GET /api/me and the app actor and its person (GET /api/actors/{id})"); err != nil {
 			return nil, err
 		}
 	}

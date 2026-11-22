@@ -80,6 +80,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var approvedAt: Date?
         var startedAt: Date?
         var unknownAt: Date?
+        /// The executed or failed entry's body.
+        var outcome: JSON?
     }
 
     let db: SQLite
@@ -190,6 +192,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         locked { states[id]?.unknownAt }
     }
 
+    /// The result entry of an executed or failed proposal: `native`, `result`, `error`, `evidence`, `confirmed_by`.
+    public func outcome(_ id: String) -> JSON? {
+        locked { states[id]?.outcome }
+    }
+
     public func runnerID(_ id: String) -> String? {
         locked { states[id]?.runnerID }
     }
@@ -229,7 +236,9 @@ public final class Journal: ProposalBook, @unchecked Sendable {
 
     /// Consumes the pending proposal `approval` was frozen from, once. It must be unchanged since then, unexpired,
     /// and the frozen values must be its own (only an agent run's model may differ).
-    public func approve(_ approval: FrozenApproval, at date: Date) throws {
+    /// `subject` is the record subject as the provider spells it, kept in the local entry for the records from here
+    /// on; it must name the same target as the proposal's subject, case aside, or it is ignored.
+    public func approve(_ approval: FrozenApproval, subject: String? = nil, at date: Date) throws {
         sweep(at: date)
         try append(approval.id, kind: "approved", at: date) { state in
             let proposal = state.proposal
@@ -248,6 +257,10 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                 "edited": .array(approval.edited.map(JSON.string)),
             ]
             body["original_model"] = approval.originalModel.map(JSON.string)
+            let proposed = Record.subject(action: proposal.type.rawValue, params: proposal.params, person: "")
+            if let subject, subject != proposed, subject.lowercased() == proposed.lowercased(), subject.hasPrefix("github:pr:") {
+                body["subject"] = .string(subject)
+            }
             return body
         }
     }
@@ -339,10 +352,15 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             do {
                 let proposed = try db.query(
                     "SELECT body FROM entries WHERE proposal = ? AND kind = 'proposed'", [.text(row[5].text!)]).first![0].text!
+                // From the approval on, the subject as the provider spelled it at approval, if Beacon kept one.
+                let approved = try db.query(
+                    "SELECT body FROM entries WHERE proposal = ? AND kind = 'approved' AND seq <= ?",
+                    [.text(row[5].text!), .int(seq)]).first?[0].text
+                let subject = try approved.flatMap { try JSON.parse(Data($0.utf8))["subject"]?.stringValue }
                 bytes = try Record.bytes(
                     key: row[1].text!, nonce: row[2].text!, proposal: row[5].text!, kind: row[6].text!,
                     at: Date(milliseconds: row[7].int!), body: try JSON.parse(Data(row[8].text!.utf8)),
-                    proposed: try JSON.parse(Data(proposed.utf8)), person: person)
+                    proposed: try JSON.parse(Data(proposed.utf8)), person: person, subject: subject)
             } catch {
                 // The record cannot be built (an invalid person id, an unreadable entry): stop here, visibly, until a
                 // resume. Nothing was sent, so it can be rebuilt then.
@@ -477,8 +495,12 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "outcome_unknown":
             state.proposal.status = .outcomeUnknown
             state.unknownAt = date
-        case "executed": state.proposal.status = .executed
-        case "failed": state.proposal.status = .failed
+        case "executed":
+            state.proposal.status = .executed
+            state.outcome = body
+        case "failed":
+            state.proposal.status = .failed
+            state.outcome = body
         default: return
         }
         states[id] = state

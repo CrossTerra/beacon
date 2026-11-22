@@ -40,6 +40,7 @@ final class ApprovalService: ObservableObject {
             let settingsURL0 = paths.settings
             let scheduler = DeliveryScheduler(journal: journal, connect: {
                 guard let signal = try AppSettings.load(settingsURL0).signal else { throw VaultError.notFound }
+                guard signal.usable else { throw SignalSetup.Refusal.noPerson }
                 return (try SignalRecords.connect(signal, vault: vault), signal.person)
             }, message: delivery)
             scheduler.onMessage = { [weak self] message in self?.delivery = message }
@@ -107,25 +108,37 @@ final class ApprovalService: ObservableObject {
         }
     }
 
-    /// Registers the app actor's key. It goes to the vault; this never shows or keeps it.
-    func registerSignal(key: String, origin: String, person: String) async -> String {
+    /// Registers Signal from the setup code on Signal's /beacon page. The key in it goes to the vault; this never
+    /// shows or keeps it.
+    func registerSignal(code: String) async -> String {
         guard let vault else { return status }
         do {
-            signal = try await SignalSetup.register(key: Secret(key), origin: origin, person: person, vault: vault,
-                                                    settings: paths.settings)
+            signal = try await SignalSetup.register(code: code, vault: vault, settings: paths.settings)
             // A new key or person may be what a stopped record needed.
             resumeDelivery()
-            return "Records go to \(signal!.origin) as \(signal!.handle)"
-        } catch SignalSetup.Refusal.person {
-            return "Not saved: the person is an act_… id."
+            return signal!.connected
+        } catch SignalSetup.Refusal.code(.prefix) {
+            return "Not saved: that is not a Beacon setup code. Copy it from Signal's /beacon page."
+        } catch SignalSetup.Refusal.code {
+            return "Not saved: the setup code is damaged or incomplete. Copy it again from Signal's /beacon page."
         } catch SignalSetup.Refusal.notAnApp {
-            return "Not saved: that key is not an integration actor's."
+            return "Not saved: that key is not an active integration actor's."
+        } catch SignalSetup.Refusal.notApprovalApp {
+            return "Not saved: that actor is not marked as an approval app in Signal."
+        } catch SignalSetup.Refusal.noPerson {
+            return "Not saved: that app does not work for an active person in Signal."
         } catch SignalSetup.Refusal.scopes {
             return "Not saved: the app's key must have exactly read and write."
         } catch SignalSetup.Refusal.rejected {
-            return "Not saved: Signal refused the key."
+            return "Not saved: Signal refused the key. Rotate it on Signal's /beacon page and paste the new code."
+        } catch SignalSetup.Refusal.unreachable(let retryAfter?) {
+            return "Not saved: Signal is busy or unavailable. Try again in \(retryAfter) seconds."
+        } catch SignalSetup.Refusal.unreachable(nil) {
+            return "Not saved: Signal could not be reached. Try again."
+        } catch SignalSetup.Refusal.unexpected(let status) {
+            return "Not saved: Signal answered \(status). Check the setup code, or try again."
         } catch {
-            return "Not saved: Signal could not be reached, or the origin is not https://host."
+            return "Not saved: the settings or the vault could not be written."
         }
     }
 

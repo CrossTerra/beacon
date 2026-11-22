@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
 # Exercise scripts/install.sh --dry-run: build, ad-hoc sign and install into a temporary prefix, twice, and check the
-# result. Uses no signing identity and no keychain, and must leave $HOME's Beacon untouched. Needs a clean checkout.
+# result. Uses no signing identity and no keychain, and must leave $HOME's Beacon untouched. Needs a checkout with no
+# changes to tracked files; an untracked and an ignored file are added for the run, as a person's checkout may have.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 tmp=${TMPDIR:-/tmp}
 # The physical path, as install.sh resolves it: GitHub's runners set TMPDIR with a trailing slash, and /var is a
 # symlink to /private/var.
 prefix=$(cd "$(mktemp -d "${tmp%/}/beacon-install-test.XXXXXXXX")" && pwd -P)
-trap 'rm -rf "$prefix"' EXIT
+# An untracked file and an ignored one (.e2e.env, only if there is none already) must not stop the install.
+untracked=".test-install-untracked.$$"
+touch "$untracked"
+made_ignored=false
+if [[ ! -e .e2e.env ]]; then
+	printf 'FIXTURE=1\n' > .e2e.env
+	made_ignored=true
+fi
+cleanup() {
+	rm -rf "$prefix"
+	rm -f "$untracked"
+	if [[ "$made_ignored" == true ]]; then rm -f .e2e.env; fi
+}
+trap cleanup EXIT
 
 fingerprint() {
 	local path=$1
@@ -42,6 +56,7 @@ identifier() { /usr/bin/codesign -d --verbose=1 "$1" 2>&1 | sed -n 's/^Identifie
 [[ $(cat "$prefix/.local/bin/beacon.pre-app") == "old cli" ]] || fail "the old CLI was not kept aside"
 "$prefix/.local/bin/beacon" version > /dev/null || fail "the linked CLI does not run"
 grep -q 'Dry run' "$prefix/first.log" || fail "no dry-run summary"
+if grep -Eqi 'untracked|ignored' "$prefix/first.log"; then fail "install.sh mentioned untracked or ignored files"; fi
 first=$(stat -f %i "$app")
 
 # Again: idempotent, and the new app replaces the old one in place.
@@ -54,6 +69,11 @@ leftovers=$(find "$prefix/Applications" "$prefix/.local/bin" -name '.*.new.*' -o
 
 after=$(fingerprint "$HOME/Applications/Beacon.app")$(fingerprint "$HOME/.local/bin/beacon")
 [[ "$before" == "$after" ]] || fail "the dry run changed \$HOME"
+
+# Neither file reached the build.
+for name in "$untracked" .e2e.env; do
+	[[ -z $(find "$app" -name "$name") ]] || fail "$name reached the app"
+done
 
 # A real install refuses to run without a terminal, and --prefix without --dry-run.
 if scripts/install.sh < /dev/null > /dev/null 2>&1; then fail "a real install ran without a terminal"; fi

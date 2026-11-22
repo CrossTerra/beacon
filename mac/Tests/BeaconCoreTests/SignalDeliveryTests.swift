@@ -24,8 +24,18 @@ final class FakeSignalServer: @unchecked Sendable {
     private(set) var posts: [(key: String, bytes: Data)] = []
     var loseAnswerAt: String?
     var unavailable = false
+    /// Answers a `GET` of this path with `(status, headers)` and an error body, or loses it when the status is 0.
+    var gets: [String: (Int, [String: String])] = [:]
     var me: [String: Any] = ["actor": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "name": "Beacon",
                                        "handle": "beacon-winton"], "scopes": ["read", "write"]]
+    /// `GET /api/actors/{id}`: the app actor, working for the person, and the person.
+    var actors: [String: [String: Any]] = [
+        "act_01m6a6ft00e81840g2081040g3": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration",
+                                           "handle": "beacon-winton", "approval_app": true, "works_for": person,
+                                           "deactivated_at": NSNull()],
+        person: ["id": person, "type": "human", "name": "Winton", "handle": "winton", "approval_app": false, "works_for": NSNull(),
+                 "deactivated_at": NSNull()],
+    ]
 
     init() {
         FakeSignalServer.lock.withLock { FakeSignalServer.byHost[host] = self }
@@ -59,9 +69,15 @@ final class FakeSignalServer: @unchecked Sendable {
             let authorization = request.value(forHTTPHeaderField: "Authorization")
             authorizations.append(authorization)
             guard authorization == "Bearer " + key else { return .json(401, problem("unauthorized"), [:]) }
+            if request.httpMethod == "GET", let path = request.url?.path, let (status, headers) = gets[path] {
+                return status == 0 ? .lost : .json(status, problem("scripted"), headers)
+            }
             switch (request.httpMethod, request.url?.path) {
             case ("GET", "/api/me"):
                 return .json(200, me, [:])
+            case ("GET", let path?) where path.hasPrefix("/api/actors/"):
+                let id = String(path.dropFirst("/api/actors/".count))
+                return actors[id].map { .json(200, $0, [:]) } ?? .json(404, problem("not_found"), [:])
             case ("POST", "/api/app-records"):
                 if unavailable { return .json(503, problem("unavailable"), [:]) }
                 guard let record = try? JSON.parse(body), let key = record["key"]?.stringValue else {
@@ -161,6 +177,8 @@ struct SignalDeliveryTests {
         for (entry, stored) in zip(entries, signal.stored) {
             var expected = entry["body"]!.objectValue!
             if expected["metadata"]!["action"] != "github.merge" { expected["subject"] = .string("signal:actor:\(person)") }
+            // The repository as spelled (see reproducesSignalsFixtureJournal).
+            else { expected["subject"] = "github:pr:CrossTerra/signal#140" }
             expected["key"] = .string(stored.key)
             #expect(stored.bytes == JSON.object(expected).canonicalData, "\(entry["note"]!.stringValue!)")
         }
@@ -288,25 +306,151 @@ struct SignalDeliveryTests {
         #expect(try await OutboxSender(journal: journal, transport: try transport(signal), person: person).drain() == .done(sent: 2))
     }
 
-    @Test func settingsAcceptOnlyTheAppActorsKey() async throws {
+    /// A setup code as Signal's /beacon page writes it.
+    static func setupCode(_ fields: [String: Any], prefix: String = SignalSetupCode.prefix) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: fields)
+        let base64url = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        return prefix + base64url
+    }
+
+    @Test func readsTheSetupCode() throws {
+        let decoded = try SignalSetupCode.decode("  " + Self.setupCode(["origin": "https://Signal.Example.com/", "key": "sig_k"]) + "\n")
+        #expect(decoded.origin == "https://signal.example.com" && decoded.key.value == "sig_k")
+        // Padded base64url is read too.
+        let padded = SignalSetupCode.prefix + Data(#"{"origin":"https://s.test","key":"sig_k1"}"#.utf8).base64EncodedString()
+        #expect(try SignalSetupCode.decode(padded).key.value == "sig_k1")
+
+        let problems: [(SignalSetupCode.Problem, String)] = [
+            (.prefix, ""),
+            (.prefix, "sig_k"),
+            (.prefix, Self.setupCode(["origin": "https://s.test", "key": "k"], prefix: "beacon-setup:v2:")),
+            (.prefix, Self.setupCode(["origin": "https://s.test", "key": "k"], prefix: "Beacon-Setup:v1:")),
+            (.encoding, SignalSetupCode.prefix),
+            (.encoding, SignalSetupCode.prefix + "not base64!"),
+            (.encoding, SignalSetupCode.prefix + "a"),
+            (.encoding, SignalSetupCode.prefix + Data("[1]".utf8).base64EncodedString()),
+            (.encoding, SignalSetupCode.prefix + Data("origin=https://s.test".utf8).base64EncodedString()),
+            (.fields, Self.setupCode(["key": "sig_k"])),
+            (.fields, Self.setupCode(["origin": "https://s.test"])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": ""])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": 7])),
+            (.fields, Self.setupCode(["origin": "https://s.test", "key": "sig k"])),
+            (.fields, Self.setupCode(["origin": "http://s.test", "key": "sig_k"])),
+            (.fields, Self.setupCode(["origin": "https://s.test/api", "key": "sig_k"])),
+        ]
+        for (problem, code) in problems {
+            #expect(throws: problem, "\(problem)") { try SignalSetupCode.decode(code) }
+        }
+        // A refusal never carries the key.
+        do {
+            _ = try SignalSetupCode.decode(Self.setupCode(["origin": "http://s.test", "key": "sig_secret"]))
+        } catch {
+            #expect(!"\(error)".contains("sig_secret"))
+        }
+    }
+
+    /// An outage or a busy Signal is never taken as a fact about the key: try again, after Retry-After when given.
+    /// `401` and `403` refuse the key; a `404` names a missing actor only once `/api/me` accepted the key.
+    @Test func setupTellsAnOutageFromARefusal() async throws {
         let signal = FakeSignalServer()
+        let app = "act_01m6a6ft00e81840g2081040g3"
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("signal-" + randomHex(6))
         let vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
         let url = directory.appendingPathComponent("app/settings.json")
-        func register(_ key: String = "sig_app_fixture_key", person: String = person) async throws -> SignalSettings {
-            try await SignalSetup.register(key: Secret(key), origin: signal.origin, person: person, vault: vault,
+        let cases: [(String, Int, [String: String], SignalSetup.Refusal)] = [
+            ("/api/me", 503, ["Retry-After": "30"], .unreachable(retryAfter: 30)),
+            ("/api/me", 500, [:], .unreachable(retryAfter: nil)),
+            ("/api/me", 429, ["Retry-After": "7"], .unreachable(retryAfter: 7)),
+            ("/api/me", 429, ["Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"], .unreachable(retryAfter: nil)),
+            ("/api/me", 0, [:], .unreachable(retryAfter: nil)),
+            ("/api/me", 401, [:], .rejected),
+            ("/api/me", 403, [:], .rejected),
+            ("/api/me", 404, [:], .unexpected(status: 404)),
+            ("/api/me", 400, [:], .unexpected(status: 400)),
+            ("/api/actors/\(app)", 502, ["Retry-After": "99999"], .unreachable(retryAfter: 3600)),
+            ("/api/actors/\(app)", 0, [:], .unreachable(retryAfter: nil)),
+            ("/api/actors/\(app)", 403, [:], .rejected),
+            ("/api/actors/\(app)", 404, [:], .notAnApp),
+            ("/api/actors/\(person)", 503, [:], .unreachable(retryAfter: nil)),
+            ("/api/actors/\(person)", 429, ["Retry-After": "5"], .unreachable(retryAfter: 5)),
+            ("/api/actors/\(person)", 404, [:], .noPerson),
+        ]
+        for (path, status, headers, refusal) in cases {
+            signal.gets = [path: (status, headers)]
+            await #expect(throws: refusal, "\(path) \(status)") {
+                try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": signal.key]), vault: vault,
+                                               settings: url, configuration: FakeSignalServer.configuration)
+            }
+            #expect(try AppSettings.load(url).signal == nil)
+        }
+        signal.gets = [:]
+        #expect(try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": signal.key]), vault: vault,
+                                               settings: url, configuration: FakeSignalServer.configuration).person == person)
+    }
+
+    @Test func settingsAcceptOnlyTheAppActorsKey() async throws {
+        let signal = FakeSignalServer()
+        let app = "act_01m6a6ft00e81840g2081040g3"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("signal-" + randomHex(6))
+        let vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
+        let url = directory.appendingPathComponent("app/settings.json")
+        func register(_ key: String = "sig_app_fixture_key") async throws -> SignalSettings {
+            try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": key]), vault: vault,
                                            settings: url, configuration: FakeSignalServer.configuration)
         }
-        await #expect(throws: SignalSetup.Refusal.person) { try await register(person: "@winton") }
+        await #expect(throws: SignalSetup.Refusal.code(.prefix)) {
+            try await SignalSetup.register(code: "sig_app_fixture_key", vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        await #expect(throws: SignalSetup.Refusal.code(.encoding)) {
+            try await SignalSetup.register(code: SignalSetupCode.prefix + "%%%", vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        await #expect(throws: SignalSetup.Refusal.code(.fields)) {
+            try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin]), vault: vault, settings: url,
+                                           configuration: FakeSignalServer.configuration)
+        }
+        #expect(signal.authorizations.isEmpty)
         await #expect(throws: SignalSetup.Refusal.rejected) { try await register("wrong") }
         signal.me["scopes"] = ["read", "write", "relay"]
         await #expect(throws: SignalSetup.Refusal.scopes) { try await register() }
         signal.me["scopes"] = ["read", "write"]
-        signal.me["actor"] = ["id": "act_01m6a6ft00e81840g2081040g3", "type": "human", "handle": "winton"]
+        signal.me["actor"] = ["id": app, "type": "human", "handle": "winton"]
         await #expect(throws: SignalSetup.Refusal.notAnApp) { try await register() }
-        signal.me["actor"] = ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "handle": "beacon-winton"]
+        signal.me["actor"] = ["id": app, "type": "integration", "handle": "beacon-winton"]
+
+        // The app actor as Signal shows it: active, marked approval_app, working for an active person.
+        let good = signal.actors[app]!
+        let cases: [(SignalSetup.Refusal, [String: Any])] = [
+            (.notAnApp, ["deactivated_at": "2026-11-20T00:00:00Z"]),
+            (.notApprovalApp, ["approval_app": false]),
+            (.notApprovalApp, ["approval_app": NSNull()]),
+            (.noPerson, ["works_for": NSNull()]),
+            (.noPerson, ["works_for": app]),
+            (.noPerson, ["works_for": "act_01m6a6ft00e81840g2081040g9"]),
+        ]
+        for (refusal, change) in cases {
+            signal.actors[app] = good.merging(change) { $1 }
+            await #expect(throws: refusal, "\(change)") { try await register() }
+        }
+        signal.actors[app] = good.filter { $0.key != "works_for" }
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
+        signal.actors[app] = good
+        signal.actors[person]!["type"] = "agent"
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
+        signal.actors[person]!["type"] = "human"
+        signal.actors[person]!["deactivated_at"] = "2026-11-20T00:00:00Z"
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
+        signal.actors[person]!["deactivated_at"] = NSNull()
+        #expect(try AppSettings.load(url).signal == nil)
+
+        // The actor and the person come from Signal, never from anything typed.
         let settings = try await register()
-        #expect(settings.actor == "act_01m6a6ft00e81840g2081040g3" && settings.person == person)
+        #expect(settings.actor == app && settings.person == person && settings.usable)
+        #expect(settings.origin == signal.origin)
+        #expect(settings.connected == "Connected to \(signal.origin) as Winton (@winton)")
+        #expect(try AppSettings.load(url).signal == settings)
         #expect(try vault.credential(for: try settings.binding).value == signal.key)
         #expect(try String(contentsOf: url, encoding: .utf8).contains(signal.key) == false)
 

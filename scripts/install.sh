@@ -215,9 +215,12 @@ esac
 cat <<EOF
 
 Next:
-  1. Beacon's menu → Settings… → GitHub: paste a GitHub token for your own account.
-  2. Settings… → Signal: the Signal origin, your act_… id and the app key, from Signal's /beacon page.
-  3. Approvals… (⌥⌘B) shows proposals as they arrive.
+  1. Beacon's menu → Settings… → GitHub: "Create a token on GitHub" (classic, repo scope), then paste it. If
+     your organization uses SAML SSO, click Configure SSO → Authorize next to the new token.
+  2. Settings… → Signal: paste the Beacon setup code from Signal's /beacon page. If you connected Signal
+     before, paste the code again.
+  3. Approvals… (⌥⌘B) shows proposals as they arrive. Beacon is the beacon-light icon in the menu bar, with a
+     number while proposals wait; opening Beacon.app again also shows the window.
 
 Keychain: your collector's keychain items were made by a CLI signed with this certificate and identifier
 dev.beacon.cli. The app's CLI keeps both, so the items stay readable. With a self-signed certificate, macOS may ask

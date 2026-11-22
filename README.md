@@ -15,7 +15,7 @@ requests, and it records what it did in Signal.
 
 ## Quick start
 
-From a clean checkout of the person's fork, the person runs, in their own Terminal:
+From a checkout of the person's fork, with no changes to tracked files, the person runs, in their own Terminal:
 
 ```bash
 scripts/install.sh
@@ -23,8 +23,16 @@ scripts/install.sh
 
 It builds `Beacon.app` from that commit, signs it with their code-signing identity, installs it in
 `~/Applications`, points `~/.local/bin/beacon` at its CLI, removes the old collector LaunchAgent and opens the
-app. Then, in Beacon's **Settings…**, they add a GitHub token and Signal's origin, their `act_…` id and the app
-key. See [installing and signing](docs/signing.md).
+app. Then, in Beacon's **Settings…**:
+
+- **GitHub:** **Create a token on GitHub** opens GitHub's page for a classic token with the `repo` scope, for their
+  own account; they paste it back. If the organization uses SAML single sign-on, they click **Configure SSO →
+  Authorize** next to the new token. A fine-grained token also works: the organization as resource owner, with
+  Metadata read, Contents and Pull requests read and write, and Checks, Commit statuses and Administration read
+  ([which token](docs/approvals.md#merges)).
+- **Signal:** they paste the Beacon setup code from Signal's `/beacon` page.
+
+See [installing and signing](docs/signing.md).
 
 ## Install from the person's fork
 
@@ -38,8 +46,8 @@ key. See [installing and signing](docs/signing.md).
    reuse. Work from code and synthetic fixtures. Keep credentials out of the agent session.
 3. **Report and get agreement.** Give the person the report before any installation. Resolve blocking findings
    and audit the resulting commit. The person explicitly approves the full commit ID and the proposed setup.
-   A clean checkout at a different commit needs its own approval.
-4. **Have the person install.** They run `scripts/install.sh` from a clean checkout of the approved commit
+   A checkout at a different commit needs its own approval.
+4. **Have the person install.** They run `scripts/install.sh` from a checkout of the approved commit
    ([installing and signing](docs/signing.md)). It builds, signs with their identity, verifies and installs.
 5. **Configure with sending off.** The person enters credentials directly in their terminal or Google's
    consent page. Use the workflow below, starting with `mode: dry-run` and rules that keep items local.

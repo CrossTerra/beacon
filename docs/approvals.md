@@ -82,10 +82,17 @@ user's, receives no bytes. `"socket"` overrides the path.
 
 ## The approval window
 
+Beacon's menu-bar item is an icon (a beacon light), filled and followed by the number of pending proposals when any
+are waiting. The window opens from the menu's **Approvals…**, with ⌥⌘B, or by opening Beacon.app again from Finder,
+Spotlight or `open` while it runs. Its **Settings…** button (⌘,) opens Settings.
+
 The window lists pending proposals, oldest first. The right side names the selected action in Beacon's words:
-the account, origin, destination and provider facts Beacon resolved, kept apart from the agent's reason. The
-message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`, and _Show exact parameters_ shows the
-canonical JSON.
+the account (for a merge, the GitHub login), origin, destination (`main · #147 · CrossTerra/signal`) and the
+provider facts Beacon resolved, such as **Checks: 3 passed**, with a link to the pull request, kept apart from the
+agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
+parameters_ shows the exact account (`github:user:{id}`), the destination and params as canonical JSON, and the
+approval hash. Once approved, the selected proposal stays shown with its result: _Started…_, **Merged as 18637a4**,
+_Not merged: head moved_, or an unknown outcome being read back, with the link to the pull request.
 
 **Approve** (or ⌘↩ in the window) is enabled only once Beacon has resolved the action and frozen a snapshot of
 the proposal id, its version, the final params, account, origin, destination and `approved_hash` (13.00-D29).
@@ -100,7 +107,10 @@ handler.
 ## The journal and the outbox
 
 `~/Library/Application Support/beacon/app/journal.sqlite` (in a `0700` directory, WAL, `synchronous = FULL`,
-`fullfsync` and `checkpoint_fullfsync`) is the local record (13.00-D10). On macOS a plain fsync leaves writes in
+`fullfsync` and `checkpoint_fullfsync`) is the local record (13.00-D10). The journal and its `-wal` and `-shm` files
+are `0600`: Beacon creates the journal itself before SQLite opens it (SQLite gives the other two the journal's mode),
+narrows any of the three an earlier build left wider each time it opens, and refuses one that is a symlink or not
+the person's own file. On macOS a plain fsync leaves writes in
 the drive's cache, so each commit is flushed with `F_FULLFSYNC`: a start is on disk before anything is sent. The
 vault file and `act.json` are written the same way. Each entry and its outbox row commit in one transaction. Triggers refuse any update
 or delete of an entry. The journal has one `jrn_…` id. Entries are numbered from 1, and each entry's Signal key
@@ -123,19 +133,38 @@ start without a result unknown, before the window or the socket opens. Nothing d
 
 Each entry becomes one Signal record ([the contract](#the-contract-with-signal)). Its exact bytes are built once,
 on first delivery with the person's `act_…` id, and kept. A merge is about its pull request
-(`github:pr:{owner}/{repo}#{n}`). A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
+(`github:pr:{owner}/{repo}#{n}`), with the repository as the proposal spelled it, never lowercased. From the approval
+on, the records use GitHub's own spelling (`full_name`, read in the preflight and kept in the local approval entry)
+when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
 its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
 
 ## Delivery to Signal
 
-**Settings.** The person enters the Signal origin (`https://host[:port]`), their own `act_…` id (every record's
-`metadata.person`), and the key of their app actor (13.00-D25: an integration actor marked `approval_app` that
-works for them, with a key of exactly `read` and `write`). Beacon calls `GET /api/me` with the key. It accepts only
-an integration actor's key whose scopes are exactly `read` and `write`. `/api/me` does not say whom the actor
-works for; Signal refuses any record whose person the actor does not work for. The key goes to the vault, bound to
-the origin and `signal:actor:{act_…}`. `settings.json` keeps the origin, the person, the actor and its handle.
+**Settings.** Settings → Signal has one field, **Beacon setup code**, which the person pastes from Signal's `/beacon`
+page. The code is `beacon-setup:v1:` followed by base64url (padded or not) of the JSON `{ "origin", "key" }`: the
+Signal origin (`https://host[:port]`) and the key of their app actor (13.00-D25: an integration actor marked
+`approval_app` that works for them, with a key of exactly `read` and `write`). A code with another prefix, that is
+not base64url of a JSON object, or that lacks a usable origin or key is refused before anything is sent, and the
+refusal never repeats the code. Beacon never asks for an `act_…` id. It asks Signal (`/api/me` does not include
+`works_for` or `approval_app`, so the actor is read too):
+
+1. `GET /api/me` with the key: the actor must be an integration, and the key's scopes exactly `read` and `write`;
+2. `GET /api/actors/{app}`: the actor must be active and marked `approval_app`, and its `works_for` must name
+   another actor;
+3. `GET /api/actors/{works_for}`: that actor must be an active person (`human`). It is the person, every record's
+   `metadata.person`.
+
+Any other answer saves nothing and says why. An outage is never taken as a fact about the key: no answer, a `429`
+or a `5xx` says to try again (after `Retry-After` seconds when Signal sends them, at most an hour); `401` and `403`
+mean Signal refused the key (rotate it on `/beacon`); a `404` for the app actor or the person means that actor is
+missing, asked only after `/api/me` accepted the key; any other status is reported as it is. Once saved, Settings shows
+**Connected to {origin} as {name} (@{handle})**.
+The key goes only to the vault, bound to the origin and `signal:actor:{act_…}`; the code is not kept.
+`settings.json` keeps the origin, the person with their name and handle, and the actor and its handle. Settings
+saved by an earlier build, which asked for the person, could name the app actor itself; Beacon sends nothing under
+them, and Settings asks for the setup code again.
 
 **Sending.** After every journal entry, and every 30 seconds, the app drains the outbox in journal order with
 `POST /api/app-records`. Each request carries the record's exact stored bytes and the app actor's key, sent only
@@ -173,6 +202,19 @@ another user is refused until that account is removed. The token goes straight i
 to that origin and `github:user:{id}`. `settings.json` keeps only the origin, the account and the login. The token
 is never shown, logged, written elsewhere or passed to a child process.
 
+**Which token.** Settings → GitHub says what to create and has a **Create a token on GitHub** button. It opens, in
+the browser, GitHub's page for a new **classic** token with the `repo` scope, for your own account:
+`https://github.com/settings/tokens/new?scopes=repo&description=Beacon%20(merges)`. For GitHub Enterprise it opens
+`/settings/tokens/new` on the configured origin's web host (`api.{host}` becomes `{host}`). If the organization uses
+SAML single sign-on, click **Configure SSO → Authorize** next to the new token, or GitHub refuses it on that
+organization's repositories. The token acts as you: GitHub applies your own permissions and branch rules to the merge.
+
+A **fine-grained** token works too (under _Or a fine-grained token_ in Settings): the organization that owns the
+repositories as its resource owner, with access to them, and these repository permissions: Metadata read; Contents
+read and write; Pull requests read and write; Checks read; Commit statuses read; Administration read (branch
+protection's required checks). The organization may need to approve fine-grained tokens before they work; until
+then, GitHub refuses the token's reads and Approve stays disabled.
+
 **Before approval** (the preflight that freezes the action), Beacon reads, with that token and nothing else:
 
 1. `GET /user`: the token is still the configured account's;
@@ -181,10 +223,14 @@ is never shown, logged, written elsewhere or passed to a child process.
 3. the reviews: no reviewer's latest review requests changes;
 4. the required checks on the base: contexts from repository rules and classic branch protection, where this
    account can read them;
-5. the head's check runs and commit statuses: every required context completed successfully (or neutral or
-   skipped). As in Signal's executor (#131), only the latest run of each check name and app counts: GitHub's run id
-   decides, else the later start, and a completed run that never started is the oldest. A re-run that passes
-   clears an older failure. Between apps reporting one name, a failure wins, then a run still in progress.
+5. the head's check runs and commit statuses: **every** check reported on the head, required or not, and every
+   required one, must have completed and passed (`success`, `neutral` or `skipped` for a check run, `success` for a
+   commit status). A repository with no required checks is no exception: a red check that branch protection does not
+   require still stops the merge, and a required check nobody reported is pending. As in Signal's executor (#131),
+   only the latest run of each check name and app counts: GitHub's run id decides, else the later start, and a
+   completed run that never started is the oldest. A re-run that passes clears an older failure. Between apps
+   reporting one name, a failure wins, then a run still in progress. The window shows **Checks: N passed**, or which
+   failed and which are pending.
 
 Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
 repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are

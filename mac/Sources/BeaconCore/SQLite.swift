@@ -14,6 +14,7 @@ final class SQLite {
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     init(path: String) throws {
+        try SQLite.makePrivate(path)
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW
         let rc = sqlite3_open_v2(path, &db, flags, nil)
         guard rc == SQLITE_OK else {
@@ -24,6 +25,28 @@ final class SQLite {
     }
 
     deinit { sqlite3_close(db) }
+
+    /// The database and its `-wal` and `-shm` files are the owner's alone (0600). SQLite would create the database
+    /// 0644, and gives the other two the database's mode, so the database is created here first, and files left by
+    /// an earlier build are narrowed. None may be a symlink.
+    static func makePrivate(_ path: String) throws {
+        func narrow(_ file: String, create: Bool) throws {
+            let fd = open(file, O_RDWR | O_NOFOLLOW | O_CLOEXEC | (create ? O_CREAT : 0), 0o600)
+            if fd < 0 {
+                if !create && errno == ENOENT { return }
+                throw SQLiteError(code: SQLITE_CANTOPEN, message: "\(URL(fileURLWithPath: file).lastPathComponent): errno \(errno)")
+            }
+            defer { close(fd) }
+            var info = stat()
+            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(),
+                  info.st_mode & 0o777 == 0o600 || fchmod(fd, 0o600) == 0 else {
+                throw SQLiteError(code: SQLITE_PERM, message: "\(URL(fileURLWithPath: file).lastPathComponent) is not the owner's own file")
+            }
+        }
+        try narrow(path, create: true)
+        try narrow(path + "-wal", create: false)
+        try narrow(path + "-shm", create: false)
+    }
 
     func execute(_ sql: String) throws {
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw error() }

@@ -16,7 +16,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # shellcheck source=scripts/checkout.sh
 source scripts/checkout.sh
-verify_clean_checkout "$commit"
+verify_checkout "$commit"
 
 tmp=${TMPDIR:-/tmp}
 stage=$(mktemp -d "${tmp%/}/beacon-app.XXXXXXXX")
@@ -52,6 +52,6 @@ install -m 600 "$stage/src/mac/Info.plist" "$bundle/Contents/Info.plist"
 	shasum -a 256 --check Beacon.app.sha256
 )
 rm -rf "$stage/src" "$stage/swift-build"
-verify_clean_checkout "$commit"
+verify_checkout "$commit"
 trap - EXIT
 printf 'Commit: %s\nBundle: %s\nSHA-256 manifest: %s\n' "$commit" "$bundle" "$stage/Beacon.app.sha256"
