@@ -24,6 +24,8 @@ final class FakeSignalServer: @unchecked Sendable {
     private(set) var posts: [(key: String, bytes: Data)] = []
     var loseAnswerAt: String?
     var unavailable = false
+    /// Answers a `GET` of this path with `(status, headers)` and an error body, or loses it when the status is 0.
+    var gets: [String: (Int, [String: String])] = [:]
     var me: [String: Any] = ["actor": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "name": "Beacon",
                                        "handle": "beacon-winton"], "scopes": ["read", "write"]]
     /// `GET /api/actors/{id}`: the app actor, working for the person, and the person.
@@ -67,6 +69,9 @@ final class FakeSignalServer: @unchecked Sendable {
             let authorization = request.value(forHTTPHeaderField: "Authorization")
             authorizations.append(authorization)
             guard authorization == "Bearer " + key else { return .json(401, problem("unauthorized"), [:]) }
+            if request.httpMethod == "GET", let path = request.url?.path, let (status, headers) = gets[path] {
+                return status == 0 ? .lost : .json(status, problem("scripted"), headers)
+            }
             switch (request.httpMethod, request.url?.path) {
             case ("GET", "/api/me"):
                 return .json(200, me, [:])
@@ -343,6 +348,45 @@ struct SignalDeliveryTests {
         } catch {
             #expect(!"\(error)".contains("sig_secret"))
         }
+    }
+
+    /// An outage or a busy Signal is never taken as a fact about the key: try again, after Retry-After when given.
+    /// `401` and `403` refuse the key; a `404` names a missing actor only once `/api/me` accepted the key.
+    @Test func setupTellsAnOutageFromARefusal() async throws {
+        let signal = FakeSignalServer()
+        let app = "act_01m6a6ft00e81840g2081040g3"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("signal-" + randomHex(6))
+        let vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
+        let url = directory.appendingPathComponent("app/settings.json")
+        let cases: [(String, Int, [String: String], SignalSetup.Refusal)] = [
+            ("/api/me", 503, ["Retry-After": "30"], .unreachable(retryAfter: 30)),
+            ("/api/me", 500, [:], .unreachable(retryAfter: nil)),
+            ("/api/me", 429, ["Retry-After": "7"], .unreachable(retryAfter: 7)),
+            ("/api/me", 429, ["Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"], .unreachable(retryAfter: nil)),
+            ("/api/me", 0, [:], .unreachable(retryAfter: nil)),
+            ("/api/me", 401, [:], .rejected),
+            ("/api/me", 403, [:], .rejected),
+            ("/api/me", 404, [:], .unexpected(status: 404)),
+            ("/api/me", 400, [:], .unexpected(status: 400)),
+            ("/api/actors/\(app)", 502, ["Retry-After": "99999"], .unreachable(retryAfter: 3600)),
+            ("/api/actors/\(app)", 0, [:], .unreachable(retryAfter: nil)),
+            ("/api/actors/\(app)", 403, [:], .rejected),
+            ("/api/actors/\(app)", 404, [:], .notAnApp),
+            ("/api/actors/\(person)", 503, [:], .unreachable(retryAfter: nil)),
+            ("/api/actors/\(person)", 429, ["Retry-After": "5"], .unreachable(retryAfter: 5)),
+            ("/api/actors/\(person)", 404, [:], .noPerson),
+        ]
+        for (path, status, headers, refusal) in cases {
+            signal.gets = [path: (status, headers)]
+            await #expect(throws: refusal, "\(path) \(status)") {
+                try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": signal.key]), vault: vault,
+                                               settings: url, configuration: FakeSignalServer.configuration)
+            }
+            #expect(try AppSettings.load(url).signal == nil)
+        }
+        signal.gets = [:]
+        #expect(try await SignalSetup.register(code: Self.setupCode(["origin": signal.origin, "key": signal.key]), vault: vault,
+                                               settings: url, configuration: FakeSignalServer.configuration).person == person)
     }
 
     @Test func settingsAcceptOnlyTheAppActorsKey() async throws {

@@ -156,7 +156,11 @@ refusal never repeats the code. Beacon never asks for an `act_…` id. It asks S
 3. `GET /api/actors/{works_for}`: that actor must be an active person (`human`). It is the person, every record's
    `metadata.person`.
 
-Any other answer saves nothing and says why. Settings then shows **Connected to {origin} as {name} (@{handle})**.
+Any other answer saves nothing and says why. An outage is never taken as a fact about the key: no answer, a `429`
+or a `5xx` says to try again (after `Retry-After` seconds when Signal sends them, at most an hour); `401` and `403`
+mean Signal refused the key (rotate it on `/beacon`); a `404` for the app actor or the person means that actor is
+missing, asked only after `/api/me` accepted the key; any other status is reported as it is. Once saved, Settings shows
+**Connected to {origin} as {name} (@{handle})**.
 The key goes only to the vault, bound to the origin and `signal:actor:{act_…}`; the code is not kept.
 `settings.json` keeps the origin, the person with their name and handle, and the actor and its handle. Settings
 saved by an earlier build, which asked for the person, could name the app actor itself; Beacon sends nothing under

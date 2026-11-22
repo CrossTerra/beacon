@@ -131,8 +131,14 @@ final class ApprovalService: ObservableObject {
             return "Not saved: the app's key must have exactly read and write."
         } catch SignalSetup.Refusal.rejected {
             return "Not saved: Signal refused the key. Rotate it on Signal's /beacon page and paste the new code."
+        } catch SignalSetup.Refusal.unreachable(let retryAfter?) {
+            return "Not saved: Signal is busy or unavailable. Try again in \(retryAfter) seconds."
+        } catch SignalSetup.Refusal.unreachable(nil) {
+            return "Not saved: Signal could not be reached. Try again."
+        } catch SignalSetup.Refusal.unexpected(let status) {
+            return "Not saved: Signal answered \(status). Check the setup code, or try again."
         } catch {
-            return "Not saved: Signal could not be reached."
+            return "Not saved: the settings or the vault could not be written."
         }
     }
 

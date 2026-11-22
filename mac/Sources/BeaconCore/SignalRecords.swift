@@ -109,8 +109,12 @@ public enum SignalSetup {
         /// The setup code could not be read.
         case code(SignalSetupCode.Problem)
         case scopes
+        /// `401` or `403`: Signal refused the key.
         case rejected
-        case unreachable
+        /// No answer, a `429` or a `5xx`: try again, after `retryAfter` seconds when Signal said.
+        case unreachable(retryAfter: Int?)
+        /// Any other answer, such as a `404` from `/api/me` (not a Signal at that origin) or a `400`.
+        case unexpected(status: Int)
     }
 
     /// Registers from the setup code the person pasted.
@@ -131,31 +135,23 @@ public enum SignalSetup {
         let normalized = try CredentialBinding.normalize(origin)
         let client = try ServiceClient(origin: normalized, authorization: key, headers: ["User-Agent": "beacon-app"],
                                        configuration: configuration, maxBytes: 1 << 20)
-        func read(_ path: String) async throws -> [String: Any]? {
-            do {
-                let (status, value) = try await client.json("GET", path)
-                if status == 401 { throw Refusal.rejected }
-                return status == 200 ? value as? [String: Any] : nil
-            } catch let refusal as Refusal {
-                throw refusal
-            } catch {
-                throw Refusal.unreachable
-            }
-        }
-        guard let me = try await read("/api/me") else { throw Refusal.rejected }
+        let me = try await read(client, "/api/me", missing: .unexpected(status: 404))
         let actor = me["actor"] as? [String: Any]
         guard actor?["type"] as? String == "integration", let id = actor?["id"] as? String,
               PublicID.isValid(id, prefix: "act") else { throw Refusal.notAnApp }
         guard Set(me["scopes"] as? [String] ?? []) == ["read", "write"], (me["scopes"] as? [String])?.count == 2 else {
             throw Refusal.scopes
         }
-        guard let app = try await read("/api/actors/\(id)") else { throw Refusal.notAnApp }
+        let app = try await read(client, "/api/actors/\(id)", missing: .notAnApp)
         guard app["id"] as? String == id, app["type"] as? String == "integration", app["deactivated_at"] is NSNull
         else { throw Refusal.notAnApp }
         guard app["approval_app"] as? Bool == true else { throw Refusal.notApprovalApp }
-        guard let person = app["works_for"] as? String, PublicID.isValid(person, prefix: "act"), person != id,
-              let human = try await read("/api/actors/\(person)"), human["id"] as? String == person,
-              human["type"] as? String == "human", human["deactivated_at"] is NSNull else { throw Refusal.noPerson }
+        guard let person = app["works_for"] as? String, PublicID.isValid(person, prefix: "act"), person != id else {
+            throw Refusal.noPerson
+        }
+        let human = try await read(client, "/api/actors/\(person)", missing: .noPerson)
+        guard human["id"] as? String == person, human["type"] as? String == "human", human["deactivated_at"] is NSNull
+        else { throw Refusal.noPerson }
         var settings = try AppSettings.load(url)
         if let existing = settings.signal { try? vault.remove(try existing.binding) }
         let signal = SignalSettings(origin: normalized, person: person, actor: id,
@@ -165,6 +161,32 @@ public enum SignalSetup {
         settings.signal = signal
         try settings.save(url)
         return signal
+    }
+
+    /// One read. `200` with an object is the answer; `404` is `missing` (an actor Signal does not show, only asked
+    /// once `/api/me` accepted the key); anything else is classified, never taken as a fact about the key.
+    private static func read(_ client: ServiceClient, _ path: String, missing: Refusal) async throws -> [String: Any] {
+        let answer: (status: Int, body: Data, response: HTTPURLResponse)
+        do {
+            answer = try await client.send("GET", path)
+        } catch {
+            throw Refusal.unreachable(retryAfter: nil)
+        }
+        let (status, body, response) = answer
+        switch status {
+        case 200:
+            guard let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else {
+                throw Refusal.unexpected(status: status)
+            }
+            return object
+        case 401, 403: throw Refusal.rejected
+        case 404: throw missing
+        case 429, 500...599:
+            let seconds = response.value(forHTTPHeaderField: "Retry-After")
+                .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            throw Refusal.unreachable(retryAfter: seconds.map { max(0, min($0, 3600)) })
+        default: throw Refusal.unexpected(status: status)
+        }
     }
 
     public static func remove(vault: Vault, settings url: URL) throws {
