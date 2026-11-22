@@ -8,10 +8,12 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
-int beacon_peer_match(int fd, uid_t uid, const char *const *requirements, int count, pid_t *pid) {
+int beacon_peer_match(int fd, uid_t uid, const char *const *requirements, int count, pid_t *pid,
+                      char *path, size_t path_size) {
     audit_token_t token;
     socklen_t size = sizeof(token);
     *pid = -1;
+    if (path_size > 0) path[0] = '\0';
     if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &size) != 0 || size != sizeof(token)) return -1;
     if (audit_token_to_euid(token) != uid || audit_token_to_ruid(token) != uid) return -1;
     *pid = audit_token_to_pid(token);
@@ -35,6 +37,11 @@ int beacon_peer_match(int fd, uid_t uid, const char *const *requirements, int co
             SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement) == errSecSuccess) match = i;
         if (requirement) CFRelease(requirement);
         if (text) CFRelease(text);
+    }
+    CFURLRef url = NULL;
+    if (match >= 0 && path_size > 0 && SecCodeCopyPath(code, kSecCSDefaultFlags, &url) == errSecSuccess && url) {
+        if (!CFURLGetFileSystemRepresentation(url, true, (UInt8 *)path, (CFIndex)path_size)) path[0] = '\0';
+        CFRelease(url);
     }
     CFRelease(code);
     return match;
@@ -171,22 +178,27 @@ static OSStatus add_key(CFStringRef service, CFStringRef account, const uint8_t 
     return status;
 }
 
-int beacon_vault_key(const char *identifier, const char *service_name, const char *account_name, uint8_t key[32]) {
+int beacon_vault_key(const char *identifier, const char *service_name, const char *account_name, bool create,
+                     uint8_t key[32]) {
     if (!beacon_self_is(identifier)) return -1;
     CFStringRef service = CFStringCreateWithCString(NULL, service_name, kCFStringEncodingUTF8);
     CFStringRef account = CFStringCreateWithCString(NULL, account_name, kCFStringEncodingUTF8);
     OSStatus status = -1;
     if (service && account) {
         status = read_key(service, account, key);
-        if (status == errSecItemNotFound) {
+        if (create && status == errSecSuccess) {
+            // An item Beacon did not create in this step: its access list could name anything.
+            status = BEACON_VAULT_KEY_EXISTS;
+        } else if (create && status == errSecItemNotFound) {
             uint8_t fresh[32];
             status = SecRandomCopyBytes(kSecRandomDefault, sizeof(fresh), fresh);
             if (status == errSecSuccess) status = add_key(service, account, fresh);
-            // Read back what the keychain holds: another launch may have added it first.
-            if (status == errSecSuccess || status == errSecDuplicateItem) status = read_key(service, account, key);
+            if (status == errSecDuplicateItem) status = BEACON_VAULT_KEY_EXISTS;
+            else if (status == errSecSuccess) memcpy(key, fresh, sizeof(fresh));
             memset(fresh, 0, sizeof(fresh));
         }
     }
+    if (status != errSecSuccess) memset(key, 0, 32);
     if (service) CFRelease(service);
     if (account) CFRelease(account);
     return status;

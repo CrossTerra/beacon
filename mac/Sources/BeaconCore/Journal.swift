@@ -80,7 +80,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var approvedAt: Date?
     }
 
-    private let db: SQLite
+    let db: SQLite
     private let lock = NSLock()
     private let nonce: () -> String
     private let makeID: (String) -> String
@@ -105,6 +105,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         try db.execute("""
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = FULL;
+            PRAGMA fullfsync = ON;
+            PRAGMA checkpoint_fullfsync = ON;
             CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS entries (
                 seq INTEGER PRIMARY KEY, proposal TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL,
@@ -129,8 +131,9 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             return fresh
         }
         for row in try db.query("SELECT proposal, kind, at, body FROM entries ORDER BY seq") {
-            try fold(id: row[0].text!, kind: row[1].text!, at: Date(milliseconds: row[2].int!),
-                     body: try JSON.parse(Data(row[3].text!.utf8)))
+            // A committed body was written by this journal as canonical JSON; one that no longer parses is skipped.
+            guard let body = try? JSON.parse(Data(row[3].text!.utf8)) else { continue }
+            fold(id: row[0].text!, kind: row[1].text!, at: Date(milliseconds: row[2].int!), body: body)
         }
         try recover(at: date)
     }
@@ -176,6 +179,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             ]
             body["session"] = proposal.session.map(JSON.string)
             body["subject"] = proposal.subject.map(JSON.string)
+            body["client_path"] = proposal.clientPath.map(JSON.string)
+            body["client_requirement"] = proposal.clientRequirement.map(JSON.string)
             if proposal.type == .agentRun { body["runner_id"] = .string(makeID("run")) }
             return body
         }
@@ -275,7 +280,19 @@ public final class Journal: ProposalBook, @unchecked Sendable {
     public func shutdown(at date: Date) throws {
         locked { shuttingDown = true }
         for id in locked({ order.filter { states[$0]?.proposal.status == .approved } }) {
-            try append(id, kind: "expired", at: date) { _ in ["reason": "quit_before_start"] }
+            try expire(id, from: .approved, reason: "quit_before_start", at: date)
+        }
+    }
+
+    /// Writes `expired` only if the proposal is still `status` when the entry is committed, under the lock.
+    /// Another thread may have expired, started or decided it since the list was made; that is not an error.
+    private func expire(_ id: String, from status: ProposalStatus, reason: String, at date: Date) throws {
+        do {
+            try append(id, kind: "expired", at: date) { state in
+                guard state.proposal.status == status else { throw JournalError.transition }
+                return ["reason": .string(reason)]
+            }
+        } catch JournalError.transition {
         }
     }
 
@@ -361,23 +378,27 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                 try db.query("INSERT INTO outbox (seq, key, nonce) VALUES (?, ?, ?)",
                              [.int(seq), .text("beacon:\(self.id):\(seq)"), .text(nonce())])
             }
-            try fold(id: id, kind: kind, at: date, body: body)
+            fold(id: id, kind: kind, at: date, body: body)
         }
         changed?(id)
         for observer in locked({ observers }) { observer(id) }
     }
 
-    private func fold(id: String, kind: String, at date: Date, body: JSON) throws {
+    /// Applies one committed entry. It never throws and never checks today's schema, so every committed entry
+    /// can always be read back. An entry it cannot read (a type this build does not know) is left out of the state;
+    /// its outbox record is still delivered from the stored body.
+    private func fold(id: String, kind: String, at date: Date, body: JSON) {
         if kind == "proposed" {
-            let fields = body.objectValue!
-            var request: [String: JSON] = ["op": "propose", "type": fields["type"]!, "params": fields["params"]!,
-                                           "reason": fields["reason"]!, "agent": .object(["name": fields["agent"]!])]
-            if let session = fields["session"] { request["agent"] = .object(["name": fields["agent"]!, "session": session]) }
-            if let subject = fields["subject"] { request["context"] = .object(["subject": subject]) }
-            let proposal = Proposal(request: try ProposalRequest(request), client: fields["client"]!.stringValue!,
-                                    at: date, id: id, salt: fields["salt"]!.stringValue!,
-                                    expiresAt: Date(milliseconds: fields["expires_at"]!.intValue!))
-            states[id] = State(proposal: proposal, runnerID: fields["runner_id"]?.stringValue)
+            guard let type = body["type"]?.stringValue.flatMap(ActionType.init(rawValue:)), let params = body["params"],
+                  let salt = body["salt"]?.stringValue, let reason = body["reason"]?.stringValue,
+                  let agent = body["agent"]?.stringValue, let client = body["client"]?.stringValue,
+                  let expires = body["expires_at"]?.intValue else { return }
+            let proposal = Proposal(stored: id, type: type, params: params, salt: salt, reason: reason, agent: agent,
+                                    session: body["session"]?.stringValue, subject: body["subject"]?.stringValue,
+                                    client: client, clientPath: body["client_path"]?.stringValue,
+                                    clientRequirement: body["client_requirement"]?.stringValue,
+                                    proposedAt: date, expiresAt: Date(milliseconds: expires))
+            states[id] = State(proposal: proposal, runnerID: body["runner_id"]?.stringValue)
             order.append(id)
             return
         }
@@ -387,11 +408,14 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         case "approved":
             state.proposal.status = .approved
             state.approvedAt = date
-            let original = body["original_model"]?.stringValue
-            state.approval = try FrozenApproval(state.proposal, origin: body["origin"]?.stringValue,
-                                                account: body["account"]!.stringValue!, destination: body["destination"]!,
-                                                model: original == nil ? nil : body["params"]?["model"]?.stringValue,
-                                                version: state.proposal.version - 1)
+            if let params = body["params"], let account = body["account"]?.stringValue, let destination = body["destination"],
+               let paramsHash = body["approved_params_hash"]?.stringValue, let hash = body["approved_hash"]?.stringValue {
+                state.approval = FrozenApproval(
+                    stored: id, type: state.proposal.type, version: state.proposal.version - 1, params: params,
+                    salt: state.proposal.salt, origin: body["origin"]?.stringValue, account: account,
+                    destination: destination, originalModel: body["original_model"]?.stringValue,
+                    approvedParamsHash: paramsHash, approvedHash: hash)
+            }
         case "declined": state.proposal.status = .declined
         case "withdrawn": state.proposal.status = .withdrawn
         case "expired": state.proposal.status = .expired
@@ -407,16 +431,18 @@ public final class Journal: ProposalBook, @unchecked Sendable {
     /// Expires pending proposals after 24 hours and approvals not started within ten minutes.
     private func sweep(at date: Date) {
         let due = locked {
-            order.compactMap { id -> (String, String)? in
+            order.compactMap { id -> (String, ProposalStatus, String)? in
                 guard let state = states[id] else { return nil }
-                if state.proposal.status == .pending, date >= state.proposal.expiresAt { return (id, "proposal_expired") }
+                if state.proposal.status == .pending, date >= state.proposal.expiresAt {
+                    return (id, .pending, "proposal_expired")
+                }
                 if state.proposal.status == .approved, let at = state.approvedAt,
-                   date.timeIntervalSince(at) > Journal.startWindow { return (id, "start_window_passed") }
+                   date.timeIntervalSince(at) > Journal.startWindow { return (id, .approved, "start_window_passed") }
                 return nil
             }
         }
-        for (id, reason) in due {
-            try? append(id, kind: "expired", at: date) { _ in ["reason": .string(reason)] }
+        for (id, status, reason) in due {
+            try? expire(id, from: status, reason: reason, at: date)
         }
     }
 
@@ -425,9 +451,12 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         for (id, status) in order.compactMap({ id in states[id].map { (id, $0.proposal.status) } }) {
             switch status {
             case .approved:
-                try append(id, kind: "expired", at: date) { _ in ["reason": "restart_before_start"] }
+                try expire(id, from: .approved, reason: "restart_before_start", at: date)
             case .started:
-                try append(id, kind: "outcome_unknown", at: date) { _ in ["reason": "app_restarted"] }
+                try append(id, kind: "outcome_unknown", at: date) { state in
+                    guard state.proposal.status == .started else { throw JournalError.transition }
+                    return ["reason": "app_restarted"]
+                }
             default:
                 break
             }
@@ -437,11 +466,20 @@ public final class Journal: ProposalBook, @unchecked Sendable {
 }
 
 extension FrozenApproval {
-    /// Rebuilds a stored approval. `model` is the approved model when it was edited.
-    init(_ proposal: Proposal, origin: String?, account: String, destination: JSON, model: String?, version: Int64) throws {
-        var pinned = proposal
-        pinned.version = version
-        try self.init(pinned, origin: origin, account: account, destination: destination, model: model)
+    /// An approval rebuilt from its committed entry, with the hashes it was approved with.
+    init(stored id: String, type: ActionType, version: Int64, params: JSON, salt: String, origin: String?,
+         account: String, destination: JSON, originalModel: String?, approvedParamsHash: String, approvedHash: String) {
+        self.id = id
+        self.type = type
+        self.version = version
+        self.params = params
+        self.salt = salt
+        self.origin = origin
+        self.account = account
+        self.destination = destination
+        self.originalModel = originalModel
+        self.approvedParamsHash = approvedParamsHash
+        self.approvedHash = approvedHash
     }
 }
 

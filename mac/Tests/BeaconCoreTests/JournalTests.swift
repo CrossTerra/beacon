@@ -240,3 +240,76 @@ func deliverAll(_ journal: Journal) throws -> [JSON] {
     }
     return records
 }
+
+struct JournalReviewTests {
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    /// The window and the socket sweep at once: each due proposal expires exactly once, so Signal never sees a
+    /// second `expired` and delivery never stops on one.
+    @Test func concurrentSweepsExpireOnce() async throws {
+        let journal = try Journal(path: scratchPath(), at: t0)
+        var ids: [String] = []
+        for n in 0..<20 {
+            var params = mergeParams.objectValue!
+            params["number"] = .int(Int64(200 + n))
+            let proposal = Proposal(request: request("github.merge", .object(params)), client: "c", at: t0)
+            try journal.add(proposal)
+            ids.append(proposal.id)
+        }
+        let approved = try freeze(journal, ids[0], at: t0)
+        try journal.approve(approved, at: t0)
+        let all = ids
+        let later = t0 + Proposal.lifetime + 1
+        DispatchQueue.concurrentPerform(iterations: 16) { i in
+            switch i % 4 {
+            case 0: _ = journal.pending(at: later)
+            case 1: _ = journal.proposal(all[i % all.count], at: later)
+            case 2: _ = journal.pendingCount(client: nil, at: later)
+            default: try? journal.shutdown(at: later)
+            }
+        }
+        let expired = try deliverAll(journal).filter { $0["type"] == "app.action.expired" }
+        #expect(expired.count == ids.count)
+        #expect(Set(expired.map { $0["metadata"]!["proposal"]!.stringValue! }) == Set(ids))
+    }
+
+    @Test func commitsFlushTheDriveCache() throws {
+        let journal = try Journal(path: scratchPath(), at: t0)
+        #expect(try journal.db.query("PRAGMA fullfsync").first?.first == .int(1))
+        #expect(try journal.db.query("PRAGMA checkpoint_fullfsync").first?.first == .int(1))
+        #expect(try journal.db.query("PRAGMA synchronous").first?.first == .int(2))
+    }
+
+    /// A committed entry that today's schema would refuse, and one of a type this build does not know: the
+    /// journal still opens, and the outbox still delivers both.
+    @Test func reopensEntriesTodaysSchemaRefuses() throws {
+        let path = scratchPath()
+        var journal: Journal? = try Journal(path: path, at: t0)
+        let legacy = PublicID.make("apr", at: t0)
+        let unknown = PublicID.make("apr", at: t0)
+        let bodies: [(String, JSON)] = [
+            (legacy, .object(["type": "agent.run", "params": .object(["checkout": "Old Name", "prompt": "", "model": "opus"]),
+                              "salt": .string(String(repeating: "0", count: 32)), "reason": "r", "agent": "bosun",
+                              "client": "c", "expires_at": .int((t0 + 3600).milliseconds),
+                              "runner_id": .string(PublicID.make("run"))])),
+            (unknown, .object(["type": "jira.comment", "params": .object(["issue": "X-1"]),
+                               "salt": .string(String(repeating: "0", count: 32)), "reason": "r", "agent": "bosun",
+                               "client": "c", "expires_at": .int((t0 + 3600).milliseconds)])),
+        ]
+        for (seq, (id, body)) in bodies.enumerated() {
+            try journal!.db.query("INSERT INTO entries (seq, proposal, kind, at, body) VALUES (?, ?, 'proposed', ?, ?)",
+                                  [.int(Int64(seq + 1)), .text(id), .int(t0.milliseconds), .text(body.canonical)])
+            try journal!.db.query("INSERT INTO outbox (seq, key, nonce) VALUES (?, ?, ?)",
+                                  [.int(Int64(seq + 1)), .text("beacon:\(journal!.id):\(seq + 1)"), .text(randomHex(16))])
+        }
+        journal = nil
+        let reopened = try Journal(path: path, at: t0 + 1)
+        #expect(reopened.proposal(legacy, at: t0 + 1)?.params["checkout"] == "Old Name")
+        #expect(reopened.proposal(unknown, at: t0 + 1) == nil)
+        #expect(try deliverAll(reopened).map { $0["metadata"]!["action"]!.stringValue! } == ["agent.run", "jira.comment"])
+        // New requests are still checked.
+        #expect(throws: Invalid(field: "/params/checkout")) {
+            try ActionType.agentRun.validate(params: .object(["checkout": "Old Name", "prompt": "x", "model": "a/b"]))
+        }
+    }
+}

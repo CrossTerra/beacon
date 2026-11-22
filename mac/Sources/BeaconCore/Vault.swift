@@ -4,13 +4,16 @@ import Foundation
 
 /// Where the vault's encryption key comes from.
 public protocol VaultKeySource: Sendable {
-    func key() throws -> SymmetricKey
+    /// With `create`, makes a new key and refuses one that already exists; without it, reads the existing key.
+    func key(create: Bool) throws -> SymmetricKey
 }
 
 public enum VaultError: Error, Equatable, Sendable {
     /// The running process is not the app signed with a certificate, so it cannot meet the key's access list.
     case unsignedBuild
     case keychain(Int32)
+    /// A vault key item exists but there is no vault file: Beacon did not create that item, so it is not used.
+    case existingKey
     /// The vault file is not one this key opened.
     case unreadable
     /// The origin is not `https://host[:port]`.
@@ -33,11 +36,12 @@ public struct KeychainVaultKey: VaultKeySource {
         self.account = account
     }
 
-    public func key() throws -> SymmetricKey {
+    public func key(create: Bool) throws -> SymmetricKey {
         guard beacon_self_is(KeychainVaultKey.app) else { throw VaultError.unsignedBuild }
         var bytes = [UInt8](repeating: 0, count: 32)
         defer { bytes.withUnsafeMutableBytes { _ = memset($0.baseAddress!, 0, 32) } }
-        let status = beacon_vault_key(KeychainVaultKey.app, service, account, &bytes)
+        let status = beacon_vault_key(KeychainVaultKey.app, service, account, create, &bytes)
+        if status == BEACON_VAULT_KEY_EXISTS { throw VaultError.existingKey }
         guard status == 0 else { throw VaultError.keychain(status) }
         return SymmetricKey(data: bytes)
     }
@@ -51,7 +55,7 @@ public struct FixtureVaultKey: VaultKeySource {
         bytes = key
     }
 
-    public func key() throws -> SymmetricKey { bytes }
+    public func key(create: Bool) throws -> SymmetricKey { bytes }
 }
 
 /// A credential's secret. It never prints.
@@ -121,9 +125,16 @@ public final class Vault: @unchecked Sendable {
         keySource = key
     }
 
-    /// Fetches the key, creating it on first use, without reading the file.
+    /// Opens the vault. The first time, with no vault file, it creates the key (refusing an item that already
+    /// exists) and writes an empty vault; afterwards it reads the existing key and checks the file opens.
     public func unlock() throws {
-        _ = try keySource.key()
+        try locked {
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try load()
+            } else {
+                try save(Contents())
+            }
+        }
     }
 
     /// The bindings it holds, without secrets.
@@ -169,9 +180,10 @@ public final class Vault: @unchecked Sendable {
         } catch CocoaError.fileReadNoSuchFile {
             return Contents()
         }
+        let key = try keySource.key(create: false)
         do {
             let box = try AES.GCM.SealedBox(combined: sealed)
-            let plain = try AES.GCM.open(box, using: try keySource.key(), authenticating: Vault.associated)
+            let plain = try AES.GCM.open(box, using: key, authenticating: Vault.associated)
             let contents = try JSONDecoder().decode(Contents.self, from: plain)
             guard contents.version == 1 else { throw VaultError.unreadable }
             return contents
@@ -184,7 +196,9 @@ public final class Vault: @unchecked Sendable {
 
     private func save(_ contents: Contents) throws {
         let plain = try JSONEncoder().encode(contents)
-        let box = try AES.GCM.seal(plain, using: try keySource.key(), authenticating: Vault.associated)
+        // A new vault file comes with a new key; an existing one keeps its key.
+        let key = try keySource.key(create: !FileManager.default.fileExists(atPath: url.path))
+        let box = try AES.GCM.seal(plain, using: key, authenticating: Vault.associated)
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -207,7 +221,7 @@ enum PrivateFile {
             }
             return true
         }
-        ok = ok && fsync(fd) == 0
+        ok = ok && fullSync(fd)
         close(fd)
         guard ok, rename(temporary.path, url.path) == 0 else {
             unlink(temporary.path)
@@ -215,8 +229,14 @@ enum PrivateFile {
         }
         let directory = open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         if directory >= 0 {
-            fsync(directory)
+            _ = fullSync(directory)
             close(directory)
         }
+    }
+
+    /// Flushes to the drive, not only to its cache: plain fsync does not on macOS. A file system without
+    /// F_FULLFSYNC falls back to fsync.
+    static func fullSync(_ fd: Int32) -> Bool {
+        fcntl(fd, F_FULLFSYNC) == 0 || fsync(fd) == 0
     }
 }

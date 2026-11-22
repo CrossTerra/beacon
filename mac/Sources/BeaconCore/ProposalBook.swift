@@ -20,6 +20,10 @@ public struct Proposal: Equatable, Sendable {
     public let subject: String?
     /// The admitted client identity that proposed it. Only that identity can read, wait on or withdraw it.
     public let client: String
+    /// The connected process's executable and the requirement it satisfied, as the kernel identified it. Kept in
+    /// the local journal only; Signal's contract has no field for them.
+    public let clientPath: String?
+    public let clientRequirement: String?
     public let proposedAt: Date
     public let expiresAt: Date
     public var status: ProposalStatus
@@ -30,7 +34,8 @@ public struct Proposal: Equatable, Sendable {
     public static let lifetime: TimeInterval = 24 * 60 * 60
 
     public init(request: ProposalRequest, client: String, at date: Date, id: String = PublicID.make("apr"),
-                salt: String = randomHex(16), expiresAt: Date? = nil) {
+                salt: String = randomHex(16), expiresAt: Date? = nil, clientPath: String? = nil,
+                clientRequirement: String? = nil) {
         self.id = id
         type = request.type
         params = request.params
@@ -41,8 +46,35 @@ public struct Proposal: Equatable, Sendable {
         session = request.session
         subject = request.subject
         self.client = client
+        self.clientPath = clientPath
+        self.clientRequirement = clientRequirement
         proposedAt = date
         self.expiresAt = expiresAt ?? date.addingTimeInterval(Proposal.lifetime)
+        status = .pending
+        version = 1
+    }
+}
+
+extension Proposal {
+    /// A proposal rebuilt from a committed journal entry. It is not checked against today's schema: a later
+    /// tightening must not make an old journal unreadable.
+    init(stored id: String, type: ActionType, params: JSON, salt: String, reason: String, agent: String,
+         session: String?, subject: String?, client: String, clientPath: String?, clientRequirement: String?,
+         proposedAt: Date, expiresAt: Date) {
+        self.id = id
+        self.type = type
+        self.params = params
+        self.salt = salt
+        paramsHash = ApprovalHash.params(type: type.rawValue, params: params, salt: salt)
+        self.reason = reason
+        self.agent = agent
+        self.session = session
+        self.subject = subject
+        self.client = client
+        self.clientPath = clientPath
+        self.clientRequirement = clientRequirement
+        self.proposedAt = proposedAt
+        self.expiresAt = expiresAt
         status = .pending
         version = 1
     }

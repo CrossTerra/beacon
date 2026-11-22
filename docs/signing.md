@@ -131,12 +131,17 @@ codesign --verify --strict -R "=identifier \"dev.beacon.app\" and certificate le
    `~/Library/Application Support/beacon/run/act.sock`. Quit it.
 5. **Ad hoc.** Open `"$stage/AdHoc.app"`. No prompt appears. The menu shows **Approvals need Beacon.app signed with
    your Apple Development certificate**, and there is no socket. Quit it.
-6. Record the commit, the certificate fingerprints, prompt counts and each result. To clean up, remove the test
-   item and the trust file: `security delete-generic-password -s dev.beacon.app -a vault-key` and
-   `rm ~/Library/Application Support/beacon/act.json`. A later signed launch creates both again.
+6. **An item Beacon did not make.** Quit Beacon. Move the vault file aside:
+   `mv ~/Library/Application\ Support/beacon/app/vault ~/Library/Application\ Support/beacon/app/vault.test`.
+   Open `"$stage/Beacon.app"`. The `vault-key` item exists but there is no vault, so the menu shows **Not opening the
+   vault: a vault key already exists in the Keychain without a vault**. No prompt appears. Quit it.
+7. Record the commit, the certificate fingerprints, prompt counts and each result. To clean up, remove the test
+   item, the vault files and the trust file: `security delete-generic-password -s dev.beacon.app -a vault-key`,
+   `rm ~/Library/Application\ Support/beacon/app/vault ~/Library/Application\ Support/beacon/app/vault.test` (either
+   may be absent) and `rm ~/Library/Application\ Support/beacon/act.json`. A later signed launch creates them again.
 
-If you change the certificate on purpose, step 4's prompt is expected. Delete the item and `act.json` and launch the
-newly signed app once to create them again. Do this only before the vault holds credentials.
+If you change the certificate on purpose, step 4's prompt is expected. Delete the item, the vault file and
+`act.json`, then launch the newly signed app once to create them again. Do this only before the vault holds credentials.
 
 ## Part 1 manual rebuild test
 

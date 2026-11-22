@@ -156,11 +156,11 @@ public final class ProposalServer: @unchecked Sendable {
         while true {
             let fd = Darwin.accept(listener, nil, nil)
             guard fd >= 0 else { return }
-            guard connections.count < limits.connections, let (client, pid) = admit(fd) else {
+            guard connections.count < limits.connections, let (client, pid, executable) = admit(fd) else {
                 close(fd)
                 continue
             }
-            let connection = Connection(fd: fd, client: client, pid: pid, queue: queue, now: now)
+            let connection = Connection(fd: fd, client: client, pid: pid, executable: executable, queue: queue, now: now)
             connection.onFrame = { [weak self, weak connection] frame in
                 guard let self, let connection else { return }
                 self.handle(frame, on: connection)
@@ -175,14 +175,15 @@ public final class ProposalServer: @unchecked Sendable {
     }
 
     /// The peer must run as this user and satisfy an admitted requirement. Nothing has been read yet.
-    private func admit(_ fd: Int32) -> (AdmittedClient, pid_t)? {
+    private func admit(_ fd: Int32) -> (AdmittedClient, pid_t, String?)? {
         guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, fcntl(fd, F_SETFL, 0) == 0 else { return nil }
         var pid: pid_t = -1
+        var path = [CChar](repeating: 0, count: Int(PATH_MAX))
         let index = clients.map { strdup($0.requirement) }.withUnsafeBufferPointer { pointers -> Int32 in
             defer { pointers.forEach { free($0) } }
             let requirements = pointers.map { UnsafePointer<CChar>($0) }
             return requirements.withUnsafeBufferPointer {
-                beacon_peer_match(fd, uid, $0.baseAddress, Int32(clients.count), &pid)
+                beacon_peer_match(fd, uid, $0.baseAddress, Int32(clients.count), &pid, &path, path.count)
             }
         }
         guard index >= 0 else { return nil }
@@ -191,7 +192,8 @@ public final class ProposalServer: @unchecked Sendable {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        return (clients[Int(index)], pid)
+        let executable = String(decoding: path.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        return (clients[Int(index)], pid, executable.isEmpty ? nil : executable)
     }
 
     private func tick() {
@@ -272,7 +274,8 @@ public final class ProposalServer: @unchecked Sendable {
               book.pendingCount(client: nil, at: date) < limits.pendingTotal else {
             return connection.reply(ProposalServer.error("busy"))
         }
-        let proposal = Proposal(request: parsed, client: client, at: date)
+        let proposal = Proposal(request: parsed, client: client, at: date, clientPath: connection.executable,
+                                clientRequirement: connection.client.requirement)
         do {
             try book.add(proposal)
         } catch {
@@ -342,6 +345,8 @@ final class Connection {
     let fd: Int32
     let client: AdmittedClient
     let pid: pid_t
+    /// The executable the kernel's code reference for the peer names.
+    let executable: String?
     var onFrame: ((Data) -> Void)?
     var onClose: (() -> Void)?
     var wait: Wait?
@@ -355,10 +360,12 @@ final class Connection {
     private var closed = false
     private var limit = 0
 
-    init(fd: Int32, client: AdmittedClient, pid: pid_t, queue: DispatchQueue, now: @escaping () -> Date) {
+    init(fd: Int32, client: AdmittedClient, pid: pid_t, executable: String?, queue: DispatchQueue,
+         now: @escaping () -> Date) {
         self.fd = fd
         self.client = client
         self.pid = pid
+        self.executable = executable
         self.now = now
         lastActive = now()
         source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)

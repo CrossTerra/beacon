@@ -198,6 +198,12 @@ struct EndToEndTests {
         try server.start()
         let id = try #require(try Client(path: server.path).call(mergeProposal())?["id"]?.stringValue)
         server.stop()
+        // The kernel's view of the client is kept locally, and never sent to Signal.
+        let stored = try #require(journal.proposal(id, at: Date()))
+        let executable = try #require(stored.clientPath)
+        #expect(executable.hasPrefix("/") && stored.clientRequirement == selfRequirement())
+        let sent = try #require(try journal.nextDelivery(person: person)).bytes
+        #expect(sent.range(of: Data(executable.utf8)) == nil && sent.range(of: Data("cdhash".utf8)) == nil)
 
         // Relaunch: the pending proposal is still there.
         journal = try Journal(path: journalPath, at: Date())
@@ -208,6 +214,7 @@ struct EndToEndTests {
         defer { server.stop() }
         let desk = ApprovalDesk(journal: journal, resolver: FakeResolver())
         #expect(desk.pending.map(\.id) == [id])
+        #expect(journal.proposal(id, at: Date())?.clientPath == executable)
 
         let client = try Client(path: server.path)
         client.send(.object(["op": "wait", "id": .string(id), "after": .int(1), "timeout": .int(30)]))

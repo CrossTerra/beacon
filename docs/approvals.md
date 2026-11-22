@@ -52,7 +52,9 @@ the strict parser above.
 
 The proposals live in the [journal](#the-journal-and-the-outbox). There is no operation to approve, list proposals, read history or see runners. `get`, `wait` and `withdraw` answer
 only the client identity that made the proposal. Any other id reads as `not_found`. Clients with the same admitted
-identity cannot tell their proposals apart; a self-reported agent name or session is recorded as such
+identity cannot tell their proposals apart. Each proposal's `proposed` entry records, locally, the client's
+executable path and the requirement it satisfied, from the kernel's code reference for the connection. Neither is
+sent to Signal. A self-reported agent name or session is recorded as such
 (`verified: false`).
 
 **Limits.** At most 32 connections, 16 concurrent waits, 20 pending proposals per client identity, 40 pending in
@@ -95,8 +97,10 @@ handler.
 
 ## The journal and the outbox
 
-`~/Library/Application Support/beacon/app/journal.sqlite` (in a `0700` directory, WAL, `synchronous = FULL`) is
-the local record (13.00-D10). Each entry and its outbox row commit in one transaction. Triggers refuse any update
+`~/Library/Application Support/beacon/app/journal.sqlite` (in a `0700` directory, WAL, `synchronous = FULL`,
+`fullfsync` and `checkpoint_fullfsync`) is the local record (13.00-D10). On macOS a plain fsync leaves writes in
+the drive's cache, so each commit is flushed with `F_FULLFSYNC`: a start is on disk before anything is sent. The
+vault file and `act.json` are written the same way. Each entry and its outbox row commit in one transaction. Triggers refuse any update
 or delete of an entry. The journal has one `jrn_…` id. Entries are numbered from 1, and each entry's Signal key
 `beacon:{journal}:{seq}` and its replay nonce are fixed when it is written.
 
@@ -105,12 +109,14 @@ or delete of an entry. The journal has one `jrn_…` id. Entries are numbered fr
 | `proposed` | a `propose` over the socket; a run also gets its `run_…` id here |
 | `approved` | a click or keystroke on the frozen snapshot |
 | `declined`, `withdrawn` | the person in the window; the proposer over the socket, while pending |
-| `expired` | 24 hours pending; ten minutes approved without a start; Quit (`quit_before_start`); relaunch (`restart_before_start`) |
+| `expired` | 24 hours pending; ten minutes approved without a start; Quit (`quit_before_start`); relaunch (`restart_before_start`). Written only if the proposal is still in the state that expires, checked under the journal's lock, so the window and the socket can never write two |
 | `started` | the durable start, before any final provider read or write; only within ten minutes of the approval, and never after Quit |
 | `outcome_unknown` | a lost reply, or a start without a result found at relaunch (`app_restarted`) |
 | `executed`, `failed` | a definite result; after an unknown outcome only by read-back |
 
-State is rebuilt from the entries at launch. Recovery then expires every approval without a start and marks every
+State is rebuilt from the entries at launch without checking them against today's schemas, which apply to new
+requests only: tightening a schema later cannot make an old journal or its outbox unreadable. An entry of a type
+this build no longer knows is left out of the window, and its record is still delivered. Recovery then expires every approval without a start and marks every
 start without a result unknown, before the window or the socket opens. Nothing dispatches an action again.
 
 Each entry becomes one Signal record ([the contract](#the-contract-with-signal)). Its exact bytes are built once,
@@ -128,10 +134,15 @@ provider's stable account id and, for Slack, the workspace (13.00-D11, D31). A c
 that exact binding, taken from Beacon's settings, never from an agent. A different origin, port, account or
 workspace finds nothing. There is no way to list secrets, and a secret prints as `[redacted]`.
 
-The 256-bit key is a generic password item in the login Keychain. The app creates it on first use with an access
-list naming only its own designated requirement. Before opening any keychain, the code checks that the running
-process is `dev.beacon.app` signed with a certificate. An ad-hoc build, a test host or any other program is refused
-first. Tests use a fixture key and fixture secrets. Nothing in this repository's tests or CI opens a keychain.
+The 256-bit key is a generic password item (`dev.beacon.app`, account `vault-key`) in the login Keychain. The key
+is created only together with a new vault file. Its access list names only the app's own designated requirement.
+If a `vault-key` item already exists when there is no vault file, or the add reports a duplicate, the app refuses
+to use it: it did not make that item, and the item's access list could name another program. The menu says so.
+Remove the item in Keychain Access (or with `security delete-generic-password -s dev.beacon.app -a vault-key`) and
+relaunch, but only while the vault holds no credentials. Once the vault file exists, the app only reads the
+existing item. Before opening any keychain, the code checks that the running process is `dev.beacon.app` signed
+with a certificate. An ad-hoc build, a test host or any other program is refused first. Tests use fixture keys
+and fixture secrets. Nothing in this repository's tests or CI opens a keychain.
 
 ## What the files do not protect
 

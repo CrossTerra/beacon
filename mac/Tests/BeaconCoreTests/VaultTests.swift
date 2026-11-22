@@ -55,3 +55,44 @@ struct VaultTests {
         }
     }
 }
+
+/// Records whether each key request may create, and refuses creation when an item "already exists".
+final class RecordingKey: VaultKeySource, @unchecked Sendable {
+    private let lock = NSLock()
+    private let inner = FixtureVaultKey()
+    var existing = false
+    private(set) var requests: [Bool] = []
+
+    func key(create: Bool) throws -> SymmetricKey {
+        try lock.withLock {
+            requests.append(create)
+            if create && existing { throw VaultError.existingKey }
+            existing = true
+            return try inner.key(create: create)
+        }
+    }
+}
+
+struct VaultKeyCreationTests {
+    @Test func aKeyIsCreatedOnlyWithANewVault() throws {
+        let url = try VaultTests().scratch()
+        let key = RecordingKey()
+        try Vault(url: url, key: key).unlock()
+        try Vault(url: url, key: key).unlock()
+        try Vault(url: url, key: key).store(Secret("fixture"), for: try CredentialBinding(
+            service: "github", origin: "https://api.github.com", account: "github:user:1"))
+        #expect(key.requests == [true, false, false, false])
+    }
+
+    @Test func anExistingItemWithoutAVaultIsRefused() throws {
+        let url = try VaultTests().scratch()
+        let key = RecordingKey()
+        key.existing = true
+        #expect(throws: VaultError.existingKey) { try Vault(url: url, key: key).unlock() }
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+        #expect(throws: VaultError.existingKey) {
+            try Vault(url: url, key: key).store(Secret("fixture"), for: try CredentialBinding(
+                service: "github", origin: "https://api.github.com", account: "github:user:1"))
+        }
+    }
+}
