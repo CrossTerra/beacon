@@ -256,3 +256,23 @@ public enum ActionOutcome {
         }
     }
 }
+
+/// Resolves each proposal with its type's handler.
+public struct ActionRouter: ActionResolver {
+    public let merges: (any ActionResolver)?
+    public let runs: (any ActionResolver)?
+
+    public init(merges: (any ActionResolver)?, runs: (any ActionResolver)?) {
+        self.merges = merges
+        self.runs = runs
+    }
+
+    public func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
+        switch proposal.type {
+        case .githubMerge: guard let merges else { break }; return try await merges.resolve(proposal, model: model)
+        case .agentRun: guard let runs else { break }; return try await runs.resolve(proposal, model: model)
+        case .slackPost: break
+        }
+        throw NoResolver.Unsupported()
+    }
+}

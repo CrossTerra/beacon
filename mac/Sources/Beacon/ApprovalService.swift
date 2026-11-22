@@ -9,6 +9,9 @@ final class ApprovalService: ObservableObject {
     @Published private(set) var github: GitHubSettings?
     @Published private(set) var signal: SignalSettings?
     @Published private(set) var delivery = "Records are not sent: add Signal in Settings"
+    @Published private(set) var checkouts: [CheckoutSettings] = []
+    /// The agent.run handler, once the journal is open.
+    @Published private(set) var runs: RunHandler?
     private var journal: Journal?
     private var deliverer: Timer?
     private var scheduler: DeliveryScheduler?
@@ -35,6 +38,7 @@ final class ApprovalService: ObservableObject {
             let settings = try AppSettings.load(paths.settings)
             github = settings.github
             signal = settings.signal
+            checkouts = settings.checkouts ?? []
             let journal = try Journal(path: paths.journal.path, at: Date())
             self.journal = journal
             let settingsURL0 = paths.settings
@@ -56,9 +60,17 @@ final class ApprovalService: ObservableObject {
             let merges = MergeHandler(journal: journal, settings: { (try? AppSettings.load(settingsURL))?.github },
                                       connect: MergeHandler.connect(vault: vault))
             self.merges = merges
-            let desk = ApprovalDesk(journal: journal, resolver: merges)
-            desk.onApproved = { id in
-                Task { _ = try? await merges.execute(id) }
+            let runs = RunHandler(journal: journal, checkouts: { (try? AppSettings.load(settingsURL))?.checkouts ?? [] },
+                                  runs: paths.runs)
+            self.runs = runs
+            let desk = ApprovalDesk(journal: journal, resolver: ActionRouter(merges: merges, runs: runs))
+            desk.claim = { runs.claim($0) }
+            desk.release = { runs.release($0) }
+            desk.onApproved = { [weak journal] id in
+                switch journal?.proposal(id, at: Date())?.type {
+                case .agentRun: Task { try? await runs.execute(id) }
+                default: Task { _ = try? await merges.execute(id) }
+                }
             }
             self.desk = desk
             // Starts found by recovery, and lost replies, are settled by reading back, never by merging again.
@@ -168,11 +180,42 @@ final class ApprovalService: ObservableObject {
         updateEnabled()
     }
 
+    /// Adds a checkout agent runs may use. Returns why not, or nil.
+    func addCheckout(name: String, path: String) -> String? {
+        do {
+            var settings = try AppSettings.load(paths.settings)
+            try settings.add(try CheckoutSettings.make(name: name, path: path))
+            try settings.save(paths.settings)
+            checkouts = settings.checkouts ?? []
+            updateEnabled()
+            return nil
+        } catch CheckoutSettings.Refusal.name {
+            return "A checkout name is lowercase letters, digits, '.', '_' and '-', starting with a letter or digit."
+        } catch CheckoutSettings.Refusal.path {
+            return "That is not an existing folder."
+        } catch CheckoutSettings.Refusal.taken {
+            return "Another checkout has that name."
+        } catch {
+            return "The settings could not be saved."
+        }
+    }
+
+    func removeCheckout(_ name: String) {
+        guard var settings = try? AppSettings.load(paths.settings) else { return }
+        settings.removeCheckout(name)
+        try? settings.save(paths.settings)
+        checkouts = settings.checkouts ?? []
+        updateEnabled()
+    }
+
     private func updateEnabled() {
         guard let server else { return }
-        server.enabled = github == nil ? [] : [.githubMerge]
-        status = github == nil ? "Accepting proposals (no action type enabled: add a GitHub account in Settings)"
-            : "Accepting github.merge proposals"
+        var types: [ActionType] = []
+        if github != nil { types.append(.githubMerge) }
+        if !checkouts.isEmpty { types.append(.agentRun) }
+        server.enabled = types
+        status = types.isEmpty ? "Accepting proposals (no action type enabled: add a GitHub account or a checkout in Settings)"
+            : "Accepting " + types.map(\.rawValue).joined(separator: " and ") + " proposals"
     }
 
     private func reconcile() {
@@ -189,6 +232,7 @@ final class ApprovalService: ObservableObject {
     func stop() {
         reconciler?.invalidate()
         deliverer?.invalidate()
+        runs?.beginShutdown()
         desk?.beginShutdown()
         server?.stop()
         server = nil

@@ -1,11 +1,12 @@
 import Darwin
 import Dispatch
 import Foundation
+import BeaconCore
 import TetherSupport
 
 /// Owns the app's only end of the supervisor lease, on the same actor as Quit.
 @MainActor
-final class TetherSession {
+final class TetherSession: RunLauncher {
     enum Event: Equatable {
         case active, legacyCollectorInstalled, busy
         case collectorRunning, collectorRestarting, collectorExited
@@ -67,6 +68,8 @@ final class TetherSession {
     /// Asks tether to stop the run: TERM to its group, KILL after the grace period.
     @discardableResult
     func stopRun(_ id: String) -> Bool { command("K", id) }
+
+    func stop(_ runnerID: String) { stopRun(runnerID) }
 
     private func command(_ verb: String, _ id: String) -> Bool {
         guard !stopping, (1...40).contains(id.utf8.count),

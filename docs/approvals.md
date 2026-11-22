@@ -6,8 +6,8 @@ window, and Beacon carries it out with its own credentials. This page describes 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
 ad-hoc build opens none of them. `github.merge` is enabled once a GitHub account is added in Settings
-([merges](#merges)). `slack.post` and `agent.run` have no handler yet. Once Signal is added in Settings, the
-outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
+([merges](#merges)), and `agent.run` once a checkout is ([agent runs](#agent-runs)). `slack.post` has no handler yet.
+Once Signal is added in Settings, the outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
 ## The contract with Signal
 
@@ -92,7 +92,10 @@ provider facts Beacon resolved, such as **Checks: 3 passed**, with a link to the
 agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
 parameters_ shows the exact account (`github:user:{id}`), the destination and params as canonical JSON, and the
 approval hash. Once approved, the selected proposal stays shown with its result: _Started…_, **Merged as 18637a4**,
-_Not merged: head moved_, or an unknown outcome being read back, with the link to the pull request.
+_Not merged: head moved_, or an unknown outcome being read back, with the link to the pull request. For an agent
+run the window shows the checkout's name, branch and path, the full prompt (scrollable), and a model picker; once
+launched, whether it is running, with **Stop the run**, then its report or why it ended. The menu counts the runs
+working.
 
 **Approve** (or ⌘↩ in the window) is enabled only once Beacon has resolved the action and frozen a snapshot of
 the proposal id, its version, the final params, account, origin, destination and `approved_hash` (13.00-D29).

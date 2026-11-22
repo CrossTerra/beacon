@@ -9,8 +9,15 @@ opens its vault key, its journal and the proposal socket ([approvals](approvals.
 in Settings, it merges approved pull requests through that account's API origin. With Signal added, it sends its
 journal's records to Signal's record API with its app actor's key. Those are its only network connections, and
 `beacon egress` lists both. It starts [tether](tether.md), a helper in its bundle that runs the bundled
-collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
-commands, paths, secrets or item content.
+collector as the same user while the app is open. The app and `tether` share one socket pair that carries only a
+run's id when the app starts or stops an approved agent run, never a path, secret or item content.
+
+With a checkout in Settings, an approved `agent.run` starts opencode in that checkout through `tether`
+([agent runs](approvals.md#agent-runs)). The run is the person's agent, not part of Beacon: it works with the
+person's files, their login shell's environment (which may hold tokens their profile exports) and opencode's own
+sign-in, and it reaches whatever hosts the agent decides to, which `beacon egress` does not list. Beacon passes it
+none of the credentials Beacon holds, and every run uses `--auto`, so opencode approves any permission the
+checkout's opencode configuration does not deny.
 
 ## What crosses the boundary
 
@@ -175,6 +182,12 @@ commands, paths, secrets or item content.
     redirects, ignores proxies and never retries. The tests use only fixture keys and fixture secrets.
 
 ## Known limits
+
+- **An agent run is not a sandbox (13.00-D12, D22).** It runs as the person, with `--auto`, their login environment
+  and their files, and can do anything they can. Approving it approves a launch in one checkout, not what the agent
+  then does; a checkout's own `bin/run` guardrails are not applied. A descendant that leaves its process group in the
+  ways [tether](tether.md#limits) describes can outlive Stop and Quit. The run's output and errors stay in
+  `~/Library/Application Support/beacon/runs/`, readable by the person.
 
 - **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in
   plain cannot be undone after the send. New plain rules should start as `hold` until their output has been checked

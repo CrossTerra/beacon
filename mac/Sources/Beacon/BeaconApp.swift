@@ -32,6 +32,16 @@ private struct MenuTitle: View {
     }
 }
 
+private struct RunsLine: View {
+    @ObservedObject var runs: RunHandler
+
+    var body: some View {
+        if !runs.running.isEmpty {
+            Text(runs.running.count == 1 ? "1 agent run working" : "\(runs.running.count) agent runs working")
+        }
+    }
+}
+
 private struct BeaconMenu: View {
     @ObservedObject var delegate: BeaconDelegate
 
@@ -47,6 +57,7 @@ private struct BeaconMenu: View {
         }
         Divider()
         Text(delegate.servicesStatus)
+        if let runs = delegate.approvals.runs { RunsLine(runs: runs) }
         Text(delegate.approvals.status)
         Text(delegate.approvals.delivery)
         Button("Resume delivery") { delegate.approvals.resumeDelivery() }
@@ -105,8 +116,13 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func servicesChanged(_ event: TetherSession.Event) {
         let running: String
+        let runs = approvals.runs
         switch event {
-        case .active: running = "Starting collector…"
+        case .active:
+            // tether has stopped anything a crashed session left: runs can start, and interrupted ones are settled.
+            runs?.launcher = services
+            runs?.recover()
+            running = "Starting collector…"
         case .collectorRunning: running = "Collector running"
         case .collectorRestarting: running = "Collector stopped with an error; restarting soon"
         case .collectorExited: running = "Collector stopped"
@@ -118,10 +134,22 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             return
         case .stopped(let verified):
             servicesStatus = verified ? "Services stopped" : "Services stopped without confirmation"
+            runs?.launcher = nil
+            runs?.supervisorEnded()
+            runs?.servicesStopped(verified: verified)
             finishServices()
             return
-        case .runStarted, .runNotStarted, .runExited, .runGone:
-            // Runs are started only by the run handler, which arrives with the app's wiring for agent runs.
+        case .runStarted(let id, _):
+            runs?.started(id)
+            return
+        case .runNotStarted(let id, let code):
+            runs?.notStarted(id, errno: code)
+            return
+        case .runExited(let id, let status):
+            runs?.exited(id, status: status)
+            return
+        case .runGone(let id):
+            runs?.gone(id)
             return
         }
         if !stopping { servicesStatus = running }

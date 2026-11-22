@@ -1,8 +1,9 @@
+import AppKit
 import BeaconCore
 import SwiftUI
 
-/// Settings: the GitHub account Beacon merges as, and the Signal it records to, from Signal's setup code. The token and
-/// code fields are secure and cleared once used; neither is shown again.
+/// Settings: the GitHub account Beacon merges as, the Signal it records to (from Signal's setup code), and the
+/// checkouts agent runs may use. The token and code fields are secure and cleared once used; neither is shown again.
 struct SettingsView: View {
     @ObservedObject var service: ApprovalService
     @Environment(\.openURL) private var openURL
@@ -11,6 +12,8 @@ struct SettingsView: View {
     @State private var message = ""
     @State private var saving = false
     @State private var setupCode = ""
+    @State private var checkoutName = ""
+    @State private var checkoutMessage = ""
     @State private var signalMessage = ""
 
     var body: some View {
@@ -76,6 +79,41 @@ struct SettingsView: View {
                 Text(service.delivery).font(.caption)
                 Button("Resume delivery") { service.resumeDelivery() }
                     .disabled(service.signal == nil)
+            }
+            Section("Checkouts for agent runs") {
+                ForEach(service.checkouts, id: \.name) { checkout in
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading) {
+                            Text(checkout.name)
+                            Text(checkout.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            if FileManager.default.isExecutableFile(atPath: checkout.path + "/bin/run") {
+                                Text("Has its own bin/run, which Beacon does not use: runs are bare opencode.")
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+                        Spacer()
+                        Button("Remove", role: .destructive) { service.removeCheckout(checkout.name) }
+                    }
+                }
+                TextField("Name, as Bosun uses it (signal)", text: $checkoutName)
+                Button("Choose a folder and add…") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseDirectories = true
+                    panel.canChooseFiles = false
+                    panel.allowsMultipleSelection = false
+                    panel.prompt = "Add"
+                    guard panel.runModal() == .OK, let url = panel.url else { return }
+                    if let problem = service.addCheckout(name: checkoutName, path: url.path) {
+                        checkoutMessage = problem
+                    } else {
+                        checkoutMessage = ""
+                        checkoutName = ""
+                    }
+                }
+                .disabled(checkoutName.isEmpty)
+                Text("Runs start opencode here with --auto and your login environment. See docs/approvals.md.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !checkoutMessage.isEmpty { Text(checkoutMessage).font(.caption) }
             }
             Text(service.status).font(.caption).foregroundStyle(.secondary)
         }

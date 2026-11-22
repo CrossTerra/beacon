@@ -11,7 +11,8 @@ Slack. Rules owned by the person select changes and the fields that reach [Signa
 [macOS menu-bar app](docs/development.md#macos-app) runs the bundled collector through [tether](docs/tether.md)
 while the app is open. Signed, it takes proposals over an authenticated local socket into its journal and shows
 them in its [approval window](docs/approvals.md). With a GitHub account in its Settings it merges approved pull
-requests, and it records what it did in Signal.
+requests; with a checkout, it runs approved opencode agents there ([agent runs](docs/approvals.md#agent-runs)). It
+records what it did in Signal.
 
 ## Quick start
 

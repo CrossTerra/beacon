@@ -21,6 +21,8 @@ public struct AppPaths: Sendable {
     /// What `beacon act` trusts: the app's own requirement.
     public var act: URL { root.appendingPathComponent("act.json") }
     public var socket: URL { root.appendingPathComponent("run/act.sock") }
+    /// One directory per agent run, `runs/<runner id>/`, which tether reads and writes (docs/tether.md).
+    public var runs: URL { root.appendingPathComponent("runs") }
 }
 
 /// The client's side of the socket's trust (13.00-D5), set up by the app instead of by hand. On the first launch
