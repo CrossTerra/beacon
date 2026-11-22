@@ -66,7 +66,10 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
     /// A start with no reply is decided as not merged only after this long, and two reads, so a merge GitHub is
     /// still finishing is never recorded as failed.
     public static let settleTime: TimeInterval = 60
-    private let openReads = Locked<[String: Int]>([:])
+    /// The second open read must come at least this long after the first.
+    public static let openReadSpacing: TimeInterval = 60
+    /// The first open read after `settleTime`, per proposal, in this process.
+    private let openReads = Locked<[String: Date]>([:])
 
     public init(journal: Journal, settings: @escaping @Sendable () -> GitHubSettings?, connect: @escaping Connect,
                 budget: ReadBudget = ReadBudget(), now: @escaping @Sendable () -> Date = { Date() }) {
@@ -281,14 +284,17 @@ public final class MergeHandler: ActionResolver, @unchecked Sendable {
         }
         if pull.state != "open" { return try fail(id, "not_merged", by: "read_back") }
         // Still open: not merged only once two reads, both at least a minute after the unknown outcome was
-        // recorded (after the write was sent), show it open.
-        let since = journal.unknownAt(id) ?? now()
-        guard now().timeIntervalSince(since) >= MergeHandler.settleTime else { return .unknown }
-        let reads = openReads.withLock { reads -> Int in
-            reads[id, default: 0] += 1
-            return reads[id]!
+        // recorded (after the write was sent) and at least `openReadSpacing` apart, show it open. Who asked for a read
+        // (the timer, relaunch, or the person's Read again) does not matter, so clicking cannot hurry the decision.
+        let at = now()
+        let since = journal.unknownAt(id) ?? at
+        guard at.timeIntervalSince(since) >= MergeHandler.settleTime else { return .unknown }
+        let first = openReads.withLock { reads -> Date in
+            if let first = reads[id], first <= at { return first }
+            reads[id] = at
+            return at
         }
-        if reads >= 2 { return try fail(id, "not_merged", by: "read_back") }
+        if at.timeIntervalSince(first) >= MergeHandler.openReadSpacing { return try fail(id, "not_merged", by: "read_back") }
         return .unknown
     }
 

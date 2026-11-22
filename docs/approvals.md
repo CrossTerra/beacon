@@ -261,10 +261,11 @@ the head moved and enforces its own branch rules for this account.
 **Read-back** reads the PR, never merges again, and only with the approved account at the approved origin. If
 Settings changed since, the outcome stays unknown. Merged by the approved account with the approved head into the
 approved base is `executed` (`read_back`). Merged otherwise is `failed` (`merged_otherwise`), and closed unmerged
-is `failed` (`not_merged`). Still open is `not_merged` only after two reads, both at least a minute after the
-unknown outcome was recorded (after the write was sent). So a merge GitHub is still finishing is never recorded as
-failed. Any other result stays unknown and is read again every minute while the app runs, and at
-every launch. A start that recovery finds without a result is settled the same way.
+is `failed` (`not_merged`). Still open is `not_merged` only after two open reads, both at least a minute after the
+unknown outcome was recorded (after the write was sent) and at least a minute apart, whether the timer, a relaunch
+or the person's _Read again_ asked for them. So a merge GitHub is still finishing is never recorded as failed, and
+clicking _Read again_ shows the current state without hurrying the decision. Any other result stays unknown and is
+read again every minute while the app runs, at every launch, and on _Read again_. A start that recovery finds without a result is settled the same way.
 
 Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and
 SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an

@@ -314,9 +314,38 @@ struct MergeTests {
         h.clock.advance(MergeHandler.settleTime)
         #expect(try await h.handler.reconcile(id) == .unknown)
         h.github.down = false
-        // Two reads past the minute, both open.
+        // Two reads past the minute, both open, a minute apart.
         #expect(try await h.handler.reconcile(id) == .unknown)
+        h.clock.advance(MergeHandler.openReadSpacing)
         #expect(try await h.handler.reconcile(id) == .failed(error: "not_merged", confirmedBy: "read_back"))
+        #expect(h.merges.count == 1)
+    }
+
+    /// Bugbot on #40: Read again on an unknown merge reads back too, but clicks cannot hurry "not merged". Two open
+    /// reads past the settle time must be a minute apart, however they were asked for; a click shows the state.
+    @Test @MainActor func readAgainCannotFinalizeAnOpenMerge() async throws {
+        let h = try MergeHarness()
+        let id = try h.propose()
+        try await h.approve(id)
+        h.github.merge = .loseReplyWithoutMerging
+        #expect(try await h.handler.execute(id) == .unknown)
+        h.clock.advance(MergeHandler.settleTime)
+        let clock = h.clock, handler = h.handler
+        let desk = ApprovalDesk(journal: h.journal, resolver: NoResolver(), now: { clock.now })
+        nonisolated(unsafe) var reads: [Task<MergeHandler.Outcome, Error>] = []
+        desk.onReadBack = { id in reads.append(Task { try await handler.reconcile(id) }) }
+        desk.select(id)
+        for _ in 0..<4 { // A timer read, then the person clicks Read again three times.
+            desk.readAgain()
+            #expect(try await reads.removeLast().value == .unknown)
+        }
+        h.clock.advance(MergeHandler.openReadSpacing - 1)
+        desk.readAgain()
+        #expect(try await reads.removeLast().value == .unknown)
+        #expect(h.journal.proposal(id, at: clock.now)?.status == .outcomeUnknown)
+        h.clock.advance(1)
+        desk.readAgain()
+        #expect(try await reads.removeLast().value == .failed(error: "not_merged", confirmedBy: "read_back"))
         #expect(h.merges.count == 1)
     }
 
