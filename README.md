@@ -7,9 +7,9 @@ do, and what blocks installation. Give them the fork URL, the full audited commi
 Follow the [audit checklist](docs/audit.md) and the [local build and signing guide](docs/signing.md).
 
 Beacon runs on the person's Mac. Its Go collector reads GitHub, Jira, Gmail, Google Calendar, Google Drive and
-Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The CLI and its
-optional per-user LaunchAgent still handle collection. The [macOS menu-bar app](docs/development.md#macos-app)
-currently opens an empty approvals window. It does not start the collector, accept proposals or execute actions.
+Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The
+[macOS menu-bar app](docs/development.md#macos-app) opens an empty approvals window and runs the bundled
+collector through [tether](docs/tether.md) while the app is open. It does not accept proposals or execute actions.
 
 ## Install from the person's fork
 
@@ -78,9 +78,9 @@ with those source names, change to `mode: send` and try `beacon run --once`. A s
 forced with `beacon run --once --dry-run`. `beacon outbox` lists send outcomes and `--bodies` shows the stored
 request bytes. `beacon status --coverage` shows coverage recorded by the continuous send loop.
 
-For continuous collection on macOS, the person can opt into [`beacon service install`](docs/commands.md#beacon-service)
-after reviewing launch behavior. It runs the signed CLI in the person's GUI session and restarts failed exits.
-Use `beacon service status`, `beacon service logs` and `beacon service uninstall` to inspect or stop it.
+The collector LaunchAgent installer is retired. Inspect or remove an existing job with
+[`beacon service`](docs/commands.md#beacon-service). For continuous collection on macOS, the person opens the
+signed `Beacon.app` after reviewing [how it runs and stops the collector](docs/tether.md).
 
 | Reference | What it covers |
 | --- | --- |

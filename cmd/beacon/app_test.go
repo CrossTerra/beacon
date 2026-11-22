@@ -175,10 +175,11 @@ type harness struct {
 	store  *keychain.Memory
 	stdout bytes.Buffer
 	stderr bytes.Buffer
+	logs   string
 }
 
 func newHarness(t *testing.T) *harness {
-	h := &harness{t: t, server: signaltest.New(token), store: keychain.NewMemory()}
+	h := &harness{t: t, server: signaltest.New(token), store: keychain.NewMemory(), logs: t.TempDir()}
 	t.Cleanup(h.server.Close)
 	h.store.Put("test", token)
 	return h
@@ -196,6 +197,9 @@ func (h *harness) app(allowed []string) *app {
 	return &app{
 		stdin: strings.NewReader(""), stdout: &h.stdout, stderr: &h.stderr, now: time.Now,
 		keychain: func() (keychain.Store, error) { return h.store, nil },
+		collectorLog: func() (string, error) {
+			return filepath.Join(h.logs, "collector.log"), nil
+		},
 		transport: func(allowed []string) http.RoundTripper {
 			return h.rec.Wrap(egress.Transport(allowed))
 		},

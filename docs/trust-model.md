@@ -4,9 +4,10 @@ Beacon sits between accounts that belong to one person and a store that many peo
 says what Beacon protects, from whom, and how. Code that changes any of these properties changes this file in the
 same pull request.
 
-The `Beacon.app` shell currently has no listener, network access, credential access or child process launches.
-Its menu and shortcut only open an empty approvals window. The rest of this document describes the separate Go
-collector and CLI.
+The `Beacon.app` shell has no approval listener, network access or credential access. Its menu and shortcut
+open an empty approvals window. It starts [tether](tether.md), a helper in its bundle that runs the bundled
+collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
+commands, paths, secrets or item content.
 
 ## What crosses the boundary
 
@@ -108,11 +109,9 @@ collector and CLI.
    rebuild signed with a self-signed certificate included, makes macOS ask. A build that is not signed with a
    certificate (`go build`, `go run`, test binaries) does not use the keychain at all, so it cannot prompt or add
    itself to an item. `beacon keychain repair` re-creates each item with this access. The
-   Signal URL must be `https`, except to a loopback address. The per-user agent is a LaunchAgent in the user's GUI
-   session, never a LaunchDaemon. `beacon run` and `beacon service` refuse to start as root, so a plist copied into
-   `/Library/LaunchDaemons` exits instead of running as root. The plist names the signed binary, the config path and
-   the log paths. It has no environment variables and no credential. The agent reads keys from the keychain when a
-   pass sends, the same as a terminal `beacon run`. Google access is
+   Signal URL must be `https`, except to a loopback address. The collector never runs as root. Under `tether`
+   it runs in the person's login session and reads keys from the keychain when a pass sends, the same as a
+   terminal `beacon run`. `tether` reads no credential and no configuration. Google access is
    read-only scopes on the person's own OAuth client (DEC-2). The client and the refresh token are in the keychain;
    the keychain package builds the token requests, reads the authorisation code from the redirect (checking `state`,
    with a PKCE verifier) and reads the token responses, so no other code holds a token's bytes. An access token is
@@ -121,8 +120,9 @@ collector and CLI.
    missing a read scope, and stores it under the workspace and user (`slack:<workspace>:<user>`).
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
-   LaunchAgent prints pass summaries. Both logs exclude item content, rule matches, keys, bodies, tokens and error
-   text. `beacon run` prints a fixed message for each reason.
+   supervised collector writes pass summaries to `~/Library/Logs/Beacon/collector.log`, rotated by size with
+   one previous file kept. The retired LaunchAgent's logs are readable for migration. Logs exclude item content, rule matches, keys,
+   bodies, tokens and error text. `beacon run` prints a fixed message for each reason.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
    person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and
    private channels; a Slack channel is public only when Slack says so (`is_private: false`), and any other is
@@ -145,9 +145,14 @@ collector and CLI.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
 11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
-    request). The local signing helper builds from a clean checkout at the full audited commit and verifies the
-    staged artifact and installed signature. See [local build and signing](signing.md). Signed releases,
-    notarized macOS builds and an SBOM per release arrive in Phase 7.
+     request). The local signing helper builds from a clean checkout at the full audited commit and verifies the
+     staged artifact and installed signature. See [local build and signing](signing.md). Signed releases,
+     notarized macOS builds and an SBOM per release arrive in Phase 7.
+12. **Services end with the app.** `tether` runs only commands compiled into it, each in its own process group.
+    Quit or the app's death cancels pending restarts and stops every group and tracked descendant, including a
+    detached one, and `tether` confirms that none remain. A session that `tether` could not clean up is stopped by
+    the next one before it starts anything. The [limits](tether.md#limits) say what can still escape. Services
+    run as the person: supervision is not isolation.
 
 ## Known limits
 
@@ -234,12 +239,11 @@ collector and CLI.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
 - **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the
-  keychain items Beacon uses. The launchd agent is that same user. Its pass summaries and JSON log stay in the
-  state directory. A terminal dry run prints item keys, rule names and projected bodies.
-- **launchd can kill a stop.** After SIGTERM, launchd waits 180 seconds and then sends SIGKILL. A send still in a
-  retry wait can be killed. The outbox recovers that the same way it recovers a crash. A crash is restarted after
-  the 10-second throttle. A persistent failure (a refused key, a refused lease, an egress block, a state file) is
-  not: the process records the reason and waits one poll interval, doubling up to 30 minutes, before the non-zero
-  exit that launchd restarts.
+  keychain items Beacon uses. The supervised collector is that same user. A terminal dry run prints item keys,
+  rule names and projected bodies.
+- **Shutdown can interrupt a collect or send.** `tether` escalates from TERM to KILL after 15 seconds. An
+  unfinished send is recovered by the collector's existing outbox rules. A failed collector can restart with
+  backoff only while the app is running. Cleanup without a verified acknowledgement is
+  unconfirmed. These guarantees cover app-supervised services, not an independent terminal run or legacy job.
 - **Beacon trusts the Signal host it is pointed at.** It checks TLS. It does not protect what the store does with
   data after it arrives.

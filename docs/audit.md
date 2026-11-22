@@ -13,12 +13,11 @@ Use synthetic fixtures and in-memory test credentials. Agents never use the logi
   [`cmd/beacon/app.go`](../cmd/beacon/app.go) and [`internal/config/config.go`](../internal/config/config.go).
 - Follow the CLI entry point in [`cmd/beacon/main.go`](../cmd/beacon/main.go) and dispatch in
   [`cmd/beacon/app.go`](../cmd/beacon/app.go). Inventory every subprocess and listener, including setup commands.
-  This tree's service runs the collector. The [`Beacon.app` entry point](../mac/Sources/Beacon/BeaconApp.swift)
-  and [registered shortcut](../mac/Sources/Beacon/ApprovalShortcut.swift) only open a local window. Review the
-  [`Info.plist`](../mac/Info.plist) and [bundle staging script](../scripts/build-app.sh); the bundle contains a
-  separate collector executable that the shell does not launch. As the app gains approvals, inspect the socket
-  and peer identity, Touch ID binding, provider reads and writes, vault and journal, and supervision on Quit and
-  crash. Check that installed files and the signer are outside the write access of the accounts they supervise.
+  Follow the [`Beacon.app` entry point](../mac/Sources/Beacon/BeaconApp.swift) through its lifetime lease to
+  [`tether`](../mac/Sources/tether/main.c). Review [`Info.plist`](../mac/Info.plist) and the
+  [bundle staging script](../scripts/build-app.sh). The app has no proposal intake or action dispatch yet.
+  Check the fixed service list in [`tether`](../mac/Sources/tether/main.c) and that nothing the app sends can
+  change a command.
 
 ## 2. Trace what Beacon reads and where it connects
 
@@ -87,8 +86,8 @@ reads, later passes, pagination and the request scope checks. Record the actual 
   Signal and other service origins. Check that repair and any platform or test overrides are unavailable to agents.
 - Trace JSON log fields back to their inputs in [`internal/logs/logs.go`](../internal/logs/logs.go).
   Check provider-derived error codes, client error paths, terminal dry-run and `explain` output, and what ends
-  up in the LaunchAgent's stdout and stderr files. Check both files for secrets, item content, request bodies or
-  matches on content. See [`cmd/beacon/app.go`](../cmd/beacon/app.go) and
+  up in local state, `~/Library/Logs/Beacon/collector.log` or a retired LaunchAgent's stdout and stderr files. Check for secrets, item content, request
+  bodies or matches on content. See [`cmd/beacon/app.go`](../cmd/beacon/app.go) and
   [`internal/service/service.go`](../internal/service/service.go). Keep live output off the agent's transcript.
 
 ## 5. Verify build, launch and updates
@@ -99,14 +98,13 @@ reads, later passes, pagination and the request scope checks. Record the actual 
   artifact paths. Run the reproducibility check for the audited commit. It compares two builds in different
   directories with the same toolchain. Report that scope and the outcome of the fixture tests or CI gates.
   Follow [signing](signing.md) for the person's clean-checkout and staged-artifact verification and disposable rebuild test.
-- Review the plist, executable and certificate checks, privileges, config path, log destinations and
-  restart/stop semantics in [`cmd/beacon/service.go`](../cmd/beacon/service.go) and
-  [`internal/service/service.go`](../internal/service/service.go). Trace SIGTERM and SIGINT in
-  [`cmd/beacon/main.go`](../cmd/beacon/main.go) and source loops in [`internal/schedule/schedule.go`](../internal/schedule/schedule.go).
-  The current optional job is per-user and has no credential or environment variables in the plist. Check both
-  install and replacement paths, including what happens to pending sends during shutdown.
+- Review [how tether starts, restarts and stops services](tether.md) in
+  [`supervise.c`](../mac/Sources/tether/supervise.c) and [`procs.c`](../mac/Sources/tether/procs.c), and its
+  [limits](tether.md#limits). Trace SIGTERM and the lifetime pipe in [`cmd/beacon/main.go`](../cmd/beacon/main.go),
+  how the collector recovers pending sends, and how cleanup is confirmed after Quit or an app crash. Check that
+  the retired collector LaunchAgent is removed before the app runs the collector.
 - Check for anything that fetches or executes new software after install, including service restarts, scripts or
-  CI artifacts offered to users. Review [CLI dispatch](../cmd/beacon/app.go), [the LaunchAgent](../internal/service/service.go)
+  CI artifacts offered to users. Review [CLI dispatch](../cmd/beacon/app.go), [supervision](../mac/Sources/tether/supervise.c)
   and [the workflow](../.github/workflows/ci.yml). The expected update channel is a person-requested Git fetch
   and a reviewed merge into their fork. For updates, audit the full diff before merging and the final commit
   before signing. See [the update procedure](../README.md#update-only-when-asked).

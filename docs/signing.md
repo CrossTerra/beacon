@@ -5,14 +5,15 @@ locked while reviewing, building and staging. Verify the full commit ID and the 
 unlocking the signer (13.00-D15). Sign locally, relock immediately and verify the signature at the path
 you will run. Agents use ad-hoc builds and fixtures, and never run anything that uses the login keychain.
 
-## Stage the macOS app skeleton
+## Stage the macOS app
 
 With the signer locked, run [`scripts/build-app.sh`](../scripts/build-app.sh) from a clean checkout at the full
 approved commit ID. It builds from a Git archive into a private staging directory and verifies a SHA-256 manifest
-of the three bundle files: `Info.plist`, the `dev.beacon.app` executable and the separate Go collector. It does
+of `Info.plist`, the `dev.beacon.app` executable, the Go collector and the `tether` helper. It does
 not sign, install, launch or access the Keychain. The toolchain may ad-hoc sign the executables when linking them;
 there is no identity-signed app bundle. This stage is for a UI smoke test only, not for provisioning credentials
-or replacing an installation. The disposable rebuild test below is still required before using a real vault.
+or replacing an installation. Opening it runs the staged collector through [tether](tether.md). The
+disposable rebuild test below is still required before using a real vault.
 
 ## Choose a local signing identity
 
@@ -51,7 +52,7 @@ The partition list is a second check. With a qualifying Apple Development certif
 hash changes. With a self-signed certificate the partition is `cdhash:<build hash>`. A rebuild can meet the
 same requirement and still prompt because its partition changed. **Always Allow** can add access to an item.
 Leave existing ACLs and partitions intact during the experiment. A certificate change also needs an explicit
-review of the existing CLI item's ACLs and the LaunchAgent's pinned leaf if you use it. See
+review of the existing CLI item's ACLs and any pinned leaf left by the retired LaunchAgent. See
 [the signing helper's partition check](../scripts/build-local.sh) and
 [`beacon keychain repair`](commands.md#beacon-keychain-repair).
 

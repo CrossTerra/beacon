@@ -5,7 +5,9 @@ let package = Package(
     name: "Beacon",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "Beacon"),
+        .target(name: "TetherSupport"),
+        .executableTarget(name: "tether", dependencies: ["TetherSupport"]),
+        .executableTarget(name: "Beacon", dependencies: ["TetherSupport"]),
         .testTarget(name: "BeaconTests", dependencies: ["Beacon"]),
     ]
 )

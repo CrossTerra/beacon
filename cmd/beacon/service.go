@@ -19,34 +19,21 @@ import (
 	"github.com/CrossTerra/beacon/internal/service"
 )
 
-const serviceUsage = `usage: beacon service install [--config PATH] [--binary PATH] [--force]
-       beacon service uninstall [--config PATH]
+const serviceUsage = `usage: beacon service uninstall [--config PATH]
        beacon service status [--config PATH]
-       beacon service logs [--config PATH] [--stdout]
+       beacon service logs [--legacy [--config PATH]]
 `
 
-const errNotSigned = "refusing to install a binary that is not code-signed with a stable identity; build it with scripts/build-local.sh"
-
-// launcher is launchd. Tests set a fake. The real one is used only on macOS, and only when a person runs the command.
+// launcher inspects and retires the legacy collector job. It cannot start one.
 type launcher interface {
-	Bootstrap(ctx context.Context, domain, plist string) error
 	Bootout(ctx context.Context, target string) error
-	Enable(ctx context.Context, target string) error
 	Print(ctx context.Context, target string) (string, error)
 }
 
 type realLaunchctl struct{}
 
-func (realLaunchctl) Bootstrap(ctx context.Context, domain, plist string) error {
-	return runLaunchctl(ctx, "bootstrap", domain, plist)
-}
-
 func (realLaunchctl) Bootout(ctx context.Context, target string) error {
 	return runLaunchctl(ctx, "bootout", target)
-}
-
-func (realLaunchctl) Enable(ctx context.Context, target string) error {
-	return runLaunchctl(ctx, "enable", target)
 }
 
 func (realLaunchctl) Print(ctx context.Context, target string) (string, error) {
@@ -98,7 +85,7 @@ func (a *app) launcher() (launcher, error) {
 		return a.launchctl, nil
 	}
 	if runtime.GOOS != "darwin" {
-		return nil, errors.New("beacon service is a per-user launchd agent and runs only on macOS")
+		return nil, errors.New("the legacy collector LaunchAgent only exists on macOS")
 	}
 	return realLaunchctl{}, nil
 }
@@ -113,7 +100,7 @@ func (a *app) cmdService(ctx context.Context, args []string) error {
 	}
 	switch args[0] {
 	case "install":
-		return a.cmdServiceInstall(ctx, args[1:])
+		return errors.New("the collector LaunchAgent installer has been retired; see docs/tether.md")
 	case "uninstall":
 		return a.cmdServiceUninstall(ctx, args[1:])
 	case "status":
@@ -124,190 +111,6 @@ func (a *app) cmdService(ctx context.Context, args []string) error {
 		fmt.Fprint(a.stderr, serviceUsage)
 		return exitError{2}
 	}
-}
-
-func (a *app) cmdServiceInstall(ctx context.Context, args []string) error {
-	fs, cfgPath := a.flags("service install")
-	binary := fs.String("binary", "", "signed binary to run (default: this executable)")
-	force := fs.Bool("force", false, "replace an existing agent")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("usage: beacon service install [--config PATH] [--binary PATH] [--force]")
-	}
-	lc, err := a.launcher()
-	if err != nil {
-		return err
-	}
-	e, err := a.load(*cfgPath)
-	if err != nil {
-		return err
-	}
-	bin, err := resolveBinary(*binary)
-	if err != nil {
-		return err
-	}
-	id, err := a.checkIdentity(ctx, bin)
-	if err != nil {
-		return err
-	}
-	state, err := filepath.Abs(e.cfg.StatePath())
-	if err != nil {
-		return err
-	}
-	spec := service.Spec{
-		Binary: bin,
-		Config: e.cfg.Path,
-		Stdout: filepath.Join(state, service.StdoutName),
-		Stderr: filepath.Join(state, service.StderrName),
-	}
-	plist, err := service.Plist(spec)
-	if err != nil {
-		return err
-	}
-	dir, err := a.agentsDirectory()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, service.PlistName)
-	if _, err := os.Stat(path); err == nil && !*force {
-		return fmt.Errorf("%s already exists; pass --force to replace it, or beacon service uninstall", path)
-	}
-	uid := a.userID()
-	if err := os.MkdirAll(state, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(state, 0o700); err != nil {
-		return err
-	}
-	if err := service.EnsureLog(spec.Stdout); err != nil {
-		return err
-	}
-	if err := service.EnsureLog(spec.Stderr); err != nil {
-		return err
-	}
-	// Stop a previous job before replacing its definition. A job that is not loaded is not an error. Wait until it
-	// is gone before bootstrap, so the new job does not overlap the old one.
-	target := service.Target(uid)
-	_ = lc.Bootout(ctx, target)
-	if err := a.waitUnloaded(ctx, lc, target); err != nil {
-		return err
-	}
-	if err := service.WriteLeaf(state, id.Leaf); err != nil {
-		return err
-	}
-	if err := writePlist(path, plist); err != nil {
-		return err
-	}
-	_ = lc.Enable(ctx, target)
-	if err := lc.Bootstrap(ctx, service.Domain(uid), path); err != nil {
-		os.Remove(path)
-		return err
-	}
-	fmt.Fprintf(a.stdout, "Installed %s\nPlist: %s\nBinary: %s\nConfig: %s\nLogs: %s\n",
-		service.Label, path, bin, e.cfg.Path, spec.Stderr)
-	return nil
-}
-
-func (a *app) checkIdentity(ctx context.Context, path string) (service.Identity, error) {
-	id, err := a.identityOf(ctx, path)
-	if err != nil || !id.Stable() || !service.LeafOK(id.Leaf) {
-		return service.Identity{}, errors.New(errNotSigned)
-	}
-	return id, nil
-}
-
-// waitUnloaded polls until launchd no longer has the job. The agent may take ExitTimeOut to finish the in-flight
-// send after SIGTERM, so the wait is that long, not a few seconds. The last check is after the last sleep: a job
-// that exits during that second is not still loaded.
-func (a *app) waitUnloaded(ctx context.Context, lc launcher, target string) error {
-	for i := 0; i < service.ExitTimeOut; i++ {
-		if unloaded, err := a.jobUnloaded(ctx, lc, target); unloaded || err != nil {
-			return err
-		}
-		if err := a.sleepFor(ctx, time.Second); err != nil {
-			return err
-		}
-	}
-	unloaded, err := a.jobUnloaded(ctx, lc, target)
-	if unloaded || err != nil {
-		return err
-	}
-	return errors.New("the previous agent is still loaded; beacon service uninstall stops it")
-}
-
-func (a *app) jobUnloaded(ctx context.Context, lc launcher, target string) (bool, error) {
-	out, err := lc.Print(ctx, target)
-	if err != nil || !service.ParsePrint(out).Loaded {
-		return true, nil
-	}
-	return false, nil
-}
-
-func resolveBinary(path string) (string, error) {
-	if path == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			return "", errors.New("the binary to install could not be found")
-		}
-		path = exe
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return "", errors.New("the binary to install could not be found")
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", errors.New("the binary to install could not be found")
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-		return "", errors.New("the binary to install could not be found")
-	}
-	return resolved, nil
-}
-
-func writePlist(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".plist-tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	cleanup = false
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 func (a *app) cmdServiceUninstall(ctx context.Context, args []string) error {
@@ -322,7 +125,13 @@ func (a *app) cmdServiceUninstall(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	_ = lc.Bootout(ctx, service.Target(a.userID()))
+	target := service.Target(a.userID())
+	if bootErr := lc.Bootout(ctx, target); bootErr != nil {
+		// Do not remove the plist and report success if launchd still reports a loaded job.
+		if out, err := lc.Print(ctx, target); err == nil || service.ParsePrint(out).Loaded {
+			return bootErr
+		}
+	}
 	dir, err := a.agentsDirectory()
 	if err != nil {
 		return err
@@ -423,21 +232,30 @@ func (a *app) identityStatus(ctx context.Context, state string) string {
 
 func (a *app) cmdServiceLogs(args []string) error {
 	fs, cfgPath := a.flags("service logs")
-	useStdout := fs.Bool("stdout", false, "print the standard output log instead of the JSON log")
+	legacy := fs.Bool("legacy", false, "print the retired LaunchAgent's summary log from the state directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := a.loadConfig(*cfgPath)
-	if err != nil {
-		return err
+	if fs.NArg() > 0 {
+		return fmt.Errorf("usage: beacon service logs [--legacy [--config PATH]]")
 	}
-	name := service.StderrName
-	if *useStdout {
-		name = service.StdoutName
+	var path string
+	if *legacy {
+		cfg, err := a.loadConfig(*cfgPath)
+		if err != nil {
+			return err
+		}
+		path = filepath.Join(cfg.StatePath(), service.StdoutName)
+	} else {
+		p, err := a.collectorLogPath()
+		if err != nil {
+			return err
+		}
+		path = p
 	}
-	f, err := os.Open(filepath.Join(cfg.StatePath(), name))
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(a.stdout, "no service log yet")
+		fmt.Fprintln(a.stdout, "no collector log yet")
 		return nil
 	}
 	if err != nil {
@@ -489,7 +307,7 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 }
 
 // failLoop records a persistent failure and, unless this is a one-shot run, waits before the non-zero exit. The
-// wait is one poll interval, doubling up to 30 minutes, so launchd cannot restart the agent every throttle interval.
+// wait is one poll interval, doubling up to 30 minutes, to prevent rapid restarts.
 // Only SIGTERM during the wait is a clean exit. SIGINT still returns the failure. alreadyRecorded means the caller
 // wrote pass.json, including the streak.
 func (a *app) failLoop(once bool, dir string, poll time.Duration, interrupt context.Context, log *logs.Logger, reason logs.Reason, text string, alreadyRecorded bool) error {
@@ -543,12 +361,26 @@ func (a *app) sleepFor(interrupt context.Context, d time.Duration) error {
 	}
 }
 
-func (a *app) serviceStdout(state string) bool {
-	out, ok := a.stdout.(*os.File)
-	return ok && sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
+func (a *app) collectorLogPath() (string, error) {
+	if a.collectorLog != nil {
+		return a.collectorLog()
+	}
+	return service.CollectorLog()
 }
 
-// refusePinned refuses to run when install recorded a certificate and this binary is not signed with it.
+// serviceStdout reports whether standard output is the collector log or the retired LaunchAgent's log.
+func (a *app) serviceStdout(state string) bool {
+	out, ok := a.stdout.(*os.File)
+	if !ok {
+		return false
+	}
+	if p, err := a.collectorLogPath(); err == nil && sameFile(p, int(out.Fd())) {
+		return true
+	}
+	return sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
+}
+
+// refusePinned refuses to run when the retired installer recorded a certificate and this binary is not signed with it.
 func (a *app) refusePinned(ctx context.Context, dir string) error {
 	want, err := service.ReadLeaf(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -575,15 +407,19 @@ func (a *app) identityOf(ctx context.Context, path string) (service.Identity, er
 	return service.CodesignIdentity(ctx, path)
 }
 
-// rotateServiceLogs rotates the service logs when this process's standard output or error is that file, which is
-// how launchd runs the agent. A terminal run is left alone.
+// rotateServiceLogs rotates a log when this process's standard output or error is that file, which is how tether
+// (and the retired LaunchAgent) runs the collector. A terminal run is left alone.
 func (a *app) rotateServiceLogs(dir string) {
-	a.rotateIfOurs(filepath.Join(dir, service.StdoutName), 1)
-	a.rotateIfOurs(filepath.Join(dir, service.StderrName), 2)
+	if p, err := a.collectorLogPath(); err == nil {
+		a.rotateIfOurs(p, a.stdout)
+	}
+	a.rotateIfOurs(filepath.Join(dir, service.StdoutName), a.stdout)
+	a.rotateIfOurs(filepath.Join(dir, service.StderrName), a.stderr)
 }
 
-func (a *app) rotateIfOurs(path string, fd int) {
-	if !sameFile(path, fd) {
+func (a *app) rotateIfOurs(path string, w io.Writer) {
+	f, ok := w.(*os.File)
+	if !ok || !sameFile(path, int(f.Fd())) {
 		return
 	}
 	_ = service.Rotate(path, service.LogMaxBytes)

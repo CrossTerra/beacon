@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -16,43 +17,24 @@ import (
 const testLeaf = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type fakeLaunch struct {
-	mu        sync.Mutex
-	calls     []string
-	printOut  string
-	printErr  error
-	bootErr   error
-	loadedFor int
-}
-
-func (f *fakeLaunch) Bootstrap(_ context.Context, domain, plist string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "bootstrap "+domain+" "+plist)
-	return f.bootErr
+	mu       sync.Mutex
+	calls    []string
+	printOut string
+	printErr error
+	bootErr  error
 }
 
 func (f *fakeLaunch) Bootout(_ context.Context, target string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "bootout "+target)
-	return nil
-}
-
-func (f *fakeLaunch) Enable(_ context.Context, target string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "enable "+target)
-	return nil
+	return f.bootErr
 }
 
 func (f *fakeLaunch) Print(_ context.Context, target string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "print "+target)
-	if f.loadedFor > 0 {
-		f.loadedFor--
-		return "state = running\npid = 1\n", nil
-	}
 	return f.printOut, f.printErr
 }
 
@@ -78,93 +60,20 @@ func serviceApp(t *testing.T, h *harness, agents string, fl *fakeLaunch, signed 
 	return a
 }
 
-func testBinary(t *testing.T) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "beacon")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestServiceInstallPlistAndRefusals(t *testing.T) {
-	secret := "sekret-from-env-must-not-appear"
-	t.Setenv("AWS_SECRET_ACCESS_KEY", secret)
-
+func TestCollectorLaunchAgentInstallIsRetired(t *testing.T) {
 	h := newHarness(t)
-	dir := t.TempDir()
-	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "svc")
 	agents := t.TempDir()
-	bin := testBinary(t)
 	fl := &fakeLaunch{}
 	a := serviceApp(t, h, agents, fl, true)
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code != 0 {
+	if code := a.main(context.Background(), []string{"service", "install"}); code == 0 ||
+		!strings.Contains(h.stderr.String(), "retired") {
 		t.Fatalf("install: %d\n%s", code, h.stderr.String())
 	}
-	plistPath := filepath.Join(agents, service.PlistName)
-	data, err := os.ReadFile(plistPath)
-	if err != nil {
-		t.Fatal(err)
+	if fl.joined() != "" || len(h.server.Requests()) != 0 {
+		t.Fatal("retired installer called launchd or Signal")
 	}
-	info, err := os.Stat(plistPath)
-	if err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("plist mode %v", info)
-	}
-	if strings.Contains(string(data), secret) || strings.Contains(string(data), "EnvironmentVariables") || strings.Contains(string(data), "--once") || strings.Contains(string(data), "UserName") {
-		t.Fatalf("plist:\n%s", data)
-	}
-	if !strings.Contains(string(data), "\n\t\t<string>run</string>\n\t\t<string>--summary</string>\n") || !strings.Contains(string(data), service.StdoutName) {
-		t.Fatalf("plist:\n%s", data)
-	}
-	leaf, err := os.ReadFile(filepath.Join(dir, "state", service.LeafName))
-	if err != nil || strings.TrimSpace(string(leaf)) != testLeaf {
-		t.Fatalf("leaf %q err %v", leaf, err)
-	}
-	calls := fl.joined()
-	if !strings.Contains(calls, "bootstrap gui/501 "+plistPath) || !strings.Contains(calls, "enable gui/501/"+service.Label) {
-		t.Fatalf("calls:\n%s", calls)
-	}
-	state := filepath.Join(dir, "state")
-	if info, err := os.Stat(state); err != nil || info.Mode().Perm() != 0o700 {
-		t.Fatalf("state mode %v err %v", info, err)
-	}
-	for _, name := range []string{service.StdoutName, service.StderrName} {
-		info, err := os.Stat(filepath.Join(state, name))
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s mode %v err %v", name, info, err)
-		}
-	}
-
-	// A second install does not bootstrap again.
-	fl2 := &fakeLaunch{}
-	a = serviceApp(t, h, agents, fl2, true)
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "--force") {
-		t.Fatalf("second install: %d\n%s", code, h.stderr.String())
-	}
-	if fl2.joined() != "" {
-		t.Fatalf("second install called launchd:\n%s", fl2.joined())
-	}
-
-	// Ad-hoc signature: nothing written, nothing bootstrapped. Use a fresh agents dir.
-	agents2 := t.TempDir()
-	fl3 := &fakeLaunch{}
-	a = serviceApp(t, h, agents2, fl3, false)
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "scripts/build-local.sh") {
-		t.Fatalf("adhoc: %d\n%s", code, h.stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(agents2, service.PlistName)); !os.IsNotExist(err) || fl3.joined() != "" {
-		t.Fatalf("adhoc wrote a plist or called launchd: %v\n%s", err, fl3.joined())
-	}
-
-	// Root is refused before launchd.
-	fl4 := &fakeLaunch{}
-	a = serviceApp(t, h, t.TempDir(), fl4, true)
-	a.euid = func() int { return 0 }
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "refusing to run as root") {
-		t.Fatalf("root: %d\n%s", code, h.stderr.String())
-	}
-	if fl4.joined() != "" {
-		t.Fatal("root called launchd")
+	if entries, err := os.ReadDir(agents); err != nil || len(entries) != 0 {
+		t.Fatalf("retired installer wrote files: %v, %v", entries, err)
 	}
 }
 
@@ -216,20 +125,15 @@ func TestServiceRunPrintsOnlySummaries(t *testing.T) {
 func TestServiceUninstallStopsAndRemoves(t *testing.T) {
 	h := newHarness(t)
 	dir := t.TempDir()
-	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "un")
 	agents := t.TempDir()
 	fl := &fakeLaunch{}
 	a := serviceApp(t, h, agents, fl, true)
-	bin := testBinary(t)
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code != 0 {
-		t.Fatal(h.stderr.String())
-	}
+	must(t, os.WriteFile(filepath.Join(agents, service.PlistName), []byte("legacy plist"), 0o600))
 	state := filepath.Join(dir, "state")
+	must(t, os.MkdirAll(state, 0o700))
 	if err := os.WriteFile(filepath.Join(state, "outbox.jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fl = &fakeLaunch{}
-	a = serviceApp(t, h, agents, fl, true)
 	if code := a.main(context.Background(), []string{"service", "uninstall"}); code != 0 {
 		t.Fatalf("uninstall: %d\n%s", code, h.stderr.String())
 	}
@@ -322,8 +226,9 @@ func TestStatusAndLogsIgnoreBrokenRules(t *testing.T) {
 	if !strings.Contains(h.stdout.String(), "last_pass: 2026-11-10T15:04:05Z\n") || !strings.Contains(h.stdout.String(), "holder: another instance\n") {
 		t.Fatalf("status hid the pass:\n%s", h.stdout.String())
 	}
+	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("Items: 0 send\n"), 0o600))
 	a = serviceApp(t, h, t.TempDir(), fl, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--config", cfg}); code != 0 || h.stdout.String() != "{\"msg\":\"run_finished\"}\n" {
+	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "Items: 0 send\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 }
@@ -336,19 +241,51 @@ func TestServiceLogs(t *testing.T) {
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(state, service.StderrName), []byte("{\"msg\":\"run_finished\"}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(state, service.StdoutName), []byte("stdout-line\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("legacy-line\n"), 0o600))
 	a := serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--config", cfg}); code != 0 || h.stdout.String() != "{\"msg\":\"run_finished\"}\n" {
+	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "no collector log yet\n" {
+		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
+	}
+	must(t, os.WriteFile(filepath.Join(h.logs, "collector.log"), []byte("collector-line\n"), 0o600))
+	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
+	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "collector-line\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--stdout", "--config", cfg}); code != 0 || h.stdout.String() != "stdout-line\n" {
-		t.Fatalf("stdout log: %d\n%s", code, h.stdout.String())
+	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "legacy-line\n" {
+		t.Fatalf("legacy log: %d\n%s", code, h.stdout.String())
+	}
+}
+
+// tether appends the collector's standard output to the collector log. The collector prints summaries only there,
+// and rotates the file in place once it reaches the size limit, keeping one previous file.
+func TestCollectorLogSummariesAndRotation(t *testing.T) {
+	h := newHarness(t)
+	dir := t.TempDir()
+	cfg, want := writeSetup(t, dir, h.server.URL, "dry-run", "collector-log")
+	a := h.app(h.egressList(cfg))
+	path := filepath.Join(h.logs, "collector.log")
+	old := bytes.Repeat([]byte("old summary\n"), service.LogMaxBytes/12+1)
+	must(t, os.WriteFile(path, old, 0o600))
+	log, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	must(t, err)
+	t.Cleanup(func() { _ = log.Close() })
+	a.stdout = log
+	// No --summary: writing to the collector log alone keeps item details out of it.
+	if h.run(a, "run", "--once", "--bodies", "--config", cfg) != 0 {
+		t.Fatal(h.stderr.String())
+	}
+	if prev := mustRead(t, path+".1"); !bytes.Equal(prev, old) {
+		t.Fatalf("previous log not kept: %d bytes", len(prev))
+	}
+	out := string(mustRead(t, path))
+	if !strings.Contains(out, "Items:") || strings.Contains(out, "old summary") || strings.Contains(out, `"subject"`) {
+		t.Fatalf("collector log:\n%s", out)
+	}
+	for _, item := range want {
+		if strings.Contains(out, item.key) || (item.rule != "" && strings.Contains(out, item.rule)) {
+			t.Fatal("the collector log contains an item key or matched rule name")
+		}
 	}
 }
 
@@ -685,15 +622,8 @@ func TestPinnedIdentityRefused(t *testing.T) {
 		t.Fatalf("%+v %v", pass, err)
 	}
 	agents := t.TempDir()
-	plist, err := service.Plist(service.Spec{
-		Binary: "/Users/winton/.local/bin/beacon",
-		Config: cfg,
-		Stdout: filepath.Join(dir, "state", service.StdoutName),
-		Stderr: filepath.Join(dir, "state", service.StderrName),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	plist := []byte(`<plist><dict><key>ProgramArguments</key><array>
+<string>/Users/fixture/.local/bin/beacon</string><string>run</string></array></dict></plist>`)
 	if err := os.WriteFile(filepath.Join(agents, service.PlistName), plist, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -706,41 +636,6 @@ func TestPinnedIdentityRefused(t *testing.T) {
 	}
 	if !strings.Contains(h.stdout.String(), "identity: mismatch\n") || strings.Contains(h.stdout.String(), testLeaf) || strings.Contains(h.stdout.String(), other) {
 		t.Fatalf("status:\n%s", h.stdout.String())
-	}
-}
-
-func TestForceWaitsUntilUnloaded(t *testing.T) {
-	h := newHarness(t)
-	dir := t.TempDir()
-	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "force")
-	agents := t.TempDir()
-	bin := testBinary(t)
-	fl := &fakeLaunch{}
-	a := serviceApp(t, h, agents, fl, true)
-	if code := a.main(context.Background(), []string{"service", "install", "--config", cfg, "--binary", bin}); code != 0 {
-		t.Fatal(h.stderr.String())
-	}
-	fl = &fakeLaunch{loadedFor: 2}
-	a = serviceApp(t, h, agents, fl, true)
-	a.sleep = func(context.Context, time.Duration) error { return nil }
-	if code := a.main(context.Background(), []string{"service", "install", "--force", "--config", cfg, "--binary", bin}); code != 0 {
-		t.Fatalf("force: %d\n%s", code, h.stderr.String())
-	}
-	calls := fl.joined()
-	if strings.Count(calls, "print ") < 3 || !strings.Contains(calls, "bootstrap ") {
-		t.Fatalf("calls:\n%s", calls)
-	}
-	boot := strings.Index(calls, "bootstrap ")
-	lastPrint := strings.LastIndex(calls[:boot], "print ")
-	if lastPrint < 0 {
-		t.Fatal("bootstrapped before print")
-	}
-
-	fl = &fakeLaunch{loadedFor: service.ExitTimeOut + 1}
-	a = serviceApp(t, h, agents, fl, true)
-	a.sleep = func(context.Context, time.Duration) error { return nil }
-	if code := a.main(context.Background(), []string{"service", "install", "--force", "--config", cfg, "--binary", bin}); code == 0 || !strings.Contains(h.stderr.String(), "still loaded") || strings.Contains(fl.joined(), "bootstrap ") {
-		t.Fatalf("exit %d\n%s\ncalls:\n%s", code, h.stderr.String(), fl.joined())
 	}
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage an unsigned Beacon.app. Does not sign, install, or launch either executable.
+# Stage an unsigned Beacon.app. Does not sign, install, or launch the bundle or helpers.
 set -euo pipefail
 umask 077
 
@@ -14,18 +14,8 @@ fi
 audited_commit=$1
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-verify_checkout() {
-	local current changes index
-	current=$(git --no-replace-objects rev-parse --verify 'HEAD^{commit}') || return 1
-	changes=$(git -c core.fsmonitor=false -c core.untrackedCache=false status \
-		--porcelain=v1 --untracked-files=all --ignored --ignore-submodules=none) || return 1
-	index=$(git ls-files -v) || return 1
-	if [[ "$current" != "$audited_commit" || -n "$changes" ]] || LC_ALL=C grep -Eq '^[Sa-z] ' <<< "$index"; then
-		printf '%s\n' 'The checkout must be clean and match the full audited commit. See docs/signing.md.' >&2
-		return 1
-	fi
-}
-verify_checkout
+source scripts/audited-build.sh
+verify_audited_checkout "$audited_commit"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/beacon-app.XXXXXXXX")
 trap 'rm -rf "$stage"' EXIT
@@ -35,8 +25,10 @@ git --no-replace-objects archive "$audited_commit" | tar -x -C "$stage/src"
 
 swift_args=(--package-path "$stage/src/mac" --scratch-path "$stage/swift-build" --configuration release)
 swift build "${swift_args[@]}" --product Beacon
+swift build "${swift_args[@]}" --product tether
 swift_bin_dir=$(swift build "${swift_args[@]}" --show-bin-path)
 install -m 700 "$swift_bin_dir/Beacon" "$bundle/Contents/MacOS/Beacon"
+install -m 700 "$swift_bin_dir/tether" "$bundle/Contents/Helpers/tether"
 install -m 600 "$stage/src/mac/Info.plist" "$bundle/Contents/Info.plist"
 /usr/bin/plutil -lint "$bundle/Contents/Info.plist"
 
@@ -54,10 +46,10 @@ install -m 600 "$stage/src/mac/Info.plist" "$bundle/Contents/Info.plist"
 
 (
 	cd "$stage"
-	shasum -a 256 Beacon.app/Contents/{Info.plist,MacOS/Beacon,Helpers/beacon} > Beacon.app.sha256
+	shasum -a 256 Beacon.app/Contents/{Info.plist,MacOS/Beacon,Helpers/beacon,Helpers/tether} > Beacon.app.sha256
 	shasum -a 256 --check Beacon.app.sha256
 )
 rm -rf "$stage/src" "$stage/swift-build"
-verify_checkout
+verify_audited_checkout "$audited_commit"
 trap - EXIT
 printf 'Commit: %s\nBundle: %s\nSHA-256 manifest: %s\n' "$audited_commit" "$bundle" "$stage/Beacon.app.sha256"

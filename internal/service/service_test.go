@@ -8,89 +8,6 @@ import (
 	"time"
 )
 
-func TestPlistGolden(t *testing.T) {
-	got, err := Plist(Spec{
-		Binary: "/Users/winton/.local/bin/beacon",
-		Config: "/Users/winton/Library/Application Support/beacon/config.yaml",
-		Stdout: "/Users/winton/Library/Application Support/beacon/state/service.stdout.log",
-		Stderr: "/Users/winton/Library/Application Support/beacon/state/service.stderr.log",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>dev.beacon.agent</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/Users/winton/.local/bin/beacon</string>
-		<string>run</string>
-		<string>--summary</string>
-		<string>--config</string>
-		<string>/Users/winton/Library/Application Support/beacon/config.yaml</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-	<key>ExitTimeOut</key>
-	<integer>180</integer>
-	<key>Umask</key>
-	<integer>63</integer>
-	<key>ProcessType</key>
-	<string>Background</string>
-	<key>StandardOutPath</key>
-	<string>/Users/winton/Library/Application Support/beacon/state/service.stdout.log</string>
-	<key>StandardErrorPath</key>
-	<string>/Users/winton/Library/Application Support/beacon/state/service.stderr.log</string>
-</dict>
-</plist>
-`
-	if string(got) != want {
-		t.Fatalf("plist:\n%s", got)
-	}
-	for _, forbidden := range []string{"EnvironmentVariables", "UserName", "GroupName", "--once", "root", "SECRET", "token"} {
-		if strings.Contains(string(got), forbidden) {
-			t.Fatalf("plist contains %q", forbidden)
-		}
-	}
-	if !strings.Contains(string(got), "\n\t\t<string>run</string>\n") {
-		t.Fatal("plist does not run the poll loop")
-	}
-}
-
-func TestPlistEscapesAndRejects(t *testing.T) {
-	got, err := Plist(Spec{
-		Binary: "/usr/local/bin/beacon",
-		Config: "/tmp/a&b<c>.yaml",
-		Stdout: "/tmp/state/out.log",
-		Stderr: "/tmp/state/err.log",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(got), "/tmp/a&amp;b&lt;c&gt;.yaml") {
-		t.Fatalf("path not escaped:\n%s", got)
-	}
-	if strings.Contains(string(got), "a&b<c>") {
-		t.Fatal("raw path leaked into the plist")
-	}
-	if _, err := Plist(Spec{Binary: "/bin/beacon", Config: "/tmp/bad\n.yaml", Stdout: "/tmp/o", Stderr: "/tmp/e"}); err == nil {
-		t.Fatal("newline in a path was accepted")
-	}
-	if _, err := Plist(Spec{Binary: "beacon", Config: "/tmp/c", Stdout: "/tmp/o", Stderr: "/tmp/e"}); err == nil {
-		t.Fatal("relative binary was accepted")
-	}
-}
-
 func TestRotateAppendDescriptor(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, StdoutName)
@@ -246,16 +163,11 @@ func TestBackoff(t *testing.T) {
 	if NextFailures(Pass{}, false) != 1 || NextFailures(Pass{Outcome: "ok"}, true) != 1 || NextFailures(Pass{Outcome: "unauthorized", Failures: 3}, true) != 4 {
 		t.Fatal("streak")
 	}
-	plist, err := Plist(Spec{
-		Binary: "/Users/winton/.local/bin/beacon",
-		Config: "/Users/winton/Library/Application Support/beacon/config.yaml",
-		Stdout: "/tmp/state/service.stdout.log",
-		Stderr: "/tmp/state/service.stderr.log",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if BinaryFromPlist(plist) != "/Users/winton/.local/bin/beacon" {
+}
+
+func TestLegacyBinaryAndPin(t *testing.T) {
+	plist := []byte(`<key>ProgramArguments</key><array><string>/Users/fixture/Beacon &amp; logs/beacon</string></array>`)
+	if BinaryFromPlist(plist) != "/Users/fixture/Beacon & logs/beacon" {
 		t.Fatalf("binary %q", BinaryFromPlist(plist))
 	}
 	sum := HashLeaf([]byte("leaf-cert"))
