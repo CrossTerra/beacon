@@ -75,6 +75,10 @@ public final class ApprovalDesk: ObservableObject {
     public let journal: Journal
     /// Called with the proposal id after an approval commits; the app hands it to the action's handler.
     public var onApproved: ((String) -> Void)?
+    /// Called before the journal consumes an approval: a refusal (a run's checkout is busy) leaves it pending, with
+    /// that reason shown. `release` undoes a claim the journal then refused.
+    public var claim: ((FrozenApproval) -> String?)?
+    public var release: ((String) -> Void)?
     private let resolver: any ActionResolver
     private let now: @Sendable () -> Date
     private var generation = 0
@@ -131,12 +135,18 @@ public final class ApprovalDesk: ObservableObject {
     public func approve(_ token: UUID) -> Bool {
         guard !stopping, let frozen, frozen.token == token, frozen.approval.id == selection else { return false }
         invalidate()
+        if let refusal = claim?(frozen.approval) {
+            problem = refusal
+            freeze()
+            return false
+        }
         do {
             try journal.approve(frozen.approval, subject: frozen.resolved.subject, at: now())
             refresh()
             onApproved?(frozen.approval.id)
             return true
         } catch {
+            release?(frozen.approval.id)
             problem = "Not approved: the proposal changed, expired or was withdrawn."
             refresh()
             return false
@@ -145,7 +155,8 @@ public final class ApprovalDesk: ObservableObject {
 
     /// What happened to an approved proposal, in Beacon's words, and where to see it; nil before its start.
     public func outcome(of proposal: Proposal) -> (text: String, link: URL?)? {
-        ActionOutcome.describe(proposal, approval: journal.approval(proposal.id), result: journal.outcome(proposal.id))
+        ActionOutcome.describe(proposal, approval: journal.approval(proposal.id), result: journal.outcome(proposal.id),
+                               runner: journal.runnerState(proposal.id), words: journal.runnerWords(proposal.id))
     }
 
     public func decline(note: String?) {
@@ -193,6 +204,9 @@ public final class ApprovalDesk: ObservableObject {
             } catch let refusal as ChecksNotGreen {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: checks \(refusal.report.summary)."
+            } catch let refusal as RunRefusal {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Beacon cannot resolve this action yet."
@@ -203,7 +217,19 @@ public final class ApprovalDesk: ObservableObject {
 
 /// An approved action's state after approval, as the window shows it.
 public enum ActionOutcome {
-    public static func describe(_ proposal: Proposal, approval: FrozenApproval?, result: JSON?) -> (text: String, link: URL?)? {
+    public static func describe(_ proposal: Proposal, approval: FrozenApproval?, result: JSON?, runner: String? = nil,
+                                words: JSON? = nil) -> (text: String, link: URL?)? {
+        if proposal.type == .agentRun, proposal.status == .executed {
+            let error = words?["error"]?.stringValue?.replacingOccurrences(of: "_", with: " ") ?? "failed"
+            switch runner {
+            case "runner_finished": return ("Finished. Its report is below and goes to Signal for the session that asked.", nil)
+            case "runner_failed": return ("The run ended: \(error).", nil)
+            case "runner_closed":
+                return (words?["report"] != nil ? "Finished; nothing of the run is left running." :
+                        "The run ended: \(error). Nothing of it is left running.", nil)
+            default: return ("Running in its checkout.", nil)
+            }
+        }
         var link: URL?
         if proposal.type == .githubMerge, let approval, let origin = approval.origin,
            let repo = approval.params["repo"]?.stringValue, let number = approval.params["number"]?.intValue {
@@ -221,7 +247,11 @@ public enum ActionOutcome {
             return ("Done", link)
         case .failed:
             let error = result?["error"]?.stringValue?.replacingOccurrences(of: "_", with: " ") ?? "failed"
-            return (proposal.type == .githubMerge ? "Not merged: \(error)" : "Failed: \(error)", link)
+            switch proposal.type {
+            case .githubMerge: return ("Not merged: \(error)", link)
+            case .agentRun: return ("Not started: \(error)", link)
+            default: return ("Failed: \(error)", link)
+            }
         default: return nil
         }
     }

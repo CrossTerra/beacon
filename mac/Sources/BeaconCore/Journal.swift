@@ -108,6 +108,8 @@ public final class Journal: ProposalBook, @unchecked Sendable {
         var outcome: JSON?
         /// A launched run's latest runner event (`runner_working` … `runner_closed`).
         var runner: String?
+        /// The body of its last event with words: the report, the failure and its detail.
+        var runnerWords: JSON?
     }
 
     let db: SQLite
@@ -226,6 +228,11 @@ public final class Journal: ProposalBook, @unchecked Sendable {
     /// A launched run's latest runner event: `runner_working`, `runner_finished`, `runner_closed`, …; nil before one.
     public func runnerState(_ id: String) -> String? {
         locked { states[id]?.runner }
+    }
+
+    /// The words of a run's last event that had any: `report`, `error` and `detail`, `question`, `last_output`.
+    public func runnerWords(_ id: String) -> JSON? {
+        locked { states[id]?.runnerWords }
     }
 
     public func runnerID(_ id: String) -> String? {
@@ -567,6 +574,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             // A runner event changes the run's life, not the proposal: its version stays.
             state.proposal.version -= 1
             state.runner = kind
+            if kind != "runner_working" && kind != "runner_closed" { state.runnerWords = body }
         default: return
         }
         states[id] = state

@@ -138,6 +138,19 @@ struct ProposalServerTests {
         #expect(client.call(.object(["op": "withdraw", "id": .string(id)]))?["status"] == "withdrawn")
         #expect(client.call(.object(["op": "withdraw", "id": .string(id)]))?["error"] == "not_pending")
         #expect(client.call(.object(["op": "get", "id": .string(id)]))?["version"] == .int(2))
+        #expect(reply["runner_id"] == nil, "only a run has a runner id")
+
+        // A run's reply carries the runner id Beacon allocated, by which its reports are routed.
+        var run = mergeProposal().objectValue!
+        run["type"] = "agent.run"
+        run["params"] = runParams
+        run["context"] = nil
+        #expect(client.call(.object(run))?["error"] == "type_disabled")
+        let runs = try Harness(enabled: [.agentRun])
+        let launched = try #require(try runs.connect().call(.object(run)))
+        let runner = try #require(launched["runner_id"]?.stringValue)
+        #expect(PublicID.isValid(runner, prefix: "run"))
+        #expect(runs.queue.sync { runs.book.runnerID(launched["id"]!.stringValue!) } == runner)
     }
 
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {

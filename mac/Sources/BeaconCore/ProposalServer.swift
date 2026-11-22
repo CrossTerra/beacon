@@ -288,10 +288,13 @@ public final class ProposalServer: @unchecked Sendable {
             return connection.reply(ProposalServer.error("unavailable"))
         }
         proposed[client, default: []].append(date)
-        connection.reply(.object([
+        var reply: [String: JSON] = [
             "id": .string(proposal.id), "params_hash": .string(proposal.paramsHash),
             "status": .string(proposal.status.rawValue), "version": .int(proposal.version),
-        ]))
+        ]
+        // A run's reports reach the session that asked by this id (docs/approval-app.md, _Delivering a run's report_).
+        reply["runner_id"] = book.runnerID(proposal.id).map(JSON.string)
+        connection.reply(.object(reply))
     }
 
     private func wait(_ request: [String: JSON], on connection: Connection, at date: Date) {

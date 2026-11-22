@@ -94,18 +94,24 @@ public protocol ProposalBook: AnyObject {
     func proposal(_ id: String, at date: Date) -> Proposal?
     func withdraw(_ id: String, at date: Date) throws -> Proposal
     func pendingCount(client: String?, at date: Date) -> Int
+    /// The runner id Beacon allocated for an agent run when it was proposed; nil for other types.
+    func runnerID(_ id: String) -> String?
 }
 
 public final class MemoryBook: ProposalBook {
     public var changed: ((String) -> Void)?
     private var proposals: [String: Proposal] = [:]
+    private var runners: [String: String] = [:]
 
     public init() {}
 
     public func add(_ proposal: Proposal) throws {
         proposals[proposal.id] = proposal
+        if proposal.type == .agentRun { runners[proposal.id] = PublicID.make("run") }
         changed?(proposal.id)
     }
+
+    public func runnerID(_ id: String) -> String? { runners[id] }
 
     public func proposal(_ id: String, at date: Date) -> Proposal? {
         guard var proposal = proposals[id] else { return nil }

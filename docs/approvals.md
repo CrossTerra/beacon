@@ -47,7 +47,7 @@ it is closed with `frame_too_large`, which frees its wait.
 | `op` | Request | Reply |
 | --- | --- | --- |
 | `types` | nothing else | `{ types: [{ type, params }] }`, the enabled types and their JSON Schemas |
-| `propose` | `type`, `params`, `reason`, `agent: { name, session? }`, `context?: { subject }` | `{ id, params_hash, status: "pending", version }` |
+| `propose` | `type`, `params`, `reason`, `agent: { name, session? }`, `context?: { subject }` | `{ id, params_hash, status: "pending", version }`, and `runner_id` for an `agent.run` |
 | `get` | `id` | `{ id, status, version }` |
 | `wait` | `id`, `after`, `timeout` (1 to 300 seconds) | the same, once `version` is past `after` or the timeout ends |
 | `withdraw` | `id` | the same, while pending; otherwise `not_pending` |
@@ -265,6 +265,79 @@ every launch. A start that recovery finds without a result is settled the same w
 Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and
 SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an
 answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origin from the app's settings.
+
+## Agent runs
+
+`agent.run` (13.00, _Agent runs_, D21, D37) launches opencode in one of the person's checkouts with a full prompt
+and a model. Its params are Signal's: `checkout` (a name from Settings, never a path), `prompt` (1 to 32,000
+characters, exactly as proposed) and `model` (an opencode `provider/model` id). The agent's name and session are the
+proposal's `agent`, as for any type. Beacon allocates the run's runner id when the proposal arrives and returns it
+from `propose` as `runner_id`: every record of the run carries it, and Bosun's watch routes the run's report by it
+to the session that asked. A run's records are about `agent-run:{handle}:{runner id without run_}`.
+
+**Settings** lists the checkouts: a name and a directory the person picks. The path is stored resolved; two names may
+point at one directory.
+
+**Before approval** Beacon reads the checkout's directory identity (`vol:{device}/inode:{inode}`, the contract's
+`checkout_id`) and its branch from `.git/HEAD` (a worktree's too; `detached:{sha7}` or `none` otherwise), and the
+models opencode lists (`opencode models --standalone`, read at most once a minute). The proposed model must be one
+of them. The window shows the checkout's path and branch, the full prompt and a model picker that starts at the
+proposed model; the model is the one field the person may change (D7), recorded as `edited: ["model"]` with the
+original. It says when the checkout has its own `bin/run`: Beacon runs bare opencode without it, as Bosun's plain
+mode does. The account is the macOS user (`macos:user:{name}`) and the origin `null`.
+
+**Approval claims the checkout.** One run per checkout, under any of its names; runs in different checkouts run in
+parallel. Approving a proposal for a busy checkout is refused with the reason, and it stays pending until approved
+again once that run ends. A claim is freed when the run's processes are all gone, or when a start fails before
+launch. Freeing a checkout never starts anything by itself.
+
+**Launch.** After the durable start Beacon checks again: the checkout still has the approved identity (otherwise
+`checkout_changed` or `checkout_missing`), opencode is on the login `PATH` (`opencode_missing`), the model is still
+configured (`model_unavailable`). Each refusal is `failed` (`pre_dispatch`) with nothing launched. It then writes
+`~/Library/Application Support/beacon/runs/{runner id}/` (`0700`): `prompt`, the approved prompt, and `launch`, and
+asks [tether](tether.md) to start
+
+```
+opencode run --standalone --format json --auto --model {model}
+```
+
+in the checkout, with the prompt on standard input (opencode reads a piped prompt as is), its own process group,
+and its output and errors in `output` and `errors` beside the prompt (`0600`). `--standalone` gives the run a
+private opencode server inside that group, so stopping the group stops the agent. tether's answer is the result:
+started is `executed` (`reply`, with the runner id), then `app.runner.working`; not started is `failed`
+(`launch_failed`). With no answer (tether ended), the outcome is unknown until the next launch reads it back.
+
+**`--auto`.** Nobody is at a terminal to answer a permission prompt, so every run passes `--auto`: opencode approves
+any permission the checkout's opencode configuration does not explicitly deny, and cancels questions. The person
+chose this; the approval window says so for every run. A launch approval is not a sandbox (D22): the agent works as
+the person, with their files, sessions and credentials.
+
+**What a run inherits.** The person's login environment, as their Terminal has it: Beacon runs their login shell
+once per launch (`$SHELL -l -i -c`, bounded to ten seconds, in its own process group) and passes the variables it
+prints, so `PATH` and anything their profile exports, tokens included, reach the run. Nothing comes from Beacon's
+own environment or vault: no GitHub token, Signal key or other credential Beacon holds is passed, and variables
+starting with `BEACON_` are dropped. opencode uses its own sign-in for the model. tether adds only its
+`BEACON_SUPERVISOR` marker.
+
+**The report.** When opencode exits, Beacon reads its JSON events: the report is the text of the last assistant
+message (a part opencode completes after the session goes idle is joined to the one before), capped at 32,000
+characters by keeping the end with a note of the full length. Exit 0 is `app.runner.finished` with the report, or
+"The run ended without a final message." Any other exit is `app.runner.failed`: `exit_{code}`, `signal_{n}` or
+`interrupted` (130), with opencode's last error message as the detail, or else the end of its standard error.
+`app.runner.closed` follows once every process of the run is gone. The report and detail are sealed and marked
+`from: "runner"`; Signal and Bosun treat them as data (contract, _Delivering a run's report to Bosun_).
+
+**Stopping.** The person can stop a running run from its detail in the window: its whole group is stopped and it is
+`failed`, `stopped`. A run whose output passes 64 MiB is stopped as `output_too_large`. Quit records each run still
+working as `failed`, `stopped_at_quit`; tether stops them with everything else, and they are closed once it
+confirms. After a crash, the next launch, once tether has stopped what was left: a launched run not closed is
+`failed`, `interrupted`, and closed; a start whose launch went unanswered is read back from its run directory.
+tether creates `output` just before it starts a run, so with it the run started (`executed`, `read_back`, then
+interrupted and closed), and without it nothing started (`failed`, `not_launched`, `read_back`).
+
+Once tether has answered, Beacon deletes `launch` (which holds the environment, and so any token the profile
+exports) and `prompt`. `output` and `errors` stay in the run's directory, readable only by the person: they hold
+what opencode wrote, the report included.
 
 ## The vault
 

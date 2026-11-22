@@ -11,10 +11,10 @@ let package = Package(
             cSettings: [.unsafeFlags(["-Wno-deprecated-declarations"])],
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("CoreFoundation"), .linkedLibrary("bsm")]
         ),
-        .target(name: "BeaconCore", dependencies: ["BeaconSecurity"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "BeaconCore", dependencies: ["BeaconSecurity", "TetherSupport"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .executableTarget(name: "tether", dependencies: ["TetherSupport"]),
         .executableTarget(name: "Beacon", dependencies: ["TetherSupport", "BeaconCore"]),
         .testTarget(name: "BeaconTests", dependencies: ["Beacon"]),
-        .testTarget(name: "BeaconCoreTests", dependencies: ["BeaconCore"], resources: [.copy("Fixtures")]),
+        .testTarget(name: "BeaconCoreTests", dependencies: ["BeaconCore", "TetherSupport"], resources: [.copy("Fixtures")]),
     ]
 )
