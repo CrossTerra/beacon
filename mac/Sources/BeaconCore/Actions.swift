@@ -22,8 +22,24 @@ public enum Limits {
 
 /// Field checks that mirror Signal's (src/domain/appRecords.ts at the fixture commit).
 enum Field {
+    /// Whether the whole of `value` matches, as JavaScript's `^…$` does without the `m` flag. ICU's `$` also
+    /// matches before a final line terminator (`NSRegularExpression` accepts `"main\n"` for `^…$`), so the
+    /// anchors are `\A` and `\z`, and the match must cover the whole string.
     static func matches(_ value: String, _ pattern: String) -> Bool {
-        value.range(of: "^(?:" + pattern + ")$", options: .regularExpression) != nil
+        let expression = compiled(pattern)
+        let whole = NSRange(value.startIndex..., in: value)
+        return expression.firstMatch(in: value, options: [.anchored], range: whole)?.range == whole
+    }
+
+    // NSCache is thread-safe; NSRegularExpression is immutable and safe to share.
+    nonisolated(unsafe) private static let cache = NSCache<NSString, NSRegularExpression>()
+
+    private static func compiled(_ pattern: String) -> NSRegularExpression {
+        if let hit = cache.object(forKey: pattern as NSString) { return hit }
+        // Every pattern is a constant in this file; one that does not compile is a programming error.
+        let expression = try! NSRegularExpression(pattern: "\\A(?:" + pattern + ")\\z")
+        cache.setObject(expression, forKey: pattern as NSString)
+        return expression
     }
 
     static func string(_ value: JSON?, _ field: String, _ pattern: String) throws -> String {

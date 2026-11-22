@@ -118,6 +118,35 @@ struct ContractTests {
             #expect(throws: Invalid(field: field)) { try type.validate(params: params) }
         }
         _ = try ActionType.slackPost.validate(params: .object(["workspace": "T1", "channel": "C1", "thread_ts": .null, "text": "hi"]))
+
+        // A trailing line terminator passes ICU's `$`, but not JavaScript's: the whole value must match.
+        for end in ["\n", "\r", "\r\n", "\u{2028}", "\u{85}"] {
+            let refusedWithEnd: [(ActionType, JSON, String)] = [
+                (.githubMerge, merge(["base": .string("main" + end)]), "/params/base"),
+                (.githubMerge, merge(["head": .string(head + end)]), "/params/head"),
+                (.githubMerge, merge(["method": .string("squash" + end)]), "/params/method"),
+                (.githubMerge, merge(["repo": .string("CrossTerra/signal" + end)]), "/params/repo"),
+                (.slackPost, .object(["workspace": .string("T1" + end), "channel": "C1", "thread_ts": .null, "text": "hi"]), "/params/workspace"),
+                (.slackPost, .object(["workspace": "T1", "channel": "C1", "thread_ts": .string("1.000001" + end), "text": "hi"]), "/params/thread_ts"),
+                (.agentRun, .object(["checkout": .string("signal" + end), "prompt": "x", "model": "a/b"]), "/params/checkout"),
+                (.agentRun, .object(["checkout": "signal", "prompt": "x", "model": .string("a/b" + end)]), "/params/model"),
+            ]
+            for (type, params, field) in refusedWithEnd {
+                #expect(throws: Invalid(field: field)) { try type.validate(params: params) }
+            }
+            var request = ["op": "propose", "type": "agent.run", "reason": "r",
+                           "params": .object(["checkout": "signal", "prompt": "x", "model": "a/b"])] as [String: JSON]
+            request["agent"] = .object(["name": .string("bosun" + end)])
+            #expect(throws: Invalid(field: "/agent/name")) { try ProposalRequest(request) }
+            request["agent"] = .object(["name": "bosun", "session": .string("ses_1" + end)])
+            #expect(throws: Invalid(field: "/agent/session")) { try ProposalRequest(request) }
+            request["agent"] = .object(["name": "bosun"])
+            request["context"] = .object(["subject": .string("github:pr:a/b#1" + end)])
+            #expect(throws: Invalid(field: "/context/subject")) { try ProposalRequest(request) }
+            #expect(throws: VaultError.origin) { try CredentialBinding.normalize("https://api.github.com" + end) }
+        }
+        // A newline inside free text is still text.
+        _ = try ActionType.slackPost.validate(params: .object(["workspace": "T1", "channel": "C1", "thread_ts": .null, "text": "a\nb\n"]))
         _ = try ActionType.agentRun.validate(params: .object(["checkout": "signal", "model": "anthropic/claude-opus-5",
                                                                "prompt": .string(String(repeating: "👍", count: 32_000))]))
     }

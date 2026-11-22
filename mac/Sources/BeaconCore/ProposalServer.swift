@@ -386,7 +386,13 @@ final class Connection {
         if buffer.isEmpty { partialSince = now() }
         buffer.append(contentsOf: chunk[0..<n])
         process()
+        // While paused in a wait, frames queue up unread. At most one frame and a little more may wait here,
+        // paused or not; past that the connection closes.
+        if !closed && buffer.count > limit + Connection.margin { tooLarge() }
     }
+
+    /// Bytes allowed beyond one frame in a connection's buffer.
+    static let margin = 4096
 
     private func process() {
         while !closed {

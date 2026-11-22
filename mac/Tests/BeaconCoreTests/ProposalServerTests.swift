@@ -262,6 +262,24 @@ struct ProposalServerTests {
         #expect(exact.receive()?["types"] != nil)
     }
 
+    /// Paused in a wait, a connection cannot buffer more than one frame and a small margin.
+    @Test func boundsBufferedBytesDuringAWait() throws {
+        var limits = ServerLimits()
+        limits.frameBytes = 4096
+        let h = try Harness(limits: limits)
+        let client = try h.connect()
+        let id = try #require(client.call(mergeProposal())?["id"]?.stringValue)
+        client.send(.object(["op": "wait", "id": .string(id), "after": .int(1), "timeout": .int(300)]))
+        Thread.sleep(forTimeInterval: 0.1)
+        var flood = Data()
+        while flood.count <= 4096 + Connection.margin { flood.append(Data("{\"op\":\"types\"}\n".utf8)) }
+        client.send(flood)
+        #expect(client.receive() == .object(["error": "frame_too_large"]))
+        #expect(client.receive() == nil)
+        // Its wait slot is free again.
+        #expect(try h.connect().call(.object(["op": "wait", "id": .string(id), "after": .int(0), "timeout": .int(1)]))?["version"] == .int(1))
+    }
+
     @Test func boundsConnectionsAndRefusesASecondListener() throws {
         var limits = ServerLimits()
         limits.connections = 2

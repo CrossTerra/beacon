@@ -24,8 +24,9 @@ them and tests against copies in `mac/Tests/BeaconCoreTests/Fixtures/approval-ap
   sealed, so someone who sees only a hash cannot confirm a guess of short parameters such as a Slack text.
 - **Ids.** `apr_…` for a proposal and `jrn_…` for a journal: a UUIDv7 as 26 lowercase Crockford base32
   characters, so ids sort by time.
-- **Parameters.** `github.merge`, `slack.post` and `agent.run`, with exactly Signal's fields and patterns. Extra
-  fields are refused, and a refusal names the field without echoing the value.
+- **Parameters.** `github.merge`, `slack.post` and `agent.run`, with exactly Signal's fields and patterns. A pattern
+  must match the whole value, as JavaScript's `^…$` does: a value ending in a line terminator is refused (ICU's
+  `$` would accept it). Extra fields are refused, and a refusal names the field without echoing the value.
 
 ## The proposal socket
 
@@ -40,7 +41,8 @@ requirements admitted at setup, for example the signed `beacon` CLI's
 process is disconnected without a reply.
 
 **Frames.** Each request and reply is one JSON object on one line, at most 256 KiB including the newline, parsed by
-the strict parser above.
+the strict parser above. While a connection waits, it may hold at most one more frame and 4 KiB unread. Past that
+it is closed with `frame_too_large`, which frees its wait.
 
 | `op` | Request | Reply |
 | --- | --- | --- |
@@ -134,10 +136,16 @@ provider's stable account id and, for Slack, the workspace (13.00-D11, D31). A c
 that exact binding, taken from Beacon's settings, never from an agent. A different origin, port, account or
 workspace finds nothing. There is no way to list secrets, and a secret prints as `[redacted]`.
 
-The 256-bit key is a generic password item (`dev.beacon.app`, account `vault-key`) in the login Keychain. The key
-is created only together with a new vault file. Its access list names only the app's own designated requirement.
-If a `vault-key` item already exists when there is no vault file, or the add reports a duplicate, the app refuses
-to use it: it did not make that item, and the item's access list could name another program. The menu says so.
+The 256-bit key is a generic password item (`dev.beacon.app`, account `vault-key`) in the login Keychain. Its
+access list names only the app's own designated requirement. A new vault is made in three durable steps:
+
+1. `vault.pending`, holding a random nonce;
+2. the item, with that nonce in its generic attribute;
+3. the vault file, after which `vault.pending` is removed.
+
+After a crash at any step, the next launch resumes from the pending nonce. It makes the item if it is missing, or
+adopts the item if it carries that nonce. Any other existing `vault-key` item, untagged or tagged otherwise, is
+refused: Beacon did not make it for this vault, and its access list could name another program. The menu says so.
 Remove the item in Keychain Access (or with `security delete-generic-password -s dev.beacon.app -a vault-key`) and
 relaunch, but only while the vault holds no credentials. Once the vault file exists, the app only reads the
 existing item. Before opening any keychain, the code checks that the running process is `dev.beacon.app` signed
