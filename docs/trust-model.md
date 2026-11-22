@@ -22,7 +22,7 @@ commands, paths, secrets or item content.
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
-| Slack approvals: the Slack user token's bearer header and the conversation and thread ids go only to Slack. Only after approval does the frozen draft go to Slack, with an operation UUID and unfurls off. Signal gets the journal's records: the native message id is plain; the draft, reason and approval details are sealed by Signal | The thread root's preview and the app's operation UUID are never sent to Signal |
+| Slack approvals: the Slack user token's bearer header and the conversation and thread ids go only to Slack. Only after approval does the frozen draft go to Slack, with unfurls off and a random operation UUID as message metadata and `client_msg_id`; apps that read the message's metadata can see the UUID. Signal gets the journal's records: the native message id is plain; the draft, reason and approval details are sealed by Signal | The thread root's preview and the app's operation UUID are never sent to Signal |
 | The lease: your Signal handle, a random instance id and the lease period, as a lease in Signal's lease API (not an event) or, where Signal does not offer one, as a claim event | Rule names, and why an item matched |
 | With a Google or Slack source, a read of Signal's restricted prefixes (`GET /api/restrictions`), which sends nothing but the key | The Slack name cache (display names and channel names by id) and the record of threads checked for a retitle |
 | With a rule that lists Slack's `title`, or a Google thread Beacon opened with a title that is now sealed: reads of Beacon's own events and their threads (`GET /api/events/{id}`, `GET /api/threads/{id}`), and a new title for a thread Beacon opened (`thread.titled`) | |
@@ -183,8 +183,10 @@ commands, paths, secrets or item content.
      DMs and group DMs use the person's own Signal subject. Agent-supplied context cannot route records. The subject
      stays fixed because Signal requires exact equality throughout the proposal. Beacon checks visibility, membership
      and the thread root before it enables Approve and again at the write. A lost reply only permits read-back, never
-     another post. Without one matching operation UUID, exact text, approved user and destination in the bounded time
-     window, the outcome stays unknown.
+     another post. Without one message carrying the operation UUID (as `beacon_post` metadata or `client_msg_id`),
+     with exact text, the approved user and destination in the bounded time window, the outcome stays unknown.
+     Intake lookups, window preflights and read-back each have their own read budget and their own 429 deadlines,
+     so a proposer cannot spend the window's reads.
 
 ## Known limits
 
@@ -226,9 +228,10 @@ commands, paths, secrets or item content.
   [api.slack.com/apps](https://api.slack.com/apps).
 - **Slack approval checks are snapshots.** Visibility, membership, permissions and the root can change after
   the final read; Slack alone enforces its rules when it accepts a post. A channel made private after intake keeps
-  the original public proposal record (sensitive fields are sealed). Slack can rewrite text or omit `client_msg_id`
-  on read-back; it is not a guaranteed user-token feature, and it has not been verified against live Slack. A
-  missing reply may stay unknown even when the message was posted.
+  the original public proposal record (sensitive fields are sealed). Slack can rewrite text, or keep neither the
+  operation metadata nor `client_msg_id`; whether a user token's post keeps either has not been verified against
+  live Slack. A missing reply may then stay unknown even when the message was posted. Intake reuses a verified
+  `auth.test` for ten minutes; the window and the write always read it afresh.
 - **Slack is read by search and by watermark.** Search indexes with a delay, which the 15-minute lookback covers;
   mentions are searched over 7 days, which also finds one an edit added. A quiet followed thread or group direct
   message is read every 15 minutes, so a message there can arrive that late; a deletion is checked every 15 minutes,

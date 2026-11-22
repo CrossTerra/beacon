@@ -65,8 +65,11 @@ its connection after 10 seconds, and an idle connection after 60. Errors are `{ 
 `{ error: "invalid", field }`: `invalid_frame`, `frame_too_large`, `type_disabled`, `busy`, `not_found`,
 `not_pending`, `unavailable`. A Slack proposal does a bounded account and channel lookup before it can be
 recorded. If Slack does not confirm the workspace, account and visibility, no proposal is stored; a rate limit
-returns `busy`. Intake and window preflights share two slots and 120 provider reads per hour across GitHub and
-Slack, including pages and _Read again_. At a limit Beacon returns `busy` rather than starting another read.
+returns `busy`. Intake has its own budget per client identity: two lookups at once and 30 Slack reads an hour,
+reusing a verified `auth.test` for ten minutes, so a proposer cannot spend the window's reads. Window preflights
+share two slots and 120 provider reads per hour across GitHub and Slack, including pages and _Read again_. Slack
+read-back has a third budget ([Slack posts](#slack-posts)). At a limit Beacon returns `busy` rather than starting
+another read.
 
 A pending proposal expires after 24 hours.
 
@@ -287,28 +290,48 @@ and membership, and for a reply confirms that `thread_ts` is a root in that conv
 cannot be approved. The window shows the workspace, user, channel name and id, visibility, the root's first line,
 and a noninteractive plain preview. **Exact Slack mrkdwn** (when the preview differs) and **Show exact parameters**
 show what is frozen. Slack renders mentions and other Slack-specific formatting itself; the preview does not fetch
-or open links. To avoid Slack splitting longer messages, Beacon refuses drafts over 4,000 UTF-16 code units.
+or open links. A broadcast is marked as one, not shown as plain text: `<!here>` previews as
+**[@here — notifies everyone present]**, and `<!channel>`, `<!everyone>` and a user group (`<!subteam^…>`) likewise.
+When the text holds any `<!…>`, the exact mrkdwn is open from the start. To avoid Slack splitting longer messages,
+Beacon refuses drafts over 4,000 UTF-16 code units.
 
 **After approval.** Beacon durably records the start, rechecks the user, workspace, visibility, membership and root,
 then sends one `chat.postMessage` with the frozen text, channel and optional root, with link and media unfurls off.
 Slack may change the destination or its permissions after the last read; Slack enforces its own rules at the write.
-A verified success records `native: slack:message:{channel}:{ts}`. A definite refusal is a failure; a `429` uses
-`Retry-After` to block further calls to that Slack method for the workspace while Beacon runs. It does not sleep and
-resend the old post.
+A verified success records `native: slack:message:{channel}:{ts}`. Slack's documented refusals that are checked
+before anything is written (an archived or unknown conversation, not a member, a missing scope, `msg_too_long`,
+`message_limit_exceeded`, invalid blocks or attachments, `no_text`, `restricted_action…`, refused metadata and the
+like) are a definite failure. Anything else, `internal_error`, `fatal_error` and `request_timeout` included, may
+follow a write and leaves the outcome unknown. A `429` uses `Retry-After` to block further calls to that Slack method
+for the workspace while Beacon runs. It does not sleep and resend the old post.
 
-**Read-back, never retry.** [Slack documents `metadata_must_be_sent_from_app`](https://docs.slack.dev/reference/methods/chat.postMessage/#errors)
-and does not guarantee message metadata for a user token. Beacon sends a fresh `client_msg_id` UUID, saved in `started` before the write, rather
-than message metadata or a marker inserted into the text. If the reply is lost or unclear, Beacon reads the approved
-conversation (`conversations.history` or `conversations.replies`) around the durable start, up to four pages of 15.
-Only one matching UUID with byte-exact text, the approved user and destination, and a timestamp in that window
-confirms the write. Missing markers, rewritten text, missing pages or multiple matches leave the outcome unknown.
-It can be checked again while the app runs or on relaunch, without another POST. The TLS fake tests that a dropped
-reply causes only one wire POST. User-token `client_msg_id` round-tripping has not been verified against live Slack;
-if Slack does not echo it, a lost reply may stay unknown indefinitely. The handler is not a live Bosun cutover.
+**Read-back, never retry.** Beacon saves a fresh operation UUID in `started` before the write and sends it twice:
+as message metadata, `{ "event_type": "beacon_post", "event_payload": { "op": "<uuid>" } }` (plan 13.00), and as
+`client_msg_id`. Nothing is inserted into the text. If the reply is lost or unclear, Beacon reads the approved
+conversation (`conversations.history` or `conversations.replies`, with `include_all_metadata=true`) from a minute
+before the durable start to five minutes after it, up to four pages of 15. A message carries the operation when its
+`beacon_post` metadata names the UUID, or when it has no `beacon_post` metadata and its `client_msg_id` is the UUID;
+a message whose two ids disagree makes the outcome stay unknown. Only one such message, with byte-exact text, the
+approved user and destination, and a timestamp in that window, confirms the write. Missing ids, rewritten text,
+missing pages or more than one match leave the outcome unknown.
 
-The app sends these requests only to `https://slack.com`; `beacon egress` lists it for the saved account. Requests
-have a four-second deadline and an 8 MiB response cap, with no redirects. The Swift fixture tests need Go on `PATH`;
-they use a loopback TLS server and a fixture vault key, not a live Slack token or the Keychain.
+Read-back never posts. It runs right after the lost reply, then on a backoff (15, 30, 60, 120 seconds) until a
+minute after the search window closes; after that, once at each relaunch and whenever the person clicks _Read
+again_ on the unknown outcome. Its reads have their own budget (two at once, 60 an hour), and a `429` met while
+reading back blocks only read-back, not a new proposal's preflight or intake.
+
+**Not yet checked against live Slack.** Slack documents `metadata_must_be_sent_from_app` for `chat.postMessage`, and
+does not document `client_msg_id` there; which of the two a user token's post keeps is unverified. If Slack refuses
+the metadata, the post fails as `metadata_refused` and nothing is written. If it keeps neither id, a lost reply stays
+unknown (it is never sent again). The TLS fake covers each case and that a dropped reply causes only one wire POST.
+The handler is not a live Bosun cutover.
+
+The app sends these requests only to `https://slack.com`; `beacon egress` lists it for the saved account. Intake
+lookups have a four-second deadline, so `beacon act propose` answers within its ten seconds. The window, the final
+reads, the write and read-back use their own client with a 25-second deadline, so a slow `chat.postMessage` is not
+cut short into an unknown outcome. Every answer is capped at 8 MiB, and no redirect is followed. The Swift fixture
+tests need Go on `PATH`; they use a loopback TLS server and a fixture vault key, not a live Slack token or the
+Keychain.
 
 ## The vault
 

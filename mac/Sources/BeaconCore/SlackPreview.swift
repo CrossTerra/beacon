@@ -3,6 +3,16 @@ import Foundation
 private let slackSpans = try! NSRegularExpression(pattern:
     #"```[\s\S]*?```|`[^`\r\n]*`|<[^<>\r\n]+>|(?<![\p{L}\p{N}])([*_~])([^*_~`<>\r\n]+)\1(?![\p{L}\p{N}])"#)
 
+private let broadcastNotice = [
+    "!here": "notifies everyone present",
+    "!channel": "notifies everyone in the channel",
+    "!everyone": "notifies everyone in the workspace",
+]
+
+/// Whether the text holds a Slack special mention (`<!here>`, `<!channel>`, `<!subteam^…>`, `<!date…>`): the window
+/// then shows the exact mrkdwn without a click.
+public func slackHasSpecialMention(_ text: String) -> Bool { text.contains("<!") }
+
 /// Plain, noninteractive Slack preview. Slack resolves mentions, dates and custom emoji at display time; keep
 /// their ids/codes visible rather than trusting a label supplied by the proposer. The verbatim source is shown
 /// separately and is the only text sent. The preview never includes a live link or fetches content.
@@ -25,8 +35,11 @@ public func slackPlainPreview(_ text: String) -> String {
         } else if span.hasPrefix("<") {
             let parts = span.dropFirst().dropLast().split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
             let target = parts[0]
-            if ["!here", "!channel", "!everyone"].contains(target) {
-                output += "@" + target.dropFirst()
+            if let notice = broadcastNotice[String(target)] {
+                // A broadcast notifies people; it must not read like the literal text "@here".
+                output += "[@\(target.dropFirst()) — \(notice)]"
+            } else if target.hasPrefix("!subteam^") {
+                output += "[@\(target.dropFirst("!subteam^".count)) — notifies a user group]"
             } else if target.hasPrefix("@") || target.hasPrefix("#") {
                 output += target
             } else if target.hasPrefix("https://") || target.hasPrefix("http://") || target.hasPrefix("mailto:") {

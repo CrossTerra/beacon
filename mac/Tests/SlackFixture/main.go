@@ -41,6 +41,12 @@ type settings struct {
 	Echo        object   `json:"echo"`
 	Duplicate   bool     `json:"duplicate"`
 	Paginate    bool     `json:"paginate"`
+	// Metadata is how chat.postMessage treats message metadata: "" keeps it (returned only with
+	// include_all_metadata=true), "drop" accepts the post and discards it, "refuse" answers
+	// metadata_must_be_sent_from_app as Slack documents for a token that may not post metadata.
+	Metadata string `json:"metadata"`
+	// DropClientID discards client_msg_id, as an API post may.
+	DropClientID bool `json:"drop_client_id"`
 }
 
 type call struct {
@@ -149,6 +155,9 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !c.HidePosts {
 			for _, saved := range s.messages {
 				m := maps.Clone(saved)
+				if q.Get("include_all_metadata") != "true" {
+					delete(m, "metadata")
+				}
 				maps.Copy(m, c.Echo)
 				messages = append(messages, m)
 				if c.Duplicate {
@@ -164,8 +173,7 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			refuse("invalid_arguments")
 			return
 		}
-		// Model Slack's documented user-token behavior when message metadata cannot be posted.
-		if body["metadata"] != nil {
+		if body["metadata"] != nil && c.Metadata == "refuse" {
 			refuse("metadata_must_be_sent_from_app")
 			return
 		}
@@ -173,7 +181,13 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			refuse(strings.TrimPrefix(c.PostMode, "refuse:"))
 			return
 		}
-		m := object{"type": "message", "user": user, "ts": posted, "text": body["text"], "client_msg_id": body["client_msg_id"]}
+		m := object{"type": "message", "user": user, "ts": posted, "text": body["text"]}
+		if !c.DropClientID {
+			m["client_msg_id"] = body["client_msg_id"]
+		}
+		if body["metadata"] != nil && c.Metadata == "" {
+			m["metadata"] = body["metadata"]
+		}
 		if root := body["thread_ts"]; root != nil {
 			m["thread_ts"] = root
 		}
@@ -187,7 +201,9 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "unclear":
 			refuse("internal_error")
 		default:
-			write(object{"ok": true, "channel": body["channel"], "ts": posted, "message": m})
+			reply := maps.Clone(m)
+			delete(reply, "metadata")
+			write(object{"ok": true, "channel": body["channel"], "ts": posted, "message": reply})
 		}
 	default:
 		w.WriteHeader(http.StatusNotFound)

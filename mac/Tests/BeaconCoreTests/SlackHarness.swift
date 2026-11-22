@@ -10,6 +10,8 @@ final class SlackFixture {
     private let lifetime: FileHandle
     private let control: ServiceClient
     let connect: SlackAPI.Connect
+    /// The request deadline of every client the handler made, in order.
+    let timeouts: Locked<[TimeInterval]>
 
     init() throws {
         let process = Process()
@@ -43,9 +45,12 @@ final class SlackFixture {
             let fields = String(decoding: line, as: UTF8.self).split(whereSeparator: \.isWhitespace)
             guard fields.count == 2, let origin = URL(string: String(fields[0])), origin.scheme == "https", origin.host == "127.0.0.1",
                   origin.port != nil, let certificate = Data(base64Encoded: String(fields[1])) else { throw ServiceError.malformed }
-            let connect: SlackAPI.Connect = { token in
-                try ServiceClient(origin: origin.absoluteString, authorization: token, timeout: 4, resourceTimeout: 4,
-                                  delegate: FixtureTLS(certificate: certificate))
+            let timeouts = Locked<[TimeInterval]>([])
+            self.timeouts = timeouts
+            let connect: SlackAPI.Connect = { token, timeout in
+                timeouts.withLock { $0.append(timeout) }
+                return try ServiceClient(origin: origin.absoluteString, authorization: token, timeout: timeout,
+                                         resourceTimeout: timeout, delegate: FixtureTLS(certificate: certificate))
             }
             self.connect = connect
             control = try ServiceClient(origin: origin.absoluteString, authorization: nil, timeout: 4, resourceTimeout: 4,
@@ -125,7 +130,8 @@ final class SlackHarness {
     let vault: Vault
     let handler: PostHandler
 
-    init(budget: ReadBudget = ReadBudget()) throws {
+    init(budget: ReadBudget = ReadBudget(), intakePerHour: Int = 30,
+         readBackBudget: ReadBudget = ReadBudget(perHour: 60, concurrent: 2)) throws {
         fixture = try SlackFixture()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("slk-" + randomHex(4))
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
@@ -135,15 +141,17 @@ final class SlackHarness {
         settingsURL = directory.appendingPathComponent("app/settings.json")
         vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
         journal = try Journal(path: journalURL.path, at: clock.now)
-        handler = Self.handler(journal: journal, vault: vault, url: settingsURL, clock: clock, budget: budget, connect: fixture.connect)
+        handler = Self.handler(journal: journal, vault: vault, url: settingsURL, clock: clock, budget: budget,
+                               intakePerHour: intakePerHour, readBackBudget: readBackBudget, connect: fixture.connect)
     }
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
     private static func handler(journal: Journal, vault: Vault, url: URL, clock: Clock, budget: ReadBudget,
+                                intakePerHour: Int = 30, readBackBudget: ReadBudget = ReadBudget(perHour: 60, concurrent: 2),
                                 connect: @escaping SlackAPI.Connect) -> PostHandler {
-        PostHandler(journal: journal, settings: { (try? AppSettings.load(url))?.slack },
-                    vault: vault, budget: budget, now: { clock.now }, connect: connect)
+        PostHandler(journal: journal, settings: { (try? AppSettings.load(url))?.slack }, vault: vault, budget: budget,
+                    intakePerHour: intakePerHour, readBackBudget: readBackBudget, now: { clock.now }, connect: connect)
     }
 
     func restart() throws -> (Journal, PostHandler) {
@@ -175,9 +183,10 @@ final class SlackHarness {
         ])
     }
 
-    func propose(channel: String = "C0GENERAL", thread: String? = root, text: String = draft) async throws -> Proposal {
+    func propose(channel: String = "C0GENERAL", thread: String? = root, text: String = draft,
+                 client: String = "beacon-act") async throws -> Proposal {
         let request = try ProposalRequest(Self.frame(channel: channel, thread: thread, text: text).objectValue!)
-        let placement = try await handler.place(request)
+        let placement = try await handler.place(request, client: client)
         let proposal = Proposal(request: request, client: "beacon-act", at: clock.now, slackPlacement: placement)
         try journal.add(proposal)
         return proposal

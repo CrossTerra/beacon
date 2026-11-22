@@ -20,6 +20,8 @@ final class ApprovalService: ObservableObject {
     private var posts: PostHandler?
     private var reconciler: Timer?
     private var readBack: Task<Void, Never>?
+    private var postReadBack: Timer?
+    private var postReading: Task<Void, Never>?
     private var paths = AppPaths.standard
 
     func start(paths: AppPaths = .standard, bundle: Bundle = .main) {
@@ -72,11 +74,26 @@ final class ApprovalService: ObservableObject {
                 default: break
                 }
             }
+            desk.onReadBack = { [weak self] id in
+                Task { @MainActor in
+                    switch journal.proposal(id, at: Date())?.type {
+                    case .githubMerge: _ = try? await merges.reconcile(id)
+                    case .slackPost: _ = try? await posts.reconcile(id)
+                    default: break
+                    }
+                    self?.desk?.refresh()
+                }
+            }
             self.desk = desk
             // Starts found by recovery, and lost replies, are settled by reading back, never by dispatch again.
+            // GitHub reads back every minute; Slack on its own backoff, which ends after its search window.
             reconcile()
+            readBackPosts()
             reconciler = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.reconcile() }
+            }
+            postReadBack = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.readBackPosts() }
             }
             guard try ClientTrust.ensure(paths.act, requirement: requirement) != .mismatch else {
                 status = "Not accepting proposals: \(paths.act.path) names another app signature. Remove it to trust this build."
@@ -219,18 +236,21 @@ final class ApprovalService: ObservableObject {
     }
 
     private func reconcile() {
-        guard readBack == nil, let merges, let posts else { return }
+        guard readBack == nil, let merges else { return }
         readBack = Task { [weak self] in
             defer { self?.readBack = nil }
-            // A queue of unknown Slack posts shouldn't delay GitHub recovery (or vice versa).
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    for id in posts.unknown() where !Task.isCancelled { _ = try? await posts.reconcile(id) }
-                }
-                group.addTask {
-                    for id in merges.unknown() where !Task.isCancelled { _ = try? await merges.reconcile(id) }
-                }
-            }
+            for id in merges.unknown() where !Task.isCancelled { _ = try? await merges.reconcile(id) }
+            self?.desk?.refresh()
+        }
+    }
+
+    /// Slack read-back on its own task, so a queue of unknown posts never delays GitHub recovery. Reads only what
+    /// the handler says is due; most ticks read nothing.
+    private func readBackPosts() {
+        guard postReading == nil, let posts, !posts.readBackDue().isEmpty else { return }
+        postReading = Task { [weak self] in
+            defer { self?.postReading = nil }
+            await posts.automaticReadBack()
             self?.desk?.refresh()
         }
     }
@@ -240,6 +260,8 @@ final class ApprovalService: ObservableObject {
     func stop() {
         reconciler?.invalidate()
         readBack?.cancel()
+        postReadBack?.invalidate()
+        postReading?.cancel()
         deliverer?.invalidate()
         desk?.beginShutdown()
         server?.stop()

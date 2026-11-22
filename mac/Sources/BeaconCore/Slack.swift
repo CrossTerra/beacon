@@ -4,7 +4,7 @@ import Foundation
 public enum SlackRefusal: Error, Equatable, Sendable {
     case notConfigured, notAUser, accountMismatch, workspaceMismatch, destinationChanged
     case archived, notMember, channelNotFound, threadNotFound, visibilityUnknown, missingScope
-    case rejected, unavailable, busy, messageTooLong, shuttingDown
+    case rejected, unavailable, busy, messageTooLong, shuttingDown, metadataRefused
     case rateLimited(Int)
 
     var code: String {
@@ -25,6 +25,7 @@ public enum SlackRefusal: Error, Equatable, Sendable {
         case .busy: "busy"
         case .messageTooLong: "message_too_long"
         case .shuttingDown: "shutting_down"
+        case .metadataRefused: "metadata_refused"
         case .rateLimited: "rate_limited"
         }
     }
@@ -47,6 +48,7 @@ public enum SlackRefusal: Error, Equatable, Sendable {
         case .busy: "Beacon has reached its preflight read limit. Try again later."
         case .messageTooLong: "The draft exceeds 4,000 UTF-16 code units. Ask for a shorter proposal."
         case .shuttingDown: "Beacon is quitting."
+        case .metadataRefused: "Slack refused the operation id Beacon attaches as message metadata. Nothing was posted."
         case .rateLimited(let seconds): "Slack is rate limiting requests. Try again in \(seconds) seconds."
         }
     }
@@ -147,9 +149,31 @@ struct SlackMessage: Decodable {
     let thread_ts: String?
     let text: String?
     let client_msg_id: String?
+    let metadata: SlackMetadata?
 }
 
-struct SlackIdentity: Decodable {
+/// Message metadata, as `include_all_metadata=true` returns it. Anything not in this shape is ignored, not an error.
+struct SlackMetadata: Decodable {
+    static let eventType = "beacon_post"
+    let eventType: String?
+    let op: String?
+
+    enum CodingKeys: String, CodingKey { case event_type, event_payload }
+    enum PayloadKeys: String, CodingKey { case op }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        eventType = try? c.decodeIfPresent(String.self, forKey: .event_type)
+        op = try? c.nestedContainer(keyedBy: PayloadKeys.self, forKey: .event_payload).decodeIfPresent(String.self, forKey: .op)
+    }
+
+    /// The metadata Beacon sends with a post: the operation id stored in `started`, and nothing else.
+    static func json(op: String) -> JSON {
+        .object(["event_type": .string(eventType), "event_payload": .object(["op": .string(op)])])
+    }
+}
+
+struct SlackIdentity: Decodable, Sendable {
     let team_id: String
     let user_id: String
     let team: String
@@ -157,27 +181,40 @@ struct SlackIdentity: Decodable {
     let bot_id: String?
 }
 
-/// Slack's rate limit is per method and workspace. A 429 never sleeps a write and then sends it again.
+/// Slack's rate limit is per method and workspace. A 429 never sleeps a write and then sends it again. Deadlines are
+/// kept per purpose, so a 429 met while reading back a lost reply does not stop a new proposal's preflight, nor an
+/// intake lookup the window's.
 final class SlackRateLimits: Sendable {
+    enum Purpose: Sendable, Hashable {
+        /// The bounded lookup before a proposal is recorded.
+        case intake
+        /// The window's preflight, the final reads before the write, and the write.
+        case preflight
+        /// Reading back a lost or unclear reply.
+        case readBack
+    }
+
     private struct Key: Hashable {
         let workspace: String
         let method: SlackAPI.Method
+        let purpose: Purpose
     }
     private let deadlines = Locked<[Key: Date]>([:])
 
-    func check(_ method: SlackAPI.Method, workspace: String, at date: Date) throws {
+    func check(_ method: SlackAPI.Method, workspace: String, purpose: Purpose, at date: Date) throws {
         try deadlines.withLock {
             $0 = $0.filter { $0.value > date }
-            if let until = $0[Key(workspace: workspace, method: method)] {
+            if let until = $0[Key(workspace: workspace, method: method, purpose: purpose)] {
                 throw SlackRefusal.rateLimited(Int(ceil(until.timeIntervalSince(date))))
             }
         }
     }
 
-    func deferMethod(_ method: SlackAPI.Method, workspace: String, at date: Date, response: HTTPURLResponse) -> SlackRefusal {
+    func deferMethod(_ method: SlackAPI.Method, workspace: String, purpose: Purpose, at date: Date,
+                     response: HTTPURLResponse) -> SlackRefusal {
         let header = response.value(forHTTPHeaderField: "Retry-After")?.trimmingCharacters(in: .whitespaces)
         let seconds = header.flatMap(Int32.init).flatMap { $0 >= 0 ? Int($0) : nil } ?? 60
-        let key = Key(workspace: workspace, method: method)
+        let key = Key(workspace: workspace, method: method, purpose: purpose)
         deadlines.withLock { $0[key] = max($0[key] ?? date, date.addingTimeInterval(TimeInterval(seconds))) }
         return .rateLimited(seconds)
     }
@@ -190,18 +227,34 @@ struct SlackAPI: Sendable {
         case history = "conversations.history", replies = "conversations.replies", post = "chat.postMessage"
     }
 
-    typealias Connect = @Sendable (Secret) throws -> ServiceClient
+    /// A client for the token with this request deadline, in seconds.
+    typealias Connect = @Sendable (Secret, TimeInterval) throws -> ServiceClient
 
-    static func connect(_ token: Secret) throws -> ServiceClient {
-        // Intake makes two reads and `beacon act propose` allows 10 seconds for the whole exchange.
-        try ServiceClient(origin: SlackSettings.origin, authorization: token, timeout: 4, resourceTimeout: 4)
+    /// Intake makes at most two reads, and `beacon act propose` allows 10 seconds for the whole exchange.
+    static let intakeTimeout: TimeInterval = 4
+    /// Everything else, the write above all: a slow answer to chat.postMessage must not be cut short into an
+    /// unknown outcome.
+    static let actionTimeout: TimeInterval = 25
+
+    static func connect(_ token: Secret, timeout: TimeInterval) throws -> ServiceClient {
+        try ServiceClient(origin: SlackSettings.origin, authorization: token, timeout: timeout, resourceTimeout: timeout)
     }
 
     let client: ServiceClient
     let workspace: String
     let rates: SlackRateLimits
+    var purpose: SlackRateLimits.Purpose = .preflight
     let now: @Sendable () -> Date
     var meter: (@Sendable () async throws -> Void)?
+
+    init(client: ServiceClient, workspace: String, rates: SlackRateLimits, purpose: SlackRateLimits.Purpose = .preflight,
+         now: @escaping @Sendable () -> Date) {
+        self.client = client
+        self.workspace = workspace
+        self.rates = rates
+        self.purpose = purpose
+        self.now = now
+    }
 
     func identity() async throws -> SlackIdentity {
         let identity = try await get(SlackIdentity.self, .auth)
@@ -277,7 +330,9 @@ struct SlackAPI: Sendable {
         var query: [URLQueryItem] = [.init(name: "channel", value: channel), .init(name: "limit", value: String(limit))]
         if let thread { query.append(.init(name: "ts", value: thread)) }
         if let oldest, let latest {
-            query += [.init(name: "oldest", value: oldest), .init(name: "latest", value: latest), .init(name: "inclusive", value: "true")]
+            // A read-back: message metadata is returned only when asked for.
+            query += [.init(name: "oldest", value: oldest), .init(name: "latest", value: latest), .init(name: "inclusive", value: "true"),
+                      .init(name: "include_all_metadata", value: "true")]
         }
         return try await get(Page.self, thread == nil ? .history : .replies, Self.withCursor(query, cursor))
     }
@@ -290,10 +345,14 @@ struct SlackAPI: Sendable {
         case posted(String), refused(SlackRefusal), ambiguous(String)
     }
 
+    /// The operation id goes twice: as message metadata (plan 13.00), which Slack returns to a read with
+    /// `include_all_metadata`, and as `client_msg_id`, which Slack's clients use and an API post may keep. Read-back
+    /// accepts either.
     func post(_ draft: SlackDraft, marker: String, user: String) async throws -> PostReply {
         try canPost()
         var body: [String: JSON] = [
             "channel": .string(draft.channel), "text": .string(draft.text), "client_msg_id": .string(marker),
+            "metadata": SlackMetadata.json(op: marker),
             "mrkdwn": .bool(true), "parse": "none", "unfurl_links": .bool(false), "unfurl_media": .bool(false),
         ]
         body["thread_ts"] = draft.thread.map(JSON.string)
@@ -329,12 +388,12 @@ struct SlackAPI: Sendable {
         return .posted(posted.ts)
     }
 
-    func canPost() throws { try rates.check(.post, workspace: workspace, at: now()) }
+    func canPost() throws { try rates.check(.post, workspace: workspace, purpose: .preflight, at: now()) }
 
     private struct Envelope: Decodable { let ok: Bool; let error: String? }
 
     private func get<T: Decodable>(_ type: T.Type, _ method: Method, _ query: [URLQueryItem] = []) async throws -> T {
-        try rates.check(method, workspace: workspace, at: now())
+        try rates.check(method, workspace: workspace, purpose: purpose, at: now())
         try await meter?()
         try Task.checkCancellation()
         let response = try await client.send("GET", "/api/\(method.rawValue)", query: query)
@@ -349,20 +408,31 @@ struct SlackAPI: Sendable {
 
     private func rateLimit(_ method: Method, _ response: (status: Int, body: Data, response: HTTPURLResponse)) -> SlackRefusal? {
         guard response.status == 429 else { return nil }
-        return rates.deferMethod(method, workspace: workspace, at: now(), response: response.response)
+        return rates.deferMethod(method, workspace: workspace, purpose: method == .post ? .preflight : purpose, at: now(),
+                                 response: response.response)
     }
 
-    private static func refusal(_ error: String?) -> SlackRefusal? {
+    /// Slack's documented refusals that are checked before anything is written. Any other error, `internal_error`,
+    /// `fatal_error` and `request_timeout` among them, may follow a write and stays ambiguous.
+    static func refusal(_ error: String?) -> SlackRefusal? {
         switch error {
-        case "is_archived": .archived
+        case "is_archived", "channel_is_archived": .archived
         case "channel_not_found": .channelNotFound
         case "thread_not_found", "cannot_reply_to_message": .threadNotFound
         case "not_in_channel": .notMember
         case "missing_scope": .missingScope
+        case "msg_too_long", "msg_blocks_too_long": .messageTooLong
+        case "metadata_must_be_sent_from_app", "invalid_metadata_format", "invalid_metadata_schema", "metadata_too_large":
+            .metadataRefused
         case "invalid_auth", "not_authed", "account_inactive", "token_revoked", "token_expired", "not_allowed_token_type",
-             "access_denied", "no_permission", "restricted_action", "restricted_action_read_only_channel",
+             "access_denied", "no_permission", "ekm_access_denied", "team_access_not_granted", "enterprise_is_restricted",
+             "two_factor_setup_required", "org_login_required", "restricted_action", "restricted_action_read_only_channel",
              "restricted_action_non_threadable_channel", "restricted_action_thread_locked", "restricted_action_thread_only_channel",
-             "no_text", "invalid_arguments", "invalid_arg_name", "posting_to_channel_denied": .rejected
+             "posting_to_channel_denied", "message_limit_exceeded", "no_text", "invalid_blocks", "invalid_blocks_format",
+             "too_many_attachments", "invalid_attachments", "too_many_contact_cards", "as_user_not_supported",
+             "duplicate_channel_not_found", "duplicate_message_not_found", "invalid_arguments", "invalid_arg_name",
+             "invalid_array_arg", "invalid_charset", "invalid_form_data", "invalid_post_type", "missing_post_type",
+             "invalid_json", "json_not_object", "deprecated_endpoint", "method_deprecated", "upgrade_required": .rejected
         default: nil
         }
     }

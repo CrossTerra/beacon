@@ -103,9 +103,7 @@ private struct DeskView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(verbatim: visibleText(preview)).textSelection(.enabled)
                             if !text.utf8.elementsEqual(preview.utf8) {
-                                DisclosureGroup("Exact Slack mrkdwn") {
-                                    Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
-                                }
+                                ExactMrkdwn(text: text).id(proposal.id + text)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -142,6 +140,9 @@ private struct DeskView: View {
                         .disabled(token == nil || desk.stopping)
                     }
                 }
+                if proposal.status == .outcomeUnknown {
+                    Button("Read again") { desk.readAgain() }
+                }
                 if let problem = desk.problem, desk.frozen == nil, proposal.status != .pending {
                     Text(problem).foregroundStyle(.red)
                 }
@@ -154,6 +155,23 @@ private struct DeskView: View {
         HStack(alignment: .top) {
             Text(label).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
             Text(visibleText(value)).textSelection(.enabled)
+        }
+    }
+}
+
+/// The verbatim mrkdwn that will be sent. Open from the start when it holds a Slack special mention (`<!…>`).
+private struct ExactMrkdwn: View {
+    let text: String
+    @State private var expanded: Bool
+
+    init(text: String) {
+        self.text = text
+        _expanded = State(initialValue: slackHasSpecialMention(text))
+    }
+
+    var body: some View {
+        DisclosureGroup("Exact Slack mrkdwn", isExpanded: $expanded) {
+            Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
         }
     }
 }

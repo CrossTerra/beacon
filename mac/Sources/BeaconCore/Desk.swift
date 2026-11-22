@@ -75,6 +75,8 @@ public final class ApprovalDesk: ObservableObject {
     public let journal: Journal
     /// Called with the proposal id after an approval commits; the app hands it to the action's handler.
     public var onApproved: ((String) -> Void)?
+    /// Called for _Read again_ on an unknown outcome: the app asks the handler to read back once more.
+    public var onReadBack: ((String) -> Void)?
     private let resolver: any ActionResolver
     private let now: @Sendable () -> Date
     private var generation = 0
@@ -120,8 +122,13 @@ public final class ApprovalDesk: ObservableObject {
         freeze()
     }
 
-    /// _Read again_: drop the snapshot and resolve afresh.
+    /// _Read again_: drop the snapshot and resolve afresh. For an unknown outcome, read it back once more; nothing
+    /// is sent again.
     public func readAgain() {
+        if let proposal = selected, proposal.status == .outcomeUnknown {
+            onReadBack?(proposal.id)
+            return
+        }
         invalidate()
         freeze()
     }
@@ -218,7 +225,11 @@ public enum ActionOutcome {
         switch proposal.status {
         case .approved: return ("Approved; starting…", link)
         case .started: return ("Started…", link)
-        case .outcomeUnknown: return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
+        case .outcomeUnknown:
+            if proposal.type == .slackPost {
+                return ("Outcome unknown: Beacon reads Slack for a few minutes after the start, then again on relaunch or Read again. It will not be sent again.", nil)
+            }
+            return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
         case .executed:
             if let commit, proposal.type == .githubMerge { return ("Merged as \(commit)", link) }
             if proposal.type == .slackPost { return ("Posted to Slack", nil) }

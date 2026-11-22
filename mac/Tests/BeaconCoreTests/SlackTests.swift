@@ -43,7 +43,7 @@ struct SlackTests {
         let clock = h.clock
         let server = ProposalServer(path: h.directory.appendingPathComponent("run/s").path,
                                     clients: [.init(name: "beacon-act", requirement: selfRequirement())], book: h.journal,
-                                    enabled: [.slackPost], now: { clock.now }, slackLookup: h.handler.place)
+                                    enabled: [.slackPost], now: { clock.now }, slackLookup: h.handler.place(_:client:))
         try server.start()
         defer { server.stop() }
         let client = try Client(path: server.path)
@@ -77,7 +77,11 @@ struct SlackTests {
         let text = try #require(frozen.approval.params["text"]?.stringValue)
         #expect(text.utf8.elementsEqual(SlackHarness.draft.utf8))
         #expect(slackPlainPreview(text) == SlackHarness.preview)
-        #expect(slackPlainPreview("<!here> &lt;code&gt; &amp;gt; <@U0OTHER|Untrusted>") == "@here <code> &gt; @U0OTHER")
+        #expect(slackPlainPreview("<!here> &lt;code&gt; &amp;gt; <@U0OTHER|Untrusted>") ==
+                "[@here — notifies everyone present] <code> &gt; @U0OTHER")
+        #expect(slackPlainPreview("<!channel|@channel> and <!everyone> or <!subteam^S0OPS|@ops>") ==
+                "[@channel — notifies everyone in the channel] and [@everyone — notifies everyone in the workspace] or [@S0OPS — notifies a user group]")
+        #expect(slackHasSpecialMention("hi <!here>") && !slackHasSpecialMention(SlackHarness.draft))
         #expect(visibleText(slackPlainPreview("name\u{202E}choice")) == "name⟨U+202E⟩choice")
         #expect(try await h.fixture.posts().isEmpty)
         #expect(desk.approve(frozen.token))
@@ -94,7 +98,10 @@ struct SlackTests {
         #expect(body["channel"] == "C0GENERAL" && body["thread_ts"] == .string(SlackHarness.root))
         #expect(body["text"]?.stringValue?.utf8.elementsEqual(SlackHarness.draft.utf8) == true)
         #expect(body["mrkdwn"] == .bool(true) && body["unfurl_links"] == .bool(false) && body["unfurl_media"] == .bool(false))
-        #expect(body["metadata"] == nil)
+        // The operation id goes both ways: as message metadata and as client_msg_id.
+        let marker = try #require(h.journal.slackMarker(id))
+        #expect(body["metadata"] == .object(["event_type": "beacon_post", "event_payload": .object(["op": .string(marker)])]))
+        #expect(body["client_msg_id"] == .string(marker))
 
         let records = try deliverAll(h.journal)
         #expect(records.map { $0["type"] } == ["app.action.proposed", "app.action.approved", "app.action.started", "app.action.executed"])
@@ -213,8 +220,12 @@ struct SlackTests {
     @Test func knownSlackRefusalsAreDefiniteAndNotRetried() async throws {
         let h = try SlackHarness()
         try await h.register()
-        for (provider, error) in [("is_archived", "channel_archived"), ("not_in_channel", "not_in_channel"),
-                                  ("missing_scope", "missing_scope"), ("restricted_action", "slack_refused")] {
+        let refusals = [("is_archived", "channel_archived"), ("not_in_channel", "not_in_channel"),
+                        ("missing_scope", "missing_scope"), ("restricted_action", "slack_refused"),
+                        ("msg_too_long", "message_too_long"), ("message_limit_exceeded", "slack_refused"),
+                        ("invalid_blocks", "slack_refused"), ("too_many_attachments", "slack_refused"),
+                        ("metadata_must_be_sent_from_app", "metadata_refused")]
+        for (provider, error) in refusals {
             let proposal = try await h.propose()
             try await h.approve(proposal)
             try await h.fixture.configure(["post_mode": .string("refuse:" + provider)])
@@ -223,10 +234,28 @@ struct SlackTests {
             await #expect(throws: JournalError.transition) { try await h.handler.execute(proposal.id) }
         }
         let calls = try await h.fixture.calls()
-        #expect(calls.filter { $0["method"] == "POST" }.count == 4)
+        #expect(calls.filter { $0["method"] == "POST" }.count == refusals.count)
         #expect(!calls.contains { $0["query"]?["oldest"] != nil })
         #expect(h.handler.unknown().isEmpty)
-        #expect(try deliverAll(h.journal).filter { $0["type"] == "app.action.failed" }.count == 4)
+        #expect(try deliverAll(h.journal).filter { $0["type"] == "app.action.failed" }.count == refusals.count)
+        // Errors that can follow a write stay ambiguous.
+        for error in ["internal_error", "fatal_error", "request_timeout", "something_new"] {
+            #expect(SlackAPI.refusal(error) == nil)
+        }
+    }
+
+    /// A token that may not post metadata is refused before the write: one POST, a definite failure, no read-back.
+    @Test func refusedMetadataIsADefiniteFailure() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        let proposal = try await h.propose()
+        try await h.approve(proposal)
+        try await h.fixture.configure(["metadata": "refuse"])
+        #expect(try await h.handler.execute(proposal.id) == .failed(error: "metadata_refused", confirmedBy: "reply"))
+        #expect(h.journal.outcome(proposal.id)?["result"] ==
+                "Slack refused the operation id Beacon attaches as message metadata. Nothing was posted.")
+        let calls = try await h.fixture.calls()
+        #expect(calls.filter { $0["method"] == "POST" }.count == 1 && !calls.contains { $0["query"]?["oldest"] != nil })
     }
 
     @Test func retryAfterBlocksNewWritesButNeverRetriesTheOldOne() async throws {
@@ -256,15 +285,115 @@ struct SlackTests {
     @Test func preflightReadsAreMeteredAndSlackRedirectsAreNotFollowed() async throws {
         let h = try SlackHarness(budget: ReadBudget(perHour: 4))
         try await h.register()
-        let proposal = try await h.propose() // Two reads.
+        let proposal = try await h.propose() // Two intake reads, from the intake budget.
+        #expect(try await h.handler.resolve(proposal, model: nil).origin == "https://slack.com") // Three reads.
         await #expect(throws: SlackRefusal.busy) { try await h.handler.resolve(proposal, model: nil) }
-        #expect(try await h.fixture.calls().count == 5) // Initial setup and the four metered reads; no root lookup.
-        await #expect(throws: SlackRefusal.busy) { try await h.propose() }
+        #expect(try await h.fixture.calls().count == 7) // Setup, intake two, three, then the fourth metered read only.
         h.clock.advance(3_601)
         try await h.fixture.configure(["redirect": "auth.test"])
-        await #expect(throws: SlackRefusal.unavailable) { try await h.propose() }
+        await #expect(throws: SlackRefusal.unavailable) { try await h.propose() } // The cached auth.test has expired.
         #expect(try await h.fixture.calls().last?["path"] == "/api/auth.test")
-        #expect(try await h.fixture.calls().count == 6)
+        #expect(try await h.fixture.calls().count == 8)
+    }
+
+    /// A proposer cannot spend the window's reads: intake has its own budget per client identity, and reuses a
+    /// verified auth.test for ten minutes.
+    @Test func intakeHasItsOwnBudgetPerClient() async throws {
+        let h = try SlackHarness(budget: ReadBudget(perHour: 3), intakePerHour: 4)
+        try await h.register()
+        let first = try await h.propose() // auth.test and conversations.info.
+        _ = try await h.propose() // conversations.info only.
+        _ = try await h.propose()
+        await #expect(throws: SlackRefusal.busy) { try await h.propose() }
+        let intake = try await h.fixture.calls().dropFirst()
+        #expect(intake.map { $0["path"] } == ["/api/auth.test", "/api/conversations.info", "/api/conversations.info", "/api/conversations.info"])
+        // Another admitted client has its own budget.
+        _ = try await h.propose(client: "other-client")
+        // The window's Read again still has all of its reads.
+        #expect(try await h.handler.resolve(first, model: nil).facts["Visibility"] == "Public channel")
+        h.clock.advance(601)
+        _ = try await h.propose(client: "other-client")
+        #expect(try await h.fixture.calls().suffix(2).map { $0["path"] } == ["/api/auth.test", "/api/conversations.info"])
+    }
+
+    /// Intake keeps its short deadline; the window, the write and read-back have their own client and a long one.
+    @Test func onlyIntakeUsesTheShortDeadline() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        h.fixture.timeouts.withLock { $0 = [] }
+        let proposal = try await h.propose()
+        #expect(h.fixture.timeouts.withLock { $0 } == [SlackAPI.intakeTimeout])
+        try await h.approve(proposal)
+        try await h.fixture.configure(["post_mode": "unclear"])
+        #expect(try await h.handler.execute(proposal.id) == .executed(confirmedBy: "read_back"))
+        #expect(h.fixture.timeouts.withLock { $0 } == [4, 25, 25, 25])
+    }
+
+    /// Either operation id confirms a lost reply: Slack may keep the metadata, client_msg_id, or both.
+    @Test func readBackMatchesEitherOperationID() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        for settings: [String: JSON] in [["metadata": "", "drop_client_id": .bool(true)], ["metadata": "drop", "drop_client_id": .bool(false)]] {
+            try await h.fixture.configure(settings.merging(["post_mode": "lost"], uniquingKeysWith: { $1 }))
+            let proposal = try await h.propose()
+            try await h.approve(proposal)
+            #expect(try await h.handler.execute(proposal.id) == .executed(confirmedBy: "read_back"))
+            let lookup = try #require(try await h.fixture.calls().last { $0["query"]?["oldest"] != nil })
+            #expect(lookup["query"]?["include_all_metadata"] == .array(["true"]))
+        }
+        #expect(try await h.fixture.posts().count == 2)
+    }
+
+    /// Automatic read-back backs off and stops after the search window; a relaunch reads once more, and the
+    /// person's Read again always reads. A read-back 429 does not stop a new thread reply's preflight.
+    @Test func readBackBacksOffStopsAndKeepsItsOwnRateLimits() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        let proposal = try await h.propose()
+        try await h.approve(proposal)
+        try await h.fixture.configure(["post_mode": "unclear", "hide_posts": .bool(true)])
+        #expect(try await h.handler.execute(proposal.id) == .unknown)
+        #expect(h.handler.readBackDue().isEmpty) // Just read.
+        h.clock.advance(15)
+        #expect(h.handler.readBackDue() == [proposal.id])
+        await h.handler.automaticReadBack()
+        h.clock.advance(15)
+        #expect(h.handler.readBackDue().isEmpty) // Now 30 seconds apart.
+        h.clock.advance(15)
+        #expect(h.handler.readBackDue() == [proposal.id])
+
+        // Slack rate limits read-back: that deadline is read-back's alone.
+        try await h.fixture.configure(["rate_method": "conversations.replies", "retry_after": .int(600)])
+        #expect(try await h.handler.reconcile(proposal.id) == .unknown)
+        try await h.fixture.configure(["rate_method": ""])
+        let before = try await h.fixture.calls().count
+        #expect(try await h.handler.reconcile(proposal.id) == .unknown)
+        #expect(try await h.fixture.calls().dropFirst(before).allSatisfy { $0["path"] != "/api/conversations.replies" })
+        let reply = try await h.propose()
+        #expect(try await h.handler.resolve(reply, model: nil).facts["Thread"] != nil)
+
+        h.clock.advance(PostHandler.automaticReadBackEnd)
+        #expect(h.handler.readBackDue().isEmpty) // The search window has closed.
+        let (_, resumed) = try h.restart()
+        #expect(resumed.readBackDue() == [proposal.id]) // Once after a relaunch.
+        await resumed.automaticReadBack()
+        h.clock.advance(3_600)
+        #expect(resumed.readBackDue().isEmpty)
+        try await h.fixture.configure(["hide_posts": .bool(false)])
+        #expect(try await resumed.reconcile(proposal.id) == .executed(confirmedBy: "read_back")) // Read again.
+        #expect(try await h.fixture.posts().count == 1)
+    }
+
+    @Test func readBackIsMetered() async throws {
+        let h = try SlackHarness(readBackBudget: ReadBudget(perHour: 2, concurrent: 1))
+        try await h.register()
+        let proposal = try await h.propose()
+        try await h.approve(proposal)
+        try await h.fixture.configure(["post_mode": "unclear"])
+        let before = try await h.fixture.calls().count
+        #expect(try await h.handler.execute(proposal.id) == .unknown)
+        // Final reads (3) and the write, then read-back stops after its two reads.
+        #expect(try await h.fixture.calls().count == before + 3 + 1 + 2)
     }
 
     @Test func lostReplyIsReadBackWithOneWirePost() async throws {
@@ -283,7 +412,7 @@ struct SlackTests {
         #expect(posts.count == 1)
         #expect(post["body"]?["client_msg_id"] == .string(marker))
         let lookups = calls.filter { $0["query"]?["oldest"] != nil }
-        #expect(lookups.count == 2)
+        #expect(lookups.count == 2 && lookups.allSatisfy { $0["query"]?["include_all_metadata"] == .array(["true"]) })
         #expect(lookups.allSatisfy { $0["path"] == "/api/conversations.replies" && $0["query"]?["ts"] == .array([.string(SlackHarness.root)]) })
         #expect(lookups.last?["query"]?["cursor"] == .array(["fake-page=="]))
         let records = try deliverAll(h.journal)
@@ -303,8 +432,12 @@ struct SlackTests {
         #expect(h.handler.unknown() == [proposal.id])
         let marker = try #require(h.journal.slackMarker(proposal.id))
         try await h.fixture.configure(["hide_posts": .bool(false)])
+        let otherOp = JSON.object(["event_type": "beacon_post", "event_payload": .object(["op": .string(UUID().uuidString)])])
         let wrongEvidence: [[String: JSON]] = [
-            ["client_msg_id": .null], // Matching text alone is never enough.
+            ["client_msg_id": .null, "metadata": .null], // Matching text alone is never enough.
+            ["client_msg_id": .null, "metadata": otherOp], // Another Beacon operation.
+            ["metadata": otherOp], // Contradictory ids.
+            ["client_msg_id": .null, "metadata": .object(["event_type": "other_app", "event_payload": .object(["op": .string(marker)])])],
             ["text": .string(SlackHarness.draft.precomposedStringWithCanonicalMapping)], // Equal as Swift strings, not bytes.
             ["user": "U0OTHER"], ["channel": "C0OTHER"], ["thread_ts": .string(SlackHarness.root)],
             ["ts": "1800001000.000200"],
@@ -342,8 +475,8 @@ struct SlackTests {
         let approval = try h.journal.start(proposal.id, at: h.clock.now)
         let marker = try #require(h.journal.slackMarker(proposal.id))
         let clock = h.clock
-        let api = SlackAPI(client: try h.fixture.connect(h.vault.credential(for: settings.binding)), workspace: settings.workspace,
-                           rates: SlackRateLimits(), now: { clock.now })
+        let api = SlackAPI(client: try h.fixture.connect(h.vault.credential(for: settings.binding), SlackAPI.actionTimeout),
+                           workspace: settings.workspace, rates: SlackRateLimits(), now: { clock.now })
         // Simulate process death just after the service took the write, without appending a result or unknown.
         _ = try await api.post(SlackDraft(approval.params), marker: marker, user: settings.userID)
         let (journal, resumed) = try h.restart()

@@ -44,7 +44,8 @@ public enum ServerError: Error, Equatable {
 /// `propose`, `get`, `wait` and `withdraw`; there is no approve, list or history operation. Each connection is
 /// admitted by the kernel's audit token for its peer before a byte is read.
 public final class ProposalServer: @unchecked Sendable {
-    public typealias SlackLookup = @Sendable (ProposalRequest) async throws -> SlackPlacement
+    /// The Slack intake lookup, with the admitted client's name: each client has its own intake budget.
+    public typealias SlackLookup = @Sendable (ProposalRequest, String) async throws -> SlackPlacement
     public let path: String
     private let clients: [AdmittedClient]
     private let book: ProposalBook
@@ -296,11 +297,11 @@ public final class ProposalServer: @unchecked Sendable {
     }
 
     private func lookupSlack(_ parsed: ProposalRequest, on connection: Connection, using lookup: @escaping SlackLookup) {
-        let slot = ObjectIdentifier(connection), token = UUID()
+        let slot = ObjectIdentifier(connection), token = UUID(), client = connection.client.name
         connection.pause()
         let task = Task { [weak self] in
             let result: Result<SlackPlacement, SlackRefusal>
-            do { result = .success(try await lookup(parsed)) }
+            do { result = .success(try await lookup(parsed, client)) }
             catch { result = .failure(error as? SlackRefusal ?? .unavailable) }
             self?.queue.async { [weak self] in self?.finishIntake(parsed, slot: slot, token: token, result: result) }
         }
