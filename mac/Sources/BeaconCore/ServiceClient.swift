@@ -50,9 +50,10 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
 
     deinit { session.invalidateAndCancel() }
 
-    /// Sends one request. `path` is already percent-encoded and starts with `/`.
-    public func send(_ method: String, _ path: String, query: [URLQueryItem] = [], json body: Any? = nil) async throws
-        -> (status: Int, body: Data, response: HTTPURLResponse)
+    /// Sends one request. `path` is already percent-encoded and starts with `/`. `json` is serialised; `raw` is
+    /// sent as these exact bytes, as JSON.
+    public func send(_ method: String, _ path: String, query: [URLQueryItem] = [], json body: Any? = nil,
+                     raw: Data? = nil) async throws -> (status: Int, body: Data, response: HTTPURLResponse)
     {
         guard path.hasPrefix("/"), var components = URLComponents(url: origin, resolvingAgainstBaseURL: false) else {
             throw ServiceError.foreignURL
@@ -65,6 +66,9 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         if let body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        } else if let raw {
+            request.httpBody = raw
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let data: Data

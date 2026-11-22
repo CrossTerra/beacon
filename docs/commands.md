@@ -204,7 +204,8 @@ Signal accepted, is not sent again.
 
 Prints every host Beacon may contact under the current config, as `host:port` and why: the Signal host, and each
 enabled source's hosts. It also lists the hosts Beacon.app contacts under its settings
-(`~/Library/Application Support/beacon/app/settings.json`): the GitHub API origin it merges through. A hosted
+(`~/Library/Application Support/beacon/app/settings.json`): the GitHub API origin it merges through, and the Signal
+origin it sends approval records to. A hosted
 classifier would be listed here (DEC-7); Phase 1 has none. Beacon's transport refuses every other host.
 
 ## `beacon rules check`

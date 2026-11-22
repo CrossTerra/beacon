@@ -6,8 +6,8 @@ window, and Beacon carries it out with its own credentials. This page describes 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
 ad-hoc build opens none of them. `github.merge` is enabled once a GitHub account is added in Settings
-([merges](#merges)). `slack.post` and `agent.run` have no handler yet. The outbox is built and tested against a
-fake Signal, but the app does not send it yet: it has no Signal key or person id until the app actor is set up.
+([merges](#merges)). `slack.post` and `agent.run` have no handler yet. Once Signal is added in Settings, the
+outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
 ## The contract with Signal
 
@@ -127,6 +127,29 @@ on first delivery with the person's `act_…` id, and kept. A merge is about its
 its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
+
+## Delivery to Signal
+
+**Settings.** The person enters the Signal origin (`https://host[:port]`), their own `act_…` id (every record's
+`metadata.person`), and the key of their app actor (13.00-D25: an integration actor marked `approval_app` that
+works for them, with a key of exactly `read` and `write`). Beacon calls `GET /api/me` with the key. It accepts only
+an integration actor's key whose scopes are exactly `read` and `write`. `/api/me` does not say whom the actor
+works for; Signal refuses any record whose person the actor does not work for. The key goes to the vault, bound to
+the origin and `signal:actor:{act_…}`. `settings.json` keeps the origin, the person, the actor and its handle.
+
+**Sending.** After every journal entry, and every 30 seconds, the app drains the outbox in journal order with
+`POST /api/app-records`. Each request carries the record's exact stored bytes and the app actor's key, sent only
+to that origin, with no redirects, proxies or retries.
+
+| Signal answers | Beacon |
+| --- | --- |
+| `201`, or `200` with `replayed: true` | marks the record delivered and sends the next |
+| `409` (`idempotency_conflict`, `journal_order`, `transition`, …) or any other `4xx` | stops delivery at that record; nothing after it is sent until someone looks |
+| no answer, `5xx` (sealing unavailable included) | sends the same bytes again later |
+
+The menu and Settings show the result: delivered, waiting while Signal cannot be reached, or stopped at a record
+and why. Sending a record never executes an action. `beacon egress` lists the Signal origin from the app's
+settings.
 
 ## Merges
 

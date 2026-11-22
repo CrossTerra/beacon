@@ -17,6 +17,9 @@ type appSettings struct {
 	GitHub *struct {
 		Origin string `json:"origin"`
 	} `json:"github"`
+	Signal *struct {
+		Origin string `json:"origin"`
+	} `json:"signal"`
 }
 
 // appEgress lists the hosts Beacon.app contacts under its settings, so `beacon egress` shows every host either
@@ -42,13 +45,24 @@ func (a *app) appEgress() ([]egress.Host, error) {
 		return nil, fmt.Errorf("%s is not Beacon.app's settings", path)
 	}
 	var hosts []egress.Host
-	if s.GitHub != nil {
-		u, err := url.Parse(s.GitHub.Origin)
+	add := func(name, origin, purpose string) error {
+		u, err := url.Parse(origin)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" {
-			return nil, fmt.Errorf("%s: the GitHub origin is not https://host", path)
+			return fmt.Errorf("%s: the %s origin is not https://host", path, name)
 		}
-		hosts = append(hosts, egress.Host{Address: egress.Address(u),
-			Purpose: "Beacon.app: github.merge (reads before approval and before the merge, one merge per approval, read-back)"})
+		hosts = append(hosts, egress.Host{Address: egress.Address(u), Purpose: purpose})
+		return nil
+	}
+	if s.GitHub != nil {
+		if err := add("GitHub", s.GitHub.Origin,
+			"Beacon.app: github.merge (reads before approval and before the merge, one merge per approval, read-back)"); err != nil {
+			return nil, err
+		}
+	}
+	if s.Signal != nil {
+		if err := add("Signal", s.Signal.Origin, "Beacon.app: approval records, in journal order (POST /api/app-records)"); err != nil {
+			return nil, err
+		}
 	}
 	return hosts, nil
 }

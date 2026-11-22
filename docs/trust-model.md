@@ -6,8 +6,9 @@ same pull request.
 
 `Beacon.app`'s menu and shortcut open the approval window. When signed as `dev.beacon.app` with a certificate, it
 opens its vault key, its journal and the proposal socket ([approvals](approvals.md)). With a GitHub account added
-in Settings, it merges approved pull requests through that account's API origin. That is its only network
-connection so far, and `beacon egress` lists it. It starts [tether](tether.md), a helper in its bundle that runs the bundled
+in Settings, it merges approved pull requests through that account's API origin. With Signal added, it sends its
+journal's records to Signal's record API with its app actor's key. Those are its only network connections, and
+`beacon egress` lists both. It starts [tether](tether.md), a helper in its bundle that runs the bundled
 collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
 commands, paths, secrets or item content.
 
@@ -169,7 +170,7 @@ commands, paths, secrets or item content.
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
     that binding. Nothing lists or prints a secret or passes one to a child process. The GitHub token is read only
-    by the merge handler's client for its own origin. That client builds paths from validated ids, refuses
+    by the merge handler's client for its own origin, and the Signal app key only by the record sender's. That client builds paths from validated ids, refuses
     redirects, ignores proxies and never retries. The tests use only fixture keys and fixture secrets.
 
 ## Known limits

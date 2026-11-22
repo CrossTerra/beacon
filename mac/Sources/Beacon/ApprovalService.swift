@@ -7,6 +7,12 @@ import Foundation
 final class ApprovalService: ObservableObject {
     @Published private(set) var status = "Approvals are not available"
     @Published private(set) var github: GitHubSettings?
+    @Published private(set) var signal: SignalSettings?
+    @Published private(set) var delivery = "Records are not sent: add Signal in Settings"
+    private var journal: Journal?
+    private var deliverer: Timer?
+    private var delivering = false
+    private var deliverAgain = false
     private(set) var desk: ApprovalDesk?
     private var server: ProposalServer?
     private var vault: Vault?
@@ -27,8 +33,18 @@ final class ApprovalService: ObservableObject {
             let vault = Vault(url: paths.vault, key: KeychainVaultKey())
             try vault.unlock()
             self.vault = vault
-            github = try AppSettings.load(paths.settings).github
+            let settings = try AppSettings.load(paths.settings)
+            github = settings.github
+            signal = settings.signal
             let journal = try Journal(path: paths.journal.path, at: Date())
+            self.journal = journal
+            // Every new entry is sent in journal order; a timer resends after an outage.
+            journal.observe { [weak self] _ in
+                Task { @MainActor in self?.deliver() }
+            }
+            deliverer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.deliver() }
+            }
             let settingsURL = paths.settings
             let merges = MergeHandler(journal: journal, settings: { (try? AppSettings.load(settingsURL))?.github },
                                       connect: MergeHandler.connect(vault: vault))
@@ -57,6 +73,7 @@ final class ApprovalService: ObservableObject {
             try server.start()
             self.server = server
             updateEnabled()
+            deliver()
         } catch VaultError.existingKey {
             status = "Not opening the vault: a Keychain vault key from before the vault could not be removed (see docs/approvals.md)"
         } catch VaultError.keychain(let code) {
@@ -81,6 +98,65 @@ final class ApprovalService: ObservableObject {
             return "Not saved: GitHub refused the token."
         } catch {
             return "Not saved: GitHub could not be reached, or the origin is not https://host."
+        }
+    }
+
+    /// Registers the app actor's key. It goes to the vault; this never shows or keeps it.
+    func registerSignal(key: String, origin: String, person: String) async -> String {
+        guard let vault else { return status }
+        do {
+            signal = try await SignalSetup.register(key: Secret(key), origin: origin, person: person, vault: vault,
+                                                    settings: paths.settings)
+            deliver()
+            return "Records go to \(signal!.origin) as \(signal!.handle)"
+        } catch SignalSetup.Refusal.person {
+            return "Not saved: the person is an act_… id."
+        } catch SignalSetup.Refusal.notAnApp {
+            return "Not saved: that key is not an integration actor's."
+        } catch SignalSetup.Refusal.scopes {
+            return "Not saved: the app's key must have exactly read and write."
+        } catch SignalSetup.Refusal.rejected {
+            return "Not saved: Signal refused the key."
+        } catch {
+            return "Not saved: Signal could not be reached, or the origin is not https://host."
+        }
+    }
+
+    func removeSignal() {
+        guard let vault else { return }
+        try? SignalSetup.remove(vault: vault, settings: paths.settings)
+        signal = nil
+        delivery = "Records are not sent: add Signal in Settings"
+    }
+
+    /// Sends the outbox in journal order, one drain at a time. A drain asked for while one runs runs again after.
+    func deliver() {
+        guard let journal, let vault, let signal else { return }
+        if delivering {
+            deliverAgain = true
+            return
+        }
+        delivering = true
+        Task {
+            var message: String
+            do {
+                let transport = try SignalRecords.connect(signal, vault: vault)
+                let outcome = try await OutboxSender(journal: journal, transport: transport, person: signal.person).drain()
+                let status = try journal.deliveryStatus()
+                switch outcome {
+                case .done: message = "Records delivered (\(status.delivered))"
+                case .retry: message = "Signal not reachable; \(status.waiting) records waiting"
+                case .stopped(_, let reason): message = "Delivery stopped at a record (\(reason)); \(status.waiting) waiting"
+                }
+            } catch {
+                message = "Records are not sent: the Signal key is not available"
+            }
+            delivery = message
+            delivering = false
+            if deliverAgain {
+                deliverAgain = false
+                deliver()
+            }
         }
     }
 
@@ -111,6 +187,7 @@ final class ApprovalService: ObservableObject {
     /// started settles from its reply, or by read-back after the next launch.
     func stop() {
         reconciler?.invalidate()
+        deliverer?.invalidate()
         desk?.beginShutdown()
         server?.stop()
         server = nil
