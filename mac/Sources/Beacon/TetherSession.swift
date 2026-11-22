@@ -42,7 +42,11 @@ final class TetherSession: RunLauncher {
         return TetherSession(fd: fd, event: event)
     }
 
-    private init(fd: Int32, event: @escaping (Event) -> Void) {
+    /// Takes ownership of the app's end of the lease. Writing to it never raises SIGPIPE: if tether has closed its
+    /// end, a command fails with EPIPE instead of killing Beacon.
+    init(fd: Int32, event: @escaping (Event) -> Void) {
+        var one: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         self.fd = fd
         self.event = event
         source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
@@ -69,14 +73,23 @@ final class TetherSession: RunLauncher {
     @discardableResult
     func stopRun(_ id: String) -> Bool { command("K", id) }
 
-    func stop(_ runnerID: String) { stopRun(runnerID) }
+    @discardableResult
+    func stop(_ runnerID: String) -> Bool { stopRun(runnerID) }
 
+    /// One whole command line, or false: an invalid id, Quit begun, or a lease tether has closed (EPIPE).
     private func command(_ verb: String, _ id: String) -> Bool {
         guard !stopping, (1...40).contains(id.utf8.count),
               id.utf8.allSatisfy({ (0x61...0x7a).contains($0) || (0x30...0x39).contains($0) || $0 == 0x5f })
         else { return false }
         let bytes = Array("\(verb) \(id)\n".utf8)
-        return bytes.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) } == bytes.count
+        var sent = 0
+        while sent < bytes.count {
+            let n = bytes.withUnsafeBytes { send(fd, $0.baseAddress! + sent, $0.count - sent, 0) }
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { return false }
+            sent += n
+        }
+        return true
     }
 
     private func receive() {

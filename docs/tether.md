@@ -45,7 +45,8 @@ for example on a refused key; `beacon status` shows the last pass and its reason
 
 If `~/Library/LaunchAgents/dev.beacon.agent.plist` exists, `tether` does not start the collector, because two
 collectors would contend for one outbox. The menu says **Collector not started: run beacon service uninstall,
-then reopen Beacon**. Before you do, check two things the old job may have relied on.
+then reopen Beacon**, and keeps saying it while runs start and end in that session: `tether` reports the collector's
+state only for the collector job, never for a run, which reports through its own lines. Before you do, check two things the old job may have relied on.
 
 **A config at another path.** `tether` runs the collector with the default config,
 `~/Library/Application Support/beacon/config.yaml`, and does not pass `BEACON_CONFIG`. See which config the old

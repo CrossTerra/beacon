@@ -402,6 +402,33 @@ def many_runs_in_one_session(fixture, state):
     assert_clean(state, port)
 
 
+def runs_without_a_collector(fixture, state):
+    """With the retired LaunchAgent installed there is no collector job; the first run is job 0. Its start, exit
+    and end come only as its own lines, never as the collector's state bytes."""
+    (state / "pids").mkdir(exist_ok=True)
+    session = Session(fixture, state, "legacy")
+    assert session.receive() == b"L"
+    for run in ("run_l1", "run_l2"):
+        session.launch(state, run, "exit 1", state)
+        assert session.until("#started")[1] == run
+        assert session.until("#exited") == ["#exited", run, "1"]
+        assert session.until("#gone") == ["#gone", run]
+    session.holder.shutdown(socket.SHUT_WR)
+    assert session.until_closed() == b"S"
+    assert session.helper.wait(timeout=10) == 0
+    session.close()
+    # Every byte outside a "#…\n" line: only the ready byte and the confirmation, no R, W or X.
+    bare, inside = b"", False
+    for byte in session.seen:
+        if inside:
+            inside = byte != ord("\n")
+        elif byte == ord("#"):
+            inside = True
+        else:
+            bare += bytes([byte])
+    assert bare == b"LS", session.seen
+
+
 def collector_lifetime(collector, scratch):
     """The real Go collector: SIGTERM is a clean stop, and EOF on its lifetime pipe ends it."""
     config = scratch / "config.yaml"
@@ -437,7 +464,8 @@ if __name__ == "__main__":
                  leaked_grandchild_stopped_before_restart, app_crash, helper_crash_then_recovery,
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
                  stubborn_sweep_gives_up, runner_runs_and_reports, runner_stopped, runners_stop_at_quit,
-                 runner_bad_launches, runner_checkout_swapped, run_left_by_a_killed_tether, many_runs_in_one_session):
+                 runner_bad_launches, runner_checkout_swapped, run_left_by_a_killed_tether, many_runs_in_one_session,
+                 runs_without_a_collector):
         state = Path(tempfile.mkdtemp(prefix="tether-"))
         try:
             case(fixture, state)

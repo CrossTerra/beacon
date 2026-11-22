@@ -43,6 +43,7 @@ struct runner {
 struct job {
     const struct tether_spec *spec;
     struct runner *runner; // NULL for a fixed service.
+    bool collector;        // The first fixed service: the only job whose state is sent as a bare byte.
     char entry[ENTRY_SIZE]; // TETHER_MARKER "<session>:<job>"
     // The group leader. It is reaped only after its whole tree is gone, so while pid > 0
     // the kernel cannot reuse pid as another group's id.
@@ -185,8 +186,10 @@ static size_t members(struct session *s, size_t j, int sig) {
     return count;
 }
 
+// The collector's state, by kind and not by index: with the retired LaunchAgent installed there is no fixed
+// service, and the first run takes job 0. A run reports only through its "#… <id>" lines.
 static void report(struct session *s, size_t j, char state) {
-    if (j == 0 && live(s)) send_byte(s->lease, state);
+    if (s->jobs[j].collector && !s->jobs[j].runner && live(s)) send_byte(s->lease, state);
 }
 
 // A run's exit: its code, or 128 plus the signal that ended it. Sent once.
@@ -642,7 +645,7 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
     struct job *jobs = calloc(count ? count : 1, sizeof(*jobs));
     if (!jobs) return 1;
     for (size_t j = 0; j < count; j++) {
-        jobs[j] = (struct job){.spec = &specs[j], .lifetime = -1};
+        jobs[j] = (struct job){.spec = &specs[j], .lifetime = -1, .collector = j == 0};
         snprintf(jobs[j].entry, sizeof(jobs[j].entry), TETHER_MARKER "%s:%zu", token, j);
     }
     struct session s = {.lease = lease, .dir = dir, .token = token, .jobs = jobs, .count = count, .env = env,

@@ -359,7 +359,10 @@ characters by keeping the end with a note of the full length. Exit 0 is `app.run
 `failed`, `stopped`. A run whose output and errors together pass 64 MiB is stopped as `output_too_large`. The report
 is read off the main thread, and a run's records keep their order: its report or failure always comes before
 `closed`. Quit records each run still working as `failed`, `stopped_at_quit`; tether stops them with everything else,
-and they are closed once it confirms. If tether ends on its own while the app runs, each run still working is
+and they are closed once it confirms. A launch tether answers `started` after Quit began is recorded `executed`, then
+`failed`, `stopped_at_quit`, never `working`; no run is closed without an outcome first. A Stop that cannot reach
+tether (its end of the lease is closed: the write fails with `EPIPE`, which never raises SIGPIPE in the app) leaves
+the run unmarked, and tether's end settles it. If tether ends on its own while the app runs, each run still working is
 `failed`, `supervisor_ended`, and closed if tether confirmed its processes gone; a launch still waiting for its answer
 is `outcome_unknown` (`supervisor_ended`), read back later. Either way the session's claims end with it. A launched
 run cannot become unknown (the contract allows only runner events after `executed`), so an unconfirmed one stays

@@ -77,6 +77,8 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     let approvals = ApprovalService()
     private var stopping = false
     private var awaitingQuit = false
+    /// The session started without the collector: the retired LaunchAgent is installed.
+    private var collectorHeldBack = false
     private var countTimer: Timer?
     private var terminate: (any DispatchSourceSignal)?
 
@@ -136,8 +138,13 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         case .active, .legacyCollectorInstalled:
             // Both indicate the startup sweep completed. Only the collector is held back by the old LaunchAgent.
             if let services { runs?.servicesReady(services) }
+            collectorHeldBack = event == .legacyCollectorInstalled
             running = event == .active ? "Starting collector…"
                 : "Collector not started: run beacon service uninstall, then reopen Beacon"
+        case .collectorRunning where collectorHeldBack, .collectorRestarting where collectorHeldBack,
+             .collectorExited where collectorHeldBack:
+            // No collector runs in this session; keep saying why.
+            return
         case .collectorRunning: running = "Collector running"
         case .collectorRestarting: running = "Collector stopped with an error; restarting soon"
         case .collectorExited: running = "Collector stopped"

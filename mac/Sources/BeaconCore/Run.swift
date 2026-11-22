@@ -31,7 +31,9 @@ public enum RunRefusal: String, Error, Sendable {
 public protocol RunLauncher: AnyObject {
     /// False if the request could not be made: nothing was started.
     func launch(_ runnerID: String) -> Bool
-    func stop(_ runnerID: String)
+    /// False if the request could not be made (the supervisor is gone): nothing was asked to stop.
+    @discardableResult
+    func stop(_ runnerID: String) -> Bool
 }
 
 /// The `agent.run` handler (plan 13.00, _Agent runs_). Before approval it pins the named checkout (its directory's
@@ -250,6 +252,11 @@ public final class RunHandler: ObservableObject, ActionResolver {
         forgetLaunch(runner)
         attribution.add(leader: pid, runner: runner)
         record { try journal.result(id, executed: true, confirmedBy: "reply", fields: launched(id), at: now()) }
+        guard !quitting else {
+            // The launch was answered after Quit began: it started, and tether is stopping it with everything else.
+            stoppedAtQuit(id)
+            return
+        }
         record { try journal.runner(id, .working, at: now()) }
         running.insert(id)
         startWatching()
@@ -306,17 +313,24 @@ public final class RunHandler: ObservableObject, ActionResolver {
             if !run.exited, !quitting {
                 self.record { try self.journal.runner(run.proposal, .failed(error: "ended", detail: nil), at: self.now()) }
             }
-            self.record { try self.journal.runner(run.proposal, .closed, at: self.now()) }
+            self.close(run.proposal)
             self.running.remove(run.proposal)
             self.release(run.proposal)
         }
     }
 
-    /// The person's Stop: the run's whole process group is stopped; it is recorded as failed, `stopped`.
-    public func stop(_ proposal: String) {
-        guard let entry = runs.first(where: { $0.value.proposal == proposal }), !entry.value.exited else { return }
-        runs[entry.key]?.stopReason = entry.value.stopReason ?? "stopped"
-        launcher?.stop(entry.key)
+    /// The person's Stop: the run's whole process group is stopped; it is recorded as failed, `stopped`. False when
+    /// the request could not reach tether: the run is not marked as stopped, and tether's end settles it.
+    @discardableResult
+    public func stop(_ proposal: String) -> Bool {
+        guard let entry = runs.first(where: { $0.value.proposal == proposal }), !entry.value.exited else { return false }
+        let previous = entry.value.stopReason
+        runs[entry.key]?.stopReason = previous ?? "stopped"
+        guard launcher?.stop(entry.key) == true else {
+            runs[entry.key]?.stopReason = previous
+            return false
+        }
+        return true
     }
 
     /// Whether a proposal's run is still going.
@@ -325,16 +339,35 @@ public final class RunHandler: ObservableObject, ActionResolver {
     // MARK: Quit and relaunch
 
     /// Quit: every run still working is recorded as stopped at Quit; tether then stops them all. A launch with no
-    /// answer yet is left to the next launch's recovery.
+    /// answer yet is recorded the same way if tether answers `started` before the session ends, and otherwise is
+    /// left to the next launch's recovery.
     public func beginShutdown() {
         quitting = true
         watch?.invalidate()
         for (_, run) in runs where !run.exited && journal.proposal(run.proposal, at: now())?.status == .executed {
-            record {
-                try journal.runner(run.proposal, .failed(error: "stopped_at_quit",
-                                                         detail: "Beacon quit while the run was working."), at: now())
+            stoppedAtQuit(run.proposal)
+        }
+    }
+
+    private func stoppedAtQuit(_ id: String) {
+        record {
+            try journal.runner(id, .failed(error: "stopped_at_quit", detail: "Beacon quit while the run was working."), at: now())
+        }
+    }
+
+    /// `closed` comes only after an outcome: a run with none yet (the Quit races it lost) is recorded as stopped at
+    /// Quit, or as ended, first.
+    private func close(_ id: String) {
+        let state = journal.runnerState(id)
+        guard state != "runner_closed" else { return }
+        if state != "runner_finished" && state != "runner_failed" {
+            if quitting {
+                stoppedAtQuit(id)
+            } else {
+                record { try journal.runner(id, .failed(error: "ended", detail: nil), at: now()) }
             }
         }
+        record { try journal.runner(id, .closed, at: now()) }
     }
 
     /// tether's session ended: at Quit, or because tether itself stopped. A run still working when tether ended on
@@ -361,7 +394,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
                                                 at: self.now())
                     }
                 }
-                if verified { self.record { try self.journal.runner(run.proposal, .closed, at: self.now()) } }
+                if verified { self.close(run.proposal) }
             }
         }
         runs.removeAll()
@@ -520,7 +553,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
             let directory = runsDirectory.appendingPathComponent(runner)
             if size(directory.appendingPathComponent("output")) + size(directory.appendingPathComponent("errors")) > outputLimit {
                 runs[runner]?.stopReason = "output_too_large"
-                launcher?.stop(runner)
+                // Not sent: tether is gone, and its end records the run; the next check tries again if it is not.
+                if launcher?.stop(runner) != true { runs[runner]?.stopReason = nil }
             }
         }
     }

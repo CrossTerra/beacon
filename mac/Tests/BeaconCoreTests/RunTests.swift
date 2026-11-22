@@ -113,10 +113,16 @@ final class FakeLauncher: RunLauncher {
         return true
     }
 
-    func stop(_ runner: String) {
-        guard let pid = pids[runner] else { return }
+    /// False, as a lease tether has closed: nothing is asked to stop.
+    var refuseStop = false
+
+    @discardableResult
+    func stop(_ runner: String) -> Bool {
+        guard !refuseStop else { return false }
+        guard let pid = pids[runner] else { return true }
         killpg(pid, SIGTERM)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { killpg(pid, SIGKILL) }
+        return true
     }
 
     /// Quit: every group is killed, as tether's cleanup does.
@@ -353,6 +359,45 @@ struct RunTests {
         let failed = try q.records(quit).first { $0["type"] == "app.runner.failed" }!
         #expect(failed["metadata"]?["error"] == "stopped_at_quit")
         #expect(try q.records(quit).filter { $0["type"] == "app.runner.failed" }.count == 1)
+    }
+
+    /// Bugbot on #38: a launch whose `started` arrives after Quit began is recorded as stopped at Quit, never as
+    /// working, and is never closed without that outcome, whether its end comes as `gone` or as tether's end.
+    @Test func aStartAnsweredAfterQuitIsStoppedAtQuitBeforeClosed() async throws {
+        for viaGone in [true, false] {
+            let h = try RunHarness()
+            h.launcher.silent = true // tether has not answered yet.
+            let id = try await h.run("hang")
+            #expect(h.journal.proposal(id, at: Date())?.status == .started)
+            let runner = try #require(h.journal.runnerID(id))
+            h.handler.beginShutdown()
+            h.handler.started(runner, pid: 99_999)
+            #expect(h.journal.runnerState(id) == "runner_failed")
+            #expect(!h.handler.isRunning(id))
+            if viaGone {
+                h.handler.gone(runner)
+            } else {
+                h.handler.servicesStopped(verified: true)
+            }
+            try await h.until("the run to close") { h.journal.runnerState(id) == "runner_closed" }
+            let types = try h.records(id).compactMap { $0["type"]?.stringValue }
+            #expect(types.suffix(3) == ["app.action.executed", "app.runner.failed", "app.runner.closed"], "\(types)")
+            #expect(!types.contains("app.runner.working"))
+            #expect(try h.records(id).first { $0["type"] == "app.runner.failed" }?["metadata"]?["error"] == "stopped_at_quit")
+        }
+    }
+
+    /// A Stop that cannot reach tether (its end of the lease is closed) does not mark the run as stopped.
+    @Test func aStopThatCannotBeSentChangesNothing() async throws {
+        let h = try RunHarness()
+        let id = try await h.run("hang")
+        try await h.until("the run to start") { h.handler.isRunning(id) }
+        h.launcher.refuseStop = true
+        #expect(!h.handler.stop(id))
+        h.launcher.refuseStop = false
+        #expect(h.handler.stop(id))
+        try await h.until("the run to stop") { h.journal.runnerState(id) == "runner_closed" }
+        #expect(try h.records(id).first { $0["type"] == "app.runner.failed" }?["metadata"]?["error"] == "stopped")
     }
 
     @Test func aMissingOrReplacedCheckoutIsRefused() async throws {

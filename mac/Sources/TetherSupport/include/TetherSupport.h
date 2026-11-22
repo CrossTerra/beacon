@@ -15,7 +15,7 @@
 #define TETHER_LEGACY 'L'  // the retired collector LaunchAgent is installed; collector not started
 #define TETHER_BUSY 'B'    // another session holds the lock; nothing started
 #define TETHER_STOPPED 'S' // every supervised process is verified gone
-// The first service's state (the collector), after TETHER_ACTIVE.
+// The collector's state, after TETHER_ACTIVE. Never sent for a run, nor at all after TETHER_LEGACY.
 #define TETHER_RUNNING 'R'  // started
 #define TETHER_WAITING 'W'  // exited with a failure; restarting after a backoff
 #define TETHER_EXITED 'X'   // exited and will not be restarted this session
