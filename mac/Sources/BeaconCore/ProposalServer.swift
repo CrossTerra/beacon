@@ -44,6 +44,8 @@ public enum ServerError: Error, Equatable {
 /// `propose`, `get`, `wait` and `withdraw`, and `quit` for the one client the app names; there is no approve, list
 /// or history operation. Each connection is admitted by the kernel's audit token for its peer before a byte is read.
 public final class ProposalServer: @unchecked Sendable {
+    /// The Slack intake lookup, with the admitted client's name: each client has its own intake budget.
+    public typealias SlackLookup = @Sendable (ProposalRequest, String) async throws -> SlackPlacement
     public let path: String
     private let clients: [AdmittedClient]
     private let book: ProposalBook
@@ -63,6 +65,7 @@ public final class ProposalServer: @unchecked Sendable {
         set { enabledLock.withLock { enabledTypes = newValue } }
     }
     private let limits: ServerLimits
+    private let slackLookup: SlackLookup?
     private let now: @Sendable () -> Date
     private let queue: DispatchQueue
     private let uid = getuid()
@@ -76,13 +79,14 @@ public final class ProposalServer: @unchecked Sendable {
     public init(path: String, clients: [AdmittedClient], book: ProposalBook, enabled: [ActionType],
                 attribution: RunAttribution? = nil, limits: ServerLimits = ServerLimits(),
                 now: @escaping @Sendable () -> Date = { Date() },
-                queue: DispatchQueue = DispatchQueue(label: "dev.beacon.proposals")) {
+                queue: DispatchQueue = DispatchQueue(label: "dev.beacon.proposals"), slackLookup: SlackLookup? = nil) {
         self.path = path
         self.clients = clients
         self.book = book
         enabledTypes = enabled
         self.attribution = attribution
         self.limits = limits
+        self.slackLookup = slackLookup
         self.now = now
         self.queue = queue
         // A change can come from the window on another thread; waits are answered on this queue.
@@ -308,19 +312,63 @@ public final class ProposalServer: @unchecked Sendable {
         let client = connection.client.name
         let recent = (proposed[client] ?? []).filter { date.timeIntervalSince($0) < 3600 }
         proposed[client] = recent
+        let lookingUp = connections.values.filter { $0.intake != nil }
         guard recent.count < limits.proposalsPerClientPerHour,
-              book.pendingCount(client: client, at: date) < limits.pendingPerClient,
-              book.pendingCount(client: nil, at: date) < limits.pendingTotal else {
+              book.pendingCount(client: client, at: date) + lookingUp.filter({ $0.client.name == client }).count < limits.pendingPerClient,
+              book.pendingCount(client: nil, at: date) + lookingUp.count < limits.pendingTotal else {
             return connection.reply(ProposalServer.error("busy"))
         }
+        if parsed.type == .slackPost {
+            guard let slackLookup else { return connection.reply(ProposalServer.error("type_disabled")) }
+            guard lookingUp.count < 16 else { return connection.reply(ProposalServer.error("busy")) }
+            // Charge even unsuccessful lookups, and reserve a pending slot while the read is in flight.
+            proposed[client, default: []].append(date)
+            lookupSlack(parsed, on: connection, using: slackLookup)
+        } else if store(parsed, on: connection, at: date) {
+            proposed[client, default: []].append(date)
+        }
+    }
+
+    private func lookupSlack(_ parsed: ProposalRequest, on connection: Connection, using lookup: @escaping SlackLookup) {
+        let slot = ObjectIdentifier(connection), token = UUID(), client = connection.client.name
+        connection.pause()
+        let task = Task { [weak self] in
+            let result: Result<SlackPlacement, SlackRefusal>
+            do { result = .success(try await lookup(parsed, client)) }
+            catch { result = .failure(error as? SlackRefusal ?? .unavailable) }
+            self?.queue.async { [weak self] in self?.finishIntake(parsed, slot: slot, token: token, result: result) }
+        }
+        connection.intake = (token, task)
+    }
+
+    private func finishIntake(_ parsed: ProposalRequest, slot: ObjectIdentifier, token: UUID, result: Result<SlackPlacement, SlackRefusal>) {
+        guard let connection = connections[slot], connection.intake?.token == token else { return }
+        let date = now()
+        connection.intake = nil
+        connection.lastActive = date
+        defer { connection.resume() }
+        guard enabled.contains(.slackPost) else { return connection.reply(ProposalServer.error("type_disabled")) }
+        // Recovery may have begun during the lookup: an unattributed peer cannot store a proposal until it is over.
+        guard canAccessProposals(connection) else { return connection.reply(Self.error("busy")) }
+        switch result {
+        case .success(let placement): _ = store(parsed, on: connection, at: date, slackPlacement: placement)
+        case .failure(.busy), .failure(.rateLimited): connection.reply(ProposalServer.error("busy"))
+        case .failure: connection.reply(ProposalServer.error("unavailable"))
+        }
+    }
+
+    private func store(_ parsed: ProposalRequest, on connection: Connection, at date: Date,
+                       slackPlacement: SlackPlacement? = nil) -> Bool {
+        let client = connection.client.name
         let proposal = Proposal(request: parsed, client: client, at: date, clientPath: connection.executable,
-                                clientRequirement: connection.client.requirement, runner: connection.peer.runner)
+                                clientRequirement: connection.client.requirement, runner: connection.peer.runner,
+                                slackPlacement: slackPlacement)
         do {
             try book.add(proposal)
         } catch {
-            return connection.reply(ProposalServer.error("unavailable"))
+            connection.reply(ProposalServer.error("unavailable"))
+            return false
         }
-        proposed[client, default: []].append(date)
         var reply: [String: JSON] = [
             "id": .string(proposal.id), "params_hash": .string(proposal.paramsHash),
             "status": .string(proposal.status.rawValue), "version": .int(proposal.version),
@@ -328,6 +376,7 @@ public final class ProposalServer: @unchecked Sendable {
         // A run's reports reach the session that asked by this id (docs/approval-app.md, _Delivering a run's report_).
         reply["runner_id"] = book.runnerID(proposal.id).map(JSON.string)
         connection.reply(.object(reply))
+        return true
     }
 
     private func wait(_ request: [String: JSON], on connection: Connection, at date: Date) {
@@ -399,6 +448,7 @@ final class Connection {
     var onFrame: ((Data) -> Void)?
     var onClose: (() -> Void)?
     var wait: Wait?
+    var intake: (token: UUID, task: Task<Void, Never>)?
     var lastActive: Date
 
     private let source: DispatchSourceRead
@@ -498,6 +548,8 @@ final class Connection {
         guard !closed else { return }
         closed = true
         wait = nil
+        intake?.task.cancel()
+        intake = nil
         source.cancel()
         onClose?()
     }

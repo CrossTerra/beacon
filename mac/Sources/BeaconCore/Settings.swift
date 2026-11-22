@@ -16,6 +16,24 @@ public struct GitHubSettings: Codable, Equatable, Sendable {
     }
 }
 
+/// The one Slack workspace and user allowed to post. The API origin is fixed; only the vault holds the token.
+public struct SlackSettings: Codable, Equatable, Sendable {
+    public static let origin = "https://slack.com"
+    public let workspace: String
+    public let userID: String
+    public let team: String
+    public let user: String
+
+    public var account: String { "slack:user:\(userID)" }
+    public var connected: String { "Posts to \(team) (\(workspace)) as \(user) (\(userID))" }
+
+    public var binding: CredentialBinding {
+        get throws {
+            try CredentialBinding(service: "slack", origin: Self.origin, account: account, workspace: workspace)
+        }
+    }
+}
+
 /// Where Beacon.app sends its records (13.00-D16, D25): the Signal origin, the person they are about, and the app
 /// actor whose key (in the vault) writes them.
 public struct SignalSettings: Codable, Equatable, Sendable {
@@ -104,12 +122,15 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var version = 1
     public var github: GitHubSettings?
     public var signal: SignalSettings?
+    public var slack: SlackSettings?
     /// Absent in settings from before agent runs.
     public var checkouts: [CheckoutSettings]?
 
-    public init(github: GitHubSettings? = nil, signal: SignalSettings? = nil, checkouts: [CheckoutSettings]? = nil) {
+    public init(github: GitHubSettings? = nil, signal: SignalSettings? = nil, slack: SlackSettings? = nil,
+                checkouts: [CheckoutSettings]? = nil) {
         self.github = github
         self.signal = signal
+        self.slack = slack
         self.checkouts = checkouts
     }
 

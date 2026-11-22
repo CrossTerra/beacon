@@ -54,10 +54,12 @@ enum Record {
             throw Invalid(field: "/type")
         }
         let type = kind.hasPrefix("runner_") ? "app.runner." + kind.dropFirst("runner_".count) : "app.action." + kind
+        let publicSlack = action == ActionType.slackPost.rawValue && SlackPlacement(proposed["slack_placement"])?.visibility == .public
+            ? proposed["public_slack_subject"]?.stringValue : nil
         var record: [String: JSON] = [
             "version": .int(1), "key": .string(key), "type": .string(type),
-            "subject": .string(try subject(action: action, params: proposed["params"]!, person: person, handle: handle,
-                                           runnerID: proposed["runner_id"]?.stringValue, spelled: spelled)),
+            "subject": .string(try publicSlack ?? subject(action: action, params: proposed["params"]!, person: person, handle: handle,
+                                                          runnerID: proposed["runner_id"]?.stringValue, spelled: spelled)),
             "occurred_at": .string(timestamp(date)), "metadata": .object(metadata),
         ]
         if !sealed.isEmpty {
@@ -69,8 +71,8 @@ enum Record {
     /// A merge is about its pull request, with the repository as the proposal spelled it, or, from the approval
     /// on, as GitHub spelled it (`spelled`, kept at approval; the same subject case aside, which is how Signal
     /// compares them). A run is about itself, `agent-run:{handle}:{runner id body}`, restricted to the person in
-    /// Signal; without the person's handle it cannot be built. A post is about the person's own subject until its
-    /// handler can tell whether the conversation's subject is public (a private channel is under `slack:dm:`).
+    /// Signal; without the person's handle it cannot be built. Except for a Slack subject verified as public at
+    /// intake (chosen by the caller), posts use the person's own subject.
     static func subject(action: String, params: JSON, person: String, handle: String? = nil, runnerID: String? = nil,
                         spelled: String? = nil) throws -> String {
         if action == ActionType.githubMerge.rawValue, let repo = params["repo"]?.stringValue,

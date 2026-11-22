@@ -2,8 +2,8 @@ import AppKit
 import BeaconCore
 import SwiftUI
 
-/// Settings: the GitHub account Beacon merges as, the Signal it records to (from Signal's setup code), and the
-/// checkouts agent runs may use. The token and code fields are secure and cleared once used; neither is shown again.
+/// Settings: the GitHub and Slack accounts Beacon acts as, the Signal it records to (from Signal's setup code), and the
+/// checkouts agent runs may use. Credential fields are secure and cleared once used; none is shown again.
 struct SettingsView: View {
     @ObservedObject var service: ApprovalService
     @Environment(\.openURL) private var openURL
@@ -15,6 +15,8 @@ struct SettingsView: View {
     @State private var checkoutName = ""
     @State private var checkoutMessage = ""
     @State private var signalMessage = ""
+    @State private var slackToken = ""
+    @State private var slackMessage = ""
 
     var body: some View {
         Form {
@@ -51,6 +53,30 @@ struct SettingsView: View {
                 }
                 .disabled(token.isEmpty || saving)
                 if !message.isEmpty { Text(message).font(.caption) }
+            }
+            Section("Slack") {
+                if let slack = service.slack {
+                    LabeledContent("Workspace", value: visibleText("\(slack.team) (\(slack.workspace))"))
+                    LabeledContent("User", value: visibleText("\(slack.user) (\(slack.userID))"))
+                    Button("Remove", role: .destructive) { slackMessage = service.removeSlack() }.disabled(saving)
+                }
+                Text("In your Slack app’s OAuth & Permissions page, add User Token Scopes, install or reinstall the app in your workspace, and copy the User OAuth Token (xoxp-…). Beacon posts as you.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("User scopes: chat:write, channels:read, groups:read, im:read, mpim:read, users:read. For thread previews and lost replies, also add channels:history, groups:history, im:history and mpim:history for the conversations you use.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Open Slack apps") { openURL(URL(string: "https://api.slack.com/apps")!) }
+                SecureField("User OAuth Token", text: $slackToken)
+                Button(service.slack == nil ? "Save" : "Replace token") {
+                    let value = slackToken
+                    slackToken = ""
+                    saving = true
+                    Task {
+                        slackMessage = await service.registerSlack(token: value)
+                        saving = false
+                    }
+                }
+                .disabled(slackToken.isEmpty || saving)
+                if !slackMessage.isEmpty { Text(visibleText(slackMessage)).font(.caption) }
             }
             Section("Signal") {
                 if let signal = service.signal {

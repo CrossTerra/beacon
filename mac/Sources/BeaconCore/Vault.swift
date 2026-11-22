@@ -69,6 +69,9 @@ public struct Secret: Sendable, CustomStringConvertible, CustomDebugStringConver
 
     public var description: String { "[redacted]" }
     public var debugDescription: String { "[redacted]" }
+
+    /// Slack's User OAuth Token, not a bot, app, cookie or configuration token. Also rules out header delimiters.
+    var isSlackUserToken: Bool { Field.matches(value, "xoxp-[a-zA-Z0-9-]{1,1024}") }
 }
 
 /// What a credential is bound to (13.00-D31). A client asks by these, from Beacon's settings; an agent never

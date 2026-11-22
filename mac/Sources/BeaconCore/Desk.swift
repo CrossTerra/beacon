@@ -80,6 +80,8 @@ public final class ApprovalDesk: ObservableObject {
     /// that reason shown. `release` undoes a claim the journal then refused.
     public var claim: ((FrozenApproval) -> String?)?
     public var release: ((String) -> Void)?
+    /// Called for _Read again_ on an unknown outcome: the app asks the handler to read back once more.
+    public var onReadBack: ((String) -> Void)?
     private let resolver: any ActionResolver
     private let runServicesReady: () -> Bool
     private let now: @Sendable () -> Date
@@ -128,8 +130,13 @@ public final class ApprovalDesk: ObservableObject {
         freeze()
     }
 
-    /// _Read again_: drop the snapshot and resolve afresh.
+    /// _Read again_: drop the snapshot and resolve afresh. For an unknown outcome, read it back once more; nothing
+    /// is sent again.
     public func readAgain() {
+        if let proposal = selected, proposal.status == .outcomeUnknown {
+            onReadBack?(proposal.id)
+            return
+        }
         invalidate()
         problem = nil
         freeze()
@@ -229,6 +236,9 @@ public final class ApprovalDesk: ObservableObject {
             } catch let refusal as RunRefusal {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."
+            } catch let refusal as SlackRefusal {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable: \(refusal.explanation)"
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Beacon cannot resolve this action yet."
@@ -263,16 +273,21 @@ public enum ActionOutcome {
         switch proposal.status {
         case .approved: return ("Approved; starting…", link)
         case .started: return ("Started…", link)
-        case .outcomeUnknown: return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
+        case .outcomeUnknown:
+            if proposal.type == .slackPost {
+                return ("Outcome unknown: Beacon reads Slack for a few minutes after the start, then again on relaunch or Read again. It will not be sent again.", nil)
+            }
+            return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
         case .executed:
             if let commit, proposal.type == .githubMerge { return ("Merged as \(commit)", link) }
+            if proposal.type == .slackPost { return ("Posted to Slack", nil) }
             return ("Done", link)
         case .failed:
             let error = result?["error"]?.stringValue?.replacingOccurrences(of: "_", with: " ") ?? "failed"
             switch proposal.type {
             case .githubMerge: return ("Not merged: \(error)", link)
             case .agentRun: return ("Not started: \(error)", link)
-            default: return ("Failed: \(error)", link)
+            case .slackPost: return ("Not posted: \(result?["result"]?.stringValue ?? error)", nil)
             }
         default: return nil
         }
@@ -283,17 +298,19 @@ public enum ActionOutcome {
 public struct ActionRouter: ActionResolver {
     public let merges: (any ActionResolver)?
     public let runs: (any ActionResolver)?
+    public let posts: (any ActionResolver)?
 
-    public init(merges: (any ActionResolver)?, runs: (any ActionResolver)?) {
+    public init(merges: (any ActionResolver)?, runs: (any ActionResolver)?, posts: (any ActionResolver)? = nil) {
         self.merges = merges
         self.runs = runs
+        self.posts = posts
     }
 
     public func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
         switch proposal.type {
         case .githubMerge: guard let merges else { break }; return try await merges.resolve(proposal, model: model)
         case .agentRun: guard let runs else { break }; return try await runs.resolve(proposal, model: model)
-        case .slackPost: break
+        case .slackPost: guard let posts else { break }; return try await posts.resolve(proposal, model: model)
         }
         throw NoResolver.Unsupported()
     }

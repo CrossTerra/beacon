@@ -39,13 +39,13 @@ final class Harness: @unchecked Sendable {
 
     init(clients: [AdmittedClient] = [AdmittedClient(name: "beacon-act", requirement: selfRequirement())],
          enabled: [ActionType] = ActionType.allCases, attribution: RunAttribution? = nil,
-         limits: ServerLimits = ServerLimits()) throws {
+         limits: ServerLimits = ServerLimits(), slackLookup: ProposalServer.SlackLookup? = nil) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("sock-" + randomHex(4)).path
         path = directory + "/run/act.sock"
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         let clock = self.clock
         server = ProposalServer(path: path, clients: clients, book: book, enabled: enabled, attribution: attribution, limits: limits,
-                                now: { clock.now }, queue: queue)
+                                now: { clock.now }, queue: queue, slackLookup: slackLookup)
         try server.start()
     }
 
@@ -187,6 +187,26 @@ struct ProposalServerTests {
         #expect(duringSweep.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
         let anotherID = try #require(duringSweep.call(mergeProposal(number: 142))?["id"]?.stringValue)
         #expect(h.queue.sync { h.book.proposal(anotherID, at: h.clock.now)?.runner } == runner)
+    }
+
+    /// #38 with #40: a Slack proposal's intake lookup is asynchronous. If recovery begins while it is in flight, the
+    /// connection is no longer attributable and nothing is stored when the lookup returns.
+    @Test func recoveryDuringASlackLookupStoresNothing() throws {
+        let attribution = RunAttribution()
+        #expect(attribution.completeSweep())
+        let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+        let h = try Harness(enabled: [.slackPost], attribution: attribution, slackLookup: { _, _ in
+            entered.signal()
+            await withCheckedContinuation { done in DispatchQueue.global().async { gate.wait(); done.resume() } }
+            return SlackPlacement(account: "slack:user:U0PERSON", visibility: .public)
+        })
+        let client = try h.connect()
+        client.send(SlackHarness.frame())
+        #expect(entered.wait(timeout: .now() + 5) == .success)
+        attribution.sessionEnded(verified: false)
+        gate.signal()
+        #expect(client.receive() == .object(["error": "busy"]))
+        #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 0)
     }
 
     @Test func unknownPeersCannotUseProposalOwnershipUntilTheSweep() throws {
