@@ -175,6 +175,18 @@ func status(op string, s C.OSStatus) error {
 	}
 }
 
+// readRefused reports whether a Security framework status from a read means macOS refused it: an access prompt that
+// was denied, cancelled or could not be shown (errSecAuthFailed, errSecUserCanceled, errSecInteractionNotAllowed,
+// errSecInteractionRequired). The usual cause is a rebuild signed with another certificate; beacon keychain repair
+// fixes it.
+func readRefused(status int) bool {
+	switch status {
+	case -25293, -128, -25308, -25315:
+		return true
+	}
+	return false
+}
+
 func readStatus(s C.OSStatus) error {
 	if readRefused(int(s)) {
 		return ErrReadRefused
