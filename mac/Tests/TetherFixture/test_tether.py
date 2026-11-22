@@ -59,6 +59,7 @@ class Session:
 
     def __init__(self, fixture, state, mode=None):
         lease, self.holder = socket.socketpair()
+        self.fixture = fixture
         args = [fixture, "session", str(state)] + ([mode] if mode else [])
         self.helper = subprocess.Popen(args, stdin=lease)
         lease.close()
@@ -70,6 +71,35 @@ class Session:
         byte = self.holder.recv(1)
         self.seen += byte
         return byte
+
+    def event(self):
+        """The next state byte, or a whole runner line ("#started …") as text."""
+        byte = self.receive()
+        if byte != b"#":
+            return byte
+        line = b""
+        while (byte := self.receive()) not in (b"\n", b""):
+            line += byte
+        return "#" + line.decode()
+
+    def until(self, prefix):
+        """Reads until a runner line that starts with `prefix`; returns its words."""
+        while True:
+            event = self.event()
+            if event == b"":
+                raise AssertionError(f"the lease closed before {prefix}")
+            if isinstance(event, str) and event.startswith(prefix):
+                return event.split()
+
+    def launch(self, state, run, prompt, cwd, extra_env=()):
+        directory = state / "runs" / run
+        directory.mkdir(parents=True)
+        (directory / "prompt").write_text(prompt)
+        argv = [self.fixture, "runner", str(state)]
+        env = ["PATH=/usr/bin:/bin", "RUN_VAR=from-the-app", "BEACON_SUPERVISOR=forged", *extra_env]
+        fields = [str(cwd), str(len(argv)), *argv, *env]
+        (directory / "launch").write_bytes(b"".join(f.encode() + b"\0" for f in fields))
+        self.holder.sendall(f"L {run}\n".encode())
 
     def until_closed(self):
         """Reads state reports until the lease closes; returns the last byte, or b"" if none came."""
@@ -231,6 +261,88 @@ def stubborn_sweep_gives_up(fixture, state):
         kill_all(state)
 
 
+def runner_runs_and_reports(fixture, state):
+    """A run starts in its checkout with its prompt on stdin and the app's environment plus tether's marker;
+    its exit code and its end are reported, and its output and errors are kept beside it."""
+    session, port = started(fixture, state)
+    checkout = state / "checkout"
+    checkout.mkdir()
+    session.launch(state, "run_a1", "exit 3", checkout)
+    _, run, pid = session.until("#started")
+    assert run == "run_a1" and int(pid) > 0
+    assert session.until("#exited") == ["#exited", "run_a1", "3"]
+    assert session.until("#gone") == ["#gone", "run_a1"]
+    output = (state / "runs" / "run_a1" / "output").read_text()
+    assert f"cwd={checkout.resolve()}" in output or f"cwd={checkout}" in output, output
+    assert "prompt=exit 3" in output and "run_var=from-the-app" in output
+    # tether's own marker for this run, not the one the launch file tried to set.
+    marker = next(line for line in output.splitlines() if line.startswith("marker="))
+    assert marker.endswith(":rrun_a1") and "forged" not in marker, marker
+    assert (state / "runs" / "run_a1" / "errors").read_text() == "runner stderr\n"
+    for name in ("output", "errors"):
+        assert (state / "runs" / "run_a1" / name).stat().st_mode & 0o777 == 0o600
+    # The same run cannot start twice: its output exists.
+    session.holder.sendall(b"L run_a1\n")
+    assert session.until("#failed")[1] == "run_a1"
+    session.quit()
+    assert_clean(state, port)
+
+
+def runner_stopped(fixture, state):
+    """Stopping a run stops its whole tree, TERM ignored and a detached grandchild included."""
+    session, port = started(fixture, state)
+    before = pids(state)
+    session.launch(state, "run_b2", "hang", state)
+    session.until("#started")
+    wait_for(lambda: len(list(state.glob("leaked-*"))) == 1, "the run's detached grandchild")
+    run = pids(state) - before
+    assert len(live(run)) >= 2
+    session.holder.sendall(b"K run_b2\n")
+    exited = session.until("#exited")
+    assert exited[1] == "run_b2" and int(exited[2]) >= 128, exited
+    assert session.until("#gone") == ["#gone", "run_b2"]
+    assert not live(run), "a process of the stopped run survived"
+    assert listening(port), "stopping a run stopped another service"
+    session.quit()
+    assert_clean(state, port)
+
+
+def runners_stop_at_quit(fixture, state):
+    """Two runs at once, in two checkouts; Quit stops both, and the next session would sweep them."""
+    session, port = started(fixture, state)
+    before = pids(state)
+    for run in ("run_c1", "run_c2"):
+        (state / run).mkdir()
+        session.launch(state, run, "hang", state / run)
+        assert session.until("#started")[1] == run
+    wait_for(lambda: len(list(state.glob("leaked-*"))) == 2, "both runs' grandchildren")
+    runs = pids(state) - before
+    session.quit()
+    assert not live(runs), "a run survived Quit"
+    assert_clean(state, port)
+
+
+def runner_bad_launches(fixture, state):
+    """A launch that cannot start is reported and starts nothing; malformed commands are ignored."""
+    session, port = started(fixture, state)
+    session.holder.sendall(b"L run_missing\n")
+    assert session.until("#failed")[1] == "run_missing"
+    session.launch(state, "run_d1", "exit 0", state / "no-such-directory")
+    assert session.until("#failed")[1] == "run_d1"
+    bad = state / "runs" / "run_d2"
+    bad.mkdir(parents=True)
+    (bad / "prompt").write_text("exit 0")
+    (bad / "launch").write_bytes(b"relative\0" + b"1\0" + b"/bin/true\0")
+    session.holder.sendall(b"L run_d2\n" + b"L ../escape\n" + b"X\n" + b"L " + b"a" * 300 + b"\n")
+    assert session.until("#failed")[1] == "run_d2"
+    # A good run after all that still starts.
+    session.launch(state, "run_d3", "exit 0", state)
+    assert session.until("#exited") == ["#exited", "run_d3", "0"]
+    assert listening(port)
+    session.quit()
+    assert_clean(state, port)
+
+
 def collector_lifetime(collector, scratch):
     """The real Go collector: SIGTERM is a clean stop, and EOF on its lifetime pipe ends it."""
     config = scratch / "config.yaml"
@@ -265,7 +377,8 @@ if __name__ == "__main__":
     for case in (quit_after_restart, quit_with_restart_pending, leaked_grandchild_stopped_at_quit,
                  leaked_grandchild_stopped_before_restart, app_crash, helper_crash_then_recovery,
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
-                 stubborn_sweep_gives_up):
+                 stubborn_sweep_gives_up, runner_runs_and_reports, runner_stopped, runners_stop_at_quit,
+                 runner_bad_launches):
         state = Path(tempfile.mkdtemp(prefix="tether-"))
         try:
             case(fixture, state)

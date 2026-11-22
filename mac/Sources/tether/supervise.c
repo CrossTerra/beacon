@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +20,9 @@
 #include <unistd.h>
 
 #define TOKEN_SIZE 33
-#define ENTRY_SIZE (sizeof(TETHER_MARKER) + TOKEN_SIZE + 24)
+#define ENTRY_SIZE (sizeof(TETHER_MARKER) + TOKEN_SIZE + TETHER_ID_MAX + 8)
+#define LAUNCH_MAX (1 << 20) // The largest launch file: its argv and environment.
+#define RUNNERS_MAX 256      // Runs started in one session.
 
 struct tracked {
     pid_t pid;
@@ -27,8 +30,18 @@ struct tracked {
     size_t job;
 };
 
+// A run the app asked for: a job that is never restarted, with the strings its spec points into.
+struct runner {
+    struct tether_spec spec;
+    char id[TETHER_ID_MAX + 1];
+    char *launch; // The launch file's bytes; argv and env point into it.
+    char **argv;
+    bool exit_reported;
+};
+
 struct job {
     const struct tether_spec *spec;
+    struct runner *runner; // NULL for a fixed service.
     char entry[ENTRY_SIZE]; // TETHER_MARKER "<session>:<job>"
     // The group leader. It is reaped only after its whole tree is gone, so while pid > 0
     // the kernel cannot reuse pid as another group's id.
@@ -41,12 +54,18 @@ struct job {
 
 struct session {
     int lease;
+    bool closed; // The app closed its end, or the lease failed: the session is ending.
+    int dir;     // The state directory.
+    const char *token;
     struct job *jobs;
-    size_t count;
+    size_t count, runners;
     char *const *env;
     unsigned grace_ms;
     struct tracked *tracked;
     size_t ntracked, cap;
+    char command[TETHER_ID_MAX + 8];
+    size_t ncommand;
+    bool discarding; // The current command line is too long; drop it.
 };
 
 static volatile sig_atomic_t stopping;
@@ -62,14 +81,22 @@ static uint64_t now_ms(void) {
     return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1000000;
 }
 
-// The app never writes. Any readable byte, EOF or error ends the session for good.
-static bool live(int lease) {
-    struct pollfd fd = {.fd = lease, .events = POLLIN};
-    return !stopping && poll(&fd, 1, 0) == 0;
+static bool live(const struct session *s) {
+    return !stopping && !s->closed;
 }
 
 static void send_byte(int lease, char byte) {
     (void)send(lease, &byte, 1, MSG_DONTWAIT);
+}
+
+static void send_line(int lease, const char *format, ...) __attribute__((format(printf, 2, 3)));
+static void send_line(int lease, const char *format, ...) {
+    char line[128];
+    va_list args;
+    va_start(args, format);
+    int n = vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    if (n > 0 && n < (int)sizeof(line)) (void)send(lease, line, (size_t)n, MSG_DONTWAIT);
 }
 
 static struct tracked *find(struct session *s, pid_t pid) {
@@ -149,7 +176,15 @@ static size_t members(struct session *s, size_t j, int sig) {
 }
 
 static void report(struct session *s, size_t j, char state) {
-    if (j == 0 && live(s->lease)) send_byte(s->lease, state);
+    if (j == 0 && live(s)) send_byte(s->lease, state);
+}
+
+// A run's exit: its code, or 128 plus the signal that ended it. Sent once.
+static void report_exit(struct session *s, struct job *job, int code, int status) {
+    if (!job->runner || job->runner->exit_reported) return;
+    job->runner->exit_reported = true;
+    int value = code == CLD_EXITED ? status : 128 + status;
+    send_line(s->lease, "%c" "exited %s %d\n", TETHER_LINE, job->runner->id, value);
 }
 
 static void retry_later(struct session *s, size_t j, uint64_t now) {
@@ -209,6 +244,7 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
             job->cleaning = true;
             job->term_sent = false;
             job->clean_exit = info.si_code == CLD_EXITED && info.si_status == 0;
+            report_exit(s, job, info.si_code, info.si_status);
             // Decide on the next step, after a refresh has adopted the job's marked processes:
             // a detached descendant may have no tracked parent.
             return;
@@ -217,12 +253,17 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
     if (job->cleaning) {
         if (members(s, j, 0) == 0) {
             bool reaped = job->pid > 0;
-            if (reaped && waitpid(job->pid, NULL, WNOHANG) != job->pid) return;
+            int status = 0;
+            if (reaped && waitpid(job->pid, &status, WNOHANG) != job->pid) return;
+            // A run stopped before its exit was observed reports it from the reaped status.
+            if (reaped && WIFEXITED(status)) report_exit(s, job, CLD_EXITED, WEXITSTATUS(status));
+            if (reaped && WIFSIGNALED(status)) report_exit(s, job, CLD_KILLED, WTERMSIG(status));
             job->pid = 0;
             job->cleaning = false;
             if (job->lifetime >= 0) close(job->lifetime);
             job->lifetime = -1;
             if (!reaped) return; // A sweep at shutdown of a job with no leader.
+            if (job->runner) send_line(s->lease, "%c" "gone %s\n", TETHER_LINE, job->runner->id);
             if (!job->spec->restart || job->clean_exit) {
                 job->retired = true;
                 report(s, j, TETHER_EXITED);
@@ -238,6 +279,181 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
         }
     } else if (running && job->pid == 0 && !job->retired && now >= job->retry_at) {
         start(s, j, now);
+    }
+}
+
+static bool valid_id(const char *id) {
+    size_t n = strlen(id);
+    return n >= 1 && n <= TETHER_ID_MAX && strspn(id, "abcdefghijklmnopqrstuvwxyz0123456789_") == n;
+}
+
+static struct job *runner_job(struct session *s, const char *id) {
+    for (size_t j = 0; j < s->count; j++)
+        if (s->jobs[j].runner && strcmp(s->jobs[j].runner->id, id) == 0) return &s->jobs[j];
+    return NULL;
+}
+
+static void free_runner(struct runner *r) {
+    if (!r) return;
+    free(r->argv);
+    free(r->launch);
+    free(r);
+}
+
+// Reads <state>/runs/<id>/launch: NUL-terminated fields, the working directory, the argument
+// count, the arguments (the first an absolute image path), then the environment. Returns the
+// runner with its argv set, its environment in `env` (NULL-terminated, the job's marker still
+// to be added), or NULL with errno set.
+static struct runner *read_launch(int run, const char *id, char ***env, const char **cwd) {
+    int fd = openat(run, "launch", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat st;
+    if (fd < 0) return NULL;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 4 || st.st_size > LAUNCH_MAX) {
+        close(fd);
+        errno = EINVAL;
+        return NULL;
+    }
+    struct runner *r = calloc(1, sizeof(*r));
+    size_t size = (size_t)st.st_size;
+    char *buf = r ? malloc(size) : NULL;
+    ssize_t got = buf ? read(fd, buf, size) : -1;
+    close(fd);
+    if (!buf || got != (ssize_t)size || buf[size - 1] != '\0') {
+        free(buf);
+        free(r);
+        errno = EINVAL;
+        return NULL;
+    }
+    r->launch = buf;
+    size_t nfields = 0;
+    for (size_t i = 0; i < size; i++) nfields += buf[i] == '\0';
+    char **fields = calloc(nfields + 1, sizeof(*fields));
+    if (!fields) {
+        free_runner(r);
+        return NULL;
+    }
+    for (size_t i = 0, k = 0; i < size; i += strlen(buf + i) + 1) fields[k++] = buf + i;
+    char *end = NULL;
+    long argc = nfields >= 3 ? strtol(fields[1], &end, 10) : 0;
+    if (nfields < 3 || fields[0][0] != '/' || !end || *end || argc < 1 || argc > 64 || (size_t)argc + 2 > nfields ||
+        fields[2][0] != '/') {
+        free(fields);
+        free_runner(r);
+        errno = EINVAL;
+        return NULL;
+    }
+    *cwd = fields[0];
+    r->argv = calloc((size_t)argc + 1, sizeof(*r->argv));
+    *env = calloc(nfields - 2 - (size_t)argc + 2, sizeof(**env));
+    if (!r->argv || !*env) {
+        free(*env);
+        free(fields);
+        free_runner(r);
+        return NULL;
+    }
+    memcpy(r->argv, fields + 2, (size_t)argc * sizeof(*r->argv));
+    size_t envc = 0;
+    for (size_t k = 2 + (size_t)argc; k < nfields; k++)
+        if (strchr(fields[k], '=') && strncmp(fields[k], TETHER_MARKER, sizeof(TETHER_MARKER) - 1) != 0)
+            (*env)[envc++] = fields[k];
+    free(fields);
+    snprintf(r->id, sizeof(r->id), "%s", id);
+    r->spec = (struct tether_spec){.argv = r->argv};
+    return r;
+}
+
+// Starts the run `id` as a new job: its own process group, never restarted, with standard input
+// from the run's prompt file and its output and errors in files beside it, created afresh.
+static void launch(struct session *s, const char *id) {
+    if (s->runners >= RUNNERS_MAX || runner_job(s, id)) {
+        send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, s->runners >= RUNNERS_MAX ? EAGAIN : EEXIST);
+        return;
+    }
+    int runs = openat(s->dir, "runs", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int run = runs >= 0 ? openat(runs, id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
+    int error = errno;
+    if (runs >= 0) close(runs);
+    char **env = NULL;
+    const char *cwd = NULL;
+    struct runner *r = run >= 0 ? read_launch(run, id, &env, &cwd) : NULL;
+    if (!r) error = errno;
+    int in = -1, out = -1, err = -1;
+    struct job *grown = r ? realloc(s->jobs, (s->count + 1) * sizeof(*s->jobs)) : NULL;
+    if (grown) s->jobs = grown;
+    pid_t pid = -1;
+    if (grown) {
+        struct job *job = &s->jobs[s->count];
+        *job = (struct job){.spec = &r->spec, .runner = r, .lifetime = -1};
+        snprintf(job->entry, sizeof(job->entry), TETHER_MARKER "%s:r%s", s->token, id);
+        size_t envc = 0;
+        while (env[envc]) envc++;
+        env[envc] = job->entry;
+        in = openat(run, "prompt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        out = openat(run, "output", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        err = openat(run, "errors", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_at(r->argv[0], r->argv, env, in, out, err, cwd) : -1;
+        error = errno;
+        if (pid > 0) {
+            job->pid = pid;
+            job->started_at = now_ms();
+            s->count++;
+            s->runners++;
+        }
+    } else if (r) {
+        error = ENOMEM;
+    }
+    if (in >= 0) close(in);
+    if (out >= 0) close(out);
+    if (err >= 0) close(err);
+    if (run >= 0) close(run);
+    free(env);
+    if (pid > 0) {
+        send_line(s->lease, "%c" "started %s %d\n", TETHER_LINE, id, pid);
+    } else {
+        free_runner(r);
+        send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, error);
+    }
+}
+
+// Stops a run as a cleanup stops any job: TERM to its group and tracked processes, KILL after the
+// grace period. Its exit and its end are reported as they happen.
+static void stop_run(struct session *s, const char *id) {
+    struct job *job = runner_job(s, id);
+    if (job && job->pid > 0 && !job->cleaning) {
+        job->cleaning = true;
+        job->term_sent = false;
+    }
+}
+
+static void command(struct session *s, char *line) {
+    if (strlen(line) < 3 || line[1] != ' ' || !valid_id(line + 2)) return;
+    if (line[0] == 'L') launch(s, line + 2);
+    if (line[0] == 'K') stop_run(s, line + 2);
+}
+
+// Reads what the app wrote: runner commands, one per line. EOF or an error ends the session.
+static void read_commands(struct session *s) {
+    char buf[512];
+    for (;;) {
+        ssize_t n = recv(s->lease, buf, sizeof(buf), MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n <= 0) {
+            s->closed = true;
+            return;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == '\n') {
+                s->command[s->ncommand] = '\0';
+                if (!s->discarding) command(s, s->command);
+                s->ncommand = 0;
+                s->discarding = false;
+            } else if (s->ncommand + 1 < sizeof(s->command)) {
+                s->command[s->ncommand++] = buf[i];
+            } else {
+                s->discarding = true;
+            }
+        }
     }
 }
 
@@ -356,22 +572,26 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         jobs[j] = (struct job){.spec = &specs[j], .lifetime = -1};
         snprintf(jobs[j].entry, sizeof(jobs[j].entry), TETHER_MARKER "%s:%zu", token, j);
     }
-    struct session s = {.lease = lease, .jobs = jobs, .count = count, .env = env, .grace_ms = grace_ms};
-    if (live(lease)) send_byte(lease, ready);
+    struct session s = {.lease = lease, .dir = dir, .token = token, .jobs = jobs, .count = count, .env = env,
+                        .grace_ms = grace_ms};
+    if (live(&s)) send_byte(lease, ready);
 
     struct pollfd fd = {.fd = lease, .events = POLLIN};
-    while (live(lease)) {
+    while (live(&s)) {
+        read_commands(&s);
+        if (!live(&s)) break;
         if (refresh(&s))
-            for (size_t j = 0; j < count; j++) step(&s, j, live(lease), now_ms());
+            for (size_t j = 0; j < s.count; j++) step(&s, j, live(&s), now_ms());
         poll(&fd, 1, 100);
     }
+    s.closed = true;
     // No restart from here. Stop every job at once so their grace periods overlap. Jobs without a
     // leader (in backoff, or retired) are swept too: their marked processes are adopted on the next
     // refresh, and the session file is kept unless every job is confirmed empty after that.
-    for (size_t j = 0; j < count; j++) {
-        if (!jobs[j].cleaning) {
-            jobs[j].cleaning = true;
-            jobs[j].term_sent = false;
+    for (size_t j = 0; j < s.count; j++) {
+        if (!s.jobs[j].cleaning) {
+            s.jobs[j].cleaning = true;
+            s.jobs[j].term_sent = false;
         }
     }
     uint64_t give_up = now_ms() + grace_ms + TETHER_GIVE_UP_MS;
@@ -379,9 +599,9 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
     while (now_ms() < give_up) {
         bool done = true;
         if (refresh(&s)) {
-            for (size_t j = 0; j < count; j++) {
+            for (size_t j = 0; j < s.count; j++) {
                 step(&s, j, false, now_ms());
-                if (jobs[j].pid > 0 || jobs[j].cleaning) done = false;
+                if (s.jobs[j].pid > 0 || s.jobs[j].cleaning) done = false;
             }
         } else {
             done = false;
@@ -397,10 +617,12 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         fsync(dir);
         send_byte(lease, TETHER_STOPPED);
     }
-    for (size_t j = 0; j < count; j++)
-        if (jobs[j].lifetime >= 0) close(jobs[j].lifetime);
+    for (size_t j = 0; j < s.count; j++) {
+        if (s.jobs[j].lifetime >= 0) close(s.jobs[j].lifetime);
+        free_runner(s.jobs[j].runner);
+    }
     free(s.tracked);
-    free(jobs);
+    free(s.jobs);
     close(lock);
     close(dir);
     return verified ? 0 : 4;

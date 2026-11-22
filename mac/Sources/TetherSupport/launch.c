@@ -1,5 +1,6 @@
 #include "TetherSupport.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -7,6 +8,11 @@
 #include <unistd.h>
 
 pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int input, int output) {
+    return tether_spawn_at(image, argv, env, input, output, -1, NULL);
+}
+
+pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
+                      const char *cwd) {
     posix_spawn_file_actions_t files;
     posix_spawnattr_t attrs;
     if (posix_spawn_file_actions_init(&files) != 0) return -1;
@@ -24,15 +30,20 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
             err = output < 0
                 ? posix_spawn_file_actions_addopen(&files, STDOUT_FILENO, "/dev/null", O_WRONLY, 0)
                 : posix_spawn_file_actions_adddup2(&files, output, STDOUT_FILENO);
+        if (err == 0)
+            err = error < 0
+                ? posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
+                : posix_spawn_file_actions_adddup2(&files, error, STDERR_FILENO);
+        if (err == 0 && cwd) err = posix_spawn_file_actions_addchdir_np(&files, cwd);
         if (err == 0 &&
-            posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY, 0) == 0 &&
             posix_spawnattr_setsigmask(&attrs, &clear) == 0 &&
             posix_spawnattr_setsigdefault(&attrs, &defaults) == 0 &&
             posix_spawnattr_setpgroup(&attrs, 0) == 0 &&
             posix_spawnattr_setflags(&attrs, flags) == 0 &&
-            posix_spawn(&pid, image, &files, &attrs, argv, env) != 0) {
+            (err = posix_spawn(&pid, image, &files, &attrs, argv, env)) != 0) {
             pid = -1;
         }
+        if (pid < 0) errno = err ? err : EINVAL;
         posix_spawnattr_destroy(&attrs);
     }
     posix_spawn_file_actions_destroy(&files);

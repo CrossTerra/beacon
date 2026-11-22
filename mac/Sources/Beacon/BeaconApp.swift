@@ -120,6 +120,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             servicesStatus = verified ? "Services stopped" : "Services stopped without confirmation"
             finishServices()
             return
+        case .runStarted, .runNotStarted, .runExited, .runGone:
+            // Runs are started only by the run handler, which arrives with the app's wiring for agent runs.
+            return
         }
         if !stopping { servicesStatus = running }
     }
