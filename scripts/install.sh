@@ -1,9 +1,10 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Install Beacon from this checkout, in one command (plan 13.00-D15): build Beacon.app, sign it with your code-signing
-# identity, install it in ~/Applications, point ~/.local/bin/beacon at its CLI, retire the old collector LaunchAgent
-# and open the app. Run it yourself, in Terminal; it can run again any time. See docs/signing.md.
+# identity, quit a running Beacon, install it in ~/Applications, point ~/.local/bin/beacon at its CLI, retire the old
+# collector LaunchAgent, repair the collector's keychain items for a self-signed build, and open the app. Run it
+# yourself, in Terminal; it can run again any time. See docs/signing.md.
 #
-#   scripts/install.sh [--identity NAME_OR_SHA1] [--no-open]
+#   scripts/install.sh [--identity NAME_OR_SHA1] [--no-open] [--repair | --no-repair]
 #   scripts/install.sh --dry-run [--prefix DIR]
 #
 # --dry-run builds and ad-hoc signs into DIR (a new temporary directory by default) and checks the result. It uses
@@ -15,14 +16,17 @@ identity=""
 dry_run=false
 prefix=""
 open_app=true
+repair=auto
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--repair) repair=force; shift ;;
+	--no-repair) repair=never; shift ;;
 	--identity) identity=${2:?--identity needs a name or SHA-1}; shift 2 ;;
 	--dry-run) dry_run=true; shift ;;
 	--prefix) prefix=${2:?--prefix needs a directory}; shift 2 ;;
 	--no-open) open_app=false; shift ;;
 	*)
-		echo "Usage: scripts/install.sh [--identity NAME_OR_SHA1] [--no-open] | --dry-run [--prefix DIR]" >&2
+		echo "Usage: scripts/install.sh [--identity NAME_OR_SHA1] [--no-open] [--repair | --no-repair] | --dry-run [--prefix DIR]" >&2
 		exit 2
 		;;
 	esac
@@ -41,15 +45,15 @@ if [[ "$dry_run" != true && (! -t 0 || ! -t 1) ]]; then
 	exit 1
 fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source=scripts/install-lib.sh
+source scripts/install-lib.sh
 # A temporary directory without a trailing slash (GitHub's macOS runners set TMPDIR with one).
 tmp=${TMPDIR:-/tmp}
 tmp=${tmp%/}
 commit=$(git rev-parse --verify 'HEAD^{commit}')
 
 say() { printf '%s\n' "$*"; }
-done_steps=()
 step() {
-	done_steps+=("$*")
 	say "• $*"
 }
 
@@ -145,23 +149,15 @@ new="$apps/.Beacon.app.new.$$"
 /usr/bin/ditto "$bundle" "$new"
 verify "$new"
 
-if [[ "$dry_run" != true ]]; then
-	# A running Beacon quits as with Quit: it stops its services and expires approvals not yet started.
-	running=$(pgrep -U "$(id -u)" -f '/Beacon\.app/Contents/MacOS/Beacon$' || true)
-	if [[ -n "$running" ]]; then
-		say "Quitting the running Beacon…"
-		# shellcheck disable=SC2086
-		kill -TERM $running 2>/dev/null || true
-		for _ in $(seq 1 45); do
-			pgrep -U "$(id -u)" -f '/Beacon\.app/Contents/MacOS/Beacon$' >/dev/null || break
-			sleep 1
-		done
-		if pgrep -U "$(id -u)" -f '/Beacon\.app/Contents/MacOS/Beacon$' >/dev/null; then
-			echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
-			exit 1
-		fi
-		step "Quit the running Beacon"
+if [[ "$dry_run" != true && -n "$(beacon_pids)" ]]; then
+	# As the menu's Quit: services stop and approvals not yet started expire. The new CLI asks through the socket
+	# (signed like the old one, so the running app admits it); SIGTERM is the fallback for an app without `quit`.
+	say "Quitting the running Beacon…"
+	if ! how=$(quit_beacon "$new/Contents/Helpers/beacon" 30); then
+		echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
+		exit 1
 	fi
+	step "Quit the running Beacon ($how)"
 fi
 old=
 if [[ -e "$app" || -L "$app" ]]; then
@@ -203,6 +199,17 @@ if [[ -e "$HOME/Library/LaunchAgents/dev.beacon.agent.plist" ]] ||
 	step "Removed the old collector LaunchAgent (dev.beacon.agent); Beacon.app runs the collector now"
 fi
 
+# --- The collector's keychain items, while no collector runs: a self-signed build must be allowed again.
+if [[ "$repair" != never ]]; then
+	kind=apple
+	if [[ "$repair" == force ]]; then
+		kind=force
+	elif ! apple_issued "$cert_name"; then
+		kind=self
+	fi
+	repair_keychain "$target" "$kind"
+fi
+
 if [[ "$open_app" == true ]]; then
 	/usr/bin/open "$app"
 	step "Opened Beacon"
@@ -212,18 +219,10 @@ case ":$PATH:" in
 *":$bin:"*) ;;
 *) say "Note: $bin is not on your PATH. Add it so \`beacon\` and \`beacon act\` are the app's CLI." ;;
 esac
-cat <<EOF
-
-Next:
-  1. Beacon's menu → Settings… → GitHub: "Create a token on GitHub" (classic, repo scope), then paste it. If
-     your organization uses SAML SSO, click Configure SSO → Authorize next to the new token.
-  2. Settings… → Signal: paste the Beacon setup code from Signal's /beacon page. If you connected Signal
-     before, paste the code again.
-  3. Approvals… (⌥⌘B) shows proposals as they arrive. Beacon is the beacon-light icon in the menu bar, with a
-     number while proposals wait; opening Beacon.app again also shows the window.
-
-Keychain: your collector's keychain items were made by a CLI signed with this certificate and identifier
-dev.beacon.cli. The app's CLI keeps both, so the items stay readable. With a self-signed certificate, macOS may ask
-once per item after a rebuild; choose Always Allow. With an Apple Development certificate it does not ask.
-The first signed launch of the app creates its vault key in your login keychain.
-EOF
+say ""
+say "Next:"
+next_steps "$HOME/Library/Application Support/beacon/app/settings.json"
+if ! apple_issued "$cert_name"; then
+	say ""
+	say "Beacon.app's own vault key asks once after this rebuild too (self-signed): choose Always Allow."
+fi

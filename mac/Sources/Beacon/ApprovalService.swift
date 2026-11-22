@@ -1,3 +1,4 @@
+import AppKit
 import BeaconCore
 import Foundation
 
@@ -77,6 +78,11 @@ final class ApprovalService: ObservableObject {
             }
             let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
                                         book: journal, enabled: [])
+            // scripts/install.sh quits a running Beacon through the bundled CLI, as the menu's Quit does, without
+            // asking for permission to control the app.
+            server.quit = (client: "beacon-act", action: {
+                DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+            })
             try server.start()
             self.server = server
             updateEnabled()

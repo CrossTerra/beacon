@@ -41,14 +41,21 @@ public enum ServerError: Error, Equatable {
 }
 
 /// The proposal socket. One serial queue owns every connection and the book. Operations are `types`,
-/// `propose`, `get`, `wait` and `withdraw`; there is no approve, list or history operation. Each connection is
-/// admitted by the kernel's audit token for its peer before a byte is read.
+/// `propose`, `get`, `wait` and `withdraw`, and `quit` for the one client the app names; there is no approve, list
+/// or history operation. Each connection is admitted by the kernel's audit token for its peer before a byte is read.
 public final class ProposalServer: @unchecked Sendable {
     public let path: String
     private let clients: [AdmittedClient]
     private let book: ProposalBook
     private let enabledLock = NSLock()
     private var enabledTypes: [ActionType]
+    /// `quit`: the admitted client allowed to ask the app to quit as its menu's Quit does (the bundled CLI, for
+    /// scripts/install.sh), and what quitting does. Without it, `quit` is an unknown operation.
+    public var quit: (client: String, action: @Sendable () -> Void)? {
+        get { enabledLock.withLock { quitter } }
+        set { enabledLock.withLock { quitter = newValue } }
+    }
+    private var quitter: (client: String, action: @Sendable () -> Void)?
     /// The types `types` lists and `propose` accepts. The app changes it when an account is added or removed.
     public var enabled: [ActionType] {
         get { enabledLock.withLock { enabledTypes } }
@@ -245,6 +252,11 @@ public final class ProposalServer: @unchecked Sendable {
             })]))
         case "propose":
             propose(request, on: connection, at: date)
+        case "quit":
+            guard let quit, quit.client == connection.client.name else { return connection.reply(ProposalServer.invalid("/op")) }
+            guard request.count == 1 else { return connection.reply(ProposalServer.invalid("")) }
+            connection.reply(.object(["status": "quitting"]))
+            quit.action()
         case "get":
             guard let id = owned(request, keys: ["op", "id"], by: connection, at: date) else { return }
             connection.reply(status(id))

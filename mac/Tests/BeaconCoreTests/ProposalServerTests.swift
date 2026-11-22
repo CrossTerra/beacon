@@ -140,6 +140,22 @@ struct ProposalServerTests {
         #expect(client.call(.object(["op": "get", "id": .string(id)]))?["version"] == .int(2))
     }
 
+    /// `quit` answers only the client the app names, and only once the app has set what quitting does.
+    @Test func quitIsForTheNamedClientOnly() throws {
+        let h = try Harness()
+        let client = try h.connect()
+        #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
+        let asked = NSLock()
+        nonisolated(unsafe) var quits = 0
+        h.server.quit = (client: "someone-else", action: { asked.withLock { quits += 1 } })
+        #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
+        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        #expect(client.call(.object(["op": "quit", "now": .bool(true)]))?["error"] == "invalid")
+        #expect(asked.withLock { quits } == 0)
+        #expect(client.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
+        #expect(asked.withLock { quits } == 1)
+    }
+
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {
         let h = try Harness(clients: [AdmittedClient(name: "other", requirement: "identifier \"dev.beacon.nobody\"")])
         let client = try h.connect()
