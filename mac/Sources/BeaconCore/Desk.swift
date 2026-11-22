@@ -59,6 +59,8 @@ public final class ApprovalDesk: ObservableObject {
     @Published public private(set) var stopping = false
 
     public let journal: Journal
+    /// Called with the proposal id after an approval commits; the app hands it to the action's handler.
+    public var onApproved: ((String) -> Void)?
     private let resolver: any ActionResolver
     private let now: @Sendable () -> Date
     private var generation = 0
@@ -118,6 +120,7 @@ public final class ApprovalDesk: ObservableObject {
         do {
             try journal.approve(frozen.approval, at: now())
             refresh()
+            onApproved?(frozen.approval.id)
             return true
         } catch {
             problem = "Not approved: the proposal changed, expired or was withdrawn."
@@ -165,6 +168,9 @@ public final class ApprovalDesk: ObservableObject {
                 let approval = try FrozenApproval(current, origin: resolved.origin, account: resolved.account,
                                                   destination: resolved.destination, model: model)
                 self.frozen = Frozen(token: UUID(), approval: approval, resolved: resolved)
+            } catch let refusal as MergeRefusal {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Beacon cannot resolve this action yet."

@@ -21,7 +21,7 @@ final class FakeSignal: RecordTransport, @unchecked Sendable {
             let key = try JSON.parse(bytes)["key"]!.stringValue!
             if let existing = stored.firstIndex(where: { $0.key == key }) {
                 return stored[existing].bytes == bytes ? .stored(eventID: "evt_\(existing)", replayed: true)
-                    : .conflict(reason: "idempotency_conflict")
+                    : .stop(reason: "conflict:idempotency_conflict")
             }
             let parts = key.split(separator: ":")
             let journal = String(parts[1]), seq = Int(parts[2])!
@@ -29,7 +29,7 @@ final class FakeSignal: RecordTransport, @unchecked Sendable {
                 let lastParts = last.key.split(separator: ":")
                 let lastJournal = String(lastParts[1]), lastSeq = Int(lastParts[2])!
                 let ok = journal == lastJournal ? seq > lastSeq : (seq == 1 && journal > lastJournal)
-                if !ok { return .conflict(reason: "journal_order") }
+                if !ok { return .stop(reason: "conflict:journal_order") }
             }
             stored.append((key, bytes))
             if loseAnswerFor == key {
@@ -74,7 +74,7 @@ struct DeliveryTests {
         var (journal, _) = try filledJournal(path, at: t0)
         let signal = FakeSignal()
         signal.loseAnswerFor = "beacon:\(journal.id):2"
-        #expect(try await OutboxSender(journal: journal, transport: signal, person: person).drain() == .retry(sent: 1))
+        #expect(try await OutboxSender(journal: journal, transport: signal, person: person).drain() == .retry(sent: 1, after: nil))
         let first = signal.stored[1].bytes
 
         journal = try Journal(path: path, at: t0 + 60, nonce: { "ffffffffffffffffffffffffffffffff" })
@@ -88,7 +88,7 @@ struct DeliveryTests {
         let (journal, _) = try filledJournal(path, at: t0, count: 1)
         let signal = FakeSignal()
         signal.down = true
-        #expect(try await OutboxSender(journal: journal, transport: signal, person: person).drain() == .retry(sent: 0))
+        #expect(try await OutboxSender(journal: journal, transport: signal, person: person).drain() == .retry(sent: 0, after: nil))
         let pending = try #require(try journal.nextDelivery(person: person)).bytes
         let reopened = try Journal(path: path, at: t0 + 1, nonce: { "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" })
         #expect(try reopened.nextDelivery(person: person)?.bytes == pending)

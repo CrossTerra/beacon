@@ -47,7 +47,13 @@ public final class ProposalServer: @unchecked Sendable {
     public let path: String
     private let clients: [AdmittedClient]
     private let book: ProposalBook
-    private let enabled: [ActionType]
+    private let enabledLock = NSLock()
+    private var enabledTypes: [ActionType]
+    /// The types `types` lists and `propose` accepts. The app changes it when an account is added or removed.
+    public var enabled: [ActionType] {
+        get { enabledLock.withLock { enabledTypes } }
+        set { enabledLock.withLock { enabledTypes = newValue } }
+    }
     private let limits: ServerLimits
     private let now: @Sendable () -> Date
     private let queue: DispatchQueue
@@ -65,7 +71,7 @@ public final class ProposalServer: @unchecked Sendable {
         self.path = path
         self.clients = clients
         self.book = book
-        self.enabled = enabled
+        enabledTypes = enabled
         self.limits = limits
         self.now = now
         self.queue = queue

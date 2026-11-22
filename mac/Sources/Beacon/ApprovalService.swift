@@ -6,10 +6,21 @@ import Foundation
 @MainActor
 final class ApprovalService: ObservableObject {
     @Published private(set) var status = "Approvals are not available"
+    @Published private(set) var github: GitHubSettings?
+    @Published private(set) var signal: SignalSettings?
+    @Published private(set) var delivery = "Records are not sent: add Signal in Settings"
+    private var journal: Journal?
+    private var deliverer: Timer?
+    private var scheduler: DeliveryScheduler?
     private(set) var desk: ApprovalDesk?
     private var server: ProposalServer?
+    private var vault: Vault?
+    private var merges: MergeHandler?
+    private var reconciler: Timer?
+    private var paths = AppPaths.standard
 
     func start(paths: AppPaths = .standard, bundle: Bundle = .main) {
+        self.paths = paths
         guard let requirement = ClientTrust.ownRequirement() else {
             status = "Approvals need Beacon.app signed with your Apple Development certificate"
             return
@@ -18,9 +29,42 @@ final class ApprovalService: ObservableObject {
             try FileManager.default.createDirectory(at: paths.data, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
             // Opening the vault creates or reads its Keychain key, which only this signed app reads.
-            try Vault(url: paths.vault, key: KeychainVaultKey()).unlock()
+            let vault = Vault(url: paths.vault, key: KeychainVaultKey())
+            try vault.unlock()
+            self.vault = vault
+            let settings = try AppSettings.load(paths.settings)
+            github = settings.github
+            signal = settings.signal
             let journal = try Journal(path: paths.journal.path, at: Date())
-            desk = ApprovalDesk(journal: journal, resolver: NoResolver())
+            self.journal = journal
+            let settingsURL0 = paths.settings
+            let scheduler = DeliveryScheduler(journal: journal, connect: {
+                guard let signal = try AppSettings.load(settingsURL0).signal else { throw VaultError.notFound }
+                return (try SignalRecords.connect(signal, vault: vault), signal.person)
+            }, message: delivery)
+            scheduler.onMessage = { [weak self] message in self?.delivery = message }
+            self.scheduler = scheduler
+            // Every new entry is sent in journal order; a timer resends after an outage.
+            journal.observe { [weak self] _ in
+                Task { @MainActor in self?.deliver() }
+            }
+            deliverer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.deliver() }
+            }
+            let settingsURL = paths.settings
+            let merges = MergeHandler(journal: journal, settings: { (try? AppSettings.load(settingsURL))?.github },
+                                      connect: MergeHandler.connect(vault: vault))
+            self.merges = merges
+            let desk = ApprovalDesk(journal: journal, resolver: merges)
+            desk.onApproved = { id in
+                Task { _ = try? await merges.execute(id) }
+            }
+            self.desk = desk
+            // Starts found by recovery, and lost replies, are settled by reading back, never by merging again.
+            reconcile()
+            reconciler = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reconcile() }
+            }
             guard try ClientTrust.ensure(paths.act, requirement: requirement) != .mismatch else {
                 status = "Not accepting proposals: \(paths.act.path) names another app signature. Remove it to trust this build."
                 return
@@ -30,12 +74,12 @@ final class ApprovalService: ObservableObject {
                 status = "Not accepting proposals: the bundled beacon CLI is not signed"
                 return
             }
-            // No action type is enabled until its handler exists (plan 13.00 part 3).
             let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
                                         book: journal, enabled: [])
             try server.start()
             self.server = server
-            status = "Accepting proposals (no action type enabled yet)"
+            updateEnabled()
+            deliver()
         } catch VaultError.existingKey {
             status = "Not opening the vault: a Keychain vault key from before the vault could not be removed (see docs/approvals.md)"
         } catch VaultError.keychain(let code) {
@@ -45,8 +89,93 @@ final class ApprovalService: ObservableObject {
         }
     }
 
-    /// Quit: no approval from now on, approvals without a start expire, and the socket closes.
+    /// Registers the GitHub token. It goes to the vault; this never shows or keeps it.
+    func registerGitHub(token: String, origin: String) async -> String {
+        guard let vault else { return status }
+        do {
+            github = try await GitHubSetup.register(token: Secret(token), origin: origin, vault: vault, settings: paths.settings)
+            updateEnabled()
+            return "Merges as \(github!.login)"
+        } catch GitHubSetup.Refusal.notAUser {
+            return "Not saved: that token is not a user's."
+        } catch GitHubSetup.Refusal.otherUser(let login) {
+            return "Not saved: Beacon is set up for \(login). Remove that account first."
+        } catch GitHubSetup.Refusal.rejected {
+            return "Not saved: GitHub refused the token."
+        } catch {
+            return "Not saved: GitHub could not be reached, or the origin is not https://host."
+        }
+    }
+
+    /// Registers the app actor's key. It goes to the vault; this never shows or keeps it.
+    func registerSignal(key: String, origin: String, person: String) async -> String {
+        guard let vault else { return status }
+        do {
+            signal = try await SignalSetup.register(key: Secret(key), origin: origin, person: person, vault: vault,
+                                                    settings: paths.settings)
+            // A new key or person may be what a stopped record needed.
+            resumeDelivery()
+            return "Records go to \(signal!.origin) as \(signal!.handle)"
+        } catch SignalSetup.Refusal.person {
+            return "Not saved: the person is an act_… id."
+        } catch SignalSetup.Refusal.notAnApp {
+            return "Not saved: that key is not an integration actor's."
+        } catch SignalSetup.Refusal.scopes {
+            return "Not saved: the app's key must have exactly read and write."
+        } catch SignalSetup.Refusal.rejected {
+            return "Not saved: Signal refused the key."
+        } catch {
+            return "Not saved: Signal could not be reached, or the origin is not https://host."
+        }
+    }
+
+    func removeSignal() {
+        guard let vault else { return }
+        try? SignalSetup.remove(vault: vault, settings: paths.settings)
+        signal = nil
+        delivery = "Records are not sent: add Signal in Settings"
+    }
+
+    /// Sends the outbox in journal order, one drain at a time (see `DeliveryScheduler`).
+    func deliver(force: Bool = false) {
+        guard signal != nil else { return }
+        scheduler?.deliver(force: force)
+    }
+
+    /// Resume: records stopped at a refusal go back to pending and are sent now, also when a drain is running.
+    func resumeDelivery() {
+        guard signal != nil else { return }
+        scheduler?.resume()
+    }
+
+    func removeGitHub() {
+        guard let vault else { return }
+        try? GitHubSetup.remove(vault: vault, settings: paths.settings)
+        github = nil
+        updateEnabled()
+    }
+
+    private func updateEnabled() {
+        guard let server else { return }
+        server.enabled = github == nil ? [] : [.githubMerge]
+        status = github == nil ? "Accepting proposals (no action type enabled: add a GitHub account in Settings)"
+            : "Accepting github.merge proposals"
+    }
+
+    private func reconcile() {
+        guard let merges else { return }
+        let desk = self.desk
+        Task {
+            for id in merges.unknown() { _ = try? await merges.reconcile(id) }
+            await MainActor.run { desk?.refresh() }
+        }
+    }
+
+    /// Quit: no approval from now on, approvals without a start expire, and the socket closes. A merge already
+    /// started settles from its reply, or by read-back after the next launch.
     func stop() {
+        reconciler?.invalidate()
+        deliverer?.invalidate()
         desk?.beginShutdown()
         server?.stop()
         server = nil

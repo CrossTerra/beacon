@@ -1808,7 +1808,7 @@
             },
             "native": {
               "type": "string",
-              "pattern": "^slack:msg:[A-Z0-9]{1,32}\\/[A-Z0-9]{1,32}\\/[0-9]{1,16}\\.[0-9]{6}$"
+              "pattern": "^slack:message:[A-Z0-9]{1,32}:[0-9]{1,16}\\.[0-9]{6}$"
             }
           },
           "required": [

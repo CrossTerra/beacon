@@ -5,15 +5,15 @@ window, and Beacon carries it out with its own credentials. This page describes 
 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
-ad-hoc build opens none of them. No action type is enabled, and nothing resolves an action, so nothing can be
-approved or executed. The handlers arrive in plan 13.00 part 3. The outbox is built and tested against a fake
-Signal, but the app does not send it yet: it has no Signal key or person id until the app actor is set up.
+ad-hoc build opens none of them. `github.merge` is enabled once a GitHub account is added in Settings
+([merges](#merges)). `slack.post` and `agent.run` have no handler yet. Once Signal is added in Settings, the
+outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
 ## The contract with Signal
 
 Signal publishes what it accepts from the app in `docs/approval-app.md` and three fixture files. Beacon builds to
 them and tests against copies in `mac/Tests/BeaconCoreTests/Fixtures/approval-app`, taken from Signal at
-`0702e09ab2ba09e51d731972aaf8a47a1afca250`. Replace the copies when Signal changes them.
+`7a20b1d2cd11c99b23c17194705caa1a2295855f`. Replace the copies when Signal changes them.
 
 - **Canonical JSON and hashes.** Keys sorted by UTF-16 code unit, no insignificant whitespace, integers only
   (`1.0`, `1e0`, and integers beyond 2^53 − 1 are refused), strings escaped as `JSON.stringify` does. A hash is
@@ -127,6 +127,94 @@ on first delivery with the person's `act_…` id, and kept. A merge is about its
 its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
+
+## Delivery to Signal
+
+**Settings.** The person enters the Signal origin (`https://host[:port]`), their own `act_…` id (every record's
+`metadata.person`), and the key of their app actor (13.00-D25: an integration actor marked `approval_app` that
+works for them, with a key of exactly `read` and `write`). Beacon calls `GET /api/me` with the key. It accepts only
+an integration actor's key whose scopes are exactly `read` and `write`. `/api/me` does not say whom the actor
+works for; Signal refuses any record whose person the actor does not work for. The key goes to the vault, bound to
+the origin and `signal:actor:{act_…}`. `settings.json` keeps the origin, the person, the actor and its handle.
+
+**Sending.** After every journal entry, and every 30 seconds, the app drains the outbox in journal order with
+`POST /api/app-records`. Each request carries the record's exact stored bytes and the app actor's key, sent only
+to that origin, with no redirects, proxies or retries.
+
+| Signal answers | Beacon |
+| --- | --- |
+| `201`, or `200` with `replayed: true` | marks the record delivered and sends the next |
+| `401`; `429` (not before `Retry-After`); `403` not about `/subject`; `400` about `/occurred_at` | sends the same record again later |
+| no answer; `5xx` (sealing unavailable included) | sends the same bytes again later, and never changes them: Signal may hold them |
+| `409` (`idempotency_conflict`, `journal_order`, `transition`, …); `403` about `/subject`; any other `400`; `413`; another `4xx` | stops delivery at that record, with the reason; nothing after it is sent until delivery is resumed |
+
+A record that cannot be built (for example, the person in Settings is not an `act_…` id) also stops delivery at
+its sequence, with the reason. After a failed attempt the next waits for `Retry-After`, or a backoff doubling from
+30 seconds up to 15 minutes.
+
+**Resume delivery** (in the menu and Settings, and on saving Signal's key or person again) puts stopped records back
+to pending and sends them at once, past any backoff. A resume while a send is running is kept: as soon as that send
+ends, records it stopped are resumed too and sending starts again, without waiting for its backoff. A record Signal definitely never stored (every answer it got was a definite refusal, or
+it was never sent) has its bytes built again with the current settings, so a corrected person takes effect. A record
+that ever went without a definite answer (a lost reply, a `5xx`) keeps its exact bytes; a trigger refuses any
+change to them.
+
+The menu and Settings show the result: delivered, waiting to be sent again, or stopped at a record and why. Sending a record never executes an action. `beacon egress` lists the Signal origin from the app's
+settings.
+
+## Merges
+
+`github.merge` (13.00, _Merge at the write_) is the first handler.
+
+**Settings.** The person pastes a GitHub token and the API origin (default `https://api.github.com`, or a GitHub
+Enterprise API origin) into Beacon's Settings window. Beacon calls `GET /user` with it and accepts only a user's
+token (`type: User`), never a bot or an app installation. The first account saved becomes the account: a token for
+another user is refused until that account is removed. The token goes straight into the [vault](#the-vault), bound
+to that origin and `github:user:{id}`. `settings.json` keeps only the origin, the account and the login. The token
+is never shown, logged, written elsewhere or passed to a child process.
+
+**Before approval** (the preflight that freezes the action), Beacon reads, with that token and nothing else:
+
+1. `GET /user`: the token is still the configured account's;
+2. `GET /repos/{owner}/{repo}/pulls/{n}`: open, not merged, base equal to the proposal's, head equal to the full
+   proposed SHA, `mergeable` true and `mergeable_state` `clean`, `unstable` or `has_hooks`;
+3. the reviews: no reviewer's latest review requests changes;
+4. the required checks on the base: contexts from repository rules and classic branch protection, where this
+   account can read them;
+5. the head's check runs and commit statuses: every required context completed successfully (or neutral or
+   skipped). As in Signal's executor (#131), only the latest run of each check name and app counts: GitHub's run id
+   decides, else the later start, and a completed run that never started is the oldest. A re-run that passes
+   clears an older failure. Between apps reporting one name, a failure wins, then a run still in progress.
+
+Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
+repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are
+bounded: two at once, and 120 GitHub reads an hour counted as each request is made, every page and _Read again_
+included. A preflight that reaches the limit stops there as `busy`, and a later one makes no read until the hour
+allows it.
+
+**After approval**, Beacon records the durable start, then reads all of it again, and finally reads the PR once
+more right before the write. A changed repository id, base, head, mergeability, review or check stops the merge as
+`failed` (`pre_dispatch`), with nothing sent. Otherwise it
+sends one `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with the frozen method and `sha: head`, so GitHub refuses it if
+the head moved and enforces its own branch rules for this account.
+
+| GitHub answers | Beacon records |
+| --- | --- |
+| `200` with the merge commit | `executed`, `confirmed_by: reply`, `native: github:merge:{sha}` |
+| `405`, `409`, `403`, `404`, `422`, another `4xx` | `failed` (`reply`): `not_mergeable`, `head_moved`, `forbidden`, `not_found`, `rejected`, `github_{status}` |
+| no answer, a `5xx`, a `2xx` without a merge | `outcome_unknown`, then a read-back |
+
+**Read-back** reads the PR, never merges again, and only with the approved account at the approved origin. If
+Settings changed since, the outcome stays unknown. Merged by the approved account with the approved head into the
+approved base is `executed` (`read_back`). Merged otherwise is `failed` (`merged_otherwise`), and closed unmerged
+is `failed` (`not_merged`). Still open is `not_merged` only after two reads, both at least a minute after the
+unknown outcome was recorded (after the write was sent). So a merge GitHub is still finishing is never recorded as
+failed. Any other result stays unknown and is read again every minute while the app runs, and at
+every launch. A start that recovery finds without a result is settled the same way.
+
+Every request goes only to the configured origin. Paths are built from the validated repository, number, branch and
+SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an
+answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origin from the app's settings.
 
 ## The vault
 

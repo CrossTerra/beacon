@@ -111,7 +111,15 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv("BEACON_TEST_HELPER"); mode != "" {
 		os.Exit(helper(mode, os.Getenv("BEACON_TEST_CONFIG")))
 	}
-	os.Exit(m.Run())
+	// A private HOME: no test reads the person's Beacon.app settings or act.json.
+	home, err := os.MkdirTemp("", "beacon-home")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 func helper(mode, cfg string) int {

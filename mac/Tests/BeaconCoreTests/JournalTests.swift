@@ -38,63 +38,70 @@ func freeze(_ journal: Journal, _ id: String, at date: Date, model: String? = ni
                               destination: mergeDestination, model: model)
 }
 
+/// Replays Signal's fixture journal through Beacon's journal with the fixture's ids, salts, nonces and times,
+/// skipping its runner events (no runner handler yet). Returns the journal and the fixture entries it replayed.
+func replaySignalFixture() throws -> (Journal, [JSON]) {
+    let entries = array(try fixture("journal.json")).filter { !$0["body"]!["type"]!.stringValue!.hasPrefix("app.runner.") }
+    var nonces = entries.map { $0["body"]?["sealed"]?["replay_nonce"]?.stringValue ?? randomHex(16) }
+    let nonce = { nonces.removeFirst() }
+    let ids = { (prefix: String) in prefix == "jrn" ? "jrn_01m6a6ft00e81840g2081040g2" : "run_01m7x1v080ec1r60r30c1g60r3" }
+    let path = scratchPath()
+    var journal = try Journal(path: path, at: iso("2026-11-20T16:59:00.000Z"), nonce: nonce, makeID: ids)
+    #expect(journal.id == "jrn_01m6a6ft00e81840g2081040g2")
+
+    for entry in entries {
+        let body = entry["body"]!
+        let metadata = body["metadata"]!
+        let sealed = body["sealed"]?["metadata"]
+        let id = metadata["proposal"]!.stringValue!
+        let at = iso(body["occurred_at"]!.stringValue!)
+        switch body["type"]!.stringValue! {
+        case "app.action.proposed":
+            let proposer = metadata["proposer"]!
+            let proposal = Proposal(request: request(metadata["action"]!.stringValue!, sealed!["params"]!,
+                                                     reason: sealed!["reason"]!.stringValue!,
+                                                     session: proposer["session"]?.stringValue),
+                                    client: "beacon-act", at: at, id: id, salt: sealed!["salt"]!.stringValue!)
+            try journal.add(proposal)
+        case "app.action.approved":
+            let proposal = journal.proposal(id, at: at)!
+            let model = sealed!["original_model"] == nil ? nil : sealed!["params"]!["model"]!.stringValue
+            let approval = try FrozenApproval(proposal, origin: sealed!["origin"]!.stringValue,
+                                              account: sealed!["account"]!.stringValue!,
+                                              destination: sealed!["destination"]!, model: model)
+            try journal.approve(approval, at: at)
+        case "app.action.declined":
+            try journal.decline(id, note: sealed?["note"]?.stringValue, at: at)
+        case "app.action.withdrawn":
+            _ = try journal.withdraw(id, at: at)
+        case "app.action.expired":
+            // The fixture's approval expired on Quit; the app then relaunched.
+            try journal.shutdown(at: at)
+            journal = try Journal(path: path, at: at, nonce: nonce, makeID: ids)
+        case "app.action.started":
+            _ = try journal.start(id, at: at)
+        case "app.action.outcome_unknown":
+            try journal.outcomeUnknown(id, reason: metadata["reason"]!.stringValue!, at: at)
+        case "app.action.executed", "app.action.failed":
+            var fields: [String: JSON] = [:]
+            for name in ["native", "error"] { fields[name] = metadata[name] }
+            for name in ["evidence", "result"] { fields[name] = sealed?[name] }
+            try journal.result(id, executed: body["type"] == "app.action.executed",
+                               confirmedBy: metadata["confirmed_by"]!.stringValue!, fields: fields, at: at)
+        default:
+            Issue.record("unexpected type")
+        }
+    }
+
+    return (journal, entries)
+}
+
 struct JournalTests {
     /// Signal's fixture journal, replayed through Beacon's journal with the fixture's ids, salts, nonces and
     /// times. Every record Beacon would send is the fixture's body, except the subject Beacon chooses for posts and
     /// runs (the person's own) and the keys (Beacon's sequence skips the fixture's runner events).
     @Test func reproducesSignalsFixtureJournal() throws {
-        let entries = array(try fixture("journal.json")).filter { !$0["body"]!["type"]!.stringValue!.hasPrefix("app.runner.") }
-        var nonces = entries.map { $0["body"]?["sealed"]?["replay_nonce"]?.stringValue ?? randomHex(16) }
-        let nonce = { nonces.removeFirst() }
-        let ids = { (prefix: String) in prefix == "jrn" ? "jrn_01m6a6ft00e81840g2081040g2" : "run_01m7x1v080ec1r60r30c1g60r3" }
-        let path = scratchPath()
-        var journal = try Journal(path: path, at: iso("2026-11-20T16:59:00.000Z"), nonce: nonce, makeID: ids)
-        #expect(journal.id == "jrn_01m6a6ft00e81840g2081040g2")
-
-        for entry in entries {
-            let body = entry["body"]!
-            let metadata = body["metadata"]!
-            let sealed = body["sealed"]?["metadata"]
-            let id = metadata["proposal"]!.stringValue!
-            let at = iso(body["occurred_at"]!.stringValue!)
-            switch body["type"]!.stringValue! {
-            case "app.action.proposed":
-                let proposer = metadata["proposer"]!
-                let proposal = Proposal(request: request(metadata["action"]!.stringValue!, sealed!["params"]!,
-                                                         reason: sealed!["reason"]!.stringValue!,
-                                                         session: proposer["session"]?.stringValue),
-                                        client: "beacon-act", at: at, id: id, salt: sealed!["salt"]!.stringValue!)
-                try journal.add(proposal)
-            case "app.action.approved":
-                let proposal = journal.proposal(id, at: at)!
-                let model = sealed!["original_model"] == nil ? nil : sealed!["params"]!["model"]!.stringValue
-                let approval = try FrozenApproval(proposal, origin: sealed!["origin"]!.stringValue,
-                                                  account: sealed!["account"]!.stringValue!,
-                                                  destination: sealed!["destination"]!, model: model)
-                try journal.approve(approval, at: at)
-            case "app.action.declined":
-                try journal.decline(id, note: sealed?["note"]?.stringValue, at: at)
-            case "app.action.withdrawn":
-                _ = try journal.withdraw(id, at: at)
-            case "app.action.expired":
-                // The fixture's approval expired on Quit; the app then relaunched.
-                try journal.shutdown(at: at)
-                journal = try Journal(path: path, at: at, nonce: nonce, makeID: ids)
-            case "app.action.started":
-                _ = try journal.start(id, at: at)
-            case "app.action.outcome_unknown":
-                try journal.outcomeUnknown(id, reason: metadata["reason"]!.stringValue!, at: at)
-            case "app.action.executed", "app.action.failed":
-                var fields: [String: JSON] = [:]
-                for name in ["native", "error"] { fields[name] = metadata[name] }
-                for name in ["evidence", "result"] { fields[name] = sealed?[name] }
-                try journal.result(id, executed: body["type"] == "app.action.executed",
-                                   confirmedBy: metadata["confirmed_by"]!.stringValue!, fields: fields, at: at)
-            default:
-                Issue.record("unexpected type")
-            }
-        }
-
+        let (journal, entries) = try replaySignalFixture()
         var keys: [Int64] = []
         for entry in entries {
             let (seq, bytes) = try #require(try journal.nextDelivery(person: person))
