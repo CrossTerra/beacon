@@ -153,7 +153,8 @@ its sequence, with the reason. After a failed attempt the next waits for `Retry-
 30 seconds up to 15 minutes.
 
 **Resume delivery** (in the menu and Settings, and on saving Signal's key or person again) puts stopped records back
-to pending and sends them. A record Signal definitely never stored (every answer it got was a definite refusal, or
+to pending and sends them at once, past any backoff. A resume while a send is running is kept: as soon as that send
+ends, records it stopped are resumed too and sending starts again, without waiting for its backoff. A record Signal definitely never stored (every answer it got was a definite refusal, or
 it was never sent) has its bytes built again with the current settings, so a corrected person takes effect. A record
 that ever went without a definite answer (a lost reply, a `5xx`) keeps its exact bytes; a trigger refuses any
 change to them.
