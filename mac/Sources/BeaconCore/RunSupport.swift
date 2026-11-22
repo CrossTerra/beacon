@@ -70,7 +70,9 @@ public enum LoginEnvironment {
             cArgs.forEach { free($0) }
             cEnv.forEach { free($0) }
         }
-        let pid = tether_spawn_at(argv[0], cArgs, cEnv, -1, fds[1], -1, directory)
+        let cwd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        let pid = cwd >= 0 ? tether_spawn_at(argv[0], cArgs, cEnv, -1, fds[1], -1, cwd) : -1
+        if cwd >= 0 { close(cwd) }
         close(fds[1])
         guard pid > 0 else {
             close(fds[0])
@@ -140,6 +142,14 @@ public struct CheckoutIdentity: Equatable, Sendable {
     public let branch: String
     /// The checkout has its own `bin/run`, which Beacon does not use.
     public let ownRunner: Bool
+
+    /// `vol:{device}/inode:{inode}` as tether's launch file pins it, `{device}:{inode}`; nil if it is not one.
+    static func pin(_ id: String) -> String? {
+        let parts = id.split(separator: "/")
+        guard parts.count == 2, parts[0].hasPrefix("vol:"), parts[1].hasPrefix("inode:"),
+              let device = UInt64(parts[0].dropFirst(4)), let inode = UInt64(parts[1].dropFirst(6)) else { return nil }
+        return "\(device):\(inode)"
+    }
 
     public static func read(_ path: String) -> CheckoutIdentity? {
         var info = stat()

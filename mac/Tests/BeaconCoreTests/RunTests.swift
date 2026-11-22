@@ -38,6 +38,9 @@ if word == "crash":
 if word == "long":
     text("msg_1", "prt_1", "start " + "x" * 40000 + " end")
     sys.exit(0)
+if word == "spamerr":
+    while True:
+        sys.stderr.write("z" * 10000 + "\n")
 if word == "spam":
     while True:
         text("msg_1", "prt_1", "y" * 10000)
@@ -49,8 +52,9 @@ if word == "hang":
 sys.exit(9)
 """#
 
-/// tether's side of a run, in-process: reads `runs/<id>/launch` and `prompt`, starts the run as the leader of a new
-/// process group with its output and errors beside them, reports its exit, kills what is left of its group and
+/// tether's side of a run, in-process: reads `runs/<id>/launch` and `prompt`, opens the pinned directory and refuses
+/// it with ESTALE unless its device and inode match, starts the run in it as the leader of a new process group with
+/// its output and errors beside them, writes `started`, reports its exit, kills what is left of its group and
 /// reports it gone. `stop` sends TERM to the group, then KILL after half a second.
 @MainActor
 final class FakeLauncher: RunLauncher {
@@ -71,23 +75,31 @@ final class FakeLauncher: RunLauncher {
             return true
         }
         let fields = launch.split(separator: 0, omittingEmptySubsequences: false).dropLast().map { String(decoding: $0, as: UTF8.self) }
-        let argc = Int(fields[1])!
-        let argv = Array(fields[2..<(2 + argc)]), env = Array(fields[(2 + argc)...])
+        let argc = Int(fields[2])!
+        let argv = Array(fields[3..<(3 + argc)]), env = Array(fields[(3 + argc)...])
+        let cwd = open(fields[0], O_RDONLY | O_DIRECTORY)
+        var info = stat()
+        guard cwd >= 0, fstat(cwd, &info) == 0, "\(info.st_dev):\(info.st_ino)" == fields[1] else {
+            if cwd >= 0 { close(cwd) }
+            Task { @MainActor in self.handler?.notStarted(runner, errno: ESTALE) }
+            return true
+        }
         let input = open(directory.appendingPathComponent("prompt").path, O_RDONLY)
         let output = open(directory.appendingPathComponent("output").path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         let errors = open(directory.appendingPathComponent("errors").path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         let cArgs = argv.map { strdup($0) } + [nil], cEnv = env.map { strdup($0) } + [nil]
-        let pid = tether_spawn_at(argv[0], cArgs, cEnv, input, output, errors, fields[0])
+        let pid = tether_spawn_at(argv[0], cArgs, cEnv, input, output, errors, cwd)
         cArgs.forEach { free($0) }
         cEnv.forEach { free($0) }
-        [input, output, errors].forEach { close($0) }
+        [input, output, errors, cwd].forEach { close($0) }
+        if pid > 0 { try? Data("\(pid)\n".utf8).write(to: directory.appendingPathComponent("started")) }
         guard pid > 0 else {
             let code = errno
             Task { @MainActor in self.handler?.notStarted(runner, errno: code) }
             return true
         }
         pids[runner] = pid
-        Task { @MainActor in self.handler?.started(runner) }
+        Task { @MainActor in self.handler?.started(runner, pid: pid) }
         Thread.detachNewThread { [weak self] in
             var status: Int32 = 0
             while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
@@ -111,6 +123,20 @@ final class FakeLauncher: RunLauncher {
     func stopAll() { pids.values.forEach { killpg($0, SIGKILL) } }
 }
 
+final class SwapBox: @unchecked Sendable {
+    var checkout: URL?
+    private var done = false
+
+    /// Moves the checkout away and puts a new directory at its path, once.
+    func swap() {
+        guard let checkout, !done else { return }
+        done = true
+        let away = checkout.deletingLastPathComponent().appendingPathComponent("moved-" + randomHex(4))
+        try? FileManager.default.moveItem(at: checkout, to: away)
+        try? FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+    }
+}
+
 @MainActor
 final class RunHarness {
     let root: URL
@@ -124,7 +150,7 @@ final class RunHarness {
     /// Every record delivered so far, so each test can read them more than once.
     private var delivered: [JSON] = []
 
-    init(models: [String]? = nil) throws {
+    init(models: [String]? = nil, duringRefresh: (@Sendable () -> Void)? = nil) throws {
         root = URL(fileURLWithPath: realpath(FileManager.default.temporaryDirectory.path, nil).map { p in
             defer { free(p) }
             return String(cString: p)
@@ -152,7 +178,8 @@ final class RunHarness {
             tools: RunHandler.Tools(
                 environment: { env },
                 models: { opencode, environment in
-                    models ?? OpencodeModels.list(opencode: opencode, environment: environment, timeout: 20) }))
+                    duringRefresh?()
+                    return models ?? OpencodeModels.list(opencode: opencode, environment: environment, timeout: 20) }))
         holder = self
         handler.launcher = launcher
         launcher.handler = handler
@@ -322,7 +349,7 @@ struct RunTests {
         q.launcher.stopAll()
         try await Task.sleep(nanoseconds: 300_000_000)
         q.handler.servicesStopped(verified: true)
-        #expect(q.journal.runnerState(quit) == "runner_closed")
+        try await q.until("the run to close") { q.journal.runnerState(quit) == "runner_closed" }
         let failed = try q.records(quit).first { $0["type"] == "app.runner.failed" }!
         #expect(failed["metadata"]?["error"] == "stopped_at_quit")
         #expect(try q.records(quit).filter { $0["type"] == "app.runner.failed" }.count == 1)
@@ -415,9 +442,108 @@ struct RunTests {
         h.launcher.refuse = true
         let id = try await h.run("succeed")
         #expect(h.journal.outcome(id)?["error"] == "supervisor_unavailable")
+        let directory = h.root.appendingPathComponent("runs/\(h.journal.runnerID(id)!)")
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch").path))
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("prompt").path))
         // Freed: a later run in the checkout may be approved.
         h.launcher.refuse = false
         #expect(try await h.approve(try h.propose("succeed")) == nil)
+    }
+
+    /// A directory swapped in at the checkout's path after the check, while Beacon reads the models, is refused by
+    /// the launcher's pinned identity: nothing runs, and the launch and prompt are gone.
+    @Test func aCheckoutSwappedDuringTheLaunchIsRefused() async throws {
+        let box = SwapBox()
+        let h = try RunHarness(duringRefresh: { box.swap() })
+        let id = try h.propose("succeed")
+        try await h.approve(id)
+        box.checkout = h.checkout
+        try await h.handler.execute(id)
+        try await h.until("tether's answer") { h.journal.proposal(id, at: Date())?.status == .failed }
+        #expect(h.journal.outcome(id)?["error"] == "checkout_changed")
+        #expect(h.journal.outcome(id)?["confirmed_by"] == "reply")
+        #expect(h.launcher.pids.isEmpty && h.calls == 0)
+        let directory = h.root.appendingPathComponent("runs/\(h.journal.runnerID(id)!)")
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch").path))
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("started").path))
+        #expect(try await h.approve(try h.propose("succeed")) == nil, "the checkout is free again")
+    }
+
+    /// tether ending while a run works: it failed (`supervisor_ended`), then closed once tether confirmed; without
+    /// confirmation it is not closed, and the session's claims and running set end either way.
+    @Test func tetherEndingWhileARunWorks() async throws {
+        for verified in [true, false] {
+            let h = try RunHarness()
+            let id = try await h.run("hang")
+            try await h.until("the run to start") { h.handler.isRunning(id) }
+            h.handler.servicesStopped(verified: verified)
+            #expect(h.journal.runnerWords(id)?["error"] == "supervisor_ended")
+            #expect(h.journal.runnerState(id) == (verified ? "runner_closed" : "runner_failed"))
+            #expect(!h.handler.isRunning(id))
+            #expect(try await h.approve(try h.propose("succeed")) == nil, "the claim ended with the session")
+            h.launcher.stopAll()
+        }
+    }
+
+    /// Before tether is up (starting, or sweeping after a crash) a run cannot be approved: it stays pending with the
+    /// reason, and nothing is consumed or recorded as failed.
+    @Test func noApprovalBeforeTetherIsUp() async throws {
+        let h = try RunHarness()
+        h.handler.launcher = nil
+        let id = try h.propose("succeed")
+        await #expect(throws: RunRefusal.supervisorNotReady) { try await h.approve(id) }
+        #expect(h.journal.proposal(id, at: Date())?.status == .pending)
+        h.handler.launcher = h.launcher
+        #expect(try await h.approve(id) == nil)
+    }
+
+    /// tether ending without confirming: an unanswered launch is unknown (`supervisor_ended`); a launched run is
+    /// left unclosed, so Quit or the next launch sweeps it, and the next session's recovery closes it.
+    @Test func anUnconfirmedEndLeavesRunsForTheSweep() async throws {
+        let h = try RunHarness()
+        let working = try await h.run("hang")
+        try await h.until("the run to start") { h.handler.isRunning(working) }
+        h.launcher.silent = true
+        h.checkouts.append(CheckoutSettings(name: "other", path: h.root.appendingPathComponent("log").path))
+        let unanswered = try h.propose("succeed", checkout: "other")
+        try await h.approve(unanswered)
+        try await h.handler.execute(unanswered)
+        h.handler.launcher = nil
+        h.handler.supervisorEnded()
+        h.handler.servicesStopped(verified: false)
+        #expect(h.journal.proposal(unanswered, at: Date())?.status == .outcomeUnknown)
+        #expect(try h.records(unanswered).last?["metadata"]?["reason"] == "supervisor_ended")
+        #expect(h.handler.hasUnclosedRuns)
+        h.launcher.stopAll()
+        h.handler.recover()
+        #expect(h.journal.runnerState(working) == "runner_closed")
+        #expect(!h.handler.hasUnclosedRuns)
+    }
+
+    @Test func errorsCountTowardTheOutputLimit() async throws {
+        let h = try RunHarness()
+        h.handler.outputLimit = 200_000
+        let id = try await h.run("spamerr")
+        try await h.until("the run to start") { h.handler.isRunning(id) }
+        try await h.until("errors past the limit to stop the run") {
+            h.handler.checkOutput()
+            return h.journal.runnerState(id) == "runner_closed"
+        }
+        #expect(h.journal.runnerWords(id)?["error"] == "output_too_large")
+    }
+
+    /// A process in a run's group is that run's; anything else, or a run that is gone, is nobody's.
+    @Test func aRunsProcessesAreAttributedToIt() async throws {
+        let h = try RunHarness()
+        let id = try await h.run("hang")
+        try await h.until("the run and its child") { h.calls == 1 }
+        let runner = h.journal.runnerID(id)!
+        let leader = h.launcher.pids[runner]!
+        #expect(h.handler.attribution.runner(of: leader) == runner)
+        #expect(h.handler.attribution.runner(of: getpid()) == nil)
+        h.handler.stop(id)
+        try await h.until("the run to end") { h.journal.runnerState(id) == "runner_closed" }
+        #expect(h.handler.attribution.runner(of: leader) == nil)
     }
 
     /// After a crash: a launched run not closed failed as interrupted; a start with no answer is read back.
@@ -425,7 +551,10 @@ struct RunTests {
         let h = try RunHarness()
         h.launcher.silent = true
         let lost = try await h.run("succeed")
+        let lostLaunch = h.root.appendingPathComponent("runs/\(h.journal.runnerID(lost)!)/launch")
+        #expect(FileManager.default.fileExists(atPath: lostLaunch.path))
         h.handler.supervisorEnded()
+        #expect(!FileManager.default.fileExists(atPath: lostLaunch.path), "the environment is not left behind")
         #expect(h.journal.proposal(lost, at: Date())?.status == .outcomeUnknown)
         // Whether it started is unknown, so its checkout stays claimed in this session.
         #expect(try await h.approve(try h.propose("succeed"))?.contains("another run") == true)
@@ -448,12 +577,23 @@ struct RunTests {
         try h.journal.outcomeUnknown(begun, reason: "app_restarted", at: Date())
         let directory = h.root.appendingPathComponent("runs/\(h.journal.runnerID(begun)!)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        FileManager.default.createFile(atPath: directory.appendingPathComponent("output").path, contents: Data())
+        // tether's mark that it started the run. An output file alone proves nothing: tether creates it first.
+        FileManager.default.createFile(atPath: directory.appendingPathComponent("started").path, contents: Data("42\n".utf8))
+        let lostDirectory = h.root.appendingPathComponent("runs/\(h.journal.runnerID(lost)!)")
+        FileManager.default.createFile(atPath: lostDirectory.appendingPathComponent("output").path, contents: Data())
+        // What a crash during a launch leaves: the launch (the environment) and the prompt.
+        let crashed = h.root.appendingPathComponent("runs/run_crashed")
+        try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
+        for name in ["launch", "prompt"] {
+            FileManager.default.createFile(atPath: crashed.appendingPathComponent(name).path, contents: Data("TOKEN=x".utf8))
+        }
 
         let relaunched = RunHandler(journal: h.journal, checkouts: { [] }, runs: h.root.appendingPathComponent("runs"),
                                     tools: .init(environment: { nil }, models: { _, _ in nil }))
         relaunched.recover()
-        #expect(h.journal.outcome(lost)?["error"] == "not_launched")
+        #expect(!FileManager.default.fileExists(atPath: crashed.appendingPathComponent("launch").path))
+        #expect(!FileManager.default.fileExists(atPath: crashed.appendingPathComponent("prompt").path))
+        #expect(h.journal.outcome(lost)?["error"] == "not_launched", "an output file without tether's mark")
         #expect(h.journal.outcome(lost)?["confirmed_by"] == "read_back")
         #expect(h.journal.runnerState(launched) == "runner_closed")
         #expect(h.journal.runnerWords(launched)?["error"] == "interrupted")

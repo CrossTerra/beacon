@@ -17,6 +17,8 @@ public enum RunRefusal: String, Error, Sendable {
     case environmentUnavailable = "environment_unavailable"
     /// tether is not running, or the request could not be sent.
     case supervisorUnavailable = "supervisor_unavailable"
+    /// tether is not up yet (starting, or sweeping what a crashed session left): the proposal stays pending.
+    case supervisorNotReady = "supervisor_not_ready"
     case launchFailed = "launch_failed"
 }
 
@@ -91,6 +93,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
     private var runs: [String: Run] = [:]
     private var quitting = false
     private var watch: Timer?
+    /// Read by the proposal socket, from its own queue.
+    public nonisolated let attribution = RunAttribution()
 
     public init(journal: Journal, checkouts: @escaping () -> [CheckoutSettings], runs: URL,
                 account: String = "macos:user:\(NSUserName())", tools: Tools = .standard,
@@ -107,6 +111,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     public func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
         guard proposal.type == .agentRun else { throw NoResolver.Unsupported() }
+        // Approve stays off until tether is up, so an approval is never consumed for a run that cannot start.
+        guard launcher != nil else { throw RunRefusal.supervisorNotReady }
         let p = proposal.params
         guard let name = p["checkout"]?.stringValue, let prompt = p["prompt"]?.stringValue,
               let proposed = p["model"]?.stringValue else { throw Invalid(field: "/params") }
@@ -166,12 +172,14 @@ public final class RunHandler: ObservableObject, ActionResolver {
     // MARK: After approval
 
     /// Starts one approved run. The start is durable before anything else; a refusal from here on is a failed
-    /// `pre_dispatch` with nothing launched, and frees the checkout.
+    /// `pre_dispatch` with nothing launched, and frees the checkout. The checkout's identity is pinned in the launch:
+    /// tether opens the directory, compares it and starts the run in it by descriptor, so a directory swapped in at
+    /// the path while Beacon reads the login environment and the models is refused (`checkout_changed`).
     public func execute(_ id: String) async throws {
         let approval = try journal.start(id, at: now())
         guard let runner = journal.runnerID(id), let name = approval.params["checkout"]?.stringValue,
               let prompt = approval.params["prompt"]?.stringValue, let model = approval.params["model"]?.stringValue,
-              let pinned = approval.destination["checkout_id"]?.stringValue else {
+              let pinned = approval.destination["checkout_id"]?.stringValue, let pin = CheckoutIdentity.pin(pinned) else {
             return try fail(id, .launchFailed, by: "pre_dispatch")
         }
         guard let launcher else { return try fail(id, .supervisorUnavailable, by: "pre_dispatch") }
@@ -186,8 +194,9 @@ public final class RunHandler: ObservableObject, ActionResolver {
         }
         guard context.models.contains(model) else { return try fail(id, .modelUnavailable, by: "pre_dispatch") }
         do {
-            try prepare(runner, in: checkout.path, prompt: prompt, model: model, context: context)
+            try prepare(runner, in: checkout.path, pin: pin, prompt: prompt, model: model, context: context)
         } catch {
+            forgetLaunch(runner)
             return try fail(id, .launchFailed, by: "pre_dispatch")
         }
         pending[runner] = id
@@ -195,13 +204,15 @@ public final class RunHandler: ObservableObject, ActionResolver {
         guard launcher.launch(runner) else {
             pending[runner] = nil
             runs[runner] = nil
+            forgetLaunch(runner)
             return try fail(id, .supervisorUnavailable, by: "pre_dispatch")
         }
     }
 
-    /// `runs/<runner id>/`: the prompt, exactly as approved, and the launch: the checkout, `opencode run` with the
-    /// approved model, and the login environment. Both `0600` in a `0700` directory.
-    func prepare(_ runner: String, in path: String, prompt: String, model: String, context: Context) throws {
+    /// `runs/<runner id>/`: the prompt, exactly as approved, and the launch: the checkout and its pinned identity
+    /// (`device:inode`), `opencode run` with the approved model, and the login environment. Both `0600` in a `0700`
+    /// directory, and both deleted once tether answers, or when the launch fails or is found at recovery.
+    func prepare(_ runner: String, in path: String, pin: String, prompt: String, model: String, context: Context) throws {
         let directory = runsDirectory.appendingPathComponent(runner)
         try FileManager.default.createDirectory(at: runsDirectory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -210,7 +221,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
         let argv = [context.opencode, "run", "--standalone", "--format", "json", "--auto", "--model", model]
         let environment = context.environment.filter { !LoginEnvironment.excluded($0.key) && !$0.key.contains("\0") }
             .map { "\($0.key)=\($0.value)" }.sorted()
-        let fields = [path, String(argv.count)] + argv + environment
+        let fields = [path, pin, String(argv.count)] + argv + environment
         guard fields.allSatisfy({ !$0.contains("\0") }) else { throw Invalid(field: "/launch") }
         var launch = Data()
         for field in fields { launch.append(Data(field.utf8)); launch.append(0) }
@@ -220,9 +231,12 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     // MARK: The launcher's answers
 
-    public func started(_ runner: String) {
+    /// The run started as the leader of process group `pid`. Its `beacon act` calls are attributed to it from now
+    /// until it is gone (tether keeps the leader unreaped until then, so the group id is not reused).
+    public func started(_ runner: String, pid: pid_t) {
         guard let id = pending.removeValue(forKey: runner) else { return }
         forgetLaunch(runner)
+        attribution.add(leader: pid, runner: runner)
         record { try journal.result(id, executed: true, confirmedBy: "reply", fields: launched(id), at: now()) }
         record { try journal.runner(id, .working, at: now()) }
         running.insert(id)
@@ -233,43 +247,57 @@ public final class RunHandler: ObservableObject, ActionResolver {
         guard let id = pending.removeValue(forKey: runner) else { return }
         forgetLaunch(runner)
         runs[runner] = nil
+        // ESTALE: the directory at the checkout's path is not the one approved.
+        let refusal: RunRefusal = code == ESTALE ? .checkoutChanged : .launchFailed
         record {
             try journal.result(id, executed: false, confirmedBy: "reply",
-                               fields: ["error": .string(RunRefusal.launchFailed.rawValue),
-                                        "result": .string("tether could not start opencode (error \(code)).")], at: now())
+                               fields: ["error": .string(refusal.rawValue),
+                                        "result": .string("tether did not start opencode (error \(code)).")], at: now())
         }
         release(id)
     }
 
+    /// The run's process exited. Its report is read off the main thread; its record comes before `closed`.
     public func exited(_ runner: String, status: Int32) {
         guard var run = runs[runner], !run.exited else { return }
         run.exited = true
         runs[runner] = run
         guard !quitting else { return }
         let directory = runsDirectory.appendingPathComponent(runner)
-        let report = RunReport.read(directory.appendingPathComponent("output"))
-        let event: RunnerEvent
-        if let reason = run.stopReason {
-            event = .failed(error: reason, detail: report.report ?? report.error)
-        } else if status == 0 {
-            event = .finished(report: report.report ?? "The run ended without a final message.")
-        } else {
-            let code = status == 130 ? "interrupted" : status > 128 ? "signal_\(status - 128)" : "exit_\(status)"
-            event = .failed(error: code, detail: report.error
-                ?? RunReport.tail(directory.appendingPathComponent("errors")) ?? report.report)
+        let proposal = run.proposal, reason = run.stopReason
+        chain(runner) { [weak self] in
+            let (report, errors) = await Task.detached {
+                (RunReport.read(directory.appendingPathComponent("output")),
+                 RunReport.tail(directory.appendingPathComponent("errors")))
+            }.value
+            let event: RunnerEvent
+            if let reason {
+                event = .failed(error: reason, detail: report.report ?? report.error)
+            } else if status == 0 {
+                event = .finished(report: report.report ?? "The run ended without a final message.")
+            } else {
+                let code = status == 130 ? "interrupted" : status > 128 ? "signal_\(status - 128)" : "exit_\(status)"
+                event = .failed(error: code, detail: report.error ?? errors ?? report.report)
+            }
+            guard let self else { return }
+            self.record { try self.journal.runner(proposal, event, at: self.now()) }
         }
-        record { try journal.runner(run.proposal, event, at: now()) }
     }
 
-    /// Every process of the run is gone: it is closed, also during Quit, and its checkout is free.
+    /// Every process of the run is gone: it is closed, after its report, also during Quit, and its checkout is free.
     public func gone(_ runner: String) {
         guard let run = runs.removeValue(forKey: runner) else { return }
-        if !run.exited, !quitting {
-            record { try journal.runner(run.proposal, .failed(error: "ended", detail: nil), at: now()) }
+        attribution.remove(runner: runner)
+        let quitting = self.quitting
+        after(runner) { [weak self] in
+            guard let self else { return }
+            if !run.exited, !quitting {
+                self.record { try self.journal.runner(run.proposal, .failed(error: "ended", detail: nil), at: self.now()) }
+            }
+            self.record { try self.journal.runner(run.proposal, .closed, at: self.now()) }
+            self.running.remove(run.proposal)
+            self.release(run.proposal)
         }
-        record { try journal.runner(run.proposal, .closed, at: now()) }
-        running.remove(run.proposal)
-        release(run.proposal)
     }
 
     /// The person's Stop: the run's whole process group is stopped; it is recorded as failed, `stopped`.
@@ -297,23 +325,41 @@ public final class RunHandler: ObservableObject, ActionResolver {
         }
     }
 
-    /// tether confirmed every process is gone: each run is closed. Unconfirmed, they are closed at the next launch.
+    /// tether's session ended: at Quit, or because tether itself stopped. A run still working when tether ended on
+    /// its own failed (`supervisor_ended`). If tether confirmed every process gone, each run is closed; if not, the
+    /// next launch closes them once its sweep is done. Either way this session's runs, claims and attributions end:
+    /// nothing more can start or be reported in it.
     public func servicesStopped(verified: Bool) {
-        guard verified else { return }
-        for (_, run) in runs where journal.proposal(run.proposal, at: now())?.status == .executed {
-            record { try journal.runner(run.proposal, .closed, at: now()) }
+        let quitting = self.quitting
+        for (runner, run) in runs where journal.proposal(run.proposal, at: now())?.status == .executed {
+            after(runner) { [weak self] in
+                guard let self else { return }
+                if !run.exited, !quitting {
+                    self.record {
+                        try self.journal.runner(run.proposal, .failed(error: "supervisor_ended",
+                                                                      detail: "tether ended while the run was working."),
+                                                at: self.now())
+                    }
+                }
+                if verified { self.record { try self.journal.runner(run.proposal, .closed, at: self.now()) } }
+            }
         }
         runs.removeAll()
         running.removeAll()
+        claims.removeAll()
+        attribution.removeAll()
     }
 
-    /// After a relaunch, once tether has stopped anything a crashed session left: a launched run that was not
-    /// closed failed as `interrupted` and is closed now; a start whose launch is unknown is read back from its run
-    /// directory: tether creates the run's output just before it starts the run, so without it nothing started.
+    /// After a relaunch, once tether has stopped anything a crashed session left. Every run directory loses its
+    /// `launch` and `prompt` (a crash can leave them). A launched run that was not closed failed as `interrupted`
+    /// and is closed now. A start whose launch is unknown is read back: tether writes `started`, with the pid, only
+    /// after it started the run, so with it the run started, and without it nothing did.
     public func recover() {
+        let directories = (try? FileManager.default.contentsOfDirectory(atPath: runsDirectory.path)) ?? []
+        for runner in directories where pending[runner] == nil { forgetLaunch(runner) }
         for proposal in journal.all() where proposal.type == .agentRun && !isRunning(proposal.id) {
             let id = proposal.id
-            guard let runner = journal.runnerID(id), runs[runner] == nil else { continue }
+            guard let runner = journal.runnerID(id), runs[runner] == nil, pending[runner] == nil else { continue }
             let state = journal.runnerState(id)
             switch proposal.status {
             case .executed where state != "runner_closed":
@@ -325,11 +371,11 @@ public final class RunHandler: ObservableObject, ActionResolver {
                 }
                 record { try journal.runner(id, .closed, at: now()) }
             case .outcomeUnknown:
-                let output = runsDirectory.appendingPathComponent(runner).appendingPathComponent("output")
-                if FileManager.default.fileExists(atPath: output.path) {
+                let started = runsDirectory.appendingPathComponent(runner).appendingPathComponent("started")
+                if FileManager.default.fileExists(atPath: started.path) {
                     record {
                         try journal.result(id, executed: true, confirmedBy: "read_back",
-                                           fields: ["evidence": "Read back: tether had created the run's output, so it started."],
+                                           fields: ["evidence": "Read back: tether recorded that it started the run."],
                                            at: now())
                     }
                     record {
@@ -341,7 +387,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
                     record {
                         try journal.result(id, executed: false, confirmedBy: "read_back",
                                            fields: ["error": "not_launched",
-                                                    "evidence": "Read back: the run has no output, so it never started."],
+                                                    "evidence": "Read back: tether never recorded starting the run."],
                                            at: now())
                     }
                 }
@@ -351,20 +397,29 @@ public final class RunHandler: ObservableObject, ActionResolver {
         }
     }
 
-    /// tether ended while launches waited for its answer: whether they started is unknown until the next launch.
+    /// Launched runs not yet closed: after tether ended without confirming, their processes may still run until a
+    /// new session's sweep stops them.
+    public var hasUnclosedRuns: Bool {
+        journal.all().contains { $0.type == .agentRun && $0.status == .executed && journal.runnerState($0.id) != "runner_closed" }
+    }
+
+    /// tether ended while launches waited for its answer: whether they started is unknown until the next session
+    /// reads back tether's `started` mark.
     public func supervisorEnded() {
         for (runner, id) in pending {
-            record { try journal.outcomeUnknown(id, reason: "reply_lost", at: now()) }
+            record { try journal.outcomeUnknown(id, reason: "supervisor_ended", at: now()) }
             runs[runner] = nil
+            forgetLaunch(runner)
         }
         pending.removeAll()
     }
 
     // MARK: Internals
 
-    /// Once tether has answered, it has read `launch` and holds `prompt` open: both go, so the environment (which
-    /// may hold the person's tokens) and the prompt are not kept on disk. `output` and `errors` stay.
+    /// `launch` holds the environment (which may hold the person's tokens) and `prompt` the prompt: neither is kept
+    /// once tether has answered, nor after a failed launch or a crash. `output`, `errors` and `started` stay.
     private func forgetLaunch(_ runner: String) {
+        guard !runner.contains("/") else { return }
         let directory = runsDirectory.appendingPathComponent(runner)
         for name in ["launch", "prompt"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent(name)) }
     }
@@ -387,7 +442,28 @@ public final class RunHandler: ObservableObject, ActionResolver {
         try? write()
     }
 
-    /// Every two seconds: a run whose output passed the limit is stopped.
+    /// A run's journal writes, in order: one that may wait (reading the report) is queued, and later ones wait for
+    /// it. With nothing queued a write happens at once, so Quit does not lose it.
+    private var tails: [String: Task<Void, Never>] = [:]
+
+    private func chain(_ runner: String, _ work: @escaping @MainActor () async -> Void) {
+        let previous = tails[runner]
+        let next = Task { @MainActor in
+            await previous?.value
+            await work()
+        }
+        tails[runner] = next
+        Task { @MainActor [weak self] in
+            await next.value
+            if self?.tails[runner] == next { self?.tails[runner] = nil }
+        }
+    }
+
+    private func after(_ runner: String, _ work: @escaping @MainActor () -> Void) {
+        if tails[runner] == nil { work() } else { chain(runner) { work() } }
+    }
+
+    /// Every two seconds: a run whose output and errors together passed the limit is stopped.
     private func startWatching() {
         guard watch == nil else { return }
         watch = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -396,13 +472,36 @@ public final class RunHandler: ObservableObject, ActionResolver {
     }
 
     func checkOutput() {
+        func size(_ url: URL) -> UInt64 {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        }
         for (runner, run) in runs where !run.exited && run.stopReason == nil {
-            let output = runsDirectory.appendingPathComponent(runner).appendingPathComponent("output")
-            let size = (try? FileManager.default.attributesOfItem(atPath: output.path)[.size] as? NSNumber)?.uint64Value ?? 0
-            if size > outputLimit {
+            let directory = runsDirectory.appendingPathComponent(runner)
+            if size(directory.appendingPathComponent("output")) + size(directory.appendingPathComponent("errors")) > outputLimit {
                 runs[runner]?.stopReason = "output_too_large"
                 launcher?.stop(runner)
             }
         }
+    }
+}
+
+/// Which run a connecting process belongs to: the process group of a run Beacon launched. tether keeps each run's
+/// leader unreaped until its whole group is gone, so while a run is listed here its group id cannot name another
+/// group. A process that left the group (setsid) is not attributed, and is treated as anyone else.
+public final class RunAttribution: @unchecked Sendable {
+    private let lock = NSLock()
+    private var leaders: [pid_t: String] = [:]
+
+    public init() {}
+
+    func add(leader: pid_t, runner: String) { lock.withLock { leaders[leader] = runner } }
+    func remove(runner: String) { lock.withLock { leaders = leaders.filter { $0.value != runner } } }
+    func removeAll() { lock.withLock { leaders.removeAll() } }
+
+    /// The run `pid` belongs to, by its process group, or nil.
+    public func runner(of pid: pid_t) -> String? {
+        let group = getpgid(pid)
+        guard group > 0 else { return nil }
+        return lock.withLock { leaders[group] }
     }
 }

@@ -91,13 +91,19 @@ class Session:
             if isinstance(event, str) and event.startswith(prefix):
                 return event.split()
 
-    def launch(self, state, run, prompt, cwd, extra_env=()):
+    def launch(self, state, run, prompt, cwd, extra_env=(), pin=None):
+        """Writes the run's directory, pinning `cwd`'s identity (or `pin`'s) as the app does, and asks for it."""
         directory = state / "runs" / run
         directory.mkdir(parents=True)
         (directory / "prompt").write_text(prompt)
         argv = [self.fixture, "runner", str(state)]
         env = ["PATH=/usr/bin:/bin", "RUN_VAR=from-the-app", "BEACON_SUPERVISOR=forged", *extra_env]
-        fields = [str(cwd), str(len(argv)), *argv, *env]
+        try:
+            st = os.stat(pin or cwd)
+            identity = f"{st.st_dev}:{st.st_ino}"
+        except FileNotFoundError:
+            identity = "1:1"
+        fields = [str(cwd), identity, str(len(argv)), *argv, *env]
         (directory / "launch").write_bytes(b"".join(f.encode() + b"\0" for f in fields))
         self.holder.sendall(f"L {run}\n".encode())
 
@@ -270,6 +276,8 @@ def runner_runs_and_reports(fixture, state):
     session.launch(state, "run_a1", "exit 3", checkout)
     _, run, pid = session.until("#started")
     assert run == "run_a1" and int(pid) > 0
+    # Written only after the spawn succeeded, with the pid: what the app reads back after a crash.
+    assert (state / "runs" / "run_a1" / "started").read_text() == f"{pid}\n"
     assert session.until("#exited") == ["#exited", "run_a1", "3"]
     assert session.until("#gone") == ["#gone", "run_a1"]
     output = (state / "runs" / "run_a1" / "output").read_text()
@@ -332,13 +340,64 @@ def runner_bad_launches(fixture, state):
     bad = state / "runs" / "run_d2"
     bad.mkdir(parents=True)
     (bad / "prompt").write_text("exit 0")
-    (bad / "launch").write_bytes(b"relative\0" + b"1\0" + b"/bin/true\0")
+    (bad / "launch").write_bytes(b"relative\0" + b"1:1\0" + b"1\0" + b"/bin/true\0")
     session.holder.sendall(b"L run_d2\n" + b"L ../escape\n" + b"X\n" + b"L " + b"a" * 300 + b"\n")
     assert session.until("#failed")[1] == "run_d2"
     # A good run after all that still starts.
     session.launch(state, "run_d3", "exit 0", state)
     assert session.until("#exited") == ["#exited", "run_d3", "0"]
     assert listening(port)
+    session.quit()
+    assert_clean(state, port)
+
+
+def runner_checkout_swapped(fixture, state):
+    """A directory swapped in at the checkout's path after the app pinned it is refused: nothing starts."""
+    session, port = started(fixture, state)
+    checkout, other = state / "checkout", state / "other"
+    checkout.mkdir()
+    other.mkdir()
+    pinned = os.stat(checkout)
+    checkout.rename(state / "moved-away")
+    other.rename(checkout)
+    session.launch(state, "run_e1", "exit 0", checkout, pin=state / "moved-away")
+    assert os.stat(checkout).st_ino != pinned.st_ino
+    failed = session.until("#failed")
+    assert failed[1] == "run_e1" and int(failed[2]) == 70, failed  # ESTALE
+    assert not (state / "runs" / "run_e1" / "started").exists()
+    assert not (state / "runs" / "run_e1" / "output").exists()
+    session.quit()
+    assert_clean(state, port)
+
+
+def run_left_by_a_killed_tether(fixture, state):
+    """tether killed while a run works: the next session sweeps the run's processes before it reports ready."""
+    session, port = started(fixture, state)
+    before = pids(state)
+    session.launch(state, "run_k1", "hang", state)
+    session.until("#started")
+    wait_for(lambda: len(list(state.glob("leaked-*"))) == 1, "the run's detached grandchild")
+    run = pids(state) - before
+    session.helper.kill()
+    session.helper.wait()
+    session.close()
+    assert live(run), "the fixture left no run to sweep"
+    (state / "port").unlink()
+    session, new_port = started(fixture, state)
+    assert not live(run), "the next session did not stop the run"
+    session.quit()
+    assert_clean(state, new_port)
+
+
+def many_runs_in_one_session(fixture, state):
+    """Only live runs count against the limit: 300 runs one after another all start, past the 256 at once."""
+    session, port = started(fixture, state)
+    for n in range(300):
+        run = f"run_m{n}"
+        session.launch(state, run, "exit 0", state)
+        event = session.until("#")
+        assert event[0] == "#started" and event[1] == run, (n, event)
+        assert session.until("#gone")[1] == run
     session.quit()
     assert_clean(state, port)
 
@@ -378,7 +437,7 @@ if __name__ == "__main__":
                  leaked_grandchild_stopped_before_restart, app_crash, helper_crash_then_recovery,
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
                  stubborn_sweep_gives_up, runner_runs_and_reports, runner_stopped, runners_stop_at_quit,
-                 runner_bad_launches):
+                 runner_bad_launches, runner_checkout_swapped, run_left_by_a_killed_tether, many_runs_in_one_session):
         state = Path(tempfile.mkdtemp(prefix="tether-"))
         try:
             case(fixture, state)

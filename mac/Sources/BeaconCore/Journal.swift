@@ -252,6 +252,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
             body["subject"] = proposal.subject.map(JSON.string)
             body["client_path"] = proposal.clientPath.map(JSON.string)
             body["client_requirement"] = proposal.clientRequirement.map(JSON.string)
+            body["proposer_runner_id"] = proposal.runner.map(JSON.string)
             if proposal.type == .agentRun { body["runner_id"] = .string(makeID("run")) }
             return body
         }
@@ -536,7 +537,7 @@ public final class Journal: ProposalBook, @unchecked Sendable {
                                     session: body["session"]?.stringValue, subject: body["subject"]?.stringValue,
                                     client: client, clientPath: body["client_path"]?.stringValue,
                                     clientRequirement: body["client_requirement"]?.stringValue,
-                                    proposedAt: date, expiresAt: Date(milliseconds: expires))
+                                    runner: body["proposer_runner_id"]?.stringValue, proposedAt: date, expiresAt: Date(milliseconds: expires))
             states[id] = State(proposal: proposal, runnerID: body["runner_id"]?.stringValue)
             order.append(id)
             return

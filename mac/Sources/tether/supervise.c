@@ -22,7 +22,8 @@
 #define TOKEN_SIZE 33
 #define ENTRY_SIZE (sizeof(TETHER_MARKER) + TOKEN_SIZE + TETHER_ID_MAX + 8)
 #define LAUNCH_MAX (1 << 20) // The largest launch file: its argv and environment.
-#define RUNNERS_MAX 256      // Runs started in one session.
+#define TETHER_SEND_MS 1000  // The longest a line to the app may block.
+#define RUNNERS_MAX 256      // Runs alive at once in one session.
 
 struct tracked {
     pid_t pid;
@@ -58,7 +59,7 @@ struct session {
     int dir;     // The state directory.
     const char *token;
     struct job *jobs;
-    size_t count, runners;
+    size_t count;
     char *const *env;
     unsigned grace_ms;
     struct tracked *tracked;
@@ -90,13 +91,22 @@ static void send_byte(int lease, char byte) {
 }
 
 static void send_line(int lease, const char *format, ...) __attribute__((format(printf, 2, 3)));
+// A whole line, or nothing more once the lease fails: the lease blocks for at most TETHER_SEND_MS
+// (SO_SNDTIMEO), so an app that stops reading cannot hold tether, and a partial write is completed.
 static void send_line(int lease, const char *format, ...) {
     char line[128];
     va_list args;
     va_start(args, format);
     int n = vsnprintf(line, sizeof(line), format, args);
     va_end(args);
-    if (n > 0 && n < (int)sizeof(line)) (void)send(lease, line, (size_t)n, MSG_DONTWAIT);
+    if (n <= 0 || n >= (int)sizeof(line)) return;
+    size_t sent = 0;
+    while (sent < (size_t)n) {
+        ssize_t w = send(lease, line + sent, (size_t)n - sent, 0);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return;
+        sent += (size_t)w;
+    }
 }
 
 static struct tracked *find(struct session *s, pid_t pid) {
@@ -300,11 +310,11 @@ static void free_runner(struct runner *r) {
     free(r);
 }
 
-// Reads <state>/runs/<id>/launch: NUL-terminated fields, the working directory, the argument
-// count, the arguments (the first an absolute image path), then the environment. Returns the
-// runner with its argv set, its environment in `env` (NULL-terminated, the job's marker still
-// to be added), or NULL with errno set.
-static struct runner *read_launch(int run, const char *id, char ***env, const char **cwd) {
+// Reads <state>/runs/<id>/launch: NUL-terminated fields, the working directory, its identity as
+// "<device>:<inode>" (pinned when the app approved it), the argument count, the arguments (the
+// first an absolute image path), then the environment. Returns the runner with its argv set, its
+// environment in `env` (NULL-terminated, the job's marker still to be added), or NULL with errno set.
+static struct runner *read_launch(int run, const char *id, char ***env, const char **cwd, dev_t *dev, ino_t *ino) {
     int fd = openat(run, "launch", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     struct stat st;
     if (fd < 0) return NULL;
@@ -333,27 +343,33 @@ static struct runner *read_launch(int run, const char *id, char ***env, const ch
         return NULL;
     }
     for (size_t i = 0, k = 0; i < size; i += strlen(buf + i) + 1) fields[k++] = buf + i;
-    char *end = NULL;
-    long argc = nfields >= 3 ? strtol(fields[1], &end, 10) : 0;
-    if (nfields < 3 || fields[0][0] != '/' || !end || *end || argc < 1 || argc > 64 || (size_t)argc + 2 > nfields ||
-        fields[2][0] != '/') {
+    char *end = NULL, *colon = NULL, *rest = NULL;
+    unsigned long long device = nfields >= 4 ? strtoull(fields[1], &colon, 10) : 0;
+    unsigned long long inode = colon && *colon == ':' ? strtoull(colon + 1, &rest, 10) : 0;
+    long argc = nfields >= 4 ? strtol(fields[2], &end, 10) : 0;
+    if (nfields < 4 || fields[0][0] != '/' || !rest || *rest || colon == fields[1] || !end || *end || argc < 1 ||
+        argc > 64 || (size_t)argc + 3 > nfields || fields[3][0] != '/') {
         free(fields);
         free_runner(r);
         errno = EINVAL;
         return NULL;
     }
     *cwd = fields[0];
+    *dev = (dev_t)device;
+    *ino = (ino_t)inode;
     r->argv = calloc((size_t)argc + 1, sizeof(*r->argv));
-    *env = calloc(nfields - 2 - (size_t)argc + 2, sizeof(**env));
+    *env = calloc(nfields - 3 - (size_t)argc + 2, sizeof(**env));
     if (!r->argv || !*env) {
+        // The caller frees env too: leave it nothing to free twice.
         free(*env);
+        *env = NULL;
         free(fields);
         free_runner(r);
         return NULL;
     }
-    memcpy(r->argv, fields + 2, (size_t)argc * sizeof(*r->argv));
+    memcpy(r->argv, fields + 3, (size_t)argc * sizeof(*r->argv));
     size_t envc = 0;
-    for (size_t k = 2 + (size_t)argc; k < nfields; k++)
+    for (size_t k = 3 + (size_t)argc; k < nfields; k++)
         if (strchr(fields[k], '=') && strncmp(fields[k], TETHER_MARKER, sizeof(TETHER_MARKER) - 1) != 0)
             (*env)[envc++] = fields[k];
     free(fields);
@@ -362,11 +378,51 @@ static struct runner *read_launch(int run, const char *id, char ***env, const ch
     return r;
 }
 
-// Starts the run `id` as a new job: its own process group, never restarted, with standard input
-// from the run's prompt file and its output and errors in files beside it, created afresh.
+static size_t live_runners(const struct session *s) {
+    size_t n = 0;
+    for (size_t j = 0; j < s->count; j++) n += s->jobs[j].runner && !s->jobs[j].retired;
+    return n;
+}
+
+// A job slot for a new run: a run that ended gives its slot back (nothing is tracked for it any more: it
+// retired only once its last process was gone), so a long session does not grow without bound.
+static struct job *runner_slot(struct session *s) {
+    for (size_t j = 0; j < s->count; j++) {
+        struct job *job = &s->jobs[j];
+        // A run that ended, or a slot a failed launch left (no spec). A fixed service always has a spec.
+        if ((job->runner || !job->spec) && job->retired && job->pid == 0 && !job->cleaning) {
+            free_runner(job->runner);
+            job->runner = NULL;
+            return job;
+        }
+    }
+    struct job *grown = realloc(s->jobs, (s->count + 1) * sizeof(*s->jobs));
+    if (!grown) return NULL;
+    s->jobs = grown;
+    s->jobs[s->count] = (struct job){.lifetime = -1};
+    s->count++;
+    return &s->jobs[s->count - 1];
+}
+
+// Records that the run started, with its pid, once posix_spawn succeeded: the app reads it back after a
+// crash to tell a run that started from one that never did.
+static void mark_started(int run, pid_t pid) {
+    int fd = openat(run, "started", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    char text[32];
+    int n = snprintf(text, sizeof(text), "%d\n", pid);
+    if (n > 0) (void)!write(fd, text, (size_t)n);
+    (void)fsync(fd);
+    close(fd);
+}
+
+// Starts the run `id` as a new job: its own process group, never restarted, in the working directory
+// the app pinned (opened once, compared by device and inode, and entered by descriptor, so a directory
+// swapped in at that path is refused with ESTALE), with standard input from the run's prompt file and
+// its output and errors in files beside it, created afresh.
 static void launch(struct session *s, const char *id) {
-    if (s->runners >= RUNNERS_MAX || runner_job(s, id)) {
-        send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, s->runners >= RUNNERS_MAX ? EAGAIN : EEXIST);
+    if (live_runners(s) >= RUNNERS_MAX || runner_job(s, id)) {
+        send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, runner_job(s, id) ? EEXIST : EAGAIN);
         return;
     }
     int runs = openat(s->dir, "runs", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -375,14 +431,26 @@ static void launch(struct session *s, const char *id) {
     if (runs >= 0) close(runs);
     char **env = NULL;
     const char *cwd = NULL;
-    struct runner *r = run >= 0 ? read_launch(run, id, &env, &cwd) : NULL;
+    dev_t dev = 0;
+    ino_t ino = 0;
+    struct runner *r = run >= 0 ? read_launch(run, id, &env, &cwd, &dev, &ino) : NULL;
     if (!r) error = errno;
+    int dir = -1;
+    if (r) {
+        struct stat st;
+        dir = open(cwd, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (dir < 0) {
+            error = errno;
+        } else if (fstat(dir, &st) != 0 || st.st_dev != dev || st.st_ino != ino) {
+            error = ESTALE;
+            close(dir);
+            dir = -1;
+        }
+    }
     int in = -1, out = -1, err = -1;
-    struct job *grown = r ? realloc(s->jobs, (s->count + 1) * sizeof(*s->jobs)) : NULL;
-    if (grown) s->jobs = grown;
     pid_t pid = -1;
-    if (grown) {
-        struct job *job = &s->jobs[s->count];
+    struct job *job = dir >= 0 ? runner_slot(s) : NULL;
+    if (job) {
         *job = (struct job){.spec = &r->spec, .runner = r, .lifetime = -1};
         snprintf(job->entry, sizeof(job->entry), TETHER_MARKER "%s:r%s", s->token, id);
         size_t envc = 0;
@@ -391,20 +459,23 @@ static void launch(struct session *s, const char *id) {
         in = openat(run, "prompt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         out = openat(run, "output", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         err = openat(run, "errors", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_at(r->argv[0], r->argv, env, in, out, err, cwd) : -1;
+        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_at(r->argv[0], r->argv, env, in, out, err, dir) : -1;
         error = errno;
         if (pid > 0) {
             job->pid = pid;
             job->started_at = now_ms();
-            s->count++;
-            s->runners++;
+            mark_started(run, pid);
+        } else {
+            // The slot stays free for the next run.
+            *job = (struct job){.retired = true, .lifetime = -1};
         }
-    } else if (r) {
+    } else if (dir >= 0) {
         error = ENOMEM;
     }
     if (in >= 0) close(in);
     if (out >= 0) close(out);
     if (err >= 0) close(err);
+    if (dir >= 0) close(dir);
     if (run >= 0) close(run);
     free(env);
     if (pid > 0) {
@@ -549,6 +620,8 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         sigaction(SIGINT, &action, NULL) != 0) return 1;
     int dir = open(state_dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dir < 0) return 1;
+    const struct timeval send_timeout = {.tv_sec = TETHER_SEND_MS / 1000, .tv_usec = (TETHER_SEND_MS % 1000) * 1000};
+    (void)setsockopt(lease, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     int lock = openat(dir, "tether.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (lock < 0) return 1;
     if (flock(lock, LOCK_EX | LOCK_NB) != 0) {

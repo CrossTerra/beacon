@@ -204,6 +204,9 @@ public final class ApprovalDesk: ObservableObject {
             } catch let refusal as ChecksNotGreen {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: checks \(refusal.report.summary)."
+            } catch RunRefusal.supervisorNotReady {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable yet: Beacon's services are starting. It stays pending; this updates once they run."
             } catch let refusal as RunRefusal {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."

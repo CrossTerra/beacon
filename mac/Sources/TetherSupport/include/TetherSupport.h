@@ -7,7 +7,8 @@
 // kernel closes it if the app dies. The app writes only runner commands, one per line:
 //   "L <id>\n" launches the run described in <state>/runs/<id>/, "K <id>\n" stops it.
 // tether answers each run with lines that start with TETHER_LINE:
-//   "#started <id> <pid>", "#failed <id> <errno>" (nothing was started),
+//   "#started <id> <pid>", "#failed <id> <errno>" (nothing was started; ESTALE when the working
+//   directory is not the one the launch file pins),
 //   "#exited <id> <status>" (the exit code, or 128 + the signal), and
 //   "#gone <id>" once every process of the run is gone.
 #define TETHER_ACTIVE 'A'  // services started
@@ -35,8 +36,8 @@ int tether_open_session(const char *helper, pid_t *pid);
 pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int input, int output);
 
 // As tether_spawn, with standard error on `error` (/dev/null when negative) and, when `cwd` is
-// not NULL, started in that directory.
+// not negative, started in the directory that descriptor names.
 pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
-                      const char *cwd);
+                      int cwd);
 
 #endif

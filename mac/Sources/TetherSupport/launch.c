@@ -8,11 +8,11 @@
 #include <unistd.h>
 
 pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int input, int output) {
-    return tether_spawn_at(image, argv, env, input, output, -1, NULL);
+    return tether_spawn_at(image, argv, env, input, output, -1, -1);
 }
 
 pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
-                      const char *cwd) {
+                      int cwd) {
     posix_spawn_file_actions_t files;
     posix_spawnattr_t attrs;
     if (posix_spawn_file_actions_init(&files) != 0) return -1;
@@ -34,7 +34,7 @@ pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], 
             err = error < 0
                 ? posix_spawn_file_actions_addopen(&files, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
                 : posix_spawn_file_actions_adddup2(&files, error, STDERR_FILENO);
-        if (err == 0 && cwd) err = posix_spawn_file_actions_addchdir_np(&files, cwd);
+        if (err == 0 && cwd >= 0) err = posix_spawn_file_actions_addfchdir_np(&files, cwd);
         if (err == 0 &&
             posix_spawnattr_setsigmask(&attrs, &clear) == 0 &&
             posix_spawnattr_setsigdefault(&attrs, &defaults) == 0 &&

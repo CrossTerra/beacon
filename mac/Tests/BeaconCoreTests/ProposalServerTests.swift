@@ -153,6 +153,51 @@ struct ProposalServerTests {
         #expect(runs.queue.sync { runs.book.runnerID(launched["id"]!.stringValue!) } == runner)
     }
 
+    /// A proposal from a process in a run's group is that run's: verified, with its runner id, and only that run
+    /// reads it. Bosun's proposals are not the run's to read or withdraw, nor another run's.
+    @Test func aRunsProposalsAreItsOwn() throws {
+        let h = try Harness(enabled: [.githubMerge])
+        let current = RunnerBox()
+        h.server.runnerOf = { _ in current.value }
+        let bosun = try h.connect()
+        let bosunID = try #require(bosun.call(mergeProposal())?["id"]?.stringValue)
+
+        current.value = "run_01m7x1v080ec1r60r30c1g60r3"
+        let run = try h.connect()
+        #expect(run.call(.object(["op": "get", "id": .string(bosunID)]))?["error"] == "not_found")
+        #expect(run.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
+        let runID = try #require(run.call(mergeProposal(number: 141))?["id"]?.stringValue)
+        let stored = try #require(h.queue.sync { h.book.proposal(runID, at: h.clock.now) })
+        #expect(stored.runner == "run_01m7x1v080ec1r60r30c1g60r3")
+        #expect(run.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
+
+        current.value = "run_01m7x1v080ec1r60r30c1g60r4"
+        let other = try h.connect()
+        #expect(other.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
+        #expect(bosun.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
+        #expect(bosun.call(.object(["op": "get", "id": .string(bosunID)]))?["status"] == "pending")
+    }
+
+    /// The proposed record says who proposed: a run, verified, with its id; anyone else unverified, without one.
+    @Test func theRecordNamesTheRunThatProposed() throws {
+        let path = scratchPath()
+        let journal = try Journal(path: path, at: Date(timeIntervalSince1970: 1_800_000_000))
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        let fromRun = Proposal(request: request("github.merge", mergeParams), client: "beacon-act", at: t,
+                               runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        let fromBosun = Proposal(request: request("github.merge", mergeParams), client: "beacon-act", at: t)
+        try journal.add(fromRun)
+        try journal.add(fromBosun)
+        let records = try deliverAll(journal)
+        #expect(records[0]["metadata"]?["proposer"]?["verified"] == .bool(true))
+        #expect(records[0]["metadata"]?["proposer"]?["runner_id"] == "run_01m7x1v080ec1r60r30c1g60r3")
+        #expect(records[1]["metadata"]?["proposer"]?["verified"] == .bool(false))
+        #expect(records[1]["metadata"]?["proposer"]?["runner_id"] == nil)
+        // The journal keeps it across a relaunch.
+        let reopened = try Journal(path: path, at: t)
+        #expect(reopened.proposal(fromRun.id, at: t)?.runner == "run_01m7x1v080ec1r60r30c1g60r3")
+    }
+
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {
         let h = try Harness(clients: [AdmittedClient(name: "other", requirement: "identifier \"dev.beacon.nobody\"")])
         let client = try h.connect()
@@ -304,5 +349,14 @@ struct ProposalServerTests {
         let second = ProposalServer(path: h.path, clients: [], book: MemoryBook(), enabled: [])
         #expect(throws: ServerError.inUse) { try second.start() }
         #expect(a.call(.object(["op": "types"])) != nil)
+    }
+}
+
+final class RunnerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: String?
+    var value: String? {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
     }
 }

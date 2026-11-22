@@ -17,8 +17,10 @@ enum Record {
             metadata["params_hash"] = .string(ApprovalHash.params(type: action, params: body["params"]!,
                                                                    salt: body["salt"]!.stringValue!))
             metadata["expires_at"] = .string(timestamp(Date(milliseconds: body["expires_at"]!.intValue!)))
-            var proposer: [String: JSON] = ["agent": body["agent"]!, "verified": .bool(false)]
+            // Verified: the proposal came from a run Beacon launched, by the process group of the connecting peer.
+            var proposer: [String: JSON] = ["agent": body["agent"]!, "verified": .bool(body["proposer_runner_id"] != nil)]
             proposer["session"] = body["session"]
+            proposer["runner_id"] = body["proposer_runner_id"]
             metadata["proposer"] = .object(proposer)
             metadata["runner_id"] = body["runner_id"]
             copy(["params", "salt", "reason"], into: &sealed)

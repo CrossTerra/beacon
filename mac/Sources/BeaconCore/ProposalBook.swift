@@ -24,6 +24,9 @@ public struct Proposal: Equatable, Sendable {
     /// the local journal only; Signal's contract has no field for them.
     public let clientPath: String?
     public let clientRequirement: String?
+    /// The run Beacon launched that proposed this, when the connecting process was in that run's process group
+    /// (`RunAttribution`); nil for anyone else, Bosun included. Only the same client and run may read it.
+    public let runner: String?
     public let proposedAt: Date
     public let expiresAt: Date
     public var status: ProposalStatus
@@ -35,7 +38,7 @@ public struct Proposal: Equatable, Sendable {
 
     public init(request: ProposalRequest, client: String, at date: Date, id: String = PublicID.make("apr"),
                 salt: String = randomHex(16), expiresAt: Date? = nil, clientPath: String? = nil,
-                clientRequirement: String? = nil) {
+                clientRequirement: String? = nil, runner: String? = nil) {
         self.id = id
         type = request.type
         params = request.params
@@ -48,6 +51,7 @@ public struct Proposal: Equatable, Sendable {
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement
+        self.runner = runner
         proposedAt = date
         self.expiresAt = expiresAt ?? date.addingTimeInterval(Proposal.lifetime)
         status = .pending
@@ -60,7 +64,7 @@ extension Proposal {
     /// tightening must not make an old journal unreadable.
     init(stored id: String, type: ActionType, params: JSON, salt: String, reason: String, agent: String,
          session: String?, subject: String?, client: String, clientPath: String?, clientRequirement: String?,
-         proposedAt: Date, expiresAt: Date) {
+         runner: String?, proposedAt: Date, expiresAt: Date) {
         self.id = id
         self.type = type
         self.params = params
@@ -73,6 +77,7 @@ extension Proposal {
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement
+        self.runner = runner
         self.proposedAt = proposedAt
         self.expiresAt = expiresAt
         status = .pending

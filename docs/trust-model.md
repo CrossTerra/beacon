@@ -187,7 +187,8 @@ checkout's opencode configuration does not deny.
   and their files, and can do anything they can. Approving it approves a launch in one checkout, not what the agent
   then does; a checkout's own `bin/run` guardrails are not applied. A descendant that leaves its process group in the
   ways [tether](tether.md#limits) describes can outlive Stop and Quit. The run's output and errors stay in
-  `~/Library/Application Support/beacon/runs/`, readable by the person.
+  `~/Library/Application Support/beacon/runs/`, readable by the person; its launch file (the login environment)
+  and prompt are deleted once tether answers, after a failed launch, and at the next launch after a crash.
 
 - **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in
   plain cannot be undone after the send. New plain rules should start as `hold` until their output has been checked

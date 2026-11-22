@@ -89,6 +89,9 @@ final class ApprovalService: ObservableObject {
             }
             let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
                                         book: journal, enabled: [])
+            // A proposal from a process in a run's group is that run's: verified, and readable only by that run.
+            let attribution = runs.attribution
+            server.runnerOf = { attribution.runner(of: $0) }
             try server.start()
             self.server = server
             updateEnabled()

@@ -17,12 +17,16 @@ C locale, `BEACON_TETHERED=1` and `BEACON_SUPERVISOR`, a random marker for this 
 error goes to `/dev/null`.
 
 **Runs.** The app asks for a run by writing `L <runner id>` on the lease, after writing the run's directory,
-`~/Library/Application Support/beacon/runs/<runner id>/` (`0700`): `launch` (the working directory, the arguments and
-the environment, NUL-separated) and `prompt`. `tether` starts the run as the leader of a new process group, in that
-directory, with `prompt` as its standard input and its standard output and error appended to new `output` and
+`~/Library/Application Support/beacon/runs/<runner id>/` (`0700`): `launch` (the working directory, its device and
+inode as the app approved it, the arguments and the environment, NUL-separated) and `prompt`. `tether` opens the
+working directory once and compares its device and inode with the pinned ones; another directory at that path is
+refused with `ESTALE` and nothing starts. It starts the run as the leader of a new process group, in that directory
+by its descriptor, with `prompt` as its standard input and its standard output and error in new `output` and
 `errors` files there (`0600`, refused if they exist). It adds its own `BEACON_SUPERVISOR` marker for the run and drops
-any the app passed. It answers `#started <id> <pid>` or `#failed <id> <errno>` (nothing started), then
-`#exited <id> <status>` (the exit code, or 128 plus the signal) and `#gone <id>` once every process of the run is gone.
+any the app passed. Only once the run started does it write `started` there, with the pid. It answers
+`#started <id> <pid>` or `#failed <id> <errno>` (nothing started), then `#exited <id> <status>` (the exit code, or
+128 plus the signal) and `#gone <id>` once every process of the run is gone. At most 256 runs are alive at once; a
+run that ended gives its slot back. Lines to the app are written whole, blocking at most a second.
 `K <runner id>` stops a run as cleanup stops any service: TERM to its group and every tracked process, KILL after the
 grace period. A run is never restarted. What the app puts in a run's environment is in
 [approvals](approvals.md#agent-runs).
@@ -147,8 +151,10 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
 - a killed `tether` leaves processes that the next session stops before it reports ready;
 - a second session is refused while the first runs;
 - a run starts in its directory with its prompt on standard input, the app's environment and `tether`'s own
-  marker (a marker in the launch file is dropped); its exit code and its end are reported, its output and errors
-  are kept `0600`, and the same run cannot start twice;
+  marker (a marker in the launch file is dropped); `started` holds its pid; its exit code and its end are
+  reported, its output and errors are kept `0600`, and the same run cannot start twice;
+- a directory swapped in at the run's path after the app pinned it is refused with `ESTALE`, and nothing starts;
+- 300 runs one after another all start in one session: only live runs count against the limit;
 - stopping a run stops its whole tree, a child that ignores TERM and a detached grandchild included, and leaves the
   collector running; two runs run at once, and Quit stops both;
 - a launch that cannot start (no run directory, a missing working directory, a malformed launch file) is reported

@@ -108,6 +108,9 @@ private struct DeskView: View {
                 GroupBox("The agent says (unverified)") {
                     VStack(alignment: .leading, spacing: 4) {
                         row("Agent", proposal.agent + (proposal.session.map { " · session \($0)" } ?? ""))
+                        if let runner = proposal.runner {
+                            row("From", "run \(runner), launched by Beacon (verified by its process group)")
+                        }
                         row("Client", proposal.client + (proposal.clientPath.map { " · \($0)" } ?? ""))
                         Text(visibleText(proposal.reason)).textSelection(.enabled)
                     }.frame(maxWidth: .infinity, alignment: .leading)
