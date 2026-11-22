@@ -137,18 +137,18 @@ that exact binding, taken from Beacon's settings, never from an agent. A differe
 workspace finds nothing. There is no way to list secrets, and a secret prints as `[redacted]`.
 
 The 256-bit key is a generic password item (`dev.beacon.app`, account `vault-key`) in the login Keychain. Its
-access list names only the app's own designated requirement. A new vault is made in three durable steps:
+access list names only the app's own designated requirement.
 
-1. `vault.pending`, holding a random nonce;
-2. the item, with that nonce in its generic attribute;
-3. the vault file, after which `vault.pending` is removed.
+**Without a vault file**, a `vault-key` item can protect nothing yet. Crashing before the vault was written could
+have left it, or another program running as the person could have planted it, knowing its key. So Beacon never
+adopts one. It deletes any existing item, makes a fresh key and then writes the vault. If the delete is refused
+(another program's access list, or a denied prompt), it opens nothing, and the menu says **Not opening the vault: a
+Keychain vault key from before the vault could not be removed**. Remove the item in Keychain Access (or with
+`security delete-generic-password -s dev.beacon.app -a vault-key`) and relaunch.
 
-After a crash at any step, the next launch resumes from the pending nonce. It makes the item if it is missing, or
-adopts the item if it carries that nonce. Any other existing `vault-key` item, untagged or tagged otherwise, is
-refused: Beacon did not make it for this vault, and its access list could name another program. The menu says so.
-Remove the item in Keychain Access (or with `security delete-generic-password -s dev.beacon.app -a vault-key`) and
-relaunch, but only while the vault holds no credentials. Once the vault file exists, the app only reads the
-existing item. Before opening any keychain, the code checks that the running process is `dev.beacon.app` signed
+**With a vault file**, the app only reads the
+existing item. If that item is gone, the vault is unreadable and the menu says so; nothing replaces the key over an
+existing vault. Before opening any keychain, the code checks that the running process is `dev.beacon.app` signed
 with a certificate. An ad-hoc build, a test host or any other program is refused first. Tests use fixture keys
 and fixture secrets. Nothing in this repository's tests or CI opens a keychain.
 

@@ -37,7 +37,7 @@ final class ApprovalService: ObservableObject {
             self.server = server
             status = "Accepting proposals (no action type enabled yet)"
         } catch VaultError.existingKey {
-            status = "Not opening the vault: a vault key already exists in the Keychain without a vault (see docs/approvals.md)"
+            status = "Not opening the vault: a Keychain vault key from before the vault could not be removed (see docs/approvals.md)"
         } catch VaultError.keychain(let code) {
             status = "The vault's Keychain key is not available (\(code))"
         } catch {

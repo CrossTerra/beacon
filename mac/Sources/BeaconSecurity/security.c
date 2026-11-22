@@ -135,37 +135,31 @@ static CFMutableDictionaryRef item_query(CFStringRef service, CFStringRef accoun
     return query;
 }
 
-// Reads the item's data and its generic attribute (the creation tag, empty when there is none).
-static OSStatus read_key(CFStringRef service, CFStringRef account, uint8_t key[32], char *tag, size_t tag_size) {
+static OSStatus read_key(CFStringRef service, CFStringRef account, uint8_t key[32]) {
     CFMutableDictionaryRef query = item_query(service, account);
     if (!query) return -1;
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
-    CFDictionarySetValue(query, kSecReturnAttributes, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching(query, &result);
     CFRelease(query);
     if (status != errSecSuccess) return status;
-    tag[0] = '\0';
-    status = -1;
-    if (CFGetTypeID(result) == CFDictionaryGetTypeID()) {
-        CFDataRef data = CFDictionaryGetValue(result, kSecValueData);
-        CFDataRef generic = CFDictionaryGetValue(result, kSecAttrGeneric);
-        if (data && CFGetTypeID(data) == CFDataGetTypeID() && CFDataGetLength(data) == 32) {
-            memcpy(key, CFDataGetBytePtr(data), 32);
-            status = errSecSuccess;
-        }
-        if (generic && CFGetTypeID(generic) == CFDataGetTypeID() && (size_t)CFDataGetLength(generic) < tag_size) {
-            memcpy(tag, CFDataGetBytePtr(generic), (size_t)CFDataGetLength(generic));
-            tag[CFDataGetLength(generic)] = '\0';
-        }
-    }
+    if (CFGetTypeID(result) != CFDataGetTypeID() || CFDataGetLength(result) != 32) status = -1;
+    else memcpy(key, CFDataGetBytePtr(result), 32);
     CFRelease(result);
     return status;
 }
 
+static OSStatus delete_key(CFStringRef service, CFStringRef account) {
+    CFMutableDictionaryRef query = item_query(service, account);
+    if (!query) return -1;
+    OSStatus status = SecItemDelete(query);
+    CFRelease(query);
+    return status;
+}
+
 // Only code meeting this app's designated requirement reads the item without asking.
-static OSStatus add_key(CFStringRef service, CFStringRef account, const uint8_t key[32], const char *tag) {
+static OSStatus add_key(CFStringRef service, CFStringRef account, const uint8_t key[32]) {
     SecTrustedApplicationRef self = NULL;
     OSStatus status = SecTrustedApplicationCreateFromPath(NULL, &self);
     if (status != errSecSuccess) return status;
@@ -177,51 +171,43 @@ static OSStatus add_key(CFStringRef service, CFStringRef account, const uint8_t 
     if (status != errSecSuccess) return status;
     CFMutableDictionaryRef item = item_query(service, account);
     CFDataRef data = CFDataCreate(NULL, key, 32);
-    CFDataRef generic = CFDataCreate(NULL, (const UInt8 *)tag, (CFIndex)strlen(tag));
-    if (!item || !data || !generic) {
+    if (!item || !data) {
         if (item) CFRelease(item);
         if (data) CFRelease(data);
-        if (generic) CFRelease(generic);
         CFRelease(access);
         return -1;
     }
     CFDictionarySetValue(item, kSecAttrAccess, access);
     CFDictionarySetValue(item, kSecValueData, data);
-    CFDictionarySetValue(item, kSecAttrGeneric, generic);
     status = SecItemAdd(item, NULL);
     CFRelease(item);
     CFRelease(data);
-    CFRelease(generic);
     CFRelease(access);
     return status;
 }
 
-int beacon_vault_key(const char *identifier, const char *service_name, const char *account_name, const char *tag,
+int beacon_vault_key(const char *identifier, const char *service_name, const char *account_name, bool create,
                      uint8_t key[32]) {
     if (!beacon_self_is(identifier)) return -1;
-    if (tag && (strlen(tag) == 0 || strlen(tag) > 128)) return -1;
     CFStringRef service = CFStringCreateWithCString(NULL, service_name, kCFStringEncodingUTF8);
     CFStringRef account = CFStringCreateWithCString(NULL, account_name, kCFStringEncodingUTF8);
-    char found[129] = "";
     OSStatus status = -1;
     if (service && account) {
-        status = read_key(service, account, key, found, sizeof(found));
-        if (tag) {
-            if (status == errSecItemNotFound) {
+        if (!create) {
+            status = read_key(service, account, key);
+        } else {
+            // Never adopt: an item that exists before its vault was made elsewhere, or orphaned by a crash.
+            status = delete_key(service, account);
+            if (status == errSecSuccess || status == errSecItemNotFound) {
                 uint8_t fresh[32];
                 status = SecRandomCopyBytes(kSecRandomDefault, sizeof(fresh), fresh);
-                if (status == errSecSuccess) status = add_key(service, account, fresh, tag);
-                if (status == errSecSuccess) {
-                    memcpy(key, fresh, sizeof(fresh));
-                    snprintf(found, sizeof(found), "%s", tag);
-                } else if (status == errSecDuplicateItem) {
-                    // Another launch added one first: read it, and judge it like any existing item.
-                    status = read_key(service, account, key, found, sizeof(found));
-                }
+                if (status == errSecSuccess) status = add_key(service, account, fresh);
+                if (status == errSecSuccess) memcpy(key, fresh, sizeof(fresh));
+                else if (status == errSecDuplicateItem) status = BEACON_VAULT_KEY_EXISTS;
                 memset(fresh, 0, sizeof(fresh));
+            } else {
+                status = BEACON_VAULT_KEY_EXISTS;
             }
-            // An item made for this pending vault (perhaps before a crash) is adopted; any other is refused.
-            if (status == errSecSuccess && strcmp(found, tag) != 0) status = BEACON_VAULT_KEY_EXISTS;
         }
     }
     if (status != errSecSuccess) memset(key, 0, 32);

@@ -56,109 +56,105 @@ struct VaultTests {
     }
 }
 
-/// A stand-in for the Keychain item: it keeps one key and its creation tag, and can fail just before or
-/// just after making the item, as a crash would.
+/// A stand-in for the Keychain item. It keeps one key, may refuse to delete it (another program's access list, a
+/// denied prompt), and can fail just after making a new item, as a crash before the vault file would.
 final class FakeKeychain: VaultKeySource, @unchecked Sendable {
-    struct Item {
-        let key: SymmetricKey
-        let tag: String?
-    }
-
     struct Crash: Error {}
 
     private let lock = NSLock()
-    var item: Item?
-    var crashBeforeCreate = false
+    var item: SymmetricKey?
+    var deletable = true
     var crashAfterCreate = false
-    private(set) var tags: [String?] = []
+    private(set) var requests: [Bool] = []
 
-    func key(tag: String?) throws -> SymmetricKey {
+    func key(create: Bool) throws -> SymmetricKey {
         try lock.withLock {
-            tags.append(tag)
-            guard let tag else {
+            requests.append(create)
+            guard create else {
                 guard let item else { throw VaultError.keychain(-25300) }
-                return item.key
+                return item
             }
-            if let item {
-                guard item.tag == tag else { throw VaultError.existingKey }
-                return item.key
+            if item != nil {
+                guard deletable else { throw VaultError.existingKey }
+                item = nil
             }
-            if crashBeforeCreate { throw Crash() }
-            let made = Item(key: SymmetricKey(size: .bits256), tag: tag)
+            let made = SymmetricKey(size: .bits256)
             item = made
             if crashAfterCreate { throw Crash() }
-            return made.key
+            return made
         }
     }
+}
+
+func same(_ a: SymmetricKey?, _ b: SymmetricKey?) -> Bool {
+    a.map { $0.withUnsafeBytes { Data($0) } } == b.map { $0.withUnsafeBytes { Data($0) } }
 }
 
 struct VaultKeyCreationTests {
     let binding = try! CredentialBinding(service: "github", origin: "https://api.github.com", account: "github:user:1")
 
-    func pendingNonce(_ vault: Vault) -> String? {
-        (try? Data(contentsOf: vault.pending)).flatMap { String(data: $0, encoding: .utf8) }
-    }
-
-    @Test func aKeyIsCreatedOnlyWithANewVault() throws {
+    /// With a vault file the existing key is used and never replaced.
+    @Test func anExistingVaultUsesItsKey() throws {
         let url = try VaultTests().scratch()
         let keychain = FakeKeychain()
-        let vault = Vault(url: url, key: keychain)
-        try vault.unlock()
         try Vault(url: url, key: keychain).unlock()
-        try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding)
-        #expect(keychain.tags.count == 4 && keychain.tags[0] != nil && keychain.tags.dropFirst().allSatisfy { $0 == nil })
-        #expect(keychain.item?.tag == keychain.tags[0])
-        #expect(pendingNonce(vault) == nil && FileManager.default.fileExists(atPath: url.path))
-    }
-
-    /// The pending file was written, then the app died before the item: the next launch makes the item with
-    /// that same nonce and finishes.
-    @Test func crashBeforeTheItemResumes() throws {
-        let url = try VaultTests().scratch()
-        let keychain = FakeKeychain()
-        keychain.crashBeforeCreate = true
-        let vault = Vault(url: url, key: keychain)
-        #expect(throws: FakeKeychain.Crash.self) { try vault.unlock() }
-        let nonce = try #require(pendingNonce(vault))
-        #expect(keychain.item == nil && !FileManager.default.fileExists(atPath: url.path))
-
-        keychain.crashBeforeCreate = false
+        let key = keychain.item
         try Vault(url: url, key: keychain).unlock()
-        #expect(keychain.item?.tag == nonce && pendingNonce(vault) == nil)
         try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding)
         #expect(try Vault(url: url, key: keychain).credential(for: binding).value == "fixture")
+        // One creation, with the first vault; every later request only reads.
+        #expect(keychain.requests.first == true && keychain.requests.dropFirst().allSatisfy { !$0 })
+        #expect(keychain.requests.count == 5 && same(keychain.item, key))
     }
 
-    /// The item was made, then the app died before the vault file: the next launch adopts that item, because it
-    /// carries the pending nonce, instead of refusing it forever.
-    @Test func crashAfterTheItemAdoptsIt() throws {
+    /// A vault whose key is gone is unreadable and says so; nothing makes a new key over it.
+    @Test func anExistingVaultWithoutItsKeyIsUnreadable() throws {
+        let url = try VaultTests().scratch()
+        let keychain = FakeKeychain()
+        try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding)
+        keychain.item = nil
+        #expect(throws: VaultError.keychain(-25300)) { try Vault(url: url, key: keychain).unlock() }
+        #expect(throws: VaultError.keychain(-25300)) { try Vault(url: url, key: keychain).credential(for: binding) }
+        #expect(keychain.item == nil && keychain.requests.dropFirst().allSatisfy { !$0 })
+    }
+
+    /// The item was made, then the app died before the vault file: the next launch replaces the orphan.
+    @Test func anOrphanAfterACrashIsReplaced() throws {
         let url = try VaultTests().scratch()
         let keychain = FakeKeychain()
         keychain.crashAfterCreate = true
-        let vault = Vault(url: url, key: keychain)
-        #expect(throws: FakeKeychain.Crash.self) { try vault.unlock() }
-        let made = try #require(keychain.item)
-        #expect(made.tag == pendingNonce(vault) && !FileManager.default.fileExists(atPath: url.path))
+        #expect(throws: FakeKeychain.Crash.self) { try Vault(url: url, key: keychain).unlock() }
+        let orphan = try #require(keychain.item)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
 
         keychain.crashAfterCreate = false
         try Vault(url: url, key: keychain).unlock()
-        #expect(keychain.item?.tag == made.tag && pendingNonce(vault) == nil)
+        #expect(!same(keychain.item, orphan))
         try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding)
         #expect(try Vault(url: url, key: keychain).credential(for: binding).value == "fixture")
     }
 
-    /// An item Beacon did not make for this vault, untagged or tagged otherwise, is refused, also when a pending
-    /// file is there.
-    @Test func aPlantedItemIsRefused() throws {
-        for planted in [nil, "0123456789abcdef0123456789abcdef"] as [String?] {
-            let url = try VaultTests().scratch()
-            let keychain = FakeKeychain()
-            keychain.item = .init(key: SymmetricKey(size: .bits256), tag: planted)
-            let vault = Vault(url: url, key: keychain)
-            #expect(throws: VaultError.existingKey) { try vault.unlock() }
-            #expect(throws: VaultError.existingKey) { try vault.unlock() }
-            #expect(throws: VaultError.existingKey) { try vault.store(Secret("fixture"), for: binding) }
-            #expect(!FileManager.default.fileExists(atPath: url.path))
-        }
+    /// An item another program planted before the vault existed is deleted, and its key never encrypts anything.
+    @Test func aPlantedItemIsReplacedAndNeverUsed() throws {
+        let url = try VaultTests().scratch()
+        let keychain = FakeKeychain()
+        let planted = SymmetricKey(size: .bits256)
+        keychain.item = planted
+        try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding)
+        #expect(!same(keychain.item, planted))
+        #expect(throws: VaultError.unreadable) { try Vault(url: url, key: FixtureVaultKey(planted)).credential(for: binding) }
+        #expect(try Vault(url: url, key: keychain).credential(for: binding).value == "fixture")
+    }
+
+    /// If the existing item cannot be deleted, the vault is not opened and nothing is written.
+    @Test func anItemThatCannotBeDeletedIsRefused() throws {
+        let url = try VaultTests().scratch()
+        let keychain = FakeKeychain()
+        let planted = SymmetricKey(size: .bits256)
+        keychain.item = planted
+        keychain.deletable = false
+        #expect(throws: VaultError.existingKey) { try Vault(url: url, key: keychain).unlock() }
+        #expect(throws: VaultError.existingKey) { try Vault(url: url, key: keychain).store(Secret("fixture"), for: binding) }
+        #expect(!FileManager.default.fileExists(atPath: url.path) && same(keychain.item, planted))
     }
 }

@@ -4,16 +4,16 @@ import Foundation
 
 /// Where the vault's encryption key comes from.
 public protocol VaultKeySource: Sendable {
-    /// With a `tag` (a pending vault's nonce), adopts the key made for that tag or makes one with it, and refuses
-    /// any other existing key. Without a tag, reads the existing key.
-    func key(tag: String?) throws -> SymmetricKey
+    /// Without `create`, reads the existing key. With `create` (no vault yet), replaces any existing key with a
+    /// fresh one, never adopting it, and refuses if the existing one cannot be removed.
+    func key(create: Bool) throws -> SymmetricKey
 }
 
 public enum VaultError: Error, Equatable, Sendable {
     /// The running process is not the app signed with a certificate, so it cannot meet the key's access list.
     case unsignedBuild
     case keychain(Int32)
-    /// A vault key item exists that Beacon did not make for this vault: it is not used.
+    /// A vault key item exists before its vault and could not be removed: it is not used.
     case existingKey
     /// The vault file is not one this key opened.
     case unreadable
@@ -37,11 +37,11 @@ public struct KeychainVaultKey: VaultKeySource {
         self.account = account
     }
 
-    public func key(tag: String?) throws -> SymmetricKey {
+    public func key(create: Bool) throws -> SymmetricKey {
         guard beacon_self_is(KeychainVaultKey.app) else { throw VaultError.unsignedBuild }
         var bytes = [UInt8](repeating: 0, count: 32)
         defer { bytes.withUnsafeMutableBytes { _ = memset($0.baseAddress!, 0, 32) } }
-        let status = beacon_vault_key(KeychainVaultKey.app, service, account, tag, &bytes)
+        let status = beacon_vault_key(KeychainVaultKey.app, service, account, create, &bytes)
         if status == BEACON_VAULT_KEY_EXISTS { throw VaultError.existingKey }
         guard status == 0 else { throw VaultError.keychain(status) }
         return SymmetricKey(data: bytes)
@@ -56,7 +56,7 @@ public struct FixtureVaultKey: VaultKeySource {
         bytes = key
     }
 
-    public func key(tag: String?) throws -> SymmetricKey { bytes }
+    public func key(create: Bool) throws -> SymmetricKey { bytes }
 }
 
 /// A credential's secret. It never prints.
@@ -181,7 +181,7 @@ public final class Vault: @unchecked Sendable {
         } catch CocoaError.fileReadNoSuchFile {
             return Contents()
         }
-        let key = try keySource.key(tag: nil)
+        let key = try keySource.key(create: false)
         do {
             let box = try AES.GCM.SealedBox(combined: sealed)
             let plain = try AES.GCM.open(box, using: key, authenticating: Vault.associated)
@@ -195,33 +195,18 @@ public final class Vault: @unchecked Sendable {
         }
     }
 
-    /// A new vault is made in three durable steps, so a crash at any point can resume and never strands a key:
-    /// a pending file with a random nonce, then the Keychain item tagged with that nonce, then the vault file,
-    /// after which the pending file goes. A later launch adopts an item only if it carries the pending nonce.
+    /// Without a vault file, nothing the Keychain holds can protect anything yet: the key is made afresh, and any
+    /// existing item (left by a crash before the file was written, or planted by another program that may know its
+    /// key) is deleted, never adopted. With a vault file, the existing key is used; a missing one means the vault
+    /// cannot be read, and nothing replaces it.
     private func save(_ contents: Contents) throws {
         let plain = try JSONEncoder().encode(contents)
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        let creating = !FileManager.default.fileExists(atPath: url.path)
-        let key = try keySource.key(tag: creating ? try pendingNonce() : nil)
+        let key = try keySource.key(create: !FileManager.default.fileExists(atPath: url.path))
         let box = try AES.GCM.seal(plain, using: key, authenticating: Vault.associated)
         try PrivateFile.replace(url, with: box.combined!)
-        if creating { try? FileManager.default.removeItem(at: pending) }
-    }
-
-    /// `vault.pending`, written before the Keychain item is made.
-    var pending: URL { url.appendingPathExtension("pending") }
-
-    /// The pending vault's nonce: the one a crashed creation left, or a new one, durable before it is used.
-    private func pendingNonce() throws -> String {
-        if let data = try? Data(contentsOf: pending), let nonce = String(data: data, encoding: .utf8),
-           Field.matches(nonce, "[0-9a-f]{32}") {
-            return nonce
-        }
-        let nonce = randomHex(16)
-        try PrivateFile.replace(pending, with: Data(nonce.utf8))
-        return nonce
     }
 }
 
