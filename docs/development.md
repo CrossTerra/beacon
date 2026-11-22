@@ -120,8 +120,8 @@ bash scripts/test-tether.sh
 ```
 
 The shortcut test constructs local events without registering a global hot key or opening a window. To stage a
-bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a clean checkout (including no
-ignored build outputs). CI uses the commit under test. To install it signed, the person runs `scripts/install.sh`
+bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a checkout at that commit with no
+changes to tracked files; it builds from `git archive`, so untracked and ignored files are allowed. CI uses the commit under test. To install it signed, the person runs `scripts/install.sh`
 ([installing and signing](signing.md)).
 
 On the Mac, open the staged `Beacon.app`, choose **Approvals…** from its menu. An unsigned stage shows **No

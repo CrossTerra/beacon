@@ -7,7 +7,7 @@ they use `scripts/install.sh --dry-run`, which ad-hoc signs into a temporary dir
 
 ## Install
 
-From a clean checkout of the commit you want (no changes, untracked or ignored files), in your own Terminal:
+From a checkout of the commit you want, with no changes to tracked files, in your own Terminal:
 
 ```bash
 scripts/install.sh
@@ -16,7 +16,9 @@ scripts/install.sh
 It:
 
 1. builds `Beacon.app` from that commit (`scripts/build-app.sh`, from a Git archive in a private temporary
-   directory, with a SHA-256 manifest of the app, the CLI and `tether`);
+   directory, with a SHA-256 manifest of the app, the CLI and `tether`). Only the commit reaches the build, so
+   untracked and ignored files (a local `.e2e.env`, build outputs) are fine. A change to a tracked file, staged or
+   not, stops it: commit or stash it first;
 2. picks your code-signing identity: the single valid one in `security find-identity -v -p codesigning`, or the one
    you name with `--identity NAME_OR_SHA1` when there are several;
 3. signs the CLI (`dev.beacon.cli`), `tether` (`dev.beacon.tether`) and the app (`dev.beacon.app`). Each gets its
