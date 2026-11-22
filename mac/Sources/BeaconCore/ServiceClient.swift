@@ -24,9 +24,17 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
 
     /// `origin` is `https://host[:port]`; `configuration` is for tests (a URL protocol standing in for the
     /// service). The credential goes only in the `Authorization` header of requests to this origin.
-    public init(origin: String, authorization: Secret?, headers: [String: String] = [:],
-                configuration: URLSessionConfiguration = .ephemeral, maxBytes: Int = 8 << 20,
-                timeout: TimeInterval = 20) throws {
+    public convenience init(origin: String, authorization: Secret?, headers: [String: String] = [:],
+                            configuration: URLSessionConfiguration = .ephemeral, maxBytes: Int = 8 << 20,
+                            timeout: TimeInterval = 20, resourceTimeout: TimeInterval? = nil) throws {
+        try self.init(origin: origin, authorization: authorization, headers: headers, configuration: configuration,
+                      maxBytes: maxBytes, timeout: timeout, resourceTimeout: resourceTimeout, delegate: Delegate())
+    }
+
+    // The TLS fixture supplies its own trust delegate. Production uses the system trust evaluation.
+    init(origin: String, authorization: Secret?, headers: [String: String] = [:],
+         configuration: URLSessionConfiguration = .ephemeral, maxBytes: Int = 8 << 20,
+         timeout: TimeInterval, resourceTimeout: TimeInterval? = nil, delegate: Delegate) throws {
         guard let url = URL(string: try CredentialBinding.normalize(origin)) else { throw VaultError.origin }
         self.origin = url
         var all = headers
@@ -36,24 +44,25 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
         let configuration = configuration.copy() as! URLSessionConfiguration
         configuration.connectionProxyDictionary = [:]
         configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout * 3
+        configuration.timeoutIntervalForResource = resourceTimeout ?? timeout * 3
         configuration.httpMaximumConnectionsPerHost = 2
         configuration.waitsForConnectivity = false
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
-        session = URLSession(configuration: configuration, delegate: ServiceClient.Delegate(), delegateQueue: queue)
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: queue)
         super.init()
     }
 
     deinit { session.invalidateAndCancel() }
 
     /// Sends one request. `path` is already percent-encoded and starts with `/`. `json` is serialised; `raw` is
-    /// sent as these exact bytes, as JSON.
+    /// sent as these exact bytes, as JSON. For an at-most-once write, `oneShot` makes the body non-replayable.
     public func send(_ method: String, _ path: String, query: [URLQueryItem] = [], json body: Any? = nil,
-                     raw: Data? = nil) async throws -> (status: Int, body: Data, response: HTTPURLResponse)
+                     raw: Data? = nil, oneShot: Bool = false) async throws -> (status: Int, body: Data, response: HTTPURLResponse)
     {
         guard path.hasPrefix("/"), var components = URLComponents(url: origin, resolvingAgainstBaseURL: false) else {
             throw ServiceError.foreignURL
@@ -64,26 +73,46 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        if let body {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        } else if let raw {
-            request.httpBody = raw
+        let payload = try body.map { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) } ?? raw
+        if let payload {
+            if oneShot {
+                request.httpBodyStream = InputStream(data: payload)
+                request.setValue(String(payload.count), forHTTPHeaderField: "Content-Length")
+            } else {
+                request.httpBody = payload
+            }
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                bytes.task.cancel()
+                throw ServiceError.malformed
+            }
+            if (300..<400).contains(http.statusCode) {
+                bytes.task.cancel()
+                throw ServiceError.redirect(http.statusCode)
+            }
+            if response.expectedContentLength > maxBytes {
+                bytes.task.cancel()
+                throw ServiceError.tooLarge
+            }
+            var data = Data()
+            for try await byte in bytes {
+                guard data.count < maxBytes else {
+                    bytes.task.cancel()
+                    throw ServiceError.tooLarge
+                }
+                data.append(byte)
+            }
+            return (http.statusCode, data, http)
+        } catch let error as ServiceError {
+            throw error
         } catch let error as URLError {
             throw ServiceError.transport(error.code.rawValue.description)
         } catch {
             throw ServiceError.transport("unknown")
         }
-        guard let http = response as? HTTPURLResponse else { throw ServiceError.malformed }
-        if (300..<400).contains(http.statusCode) { throw ServiceError.redirect(http.statusCode) }
-        guard data.count <= maxBytes else { throw ServiceError.tooLarge }
-        return (http.statusCode, data, http)
     }
 
     /// Sends a request and parses a JSON object or array from a 2xx answer.
@@ -99,9 +128,24 @@ public final class ServiceClient: NSObject, @unchecked Sendable {
     }
 
     /// Refuses every redirect: the answer is returned as it is, and the credential goes nowhere else.
-    final class Delegate: NSObject, URLSessionTaskDelegate {
+    class Delegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            completionHandler(.performDefaultHandling, nil)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+            urlSession(session, didReceive: challenge, completionHandler: completionHandler)
+        }
+
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+
+        // CFNetwork may ask for a new stream after a connection failure. Never provide the body again.
+        func urlSession(_ session: URLSession, task: URLSessionTask, needNewBodyStream completionHandler: @escaping (InputStream?) -> Void) {
             completionHandler(nil)
         }
     }

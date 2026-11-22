@@ -18,6 +18,8 @@ public struct Proposal: Equatable, Sendable {
     public let agent: String
     public let session: String?
     public let subject: String?
+    /// The Slack account and visibility proven at intake, not the proposer's context subject.
+    let slackPlacement: SlackPlacement?
     /// The admitted client identity that proposed it. Only that identity can read, wait on or withdraw it.
     public let client: String
     /// The connected process's executable and the requirement it satisfied, as the kernel identified it. Kept in
@@ -35,7 +37,7 @@ public struct Proposal: Equatable, Sendable {
 
     public init(request: ProposalRequest, client: String, at date: Date, id: String = PublicID.make("apr"),
                 salt: String = randomHex(16), expiresAt: Date? = nil, clientPath: String? = nil,
-                clientRequirement: String? = nil) {
+                clientRequirement: String? = nil, slackPlacement: SlackPlacement? = nil) {
         self.id = id
         type = request.type
         params = request.params
@@ -45,6 +47,7 @@ public struct Proposal: Equatable, Sendable {
         agent = request.agent
         session = request.session
         subject = request.subject
+        self.slackPlacement = slackPlacement
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement
@@ -60,7 +63,7 @@ extension Proposal {
     /// tightening must not make an old journal unreadable.
     init(stored id: String, type: ActionType, params: JSON, salt: String, reason: String, agent: String,
          session: String?, subject: String?, client: String, clientPath: String?, clientRequirement: String?,
-         proposedAt: Date, expiresAt: Date) {
+         proposedAt: Date, expiresAt: Date, slackPlacement: SlackPlacement? = nil) {
         self.id = id
         self.type = type
         self.params = params
@@ -70,6 +73,7 @@ extension Proposal {
         self.agent = agent
         self.session = session
         self.subject = subject
+        self.slackPlacement = slackPlacement
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement

@@ -8,6 +8,7 @@ import Foundation
 final class ApprovalService: ObservableObject {
     @Published private(set) var status = "Approvals are not available"
     @Published private(set) var github: GitHubSettings?
+    @Published private(set) var slack: SlackSettings?
     @Published private(set) var signal: SignalSettings?
     @Published private(set) var delivery = "Records are not sent: add Signal in Settings"
     private var journal: Journal?
@@ -17,7 +18,11 @@ final class ApprovalService: ObservableObject {
     private var server: ProposalServer?
     private var vault: Vault?
     private var merges: MergeHandler?
+    private var posts: PostHandler?
     private var reconciler: Timer?
+    private var readBack: Task<Void, Never>?
+    private var postReadBack: Timer?
+    private var postReading: Task<Void, Never>?
     private var paths = AppPaths.standard
 
     func start(paths: AppPaths = .standard, bundle: Bundle = .main) {
@@ -35,6 +40,7 @@ final class ApprovalService: ObservableObject {
             self.vault = vault
             let settings = try AppSettings.load(paths.settings)
             github = settings.github
+            slack = settings.slack
             signal = settings.signal
             let journal = try Journal(path: paths.journal.path, at: Date())
             self.journal = journal
@@ -54,18 +60,41 @@ final class ApprovalService: ObservableObject {
                 MainActor.assumeIsolated { self?.deliver() }
             }
             let settingsURL = paths.settings
+            let budget = ReadBudget()
             let merges = MergeHandler(journal: journal, settings: { (try? AppSettings.load(settingsURL))?.github },
-                                      connect: MergeHandler.connect(vault: vault))
+                                      connect: MergeHandler.connect(vault: vault), budget: budget)
+            let posts = PostHandler(journal: journal, settings: { (try? AppSettings.load(settingsURL))?.slack },
+                                    vault: vault, budget: budget)
             self.merges = merges
-            let desk = ApprovalDesk(journal: journal, resolver: merges)
+            self.posts = posts
+            let desk = ApprovalDesk(journal: journal, resolver: Resolvers(merges: merges, posts: posts))
             desk.onApproved = { id in
-                Task { _ = try? await merges.execute(id) }
+                switch journal.approval(id)?.type {
+                case .githubMerge: Task { _ = try? await merges.execute(id) }
+                case .slackPost: Task { _ = try? await posts.execute(id) }
+                default: break
+                }
+            }
+            desk.onReadBack = { [weak self] id in
+                Task { @MainActor in
+                    switch journal.proposal(id, at: Date())?.type {
+                    case .githubMerge: _ = try? await merges.reconcile(id)
+                    case .slackPost: _ = try? await posts.reconcile(id)
+                    default: break
+                    }
+                    self?.desk?.refresh()
+                }
             }
             self.desk = desk
-            // Starts found by recovery, and lost replies, are settled by reading back, never by merging again.
+            // Starts found by recovery, and lost replies, are settled by reading back, never by dispatch again.
+            // GitHub reads back every minute; Slack on its own backoff, which ends after its search window.
             reconcile()
+            readBackPosts()
             reconciler = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.reconcile() }
+            }
+            postReadBack = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.readBackPosts() }
             }
             guard try ClientTrust.ensure(paths.act, requirement: requirement) != .mismatch else {
                 status = "Not accepting proposals: \(paths.act.path) names another app signature. Remove it to trust this build."
@@ -77,7 +106,7 @@ final class ApprovalService: ObservableObject {
                 return
             }
             let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
-                                        book: journal, enabled: [])
+                                        book: journal, enabled: [], slackLookup: posts.place)
             // scripts/install.sh quits a running Beacon through the bundled CLI, as the menu's Quit does, without
             // asking for permission to control the app.
             server.quit = (client: "beacon-act", action: {
@@ -93,6 +122,34 @@ final class ApprovalService: ObservableObject {
             status = "The vault's Keychain key is not available (\(code))"
         } catch {
             status = "Approvals are not available: \(error)"
+        }
+    }
+
+    func registerSlack(token: String) async -> String {
+        guard let vault else { return status }
+        do {
+            let saved = try await SlackSetup.register(token: Secret(token), vault: vault, settings: paths.settings)
+            slack = saved
+            if desk?.selected?.type == .slackPost { desk?.readAgain() }
+            updateEnabled()
+            return saved.connected
+        } catch let refusal as SlackRefusal {
+            return "Not saved: \(refusal.explanation)"
+        } catch {
+            return "Not saved: the settings or the vault could not be written."
+        }
+    }
+
+    func removeSlack() -> String {
+        guard let vault else { return status }
+        do {
+            try SlackSetup.remove(vault: vault, settings: paths.settings)
+            slack = nil
+            if desk?.selected?.type == .slackPost { desk?.readAgain() }
+            updateEnabled()
+            return "Slack removed."
+        } catch {
+            return "Could not remove Slack."
         }
     }
 
@@ -176,27 +233,57 @@ final class ApprovalService: ObservableObject {
 
     private func updateEnabled() {
         guard let server else { return }
-        server.enabled = github == nil ? [] : [.githubMerge]
-        status = github == nil ? "Accepting proposals (no action type enabled: add a GitHub account in Settings)"
-            : "Accepting github.merge proposals"
+        var types: [ActionType] = []
+        if github != nil { types.append(.githubMerge) }
+        if slack != nil { types.append(.slackPost) }
+        server.enabled = types
+        status = types.isEmpty ? "Accepting proposals (add a GitHub or Slack account in Settings)"
+            : "Accepting \(types.map(\.rawValue).joined(separator: ", ")) proposals"
     }
 
     private func reconcile() {
-        guard let merges else { return }
-        let desk = self.desk
-        Task {
-            for id in merges.unknown() { _ = try? await merges.reconcile(id) }
-            await MainActor.run { desk?.refresh() }
+        guard readBack == nil, let merges else { return }
+        readBack = Task { [weak self] in
+            defer { self?.readBack = nil }
+            for id in merges.unknown() where !Task.isCancelled { _ = try? await merges.reconcile(id) }
+            self?.desk?.refresh()
         }
     }
 
-    /// Quit: no approval from now on, approvals without a start expire, and the socket closes. A merge already
+    /// Slack read-back on its own task, so a queue of unknown posts never delays GitHub recovery. Reads only what
+    /// the handler says is due; most ticks read nothing.
+    private func readBackPosts() {
+        guard postReading == nil, let posts, !posts.readBackDue().isEmpty else { return }
+        postReading = Task { [weak self] in
+            defer { self?.postReading = nil }
+            await posts.automaticReadBack()
+            self?.desk?.refresh()
+        }
+    }
+
+    /// Quit: no approval from now on, approvals without a start expire, and the socket closes. A write already
     /// started settles from its reply, or by read-back after the next launch.
     func stop() {
         reconciler?.invalidate()
+        readBack?.cancel()
+        postReadBack?.invalidate()
+        postReading?.cancel()
         deliverer?.invalidate()
         desk?.beginShutdown()
         server?.stop()
         server = nil
+    }
+}
+
+private struct Resolvers: ActionResolver {
+    let merges: MergeHandler
+    let posts: PostHandler
+
+    func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
+        switch proposal.type {
+        case .githubMerge: try await merges.resolve(proposal, model: model)
+        case .slackPost: try await posts.resolve(proposal, model: model)
+        case .agentRun: try await NoResolver().resolve(proposal, model: model)
+        }
     }
 }
