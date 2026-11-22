@@ -23,8 +23,8 @@ scripts/install.sh
 
 It builds `Beacon.app` from that commit, signs it with their code-signing identity, installs it in
 `~/Applications`, points `~/.local/bin/beacon` at its CLI, removes the old collector LaunchAgent and opens the
-app. Then, in Beacon's **Settings…**, they add a GitHub token and Signal's origin, their `act_…` id and the app
-key. See [installing and signing](docs/signing.md).
+app. Then, in Beacon's **Settings…**, they add a GitHub token, and Signal's origin and the app key; Beacon reads from
+Signal whom the app works for. See [installing and signing](docs/signing.md).
 
 ## Install from the person's fork
 

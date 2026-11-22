@@ -104,7 +104,10 @@ handler.
 ## The journal and the outbox
 
 `~/Library/Application Support/beacon/app/journal.sqlite` (in a `0700` directory, WAL, `synchronous = FULL`,
-`fullfsync` and `checkpoint_fullfsync`) is the local record (13.00-D10). On macOS a plain fsync leaves writes in
+`fullfsync` and `checkpoint_fullfsync`) is the local record (13.00-D10). The journal and its `-wal` and `-shm` files
+are `0600`: Beacon creates the journal itself before SQLite opens it (SQLite gives the other two the journal's mode),
+narrows any of the three an earlier build left wider each time it opens, and refuses one that is a symlink or not
+the person's own file. On macOS a plain fsync leaves writes in
 the drive's cache, so each commit is flushed with `F_FULLFSYNC`: a start is on disk before anything is sent. The
 vault file and `act.json` are written the same way. Each entry and its outbox row commit in one transaction. Triggers refuse any update
 or delete of an entry. The journal has one `jrn_…` id. Entries are numbered from 1, and each entry's Signal key
@@ -134,12 +137,20 @@ resends the same bytes later, and a `409` or another refusal stops delivery at t
 
 ## Delivery to Signal
 
-**Settings.** The person enters the Signal origin (`https://host[:port]`), their own `act_…` id (every record's
-`metadata.person`), and the key of their app actor (13.00-D25: an integration actor marked `approval_app` that
-works for them, with a key of exactly `read` and `write`). Beacon calls `GET /api/me` with the key. It accepts only
-an integration actor's key whose scopes are exactly `read` and `write`. `/api/me` does not say whom the actor
-works for; Signal refuses any record whose person the actor does not work for. The key goes to the vault, bound to
-the origin and `signal:actor:{act_…}`. `settings.json` keeps the origin, the person, the actor and its handle.
+**Settings.** The person enters the Signal origin (`https://host[:port]`) and the key of their app actor (13.00-D25:
+an integration actor marked `approval_app` that works for them, with a key of exactly `read` and `write`), both from
+Signal's `/beacon` page. Beacon does not ask whom the records are about; it asks Signal:
+
+1. `GET /api/me` with the key: the actor must be an integration, and the key's scopes exactly `read` and `write`;
+2. `GET /api/actors/{app}`: the actor must be active and marked `approval_app`, and its `works_for` must name
+   another actor;
+3. `GET /api/actors/{works_for}`: that actor must be an active person (`human`). It is the person, every record's
+   `metadata.person`.
+
+Any other answer saves nothing and says why. The key goes to the vault, bound to the origin and
+`signal:actor:{act_…}`. `settings.json` keeps the origin, the person and their handle, the actor and its handle.
+Settings saved by an earlier build, which asked for the person, could name the app actor itself; Beacon sends
+nothing under them, and Settings asks for the app key again.
 
 **Sending.** After every journal entry, and every 30 seconds, the app drains the outbox in journal order with
 `POST /api/app-records`. Each request carries the record's exact stored bytes and the app actor's key, sent only

@@ -26,6 +26,14 @@ final class FakeSignalServer: @unchecked Sendable {
     var unavailable = false
     var me: [String: Any] = ["actor": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "name": "Beacon",
                                        "handle": "beacon-winton"], "scopes": ["read", "write"]]
+    /// `GET /api/actors/{id}`: the app actor, working for the person, and the person.
+    var actors: [String: [String: Any]] = [
+        "act_01m6a6ft00e81840g2081040g3": ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration",
+                                           "handle": "beacon-winton", "approval_app": true, "works_for": person,
+                                           "deactivated_at": NSNull()],
+        person: ["id": person, "type": "human", "handle": "winton", "approval_app": false, "works_for": NSNull(),
+                 "deactivated_at": NSNull()],
+    ]
 
     init() {
         FakeSignalServer.lock.withLock { FakeSignalServer.byHost[host] = self }
@@ -62,6 +70,9 @@ final class FakeSignalServer: @unchecked Sendable {
             switch (request.httpMethod, request.url?.path) {
             case ("GET", "/api/me"):
                 return .json(200, me, [:])
+            case ("GET", let path?) where path.hasPrefix("/api/actors/"):
+                let id = String(path.dropFirst("/api/actors/".count))
+                return actors[id].map { .json(200, $0, [:]) } ?? .json(404, problem("not_found"), [:])
             case ("POST", "/api/app-records"):
                 if unavailable { return .json(503, problem("unavailable"), [:]) }
                 guard let record = try? JSON.parse(body), let key = record["key"]?.stringValue else {
@@ -290,23 +301,48 @@ struct SignalDeliveryTests {
 
     @Test func settingsAcceptOnlyTheAppActorsKey() async throws {
         let signal = FakeSignalServer()
+        let app = "act_01m6a6ft00e81840g2081040g3"
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("signal-" + randomHex(6))
         let vault = Vault(url: directory.appendingPathComponent("app/vault"), key: FixtureVaultKey())
         let url = directory.appendingPathComponent("app/settings.json")
-        func register(_ key: String = "sig_app_fixture_key", person: String = person) async throws -> SignalSettings {
-            try await SignalSetup.register(key: Secret(key), origin: signal.origin, person: person, vault: vault,
+        func register(_ key: String = "sig_app_fixture_key") async throws -> SignalSettings {
+            try await SignalSetup.register(key: Secret(key), origin: signal.origin, vault: vault,
                                            settings: url, configuration: FakeSignalServer.configuration)
         }
-        await #expect(throws: SignalSetup.Refusal.person) { try await register(person: "@winton") }
         await #expect(throws: SignalSetup.Refusal.rejected) { try await register("wrong") }
         signal.me["scopes"] = ["read", "write", "relay"]
         await #expect(throws: SignalSetup.Refusal.scopes) { try await register() }
         signal.me["scopes"] = ["read", "write"]
-        signal.me["actor"] = ["id": "act_01m6a6ft00e81840g2081040g3", "type": "human", "handle": "winton"]
+        signal.me["actor"] = ["id": app, "type": "human", "handle": "winton"]
         await #expect(throws: SignalSetup.Refusal.notAnApp) { try await register() }
-        signal.me["actor"] = ["id": "act_01m6a6ft00e81840g2081040g3", "type": "integration", "handle": "beacon-winton"]
+        signal.me["actor"] = ["id": app, "type": "integration", "handle": "beacon-winton"]
+
+        // The app actor as Signal shows it: active, marked approval_app, working for an active person.
+        let good = signal.actors[app]!
+        let cases: [(SignalSetup.Refusal, [String: Any])] = [
+            (.notAnApp, ["deactivated_at": "2026-11-20T00:00:00Z"]),
+            (.notApprovalApp, ["approval_app": false]),
+            (.noPerson, ["works_for": NSNull()]),
+            (.noPerson, ["works_for": app]),
+            (.noPerson, ["works_for": "act_01m6a6ft00e81840g2081040g9"]),
+        ]
+        for (refusal, change) in cases {
+            signal.actors[app] = good.merging(change) { $1 }
+            await #expect(throws: refusal, "\(change)") { try await register() }
+        }
+        signal.actors[app] = good
+        signal.actors[person]!["type"] = "agent"
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
+        signal.actors[person]!["type"] = "human"
+        signal.actors[person]!["deactivated_at"] = "2026-11-20T00:00:00Z"
+        await #expect(throws: SignalSetup.Refusal.noPerson) { try await register() }
+        signal.actors[person]!["deactivated_at"] = NSNull()
+        #expect(try AppSettings.load(url).signal == nil)
+
+        // The person comes from Signal's works_for, never from what was typed.
         let settings = try await register()
-        #expect(settings.actor == "act_01m6a6ft00e81840g2081040g3" && settings.person == person)
+        #expect(settings.actor == app && settings.person == person && settings.personHandle == "winton" && settings.usable)
+        #expect(try AppSettings.load(url).signal == settings)
         #expect(try vault.credential(for: try settings.binding).value == signal.key)
         #expect(try String(contentsOf: url, encoding: .utf8).contains(signal.key) == false)
 

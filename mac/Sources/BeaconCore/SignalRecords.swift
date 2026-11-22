@@ -60,44 +60,59 @@ public struct SignalRecords: RecordTransport {
     }
 }
 
-/// Registers the app actor's key in Settings. Signal must answer `GET /api/me` with an integration actor whose key
-/// has exactly `read` and `write` (13.00-D25). The key goes straight to the vault, bound to the Signal origin and that
-/// actor; it is never shown, logged or passed on. Signal itself refuses a record whose person the app does not
-/// work for.
+/// Registers the app actor's key in Settings (13.00-D16, D25). Signal must answer `GET /api/me` with an integration
+/// actor whose key has exactly `read` and `write`, and `GET /api/actors/{id}` must show that actor active, marked
+/// `approval_app`, and working for an active person (`works_for`). That person is who the records are about: Beacon
+/// takes it from Signal and never asks for it. The key goes straight to the vault, bound to the Signal origin and the
+/// app actor; it is never shown, logged or passed on.
 public enum SignalSetup {
     public enum Refusal: Error, Equatable, Sendable {
-        case person
+        /// The key's actor is not an active integration.
         case notAnApp
+        /// The actor is not marked `approval_app`.
+        case notApprovalApp
+        /// The actor works for nobody, or not for an active person.
+        case noPerson
         case scopes
         case rejected
         case unreachable
     }
 
-    public static func register(key: Secret, origin: String, person: String, vault: Vault, settings url: URL,
+    public static func register(key: Secret, origin: String, vault: Vault, settings url: URL,
                                 configuration: URLSessionConfiguration = .ephemeral) async throws -> SignalSettings {
-        guard PublicID.isValid(person, prefix: "act") else { throw Refusal.person }
         let normalized = try CredentialBinding.normalize(origin)
         let client = try ServiceClient(origin: normalized, authorization: key, headers: ["User-Agent": "beacon-app"],
                                        configuration: configuration, maxBytes: 1 << 20)
-        let me: [String: Any]
-        do {
-            let (status, value) = try await client.json("GET", "/api/me")
-            guard let object = value as? [String: Any] else { throw status == 401 || status == 403 ? Refusal.rejected : Refusal.unreachable }
-            me = object
-        } catch let refusal as Refusal {
-            throw refusal
-        } catch {
-            throw Refusal.unreachable
+        func read(_ path: String) async throws -> [String: Any]? {
+            do {
+                let (status, value) = try await client.json("GET", path)
+                if status == 401 { throw Refusal.rejected }
+                return status == 200 ? value as? [String: Any] : nil
+            } catch let refusal as Refusal {
+                throw refusal
+            } catch {
+                throw Refusal.unreachable
+            }
         }
+        guard let me = try await read("/api/me") else { throw Refusal.rejected }
         let actor = me["actor"] as? [String: Any]
         guard actor?["type"] as? String == "integration", let id = actor?["id"] as? String,
               PublicID.isValid(id, prefix: "act") else { throw Refusal.notAnApp }
         guard Set(me["scopes"] as? [String] ?? []) == ["read", "write"], (me["scopes"] as? [String])?.count == 2 else {
             throw Refusal.scopes
         }
+        guard let app = try await read("/api/actors/\(id)") else { throw Refusal.notAnApp }
+        guard app["id"] as? String == id, app["type"] as? String == "integration", app["deactivated_at"] is NSNull
+        else { throw Refusal.notAnApp }
+        guard app["approval_app"] as? Bool == true else { throw Refusal.notApprovalApp }
+        guard let person = app["works_for"] as? String, PublicID.isValid(person, prefix: "act"), person != id,
+              let human = try await read("/api/actors/\(person)"), human["id"] as? String == person,
+              human["type"] as? String == "human", human["deactivated_at"] is NSNull else { throw Refusal.noPerson }
         var settings = try AppSettings.load(url)
         if let existing = settings.signal { try? vault.remove(try existing.binding) }
-        let signal = SignalSettings(origin: normalized, person: person, actor: id, handle: actor?["handle"] as? String ?? id)
+        let signal = SignalSettings(origin: normalized, person: person, actor: id,
+                                    handle: actor?["handle"] as? String ?? id,
+                                    personHandle: human["handle"] as? String)
         try vault.store(key, for: try signal.binding)
         settings.signal = signal
         try settings.save(url)

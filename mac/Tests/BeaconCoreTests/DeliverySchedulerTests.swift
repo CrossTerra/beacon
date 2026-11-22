@@ -110,4 +110,21 @@ struct DeliverySchedulerTests {
         await scheduler.idle()
         #expect(try journal.deliveryStatus() == .init(delivered: 2, waiting: 0, stopped: nil))
     }
+
+    /// Settings that name no usable person send nothing and say to save the app key again.
+    @Test func settingsWithoutAPersonSendNothing() async throws {
+        let (journal, _) = try filledJournal(scratchPath(), at: Date(timeIntervalSince1970: 1_800_000_000), count: 1)
+        let scheduler = DeliveryScheduler(journal: journal, connect: { throw SignalSetup.Refusal.noPerson })
+        scheduler.deliver()
+        await scheduler.idle()
+        #expect(scheduler.message.contains("Save the app key again"))
+        #expect(try journal.deliveryStatus().waiting == 1)
+    }
+
+    @Test func settingsNamingTheAppAreNotUsable() {
+        let app = "act_01m6a6ft00e81840g2081040g3"
+        #expect(!SignalSettings(origin: "https://s.test", person: app, actor: app, handle: "b").usable)
+        #expect(!SignalSettings(origin: "https://s.test", person: "@winton", actor: app, handle: "b").usable)
+        #expect(SignalSettings(origin: "https://s.test", person: person, actor: app, handle: "b").usable)
+    }
 }

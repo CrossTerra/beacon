@@ -40,6 +40,7 @@ final class ApprovalService: ObservableObject {
             let settingsURL0 = paths.settings
             let scheduler = DeliveryScheduler(journal: journal, connect: {
                 guard let signal = try AppSettings.load(settingsURL0).signal else { throw VaultError.notFound }
+                guard signal.usable else { throw SignalSetup.Refusal.noPerson }
                 return (try SignalRecords.connect(signal, vault: vault), signal.person)
             }, message: delivery)
             scheduler.onMessage = { [weak self] message in self?.delivery = message }
@@ -108,18 +109,19 @@ final class ApprovalService: ObservableObject {
     }
 
     /// Registers the app actor's key. It goes to the vault; this never shows or keeps it.
-    func registerSignal(key: String, origin: String, person: String) async -> String {
+    func registerSignal(key: String, origin: String) async -> String {
         guard let vault else { return status }
         do {
-            signal = try await SignalSetup.register(key: Secret(key), origin: origin, person: person, vault: vault,
-                                                    settings: paths.settings)
+            signal = try await SignalSetup.register(key: Secret(key), origin: origin, vault: vault, settings: paths.settings)
             // A new key or person may be what a stopped record needed.
             resumeDelivery()
-            return "Records go to \(signal!.origin) as \(signal!.handle)"
-        } catch SignalSetup.Refusal.person {
-            return "Not saved: the person is an act_… id."
+            return "Records go to \(signal!.origin) as \(signal!.handle), for \(signal!.personHandle ?? signal!.person)"
         } catch SignalSetup.Refusal.notAnApp {
-            return "Not saved: that key is not an integration actor's."
+            return "Not saved: that key is not an active integration actor's."
+        } catch SignalSetup.Refusal.notApprovalApp {
+            return "Not saved: that actor is not marked as an approval app. Use the key from Signal's /beacon page."
+        } catch SignalSetup.Refusal.noPerson {
+            return "Not saved: that app does not work for an active person in Signal."
         } catch SignalSetup.Refusal.scopes {
             return "Not saved: the app's key must have exactly read and write."
         } catch SignalSetup.Refusal.rejected {

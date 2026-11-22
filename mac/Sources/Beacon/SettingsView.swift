@@ -10,7 +10,6 @@ struct SettingsView: View {
     @State private var message = ""
     @State private var saving = false
     @State private var signalOrigin = ""
-    @State private var person = ""
     @State private var appKey = ""
     @State private var signalMessage = ""
 
@@ -39,23 +38,26 @@ struct SettingsView: View {
             Section("Signal") {
                 if let signal = service.signal {
                     LabeledContent("App actor", value: "\(signal.handle) (\(signal.actor))")
-                    LabeledContent("Person", value: signal.person)
+                    LabeledContent("Person", value: signal.personHandle.map { "\($0) (\(signal.person))" } ?? signal.person)
+                    if !signal.usable {
+                        Text("These settings name the app as the person. Paste the app key again and save.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                     LabeledContent("Origin", value: signal.origin)
                     Button("Remove", role: .destructive) { service.removeSignal() }
                 }
                 TextField("Signal origin, https://…", text: $signalOrigin)
-                TextField("Person, act_…", text: $person)
                 SecureField("App actor's key", text: $appKey)
                 Button(service.signal == nil ? "Save" : "Replace key") {
                     let value = appKey
                     appKey = ""
                     saving = true
                     Task {
-                        signalMessage = await service.registerSignal(key: value, origin: signalOrigin, person: person)
+                        signalMessage = await service.registerSignal(key: value, origin: signalOrigin)
                         saving = false
                     }
                 }
-                .disabled(appKey.isEmpty || signalOrigin.isEmpty || person.isEmpty || saving)
+                .disabled(appKey.isEmpty || signalOrigin.isEmpty || saving)
                 if !signalMessage.isEmpty { Text(signalMessage).font(.caption) }
                 Text(service.delivery).font(.caption)
                 Button("Resume delivery") { service.resumeDelivery() }

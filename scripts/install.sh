@@ -216,7 +216,8 @@ cat <<EOF
 
 Next:
   1. Beacon's menu → Settings… → GitHub: paste a GitHub token for your own account.
-  2. Settings… → Signal: the Signal origin, your act_… id and the app key, from Signal's /beacon page.
+  2. Settings… → Signal: the Signal origin and the app key, from Signal's /beacon page. Beacon reads from
+     Signal whom the app works for. If you saved Signal before, save the app key again.
   3. Approvals… (⌥⌘B) shows proposals as they arrive. Beacon is the beacon-light icon in the menu bar, with a
      number while proposals wait; opening Beacon.app again also shows the window.
 

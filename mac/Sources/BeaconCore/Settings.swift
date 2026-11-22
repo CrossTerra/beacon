@@ -21,12 +21,26 @@ public struct GitHubSettings: Codable, Equatable, Sendable {
 public struct SignalSettings: Codable, Equatable, Sendable {
     /// `https://host[:port]`.
     public var origin: String
-    /// The person the app works for, `act_…`: every record's `metadata.person`.
+    /// The person the app works for, `act_…`, as Signal's `works_for` named it: every record's `metadata.person`.
     public var person: String
     /// The app actor, `act_…`, the key belongs to.
     public var actor: String
     /// The app actor's handle, for display.
     public var handle: String
+    /// The person's handle, for display.
+    public var personHandle: String?
+
+    public init(origin: String, person: String, actor: String, handle: String, personHandle: String? = nil) {
+        self.origin = origin
+        self.person = person
+        self.actor = actor
+        self.handle = handle
+        self.personHandle = personHandle
+    }
+
+    /// Records can go out under these settings: the person is an `act_…` other than the app itself. Settings saved
+    /// before Beacon took the person from Signal could name the app; those are re-saved in Settings.
+    public var usable: Bool { PublicID.isValid(person, prefix: "act") && person != actor }
 
     public var binding: CredentialBinding {
         get throws { try CredentialBinding(service: "signal", origin: origin, account: "signal:actor:\(actor)") }

@@ -320,3 +320,31 @@ struct JournalReviewTests {
         }
     }
 }
+
+struct JournalFileTests {
+    private func mode(_ path: String) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue
+    }
+
+    /// The journal, its WAL and its shared memory are created 0600, and files an earlier build left 0644 are narrowed
+    /// when the journal opens.
+    @Test func theJournalsFilesAreTheOwnersAlone() throws {
+        let path = scratchPath()
+        let files = [path, path + "-wal", path + "-shm"]
+        let (journal, _) = try filledJournal(path, at: Date(timeIntervalSince1970: 1_800_000_000), count: 1)
+        for file in files { #expect(mode(file) == 0o600, "\(file)") }
+
+        for file in files { try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: file) }
+        let again = try Journal(path: path, at: Date(timeIntervalSince1970: 1_800_000_100))
+        for file in files { #expect(mode(file) == 0o600, "\(file)") }
+        withExtendedLifetime((journal, again)) {}
+    }
+
+    @Test func aSymlinkedWALIsRefused() throws {
+        let path = scratchPath()
+        let elsewhere = scratchPath("elsewhere")
+        FileManager.default.createFile(atPath: elsewhere, contents: Data())
+        try FileManager.default.createSymbolicLink(atPath: path + "-wal", withDestinationPath: elsewhere)
+        #expect(throws: SQLiteError.self) { try Journal(path: path, at: Date()) }
+    }
+}
