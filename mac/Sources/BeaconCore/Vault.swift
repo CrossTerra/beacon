@@ -121,6 +121,11 @@ public final class Vault: @unchecked Sendable {
         keySource = key
     }
 
+    /// Fetches the key, creating it on first use, without reading the file.
+    public func unlock() throws {
+        _ = try keySource.key()
+    }
+
     /// The bindings it holds, without secrets.
     public func bindings() throws -> [CredentialBinding] {
         try locked { try load().entries.map(\.binding) }

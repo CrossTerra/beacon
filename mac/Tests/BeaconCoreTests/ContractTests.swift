@@ -122,9 +122,3 @@ struct ContractTests {
                                                                "prompt": .string(String(repeating: "👍", count: 32_000))]))
     }
 }
-
-extension JSON: ExpressibleByStringLiteral {
-    public init(stringLiteral value: String) {
-        self = .string(value)
-    }
-}

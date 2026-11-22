@@ -24,4 +24,9 @@ bool beacon_self_is(const char *identifier);
 // or another program never reaches it. Returns 0, or an OSStatus or -1.
 int beacon_vault_key(const char *identifier, const char *service, const char *account, uint8_t key[32]);
 
+// The designated requirement of the running process, or of the code at `path`, as text. Returns false for
+// unsigned code or when `out` is too small.
+bool beacon_self_designated_requirement(char *out, size_t size);
+bool beacon_designated_requirement(const char *path, char *out, size_t size);
+
 #endif

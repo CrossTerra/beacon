@@ -82,6 +82,62 @@ A different commit, changed build input, or replaced artifact needs review with 
 [`scripts/repro.sh`](../scripts/repro.sh) during the audit for the two-path build check. It compares
 unsigned builds, not signed binaries.
 
+## Signed Beacon.app: the vault key and the socket's trust
+
+Winton runs this himself, in his own Terminal, with his Apple Development certificate and a second, disposable
+code-signing certificate for the wrong-signer control. It uses the **login** Keychain, so agents and CI never run
+it. It checks what the automated tests cannot: the Keychain item the vault key lives in, its access list, and
+`act.json` across a rebuild. No credential is stored; the vault stays empty.
+
+1. Stage the app with `scripts/build-app.sh FULL_COMMIT` and set `stage` to the printed directory. Sign the two
+   helpers and then the bundle, each with its identifier and a designated requirement that pins the certificate:
+
+~~~bash
+set -euo pipefail
+stage='/absolute/path/to/the/printed/stage'
+signing_keychain='/absolute/path/to/your-signing.keychain-db'
+cert='EXACT_APPLE_DEVELOPMENT_CERTIFICATE_SHA1'
+other='EXACT_DISPOSABLE_CERTIFICATE_SHA1'
+(cd "$stage" && shasum -a 256 --check Beacon.app.sha256)
+sign() { # certificate identifier path
+  codesign --force --sign "$1" --keychain "$signing_keychain" --timestamp=none --options runtime \
+    --identifier "$2" --requirements "=designated => identifier \"$2\" and certificate leaf = H\"$1\"" "$3"
+}
+sign_app() { # certificate bundle
+  sign "$1" dev.beacon.cli "$2/Contents/Helpers/beacon"
+  sign "$1" dev.beacon.tether "$2/Contents/Helpers/tether"
+  sign "$1" dev.beacon.app "$2"
+}
+cp -R "$stage/Beacon.app" "$stage/Other.app"
+cp -R "$stage/Beacon.app" "$stage/AdHoc.app"
+(
+  trap 'security lock-keychain "$signing_keychain"' EXIT
+  security unlock-keychain "$signing_keychain"
+  sign_app "$cert" "$stage/Beacon.app"
+  sign_app "$other" "$stage/Other.app"
+)
+codesign --force --deep --sign - "$stage/AdHoc.app"
+codesign --verify --strict -R "=identifier \"dev.beacon.app\" and certificate leaf = H\"$cert\"" "$stage/Beacon.app"
+~~~
+
+2. Quit any running Beacon. Open `"$stage/Beacon.app"`. No Keychain prompt appears. The menu shows **Accepting
+   proposals (no action type enabled yet)**. In Keychain Access, the login item `dev.beacon.app` (account
+   `vault-key`) exists, and its **Access Control** lists only Beacon. `~/Library/Application Support/beacon/act.json`
+   holds the app's designated requirement with your certificate's hash. Quit Beacon.
+3. **Rebuild.** Stage the same or a later commit again and sign it with `$cert` the same way. Open it: no prompt, and
+   the menu again shows **Accepting proposals**. The rebuilt app reads the key and `act.json` still matches.
+4. **Wrong signer.** Open `"$stage/Other.app"`. macOS asks whether it may use the `dev.beacon.app` item: click
+   **Deny**. The menu shows **The vault's Keychain key is not available**, and nothing listens on
+   `~/Library/Application Support/beacon/run/act.sock`. Quit it.
+5. **Ad hoc.** Open `"$stage/AdHoc.app"`. No prompt appears. The menu shows **Approvals need Beacon.app signed with
+   your Apple Development certificate**, and there is no socket. Quit it.
+6. Record the commit, the certificate fingerprints, prompt counts and each result. To clean up, remove the test
+   item and the trust file: `security delete-generic-password -s dev.beacon.app -a vault-key` and
+   `rm ~/Library/Application Support/beacon/act.json`. A later signed launch creates both again.
+
+If you change the certificate on purpose, step 4's prompt is expected. Delete the item and `act.json` and launch the
+newly signed app once to create them again. Do this only before the vault holds credentials.
+
 ## Part 1 manual rebuild test
 
 Winton runs this in his own Terminal on his Mac before real credentials are provisioned. It makes a minimal

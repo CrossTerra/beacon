@@ -81,6 +81,43 @@ bool beacon_self_is(const char *identifier) {
     return ok;
 }
 
+static bool requirement_text(SecStaticCodeRef code, char *out, size_t size) {
+    SecRequirementRef requirement = NULL;
+    if (SecCodeCopyDesignatedRequirement(code, kSecCSDefaultFlags, &requirement) != errSecSuccess) return false;
+    CFStringRef text = NULL;
+    OSStatus status = SecRequirementCopyString(requirement, kSecCSDefaultFlags, &text);
+    CFRelease(requirement);
+    if (status != errSecSuccess || !text) return false;
+    bool ok = CFStringGetCString(text, out, (CFIndex)size, kCFStringEncodingUTF8);
+    CFRelease(text);
+    return ok;
+}
+
+bool beacon_self_designated_requirement(char *out, size_t size) {
+    SecCodeRef self = NULL;
+    if (SecCodeCopySelf(kSecCSDefaultFlags, &self) != errSecSuccess) return false;
+    SecStaticCodeRef image = NULL;
+    OSStatus status = SecCodeCopyStaticCode(self, kSecCSDefaultFlags, &image);
+    CFRelease(self);
+    if (status != errSecSuccess) return false;
+    bool ok = requirement_text(image, out, size);
+    CFRelease(image);
+    return ok;
+}
+
+bool beacon_designated_requirement(const char *path, char *out, size_t size) {
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
+    if (!url) return false;
+    SecStaticCodeRef code = NULL;
+    bool ok = false;
+    if (SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess) {
+        ok = SecStaticCodeCheckValidity(code, kSecCSDefaultFlags, NULL) == errSecSuccess && requirement_text(code, out, size);
+        CFRelease(code);
+    }
+    CFRelease(url);
+    return ok;
+}
+
 static CFMutableDictionaryRef item_query(CFStringRef service, CFStringRef account) {
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
                                                              &kCFTypeDictionaryValueCallBacks);

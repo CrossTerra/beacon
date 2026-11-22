@@ -69,7 +69,10 @@ public final class ProposalServer: @unchecked Sendable {
         self.limits = limits
         self.now = now
         self.queue = queue
-        book.changed = { [weak self] id in self?.answerWaits(for: id) }
+        // A change can come from the window on another thread; waits are answered on this queue.
+        book.changed = { [weak self] id in
+            self?.queue.async { [weak self] in self?.answerWaits(for: id) }
+        }
     }
 
     /// Opens the listener in a private directory: `0700`, owned by this user. A live listener at the path

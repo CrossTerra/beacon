@@ -11,7 +11,7 @@ let package = Package(
             cSettings: [.unsafeFlags(["-Wno-deprecated-declarations"])],
             linkerSettings: [.linkedFramework("Security"), .linkedFramework("CoreFoundation"), .linkedLibrary("bsm")]
         ),
-        .target(name: "BeaconCore", dependencies: ["BeaconSecurity"]),
+        .target(name: "BeaconCore", dependencies: ["BeaconSecurity"], linkerSettings: [.linkedLibrary("sqlite3")]),
         .executableTarget(name: "tether", dependencies: ["TetherSupport"]),
         .executableTarget(name: "Beacon", dependencies: ["TetherSupport", "BeaconCore"]),
         .testTarget(name: "BeaconTests", dependencies: ["Beacon"]),

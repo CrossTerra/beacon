@@ -4,8 +4,9 @@ Beacon sits between accounts that belong to one person and a store that many peo
 says what Beacon protects, from whom, and how. Code that changes any of these properties changes this file in the
 same pull request.
 
-The `Beacon.app` shell has no approval listener, network access or credential access. Its menu and shortcut
-open an empty approvals window. It starts [tether](tether.md), a helper in its bundle that runs the bundled
+`Beacon.app` makes no network connection and uses no service credential yet. Its menu and shortcut open the
+approval window. When signed as `dev.beacon.app` with a certificate, it opens its vault key, its journal and the
+proposal socket ([approvals](approvals.md)). No action type is enabled, so nothing is executed. It starts [tether](tether.md), a helper in its bundle that runs the bundled
 collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
 commands, paths, secrets or item content.
 
@@ -158,12 +159,16 @@ commands, paths, secrets or item content.
     each check the other end with the kernel's audit token before sending anything. The app admits only the code
     requirements configured at setup; the client sends only to the configured app's signature. The socket has no
     operation that approves, lists or reads history. Its frames, waits and pending proposals are bounded
-    ([approvals](approvals.md)). The app does not open it yet.
+    ([approvals](approvals.md)). The app writes the client's trust (`act.json`, its own designated requirement)
+    on first launch and refuses to open the socket if the file names another signature. An approval is one
+    click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
+    proposal once. Quit and relaunch expire every approval that has no durable start, and a start without a result
+    is never dispatched again. The journal and outbox hold prompts and messages in plain text in a `0700` directory.
 14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
-    that binding. Nothing lists or prints a secret or passes one to a child process. No path uses the vault yet,
-    and the tests use only fixture keys and fixture secrets.
+    that binding. Nothing lists or prints a secret or passes one to a child process. The app opens the vault key at
+    launch, but no path reads a credential yet. The tests use only fixture keys and fixture secrets.
 
 ## Known limits
 

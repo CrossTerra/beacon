@@ -8,8 +8,9 @@ Follow the [audit checklist](docs/audit.md) and the [local build and signing gui
 
 Beacon runs on the person's Mac. Its Go collector reads GitHub, Jira, Gmail, Google Calendar, Google Drive and
 Slack. Rules owned by the person select changes and the fields that reach [Signal](#signal). The
-[macOS menu-bar app](docs/development.md#macos-app) opens an empty approvals window and runs the bundled
-collector through [tether](docs/tether.md) while the app is open. It does not accept proposals or execute actions.
+[macOS menu-bar app](docs/development.md#macos-app) runs the bundled collector through [tether](docs/tether.md)
+while the app is open. Signed, it takes proposals over an authenticated local socket into its journal and shows
+them in its [approval window](docs/approvals.md). No action type is enabled yet, so it executes nothing.
 
 ## Install from the person's fork
 

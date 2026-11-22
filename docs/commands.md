@@ -319,10 +319,11 @@ Each command sends one request and prints the app's one-line JSON reply. A reply
 defaults to `--after 0 --timeout 300`. There is no command to approve or list.
 
 It reads the app's code requirement from `~/Library/Application Support/beacon/act.json`,
-`{ "requirement": "…" }`. Before sending a byte, it checks the socket's listener against that requirement using
-the kernel's audit token. A listener with another signature, or run by another user, receives nothing. It takes
-no `--config` and reads no credential. The app does not open the socket yet; until it does, `beacon act` reports
-that Beacon.app is not running.
+`{ "requirement": "…" }`. The signed app writes that file on its first launch and refuses to listen if the file
+names another signature. Before sending a byte, `beacon act` checks the socket's listener against that
+requirement using the kernel's audit token. A listener with another signature, or run by another user, receives
+nothing. It takes no `--config` and reads no credential. Until an action type is enabled, `propose` answers
+`type_disabled`.
 
 ## `beacon keychain repair`
 

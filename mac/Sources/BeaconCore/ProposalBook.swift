@@ -30,7 +30,7 @@ public struct Proposal: Equatable, Sendable {
     public static let lifetime: TimeInterval = 24 * 60 * 60
 
     public init(request: ProposalRequest, client: String, at date: Date, id: String = PublicID.make("apr"),
-                salt: String = randomHex(16)) {
+                salt: String = randomHex(16), expiresAt: Date? = nil) {
         self.id = id
         type = request.type
         params = request.params
@@ -42,7 +42,7 @@ public struct Proposal: Equatable, Sendable {
         subject = request.subject
         self.client = client
         proposedAt = date
-        expiresAt = date.addingTimeInterval(Proposal.lifetime)
+        self.expiresAt = expiresAt ?? date.addingTimeInterval(Proposal.lifetime)
         status = .pending
         version = 1
     }

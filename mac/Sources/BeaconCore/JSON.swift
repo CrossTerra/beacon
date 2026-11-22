@@ -285,3 +285,9 @@ extension JSON {
     /// Serialises the value for a socket reply or a record. Fields come out in canonical order.
     public static func encode(_ value: JSON) -> Data { value.canonicalData }
 }
+
+extension JSON: ExpressibleByStringLiteral {
+    public init(stringLiteral value: String) {
+        self = .string(value)
+    }
+}
