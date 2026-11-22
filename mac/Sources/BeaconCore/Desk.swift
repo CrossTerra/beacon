@@ -11,13 +11,27 @@ public struct ResolvedAction: Equatable, Sendable {
     /// Facts read from the provider, shown beside the proposer's words.
     public let facts: [String: String]
     public let readAt: Date
+    /// The account and destination in the person's words (`winton`; `main · #147 · CrossTerra/signal`). The
+    /// exact `account` and `destination` stay under _Show exact parameters_.
+    public let accountLabel: String?
+    public let destinationLabel: String?
+    /// The record subject as the provider spells it (`github:pr:CrossTerra/signal#147`), for the records from the
+    /// approval on. Local only: not part of any hash.
+    public let subject: String?
+    /// Where the target can be seen, such as the pull request's page.
+    public let link: URL?
 
-    public init(origin: String?, account: String, destination: JSON, facts: [String: String] = [:], readAt: Date) {
+    public init(origin: String?, account: String, destination: JSON, facts: [String: String] = [:], readAt: Date,
+                accountLabel: String? = nil, destinationLabel: String? = nil, subject: String? = nil, link: URL? = nil) {
         self.origin = origin
         self.account = account
         self.destination = destination
         self.facts = facts
         self.readAt = readAt
+        self.accountLabel = accountLabel
+        self.destinationLabel = destinationLabel
+        self.subject = subject
+        self.link = link
     }
 }
 
@@ -118,7 +132,7 @@ public final class ApprovalDesk: ObservableObject {
         guard !stopping, let frozen, frozen.token == token, frozen.approval.id == selection else { return false }
         invalidate()
         do {
-            try journal.approve(frozen.approval, at: now())
+            try journal.approve(frozen.approval, subject: frozen.resolved.subject, at: now())
             refresh()
             onApproved?(frozen.approval.id)
             return true
@@ -127,6 +141,11 @@ public final class ApprovalDesk: ObservableObject {
             refresh()
             return false
         }
+    }
+
+    /// What happened to an approved proposal, in Beacon's words, and where to see it; nil before its start.
+    public func outcome(of proposal: Proposal) -> (text: String, link: URL?)? {
+        ActionOutcome.describe(proposal, approval: journal.approval(proposal.id), result: journal.outcome(proposal.id))
     }
 
     public func decline(note: String?) {
@@ -171,10 +190,39 @@ public final class ApprovalDesk: ObservableObject {
             } catch let refusal as MergeRefusal {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Not approvable: \(refusal.rawValue.replacingOccurrences(of: "_", with: " "))."
+            } catch let refusal as ChecksNotGreen {
+                guard let self, generation == self.generation else { return }
+                self.problem = "Not approvable: checks \(refusal.report.summary)."
             } catch {
                 guard let self, generation == self.generation else { return }
                 self.problem = "Beacon cannot resolve this action yet."
             }
+        }
+    }
+}
+
+/// An approved action's state after approval, as the window shows it.
+public enum ActionOutcome {
+    public static func describe(_ proposal: Proposal, approval: FrozenApproval?, result: JSON?) -> (text: String, link: URL?)? {
+        var link: URL?
+        if proposal.type == .githubMerge, let approval, let origin = approval.origin,
+           let repo = approval.params["repo"]?.stringValue, let number = approval.params["number"]?.intValue {
+            link = MergeHandler.pullURL(origin: origin, repo: repo, number: number)
+        }
+        let commit = result?["native"]?.stringValue.flatMap { native -> String? in
+            native.hasPrefix("github:merge:") ? String(native.dropFirst("github:merge:".count).prefix(7)) : nil
+        }
+        switch proposal.status {
+        case .approved: return ("Approved; starting…", link)
+        case .started: return ("Started…", link)
+        case .outcomeUnknown: return ("Outcome unknown: Beacon is reading it back. It will not be sent again.", link)
+        case .executed:
+            if let commit, proposal.type == .githubMerge { return ("Merged as \(commit)", link) }
+            return ("Done", link)
+        case .failed:
+            let error = result?["error"]?.stringValue?.replacingOccurrences(of: "_", with: " ") ?? "failed"
+            return (proposal.type == .githubMerge ? "Not merged: \(error)" : "Failed: \(error)", link)
+        default: return nil
         }
     }
 }

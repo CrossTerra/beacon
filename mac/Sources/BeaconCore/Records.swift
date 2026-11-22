@@ -4,7 +4,7 @@ import Foundation
 /// are canonical JSON, built once and kept, so a resend is byte for byte the same.
 enum Record {
     static func bytes(key: String, nonce: String, proposal: String, kind: String, at date: Date, body: JSON,
-                      proposed: JSON, person: String) throws -> Data {
+                      proposed: JSON, person: String, subject spelled: String? = nil) throws -> Data {
         guard PublicID.isValid(person, prefix: "act") else { throw Invalid(field: "/metadata/person") }
         let action = proposed["type"]!.stringValue!
         var metadata: [String: JSON] = ["proposal": .string(proposal), "person": .string(person), "action": .string(action)]
@@ -46,7 +46,7 @@ enum Record {
         }
         var record: [String: JSON] = [
             "version": .int(1), "key": .string(key), "type": .string("app.action." + kind),
-            "subject": .string(subject(action: action, params: proposed["params"]!, person: person)),
+            "subject": .string(subject(action: action, params: proposed["params"]!, person: person, spelled: spelled)),
             "occurred_at": .string(timestamp(date)), "metadata": .object(metadata),
         ]
         if !sealed.isEmpty {
@@ -55,12 +55,16 @@ enum Record {
         return JSON.object(record).canonicalData
     }
 
-    /// A merge is about its pull request. A post or a run is about the person's own subject until its handler
-    /// can tell whether the conversation's subject is public (a private channel is under `slack:dm:`).
-    static func subject(action: String, params: JSON, person: String) -> String {
+    /// A merge is about its pull request, with the repository as the proposal spelled it, or, from the approval
+    /// on, as GitHub spelled it (`spelled`, kept at approval; the same subject case aside, which is how Signal
+    /// compares them). A post or a run is about the person's own subject until its handler can tell whether the
+    /// conversation's subject is public (a private channel is under `slack:dm:`).
+    static func subject(action: String, params: JSON, person: String, spelled: String? = nil) -> String {
         if action == ActionType.githubMerge.rawValue, let repo = params["repo"]?.stringValue,
            let number = params["number"]?.intValue {
-            return "github:pr:\(repo.lowercased())#\(number)"
+            let proposed = "github:pr:\(repo)#\(number)"
+            if let spelled, spelled.lowercased() == proposed.lowercased() { return spelled }
+            return proposed
         }
         return "signal:actor:\(person)"
     }

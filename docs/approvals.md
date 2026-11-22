@@ -87,9 +87,12 @@ are waiting. The window opens from the menu's **Approvals…**, with ⌥⌘B, or
 Spotlight or `open` while it runs. Its **Settings…** button (⌘,) opens Settings.
 
 The window lists pending proposals, oldest first. The right side names the selected action in Beacon's words:
-the account, origin, destination and provider facts Beacon resolved, kept apart from the agent's reason. The
-message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`, and _Show exact parameters_ shows the
-canonical JSON.
+the account (for a merge, the GitHub login), origin, destination (`main · #147 · CrossTerra/signal`) and the
+provider facts Beacon resolved, such as **Checks: 3 passed**, with a link to the pull request, kept apart from the
+agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
+parameters_ shows the exact account (`github:user:{id}`), the destination and params as canonical JSON, and the
+approval hash. Once approved, the selected proposal stays shown with its result: _Started…_, **Merged as 18637a4**,
+_Not merged: head moved_, or an unknown outcome being read back, with the link to the pull request.
 
 **Approve** (or ⌘↩ in the window) is enabled only once Beacon has resolved the action and frozen a snapshot of
 the proposal id, its version, the final params, account, origin, destination and `approved_hash` (13.00-D29).
@@ -130,7 +133,9 @@ start without a result unknown, before the window or the socket opens. Nothing d
 
 Each entry becomes one Signal record ([the contract](#the-contract-with-signal)). Its exact bytes are built once,
 on first delivery with the person's `act_…` id, and kept. A merge is about its pull request
-(`github:pr:{owner}/{repo}#{n}`). A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
+(`github:pr:{owner}/{repo}#{n}`), with the repository as the proposal spelled it, never lowercased. From the approval
+on, the records use GitHub's own spelling (`full_name`, read in the preflight and kept in the local approval entry)
+when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A post or a run is about the person's own subject (`signal:actor:{act_…}`) until
 its handler can tell whether the conversation is public. The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
@@ -214,10 +219,14 @@ then, GitHub refuses the token's reads and Approve stays disabled.
 3. the reviews: no reviewer's latest review requests changes;
 4. the required checks on the base: contexts from repository rules and classic branch protection, where this
    account can read them;
-5. the head's check runs and commit statuses: every required context completed successfully (or neutral or
-   skipped). As in Signal's executor (#131), only the latest run of each check name and app counts: GitHub's run id
-   decides, else the later start, and a completed run that never started is the oldest. A re-run that passes
-   clears an older failure. Between apps reporting one name, a failure wins, then a run still in progress.
+5. the head's check runs and commit statuses: **every** check reported on the head, required or not, and every
+   required one, must have completed and passed (`success`, `neutral` or `skipped` for a check run, `success` for a
+   commit status). A repository with no required checks is no exception: a red check that branch protection does not
+   require still stops the merge, and a required check nobody reported is pending. As in Signal's executor (#131),
+   only the latest run of each check name and app counts: GitHub's run id decides, else the later start, and a
+   completed run that never started is the oldest. A re-run that passes clears an older failure. Between apps
+   reporting one name, a failure wins, then a run still in progress. The window shows **Checks: N passed**, or which
+   failed and which are pending.
 
 Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
 repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are

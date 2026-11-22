@@ -42,6 +42,7 @@ final class FakeGitHub: @unchecked Sendable {
 
     var user: (id: Int64, login: String, type: String) = (123, "winton", "User")
     var repositoryID: Int64 = 456
+    var fullName = "CrossTerra/signal"
     var pull = Pull()
     /// `(user id, state)` in order.
     var reviews: [(Int64, String)] = [(9, "APPROVED")]
@@ -90,7 +91,11 @@ final class FakeGitHub: @unchecked Sendable {
 
     func handle(_ request: URLRequest, body: Data?) -> Answer {
         lock.withLock {
-            let path = request.url!.path
+            // GitHub reads owner and repository names case-insensitively.
+            var path = request.url!.path
+            if path.lowercased().hasPrefix("/repos/crossterra/signal/") {
+                path = "/repos/CrossTerra/signal/" + path.dropFirst("/repos/crossterra/signal/".count)
+            }
             let parsed = body.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             requests.append(Request(method: request.httpMethod ?? "GET", path: path,
                                     authorization: request.value(forHTTPHeaderField: "Authorization"), body: parsed))
@@ -106,7 +111,7 @@ final class FakeGitHub: @unchecked Sendable {
                 var answer: [String: Any] = [
                     "state": pull.state, "merged": pull.merged, "mergeable_state": pull.mergeableState,
                     "title": "Add the record API",
-                    "base": ["ref": pull.base, "repo": ["id": repositoryID]], "head": ["sha": pull.head],
+                    "base": ["ref": pull.base, "repo": ["id": repositoryID, "full_name": fullName]], "head": ["sha": pull.head],
                 ]
                 answer["mergeable"] = pull.mergeable ?? NSNull()
                 answer["merge_commit_sha"] = pull.mergeCommit ?? NSNull()

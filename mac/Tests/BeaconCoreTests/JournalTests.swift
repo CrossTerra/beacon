@@ -108,6 +108,12 @@ struct JournalTests {
             var expected = entry["body"]!.objectValue!
             let action = expected["metadata"]!["action"]!.stringValue!
             if action != "github.merge" { expected["subject"] = .string("signal:actor:\(person)") }
+            // Beacon keeps the repository as spelled (CrossTerra/signal); Signal's fixture lowercases it, and Signal
+            // compares merge subjects case-insensitively.
+            if action == "github.merge" {
+                #expect(expected["subject"]!.stringValue!.lowercased() == "github:pr:crossterra/signal#140")
+                expected["subject"] = "github:pr:CrossTerra/signal#140"
+            }
             expected["key"] = .string("beacon:\(journal.id):\(seq)")
             #expect(try JSON.parse(bytes) == .object(expected), "\(entry["note"]!.stringValue!)")
             #expect(bytes == JSON.object(expected).canonicalData)

@@ -172,6 +172,8 @@ struct SignalDeliveryTests {
         for (entry, stored) in zip(entries, signal.stored) {
             var expected = entry["body"]!.objectValue!
             if expected["metadata"]!["action"] != "github.merge" { expected["subject"] = .string("signal:actor:\(person)") }
+            // The repository as spelled (see reproducesSignalsFixtureJournal).
+            else { expected["subject"] = "github:pr:CrossTerra/signal#140" }
             expected["key"] = .string(stored.key)
             #expect(stored.bytes == JSON.object(expected).canonicalData, "\(entry["note"]!.stringValue!)")
         }
