@@ -107,6 +107,41 @@ struct MergeTests {
         _ = try await h.handler.resolve(h.journal.proposal(id, at: h.clock.now)!, model: nil)
     }
 
+    /// Only the latest run of each check name and app counts (Signal's executor, #131).
+    @Test func onlyTheLatestRunOfACheckCounts() async throws {
+        func run(_ id: Int?, _ conclusion: String?, app: Int = 1, started: String? = "2026-11-20T10:00:00Z") -> [String: Any] {
+            var run: [String: Any] = ["name": "ci", "app": ["id": app],
+                                      "status": conclusion == nil ? "in_progress" : "completed",
+                                      "conclusion": conclusion ?? NSNull(), "started_at": started ?? NSNull()]
+            if let id { run["id"] = id }
+            return run
+        }
+        let cases: [(String, [[String: Any]], Bool)] = [
+            ("a re-run that passes clears an older failure", [run(1, "failure"), run(2, "success")], true),
+            ("a newer failure is not cleared by an older pass", [run(2, "failure"), run(1, "success")], false),
+            ("the higher id wins over a later start", [run(5, "success", started: "2026-11-20T09:00:00Z"),
+                                                       run(4, "failure", started: "2026-11-20T11:00:00Z")], true),
+            ("without ids, the later start wins", [run(nil, "cancelled", started: "2026-11-20T09:00:00Z"),
+                                                   run(nil, "success", started: "2026-11-20T10:00:00Z")], true),
+            ("a completed run with no start is the oldest", [run(nil, "success"), run(nil, "cancelled", started: nil)], true),
+            ("a run with no start that has not finished is the newest", [run(nil, "success"), run(nil, nil, started: nil)], false),
+            ("the latest run still in progress", [run(1, "success"), run(2, nil)], false),
+            ("another app's failing run of the same name", [run(1, "success"), run(2, "failure", app: 2)], false),
+            ("skipped and neutral are not failures", [run(1, "skipped"), run(1, "neutral", app: 2)], true),
+        ]
+        for (name, runs, green) in cases {
+            let h = try MergeHarness()
+            let id = try h.propose()
+            h.github.update { $0.checkRuns = [:]; $0.runs = runs }
+            let proposal = h.journal.proposal(id, at: h.clock.now)!
+            if green {
+                _ = try await h.handler.resolve(proposal, model: nil)
+            } else {
+                await #expect(throws: MergeRefusal.checksNotGreen, "\(name)") { try await h.handler.resolve(proposal, model: nil) }
+            }
+        }
+    }
+
     /// Anything that changed after approval stops the merge at the final read, with nothing sent.
     @Test func theFinalReadStopsAChangedMerge() async throws {
         let cases: [(String, (FakeGitHub) -> Void)] = [

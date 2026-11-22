@@ -116,35 +116,84 @@ public struct GitHubAPI: Sendable {
         return required
     }
 
-    /// The contexts that passed on `sha`: completed check runs that succeeded (or were neutral or skipped), and
-    /// commit statuses in `success`. Any other result is not green.
+    /// One reported check: a check run (keyed by its app and name) or a commit status (by context).
+    struct Check: Equatable {
+        var kind: String
+        var name: String
+        var app: Int64?
+        var id: Int64?
+        var startedAt: Date?
+        var completed: Bool
+        var conclusion: String
+    }
+
+    static let failing: Set<String> = ["failure", "cancelled", "timed_out", "action_required", "stale", "startup_failure"]
+    static let statusFailing: Set<String> = ["failure", "error"]
+
+    /// 0 passing, 1 not finished, 2 failing: between checks of one name from different apps, failing wins, then a
+    /// check still running, else passing (as Signal's executor reads them, #131).
+    static func rank(_ check: Check) -> Int {
+        guard check.completed else { return 1 }
+        if check.kind == "status" { return statusFailing.contains(check.conclusion) ? 2 : (check.conclusion == "success" ? 0 : 1) }
+        return failing.contains(check.conclusion) ? 2 : 0
+    }
+
+    /// Whether `a` is a later run than `b` of the same check. GitHub numbers runs as it creates them, so a re-run has
+    /// the higher id. Without ids, the later start wins; a run with no start (skipped or cancelled before it began)
+    /// is the oldest once completed, the newest while not.
+    static func newer(_ a: Check, than b: Check) -> Bool {
+        if let x = a.id, let y = b.id, x != y { return x > y }
+        func start(_ c: Check) -> Double {
+            c.startedAt?.timeIntervalSince1970 ?? (c.completed ? -.infinity : .infinity)
+        }
+        if start(a) != start(b) { return start(a) > start(b) }
+        return rank(a) > rank(b)
+    }
+
+    /// The names that are green: only the latest run of each name and app counts, so a re-run that passes clears an
+    /// older failure, and a newer failure is not cleared by an older pass. A name is green when its latest run from
+    /// every app, and its commit status if any, passed (success, neutral or skipped).
+    static func green(_ reported: [Check]) -> Set<String> {
+        var latest: [String: Check] = [:]
+        for check in reported {
+            let key = check.kind == "status" ? "status\u{0}\(check.name)" : "check\u{0}\(check.app ?? -1)\u{0}\(check.name)"
+            if let previous = latest[key], !newer(check, than: previous) { continue }
+            latest[key] = check
+        }
+        var worst: [String: Int] = [:]
+        for check in latest.values { worst[check.name] = max(worst[check.name] ?? 0, rank(check)) }
+        return Set(worst.filter { $0.value == 0 }.keys)
+    }
+
+    /// The contexts that passed on `sha`, from its check runs and its combined commit status.
     public func greenChecks(_ repo: String, sha: String) async throws -> Set<String> {
         let segments = try GitHubAPI.segments(repo)
-        var green = Set<String>(), seen = Set<String>(), failed = Set<String>()
+        let dates = ISO8601DateFormatter()
+        var reported: [Check] = []
         for page in 1...10 {
             let runs = try await object("/repos/\(segments)/commits/\(sha)/check-runs",
                                         query: [.init(name: "per_page", value: "100"), .init(name: "page", value: "\(page)")])
             let list = runs["check_runs"] as? [[String: Any]] ?? []
             for run in list {
                 guard let name = run["name"] as? String else { continue }
-                seen.insert(name)
-                if run["status"] as? String == "completed",
-                   ["success", "neutral", "skipped"].contains(run["conclusion"] as? String ?? "") {
-                    green.insert(name)
-                } else {
-                    failed.insert(name)
-                }
+                reported.append(Check(kind: "check", name: name,
+                                      app: ((run["app"] as? [String: Any])?["id"] as? NSNumber)?.int64Value,
+                                      id: (run["id"] as? NSNumber)?.int64Value,
+                                      startedAt: (run["started_at"] as? String).flatMap(dates.date(from:)),
+                                      completed: run["status"] as? String == "completed",
+                                      conclusion: run["conclusion"] as? String ?? ""))
             }
             if list.count < 100 { break }
             if page == 10 { throw ServiceError.tooLarge }
         }
+        // The combined status already holds the latest state of each context.
         let status = try await object("/repos/\(segments)/commits/\(sha)/status")
         for entry in status["statuses"] as? [[String: Any]] ?? [] {
-            guard let context = entry["context"] as? String, !seen.contains(context) else { continue }
-            if entry["state"] as? String == "success" { green.insert(context) } else { failed.insert(context) }
+            guard let context = entry["context"] as? String, let state = entry["state"] as? String else { continue }
+            reported.append(Check(kind: "status", name: context, app: nil, id: nil, startedAt: nil,
+                                  completed: state != "pending", conclusion: state))
         }
-        // A name that both passed and failed (a re-run alongside an old run) is not green.
-        return green.subtracting(failed)
+        return GitHubAPI.green(reported)
     }
 
     /// `PUT …/merge` with the frozen method and `sha: head`. GitHub refuses if the head moved.

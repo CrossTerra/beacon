@@ -50,6 +50,8 @@ final class FakeGitHub: @unchecked Sendable {
     /// Check runs on the head: name to conclusion (`nil` while in progress).
     var checkRuns: [String: String?] = ["ci": "success"]
     var statuses: [String: String] = [:]
+    /// More check runs, as GitHub reports them: `id`, `app`, `name`, `status`, `conclusion`, `started_at`.
+    var runs: [[String: Any]] = []
     var merge = MergeBehaviour.normal
     var down = false
     /// Answer `GET /user` with a redirect to this URL.
@@ -116,8 +118,8 @@ final class FakeGitHub: @unchecked Sendable {
             case ("GET", repo + "/commits/\(pull.head)/check-runs"):
                 return .json(200, ["check_runs": checkRuns.map { name, conclusion in
                     ["name": name, "status": conclusion == nil ? "in_progress" : "completed",
-                     "conclusion": conclusion ?? NSNull()] as [String: Any]
-                }])
+                     "conclusion": conclusion ?? NSNull(), "app": ["id": 1]] as [String: Any]
+                } + runs])
             case ("GET", repo + "/commits/\(pull.head)/status"):
                 return .json(200, ["statuses": statuses.map { ["context": $0, "state": $1] }])
             case ("PUT", repo + "/pulls/140/merge"):

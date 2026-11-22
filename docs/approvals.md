@@ -148,7 +148,9 @@ is never shown, logged, written elsewhere or passed to a child process.
 4. the required checks on the base: contexts from repository rules and classic branch protection, where this
    account can read them;
 5. the head's check runs and commit statuses: every required context completed successfully (or neutral or
-   skipped). A context that both passed and failed is not green.
+   skipped). As in Signal's executor (#131), only the latest run of each check name and app counts: GitHub's run id
+   decides, else the later start, and a completed run that never started is the oldest. A re-run that passes
+   clears an older failure. Between apps reporting one name, a failure wins, then a run still in progress.
 
 Any other answer, or one that cannot be read, leaves Approve disabled with the reason. The frozen action adds the
 repository id, the PR and the base (the contract's `destination`), the account and the origin. Preflights are
