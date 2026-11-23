@@ -11,8 +11,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/actsocket"
+	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/peer"
 )
 
@@ -22,6 +25,8 @@ const actUsage = `usage: beacon act types
        beacon act wait ID [--after VERSION] [--timeout SECONDS]
        beacon act withdraw ID
        beacon act quit
+
+Use beacon act --state-dir DIR OP to talk to the Go review preview. That socket has no quit operation.
 `
 
 // actFrameMax is the largest frame either side sends, newline included (13.00, _The local API_).
@@ -67,9 +72,21 @@ func (a *app) loadActSettings() (actSettings, error) {
 	return s, nil
 }
 
-// cmdAct sends one request to Beacon.app's proposal socket and prints the one-line JSON reply. A reply with
-// "error" exits 1. The client cannot approve: the socket has no such operation.
+// cmdAct sends one request and prints the one-line JSON reply. A reply with "error" exits 1. Without
+// the explicit preview flag this keeps using the signed Swift route; a Go socket failure cannot fall back to it.
 func (a *app) cmdAct(ctx context.Context, args []string) error {
+	var stateDir string
+	if len(args) > 0 && (args[0] == "--state-dir" || strings.HasPrefix(args[0], "--state-dir=")) {
+		fs, path := a.reviewFlags("act")
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		dir, err := reviewStateDir(*path)
+		if err != nil {
+			return err
+		}
+		stateDir, args = dir, fs.Args()
+	}
 	if len(args) == 0 {
 		fmt.Fprint(a.stderr, actUsage)
 		return exitError{2}
@@ -78,7 +95,7 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 	var wait time.Duration
 	switch args[0] {
 	case "types", "quit":
-		if len(args) != 1 {
+		if len(args) != 1 || stateDir != "" && args[0] == "quit" {
 			fmt.Fprint(a.stderr, actUsage)
 			return exitError{2}
 		}
@@ -93,6 +110,19 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 		}
 		if len(body) >= actFrameMax-len(`,"op":"propose"`)-1 {
 			return errors.New("the request is larger than one 256 KiB frame")
+		}
+		if stateDir != "" {
+			fields, err := approval.ParseObject(body)
+			if err != nil {
+				return errors.New("the request on standard input must be one JSON object")
+			}
+			if _, ok := fields["op"]; ok {
+				return errors.New("the request must not name op")
+			}
+			for k, v := range fields {
+				request[k] = v
+			}
+			break
 		}
 		var fields map[string]json.RawMessage
 		dec := json.NewDecoder(bytes.NewReader(body))
@@ -132,15 +162,13 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 		fmt.Fprint(a.stderr, actUsage)
 		return exitError{2}
 	}
-	settings, err := a.loadActSettings()
-	if err != nil {
-		return err
+	var reply []byte
+	var err error
+	if stateDir != "" {
+		reply, err = actsocket.Call(ctx, stateDir, approval.Object(request), wait)
+	} else {
+		reply, err = a.callSignedAct(ctx, request, wait)
 	}
-	frame, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	reply, err := actCall(ctx, settings, append(frame, '\n'), 10*time.Second+wait)
 	if err != nil {
 		return err
 	}
@@ -152,6 +180,18 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 		return exitError{1}
 	}
 	return nil
+}
+
+func (a *app) callSignedAct(ctx context.Context, request map[string]any, wait time.Duration) ([]byte, error) {
+	settings, err := a.loadActSettings()
+	if err != nil {
+		return nil, err
+	}
+	frame, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	return actCall(ctx, settings, append(frame, '\n'), 10*time.Second+wait)
 }
 
 // actCall connects, checks the listener, and only then writes the frame and reads one reply line.

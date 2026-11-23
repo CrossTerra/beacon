@@ -9,6 +9,9 @@ ad-hoc build opens none of them. Adding a service account in Settings enables [G
 [Slack posts](#slack-posts), independently, and adding a checkout enables [agent runs](#agent-runs). Once Signal is
 added in Settings, the outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
+The [Go service work](go-approvals.md) is separate from this signed install. It does not import or act on the
+Swift journal.
+
 ## The contract with Signal
 
 Signal publishes what it accepts from the app in `docs/approval-app.md` and three fixture files. Beacon builds to

@@ -8,6 +8,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/go-webauthn/webauthn v0.13.4
 	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/sys v0.34.0
 )
 
 require (
@@ -23,5 +24,4 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/crypto v0.40.0 // indirect
-	golang.org/x/sys v0.34.0 // indirect
 )

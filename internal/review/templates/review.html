@@ -1,0 +1,87 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.}} · Beacon</title>
+<link rel="stylesheet" href="/static/beacon.css">
+</head>
+<body><main>
+{{end}}
+{{define "end"}}</main></body>
+</html>
+{{end}}
+
+{{define "sign-in"}}
+{{template "head" "Sign in"}}
+<h1>Sign in to Beacon</h1>
+{{if .}}<p>This sign-in link could not be used. It may have expired or already been used.</p>{{end}}
+<p>Run <code>beacon open --state-dir DIR</code> on the machine running Beacon for a one-time review link.</p>
+{{template "end"}}
+{{end}}
+
+{{define "pending"}}
+{{template "head" "Pending proposals"}}
+<h1>Pending proposals</h1>
+<p>These pages are read-only. Beacon cannot take action from them.</p>
+<ol>
+{{range .}}
+  <li><a href="/p/{{.ID}}">{{action .Type}}</a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>
+{{else}}
+  <li>No pending proposals.</li>
+{{end}}
+</ol>
+{{template "end"}}
+{{end}}
+
+{{define "fields"}}
+<dl>
+{{range .}}<dt>{{visible .Key}}</dt><dd><pre><bdi>{{visible .Value}}</bdi></pre></dd>{{end}}
+</dl>
+{{end}}
+
+{{define "proposal"}}
+{{template "head" (action .Type)}}
+<nav><a href="/">Pending proposals</a></nav>
+<h1>{{action .Type}}</h1>
+<p><code>{{.ID}}</code> · {{visible .Status}} (version {{.Version}})</p>
+{{if .ShowFrozen}}
+  <h2>Recorded frozen snapshot</h2>
+  <p>This snapshot was recorded at proposal version {{.Frozen.Version}}. This is not an approval control.</p>
+  <p><a href="/p/{{.ID}}">View original proposal</a></p>
+  <dl>
+    <dt>Account</dt><dd><bdi>{{visible .Frozen.Account}}</bdi></dd>
+    <dt>Origin</dt><dd>{{if .Frozen.Origin}}<bdi>{{visible .Frozen.Origin}}</bdi>{{else}}Local machine{{end}}</dd>
+    {{if .Frozen.OriginalModel}}<dt>Originally proposed model</dt><dd><bdi>{{visible .Frozen.OriginalModel}}</bdi></dd>{{end}}
+    <dt>Approved parameters hash</dt><dd><code>{{.Frozen.ParamsHash}}</code></dd>
+    <dt>Snapshot hash</dt><dd><code>{{.Frozen.Hash}}</code></dd>
+  </dl>
+  <h3>Bound destination</h3>
+  {{template "fields" .Destination}}
+{{else}}
+  <p>Proposed {{shownTime .ProposedAt}}; expires {{shownTime .ExpiresAt}}.</p>
+  {{if .Frozen}}
+    <p><a href="/p/{{.ID}}/frozen">View recorded frozen snapshot</a></p>
+  {{else}}
+    <p>These are the proposer's parameters. Beacon has not checked an account or resolved the destination.</p>
+  {{end}}
+  <h2>Proposer</h2>
+  <dl>
+    <dt>Agent (claimed)</dt><dd><bdi>{{visible .Agent}}</bdi></dd>
+    {{if .Session}}<dt>Session (claimed)</dt><dd><bdi>{{visible .Session}}</bdi></dd>{{end}}
+    {{if .Peer.PID}}<dt>PID (unverified label)</dt><dd>{{.Peer.PID}}</dd>{{end}}
+    {{if .Peer.Executable}}<dt>Executable (unverified label)</dt><dd><bdi>{{visible .Peer.Executable}}</bdi></dd>{{end}}
+    {{if .Peer.RunID}}<dt>Attributed to run</dt><dd><code>{{.Peer.RunID}}</code></dd>{{else}}<dt>Run attribution</dt><dd>None</dd>{{end}}
+    {{if .Context}}<dt>Context (claimed)</dt><dd><bdi>{{visible .Context}}</bdi></dd>{{end}}
+  </dl>
+  <h2>Reason</h2>
+  <pre><bdi>{{visible .Reason}}</bdi></pre>
+{{end}}
+<h2>Parameters</h2>
+{{template "fields" .Fields}}
+<details>
+  <summary>Show exact parameters</summary>
+  <pre><bdi>{{visible .Exact}}</bdi></pre>
+</details>
+{{template "end"}}
+{{end}}

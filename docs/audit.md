@@ -15,11 +15,18 @@ Use synthetic fixtures and in-memory test credentials. Agents never use the logi
   [`cmd/beacon/app.go`](../cmd/beacon/app.go). Inventory every subprocess and listener, including setup commands.
   Follow the [`Beacon.app` entry point](../mac/Sources/Beacon/BeaconApp.swift) through its lifetime lease to
   [`tether`](../mac/Sources/tether/main.c). Review [`Info.plist`](../mac/Info.plist) and the
-  [bundle staging script](../scripts/build-app.sh). The app has no proposal intake or action dispatch yet.
-  Review the [proposal socket and vault](approvals.md) in `mac/Sources/BeaconCore` and `mac/Sources/BeaconSecurity`,
+   [bundle staging script](../scripts/build-app.sh).
+   Review the signed [proposal socket and vault](approvals.md) in `mac/Sources/BeaconCore` and `mac/Sources/BeaconSecurity`,
   and `beacon act` in [`cmd/beacon/act.go`](../cmd/beacon/act.go) with [`internal/peer`](../internal/peer/peer.go).
-  Check the fixed service list in [`tether`](../mac/Sources/tether/main.c) and that nothing the app sends can
-  change a command.
+   Check the fixed service list in [`tether`](../mac/Sources/tether/main.c) and that nothing the app sends can
+   change a command.
+- Audit the [Go review preview](go-approvals.md) separately. Follow the explicit `--state-dir` route in
+  [`cmd/beacon/serve.go`](../cmd/beacon/serve.go) and [`cmd/beacon/act.go`](../cmd/beacon/act.go), then the
+  [service wiring](../internal/approvalserve/serve.go). Check that default `act` still uses the signed client,
+  neither route falls back and the preview attaches neither a credential source nor an action handler. Check
+  owner-only journal and socket paths, kernel peer UID, and who can read proposal text. Review the loopback
+  binds, Host, login, Origin and session checks in [`internal/review`](../internal/review). `open` prints a
+  bearer link; keep its output private. Audit a Tailscale proxy separately if one is used.
 
 ## 2. Trace what Beacon reads and where it connects
 
@@ -78,6 +85,9 @@ reads, later passes, pagination and the request scope checks. Record the actual 
   items, payloads, cursors, names and reports. The [state inventory](architecture.md#the-state-directory)
   points to those files. On an update, include pending payloads in the audit because a new rule does not
   rewrite bytes already in the outbox.
+- For approval records, trace [`internal/approval`](../internal/approval) against the checked-in Signal fixtures.
+  Exact POST bytes and an in-flight marker are synced before sending, and one pending record can hold up every
+  one after it. The Go connector is used with fixture credentials only. The preview CLI has no Signal egress.
 
 ## 4. Trace credentials and output
 
@@ -97,11 +107,13 @@ reads, later passes, pagination and the request scope checks. Record the actual 
 - Review [`go.mod`](../go.mod), [`go.sum`](../go.sum), [`scripts/repro.sh`](../scripts/repro.sh),
   [`scripts/build-app.sh`](../scripts/build-app.sh), [`scripts/install.sh`](../scripts/install.sh),
   [`scripts/dev-signing-setup.sh`](../scripts/dev-signing-setup.sh) and the [CI workflow](../.github/workflows/ci.yml).
-  Identify the toolchain, dependency pins, scripts and artifact paths. Run the reproducibility check for the
+   Identify the toolchain, dependency pins, scripts and artifact paths. Run the reproducibility check for the
   audited commit. It compares two builds in different directories with the same toolchain. Run
   `scripts/install.sh --dry-run`: it builds, ad-hoc signs and installs into a temporary directory, without a
   keychain. Report that scope and the outcome of the fixture tests or CI gates. Check what the person's real
-  install does in [installing and signing](signing.md): what it signs, replaces, links and removes.
+   install does in [installing and signing](signing.md): what it signs, replaces, links and removes.
+   The Go preview adds `golang.org/x/sys v0.33.0` for file locks, no-follow opens, macOS full flush, and socket
+   peer and process queries on macOS and Linux. It does not change the installer or the Go toolchain pin.
 - Review [how tether starts, restarts and stops services](tether.md) in
   [`supervise.c`](../mac/Sources/tether/supervise.c) and [`procs.c`](../mac/Sources/tether/procs.c), and its
   [limits](tether.md#limits). Trace SIGTERM and the lifetime pipe in [`cmd/beacon/main.go`](../cmd/beacon/main.go),
