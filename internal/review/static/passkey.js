@@ -118,5 +118,30 @@ function register(opts) {
   });
 }
 
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", run);
-else run();
+function bindSetup() {
+  var form = document.querySelector('form[action="/passkeys/new"]');
+  if (!form) return;
+  form.dataset.bound = "1";
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var code = form.querySelector("[name=code]").value;
+    fetch("/passkeys/new", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": location.origin },
+      body: new URLSearchParams({ code: code }).toString(),
+      credentials: "same-origin"
+    }).then(function (res) { return res.text(); }).then(function (html) {
+      document.open();
+      document.write(html);
+      document.close();
+    }).catch(show);
+  });
+}
+
+function start() {
+  bindSetup();
+  run();
+}
+
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+else start();

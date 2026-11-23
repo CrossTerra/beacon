@@ -12,6 +12,13 @@
 </html>
 {{end}}
 
+{{define "registered"}}
+{{template "head" "Passkey registered"}}
+<h1>Passkey registered</h1>
+<p id="registered">This passkey can approve actions. It does not approve one by itself.</p>
+{{template "end"}}
+{{end}}
+
 {{define "register"}}
 {{template "head" "Register passkey"}}
 <h1>Register a passkey</h1>
@@ -21,6 +28,7 @@
 <label>Setup code <input name="code" autocomplete="off" required></label>
 <button type="submit">Continue</button>
 </form>
+<script src="/static/passkey.js"></script>
 {{template "end"}}
 {{end}}
 

@@ -2,6 +2,7 @@ package review
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"html/template"
@@ -15,6 +16,7 @@ import (
 
 type held struct {
 	nonce   []byte
+	session string
 	items   []approval.Frozen
 	expires time.Time
 }
@@ -74,12 +76,6 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "approval unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	s.sessions.mu.Lock()
-	if s.held == nil {
-		s.held = map[string]held{}
-	}
-	s.held[base64.RawURLEncoding.EncodeToString(nonce)] = held{nonce: nonce, items: frozen, expires: at.Add(2 * time.Minute)}
-	s.sessions.mu.Unlock()
 	creds, err := passkey.List(s.state)
 	if err != nil || len(creds) == 0 {
 		http.Error(w, "no passkey", http.StatusConflict)
@@ -110,6 +106,22 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "approval unavailable", http.StatusInternalServerError)
 		return
 	}
+	sid := sessionID(r, s.origin)
+	if sid == "" {
+		http.Error(w, "approval unavailable", http.StatusUnauthorized)
+		return
+	}
+	s.sessions.mu.Lock()
+	if s.held == nil {
+		s.held = map[string]held{}
+	}
+	for k, h := range s.held {
+		if !at.Before(h.expires) || h.session == sid {
+			delete(s.held, k)
+		}
+	}
+	s.held[base64.RawURLEncoding.EncodeToString(nonce)] = held{nonce: nonce, session: sid, items: frozen, expires: at.Add(2 * time.Minute)}
+	s.sessions.mu.Unlock()
 	csrf := ""
 	if sess, ok := s.sessions.lookup(r, s.origin, at); ok {
 		csrf = sess.csrf
@@ -119,13 +131,22 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 
 func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 	key := r.PostForm.Get("nonce")
+	sid := sessionID(r, s.origin)
+	at := s.now()
 	s.sessions.mu.Lock()
+	if s.held != nil {
+		for k, h := range s.held {
+			if !at.Before(h.expires) {
+				delete(s.held, k)
+			}
+		}
+	}
 	item, ok := s.held[key]
 	if ok {
 		delete(s.held, key)
 	}
 	s.sessions.mu.Unlock()
-	if !ok || !s.now().Before(item.expires) {
+	if !ok || item.session != sid || !at.Before(item.expires) {
 		http.Error(w, "approval refused", http.StatusConflict)
 		return
 	}
@@ -159,7 +180,7 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 	var cred passkey.Stored
 	found := false
 	for _, c := range creds {
-		if string(c.ID) == string(id) {
+		if subtle.ConstantTimeCompare(c.ID, id) == 1 {
 			cred, found = c, true
 		}
 	}
@@ -167,7 +188,12 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "approval refused", http.StatusConflict)
 		return
 	}
-	if _, err := webauthn.VerifyAssertion(webauthn.RelyingParty{ID: rpID(s.origin.Host()), Origin: s.origin.URL()}, challenge, cred.Credential(), id, raw("client_data_json"), raw("authenticator_data"), raw("signature")); err != nil {
+	assertion, err := webauthn.VerifyAssertion(webauthn.RelyingParty{ID: rpID(s.origin.Host()), Origin: s.origin.URL()}, challenge, cred.Credential(), id, raw("client_data_json"), raw("authenticator_data"), raw("signature"))
+	if err != nil {
+		http.Error(w, "approval refused", http.StatusUnauthorized)
+		return
+	}
+	if err := passkey.NoteSignCount(s.state, id, assertion.SignCount); err != nil {
 		http.Error(w, "approval refused", http.StatusUnauthorized)
 		return
 	}
@@ -180,13 +206,17 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 		keyBytes[i] = 0
 	}
 	approver, ok := s.journal.(interface {
-		ApproveAll([]approval.Frozen, time.Time) error
+		ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
 	})
 	if !ok {
 		http.Error(w, "approval unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := approver.ApproveAll(item.items, s.now()); err != nil {
+	batchChallenge := []byte(nil)
+	if len(item.items) > 1 {
+		batchChallenge = challenge
+	}
+	if err := approver.ApproveAll(item.items, id, batchChallenge, s.now()); err != nil {
 		http.Error(w, "approval refused", http.StatusConflict)
 		return
 	}

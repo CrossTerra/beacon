@@ -1,0 +1,5 @@
+This is github.com/tobischo/gokeepasslib v3.6.1 with one change: Argon2id key
+derivation. Upstream v3.6.1 only calls argon2.DKey, and every newer release
+requires a Go version newer than 1.24.3. The Argon2id UUID is KeePass's.
+The rest of the module is unchanged. It is MIT licensed; see the upstream
+repository https://github.com/tobischo/gokeepasslib.

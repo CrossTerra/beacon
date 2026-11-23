@@ -2,6 +2,8 @@ module github.com/CrossTerra/beacon
 
 go 1.24.3
 
+replace github.com/tobischo/gokeepasslib/v3 => ./third_party/gokeepasslib
+
 require (
 	github.com/chromedp/cdproto v0.0.0-20250403032234-65de8f5d025b
 	github.com/chromedp/chromedp v0.13.6

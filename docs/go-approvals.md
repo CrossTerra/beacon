@@ -15,22 +15,36 @@ and registers one passkey. The PRF output is not stored. Approval is not on the 
 instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
 ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
 The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
-`/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies.
+`/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
+takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
+The first registration writes `write-vault.json`, a key-check sealed under the new data key. Deleting
+`passkeys.json` does not allow another first registration while that file, `passkey-reset.json`, or a
+journal `passkey_added` shows a passkey existed. A later registration needs `passkeys_reset` in the
+journal, and the setup code must be issued after that reset.
 
 A signed-in browser can freeze a proposal only when a resolver supplies the account binding. This preview
 does not set one, so the page does not freeze a live proposal and does not invent an account. When a
 binding is supplied, one assertion covers that frozen hash, or a batch of at most 10 merges or posts.
-An `agent.run` cannot join a batch. The assertion is refused unless its PRF output unwraps the write
-vault. The journal then records `approved`. `approvalserve.Dispatch` is the only path to a handler. It is nil:
-`github.merge`, `slack.post`, and `agent.run` exist in Swift, not in Go, so nothing is started or sent.
+An `agent.run` cannot join a batch. The freeze nonce belongs to that browser session; a new freeze
+cancels the session's earlier nonce. The assertion is refused unless its PRF output unwraps the write
+vault and that key opens the key-check. A missing write vault approves nothing. The new sign count is
+stored before the journal records `approved`. A batch is several `approved` frames plus an
+`approved_commit` marker; replay applies the frames only when the marker is present. Each approved frame
+records the credential id and, for a batch, the batch challenge. `approvalserve.Dispatch` is the only
+path to a handler. It is nil: `github.merge`, `slack.post`, and `agent.run` exist in Swift, not in Go,
+so nothing is started or sent.
 
 ## Unattended vault
 
-`unattended.kdbx` is a KDBX 4 database opened by `unattended.keyx`, a 32-byte key file created `0600`.
-There is no master password. Entries are found by `beacon.service`, `beacon.origin`, `beacon.account`,
-`beacon.workspace`, and `beacon.use`, not by title. A write that finds the file changed under it writes
-nothing (`vault_conflict`). Linux Secret Service is not wired; both platforms use the key file. The
-preview does not yet read a collector token from this vault.
+`unattended.kdbx` is a KDBX 4 database opened by `unattended.keyx`, a KeePassXC XML v2.0 key file created
+`0600`. Create links both files into place and refuses if either name already exists; it does not replace
+a key file or a database. There is no master password. The cipher is ChaCha20. The KDF is Argon2id with 64 MiB of memory
+and 2 iterations. Entries are found by `beacon.service`, `beacon.origin`, `beacon.account`,
+`beacon.workspace`, and `beacon.use`, not by title. A write that finds the file changed re-reads and
+retries once when the target entry is unchanged; a changed entry, or a second conflict, writes nothing
+(`vault_conflict`). After the rename it reads the file back and returns `vault_conflict` if the bytes
+differ. Linux Secret Service is not wired; both platforms use the key file. The preview does not yet
+read a collector token from this vault.
 
 ## Journal and record delivery
 

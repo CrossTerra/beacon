@@ -14,6 +14,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/approval"
@@ -22,20 +23,27 @@ import (
 )
 
 const (
-	codeLife    = 10 * time.Minute
-	pendingLife = 2 * time.Minute
-	tokenBytes  = 32
-	prfBytes    = 32
-	keyBytes    = 32
-	nonceBytes  = 12
-	hkdfInfo    = "beacon-write-vault-v1"
+	codeLife       = 10 * time.Minute
+	pendingLife    = 2 * time.Minute
+	tokenBytes     = 32
+	prfBytes       = 32
+	keyBytes       = 32
+	nonceBytes     = 12
+	hkdfInfo       = "beacon-write-vault-v1"
+	vaultPlain     = "beacon-write-vault-v1"
+	writeVaultName = "write-vault.json"
+	resetMarker    = "passkey-reset.json"
 )
+
+var mu sync.Mutex
 
 var (
 	ErrSetup      = errors.New("setup code is missing, expired, or already used")
 	ErrPending    = errors.New("passkey registration is not waiting")
 	ErrRegistered = errors.New("a passkey is already registered")
 	ErrPRF        = errors.New("passkey registration needs PRF")
+	ErrVault      = errors.New("write vault is absent or does not match this passkey")
+	ErrSignCount  = errors.New("sign count did not increase")
 )
 
 // Ceremony is one browser result. PRF output is not part of the signed assertion.
@@ -59,13 +67,27 @@ func Issue(dir string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer lock.Close()
+	defer approval.CloseInstance(dir, lock)
+	reset, block, err := priorPasskeys(dir)
+	if err != nil {
+		return "", err
+	}
+	if block && reset.IsZero() {
+		return "", ErrRegistered
+	}
+	if block && !now.After(reset) {
+		return "", ErrRegistered
+	}
 	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(raw)
-	body, err := json.Marshal(codeFile{Hash: sum[:], Expires: now.Add(codeLife).UTC()})
+	code := codeFile{Hash: sum[:], Expires: now.Add(codeLife).UTC(), IssuedAt: now.UTC()}
+	if block {
+		code.ResetAt = reset.UnixMilli()
+	}
+	body, err := json.Marshal(code)
 	if err != nil {
 		return "", err
 	}
@@ -82,6 +104,13 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	if rp.ID == "" || rp.Origin == "" {
 		return nil, nil, nil, errors.New("no canonical review origin")
 	}
+	release, err := withInstance(dir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer release()
+	mu.Lock()
+	defer mu.Unlock()
 	raw, err := base64.RawURLEncoding.Strict().DecodeString(code)
 	if err != nil || len(raw) != tokenBytes {
 		return nil, nil, nil, ErrSetup
@@ -91,20 +120,22 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil, err
 	}
-	f, err := approval.OpenPrivate(filepath.Join(dir, "setup-code.json"), os.O_RDWR)
+	reset, block, err := priorPasskeys(dir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, nil, ErrSetup
-		}
 		return nil, nil, nil, err
 	}
-	defer f.Close()
-	var stored codeFile
-	if err := json.NewDecoder(f).Decode(&stored); err != nil || len(stored.Hash) != sha256.Size {
-		return nil, nil, nil, ErrSetup
+	stored, err := claimCode(dir)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	sum := sha256.Sum256(raw)
-	if subtle.ConstantTimeCompare(sum[:], stored.Hash) != 1 || !now.Before(stored.Expires) {
+	if subtle.ConstantTimeCompare(sum[:], stored.Hash) != 1 || !now.Before(stored.Expires) || len(stored.Hash) != sha256.Size {
+		return nil, nil, nil, ErrSetup
+	}
+	if block && (reset.IsZero() || stored.ResetAt != reset.UnixMilli() || !stored.IssuedAt.After(reset)) {
+		return nil, nil, nil, ErrRegistered
+	}
+	if !block && stored.ResetAt != 0 {
 		return nil, nil, nil, ErrSetup
 	}
 	create, assert, salt = make([]byte, tokenBytes), make([]byte, tokenBytes), make([]byte, prfBytes)
@@ -126,9 +157,6 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	if err := writeNew(dir, "register-pending.json", body); err != nil {
 		return nil, nil, nil, err
 	}
-	if err := os.Remove(filepath.Join(dir, "setup-code.json")); err != nil {
-		return nil, nil, nil, err
-	}
 	return create, assert, salt, nil
 }
 
@@ -139,6 +167,13 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if !create.PRFEnabled || len(assert.PRFOutput) != prfBytes {
 		return ErrPRF
 	}
+	release, err := withInstance(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	mu.Lock()
+	defer mu.Unlock()
 	defer clear(assert.PRFOutput)
 	f, err := approval.OpenPrivate(filepath.Join(dir, "register-pending.json"), os.O_RDWR)
 	if err != nil {
@@ -163,8 +198,12 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err != nil {
 		return err
 	}
-	wrapped, err := wrapKey(assert.PRFOutput, pending.Salt, []byte(rp.Origin))
+	wrapped, dataKey, err := wrapKey(assert.PRFOutput, pending.Salt, []byte(rp.Origin))
 	if err != nil {
+		return err
+	}
+	defer clear(dataKey)
+	if err := sealVault(dir, dataKey, rp.Origin); err != nil {
 		return err
 	}
 	body, err := json.Marshal(storeFile{Origin: rp.Origin, RPID: rp.ID, Credentials: []credential{{
@@ -174,7 +213,7 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err != nil {
 		return err
 	}
-	if err := writeNew(dir, "passkeys.json", body); err != nil {
+	if err := publishNew(dir, "passkeys.json", body); err != nil {
 		return err
 	}
 	return os.Remove(filepath.Join(dir, "register-pending.json"))
@@ -218,38 +257,233 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 	if err != nil {
 		return nil, err
 	}
-	return gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
+	key, err = gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
+	if err != nil {
+		return nil, err
+	}
+	if err := openVaultCheck(dir, key, origin); err != nil {
+		clear(key)
+		return nil, err
+	}
+	return key, nil
 }
 
-func wrapKey(prf, salt, origin []byte) (wrapped, error) {
+func wrapKey(prf, salt, origin []byte) (wrapped, []byte, error) {
 	kek, err := hkdf.Key(sha256.New, prf, salt, hkdfInfo, keyBytes)
 	if err != nil {
-		return wrapped{}, err
+		return wrapped{}, nil, err
 	}
 	defer clear(kek)
 	block, err := aes.NewCipher(kek)
 	if err != nil {
-		return wrapped{}, err
+		return wrapped{}, nil, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return wrapped{}, err
+		return wrapped{}, nil, err
 	}
 	data := make([]byte, keyBytes)
 	if _, err := rand.Read(data); err != nil {
-		return wrapped{}, err
+		return wrapped{}, nil, err
 	}
-	defer clear(data)
 	nonce := make([]byte, nonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
-		return wrapped{}, err
+		clear(data)
+		return wrapped{}, nil, err
 	}
-	return wrapped{Nonce: nonce, Key: gcm.Seal(nil, nonce, data, origin)}, nil
+	return wrapped{Nonce: nonce, Key: gcm.Seal(nil, nonce, data, origin)}, data, nil
+}
+
+func sealVault(dir string, key []byte, origin string) error {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	nonce := make([]byte, nonceBytes)
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	body, err := json.Marshal(vaultFile{Origin: origin, Nonce: nonce, Check: gcm.Seal(nil, nonce, []byte(vaultPlain), []byte(origin))})
+	if err != nil {
+		return err
+	}
+	return publishNew(dir, writeVaultName, body)
+}
+
+func openVaultCheck(dir string, key []byte, origin string) error {
+	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrVault
+		}
+		return err
+	}
+	var stored vaultFile
+	if err := json.Unmarshal(body, &stored); err != nil || stored.Origin != origin || len(stored.Nonce) != nonceBytes {
+		return ErrVault
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	plain, err := gcm.Open(nil, stored.Nonce, stored.Check, []byte(origin))
+	if err != nil || subtle.ConstantTimeCompare(plain, []byte(vaultPlain)) != 1 {
+		return ErrVault
+	}
+	return nil
+}
+
+// NoteSignCount persists the assertion's sign count before an approval is committed.
+// A non-zero count must have increased. Both zero is an authenticator that does not count.
+func NoteSignCount(dir string, id []byte, count uint32) error {
+	release, err := withInstance(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	mu.Lock()
+	defer mu.Unlock()
+	path := filepath.Join(dir, "passkeys.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var stored storeFile
+	if err := json.Unmarshal(body, &stored); err != nil {
+		return err
+	}
+	found := -1
+	for i := range stored.Credentials {
+		if subtle.ConstantTimeCompare(stored.Credentials[i].ID, id) == 1 {
+			found = i
+			break
+		}
+	}
+	if found < 0 {
+		return errors.New("passkey not registered")
+	}
+	prev := stored.Credentials[found].SignCount
+	if !(count > prev || count == 0 && prev == 0) {
+		return ErrSignCount
+	}
+	stored.Credentials[found].SignCount = count
+	next, err := json.Marshal(stored)
+	if err != nil {
+		return err
+	}
+	return writeNew(dir, "passkeys.json", next)
+}
+
+// Reset records a journal reset, leaves a marker, and removes the passkey list and write vault.
+// The marker stays, so a later registration must use a code issued after that journal reset.
+func Reset(dir string, at time.Time, record func(string, time.Time) error) error {
+	release, err := withInstance(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+	mu.Lock()
+	defer mu.Unlock()
+	if record == nil {
+		return errors.New("passkey reset is not recorded")
+	}
+	if err := record("passkeys_reset", at); err != nil {
+		return err
+	}
+	body, err := json.Marshal(struct {
+		At int64 `json:"at"`
+	}{at.UnixMilli()})
+	if err != nil {
+		return err
+	}
+	if err := writeNew(dir, resetMarker, body); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, "passkeys.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, writeVaultName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func priorPasskeys(dir string) (reset time.Time, block bool, err error) {
+	added, reset, err := approval.PasskeyMarks(dir)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	_, vaultErr := os.Lstat(filepath.Join(dir, writeVaultName))
+	vault := vaultErr == nil
+	if vaultErr != nil && !errors.Is(vaultErr, os.ErrNotExist) {
+		return time.Time{}, false, vaultErr
+	}
+	_, markerErr := os.Lstat(filepath.Join(dir, resetMarker))
+	marker := markerErr == nil
+	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
+		return time.Time{}, false, markerErr
+	}
+	if !vault && !marker && added.IsZero() {
+		return time.Time{}, false, nil
+	}
+	if !vault && !reset.IsZero() && reset.After(added) {
+		return reset, true, nil
+	}
+	return time.Time{}, true, nil
+}
+
+func claimCode(dir string) (codeFile, error) {
+	src := filepath.Join(dir, "setup-code.json")
+	dst := filepath.Join(dir, "setup-code.claimed")
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return codeFile{}, err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return codeFile{}, ErrSetup
+	}
+	defer os.Remove(dst)
+	f, err := approval.OpenPrivate(dst, os.O_RDONLY)
+	if err != nil {
+		return codeFile{}, ErrSetup
+	}
+	defer f.Close()
+	var stored codeFile
+	if err := json.NewDecoder(f).Decode(&stored); err != nil {
+		return codeFile{}, ErrSetup
+	}
+	return stored, nil
+}
+
+func withInstance(dir string) (func(), error) {
+	f, err := approval.LockInstance(dir)
+	if err == nil {
+		return func() { approval.CloseInstance(dir, f) }, nil
+	}
+	if errors.Is(err, approval.ErrLocked) && approval.HoldsInstance(dir) {
+		return func() {}, nil
+	}
+	return nil, err
 }
 
 type codeFile struct {
-	Hash    []byte    `json:"hash"`
-	Expires time.Time `json:"expires"`
+	Hash     []byte    `json:"hash"`
+	Expires  time.Time `json:"expires"`
+	IssuedAt time.Time `json:"issued_at"`
+	ResetAt  int64     `json:"reset_at,omitempty"`
+}
+
+type vaultFile struct {
+	Origin string `json:"origin"`
+	Nonce  []byte `json:"nonce"`
+	Check  []byte `json:"check"`
 }
 
 type pendingFile struct {
@@ -283,6 +517,25 @@ type wrapped struct {
 	Key   []byte `json:"key"`
 }
 
+func publishNew(dir, name string, body []byte) error {
+	path := filepath.Join(dir, name)
+	tmp, err := os.CreateTemp(dir, "."+name+"-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := writeTemp(tmp, body); err != nil {
+		return err
+	}
+	if err := os.Link(tmp.Name(), path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrRegistered
+		}
+		return err
+	}
+	return syncDir(dir)
+}
+
 func writeNew(dir, name string, body []byte) error {
 	path := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, "."+name+"-")
@@ -290,6 +543,16 @@ func writeNew(dir, name string, body []byte) error {
 		return err
 	}
 	defer os.Remove(tmp.Name())
+	if err := writeTemp(tmp, body); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func writeTemp(tmp *os.File, body []byte) error {
 	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		tmp.Close()
 		return err
@@ -302,12 +565,10 @@ func writeNew(dir, name string, body []byte) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		return err
-	}
+	return tmp.Close()
+}
+
+func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
 		return err

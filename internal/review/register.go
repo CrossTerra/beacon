@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
+	"time"
 
 	"github.com/CrossTerra/beacon/internal/passkey"
 	"github.com/CrossTerra/beacon/internal/webauthn"
@@ -58,7 +59,13 @@ func (s *Site) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "registration refused", http.StatusUnauthorized)
 		return
 	}
-	render(w, "sign-in", http.StatusOK, false)
+	if rec, ok := s.journal.(interface{ RecordLocal(string, time.Time) error }); ok {
+		if err := rec.RecordLocal("passkey_added", s.now()); err != nil {
+			http.Error(w, "registration refused", http.StatusInternalServerError)
+			return
+		}
+	}
+	render(w, "registered", http.StatusOK, nil)
 }
 
 type ceremonyPage struct {

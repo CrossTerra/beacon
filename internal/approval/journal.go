@@ -2,6 +2,7 @@ package approval
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"maps"
@@ -28,18 +29,21 @@ const startWindow = 10 * time.Minute
 // frame is the v1 disk schema. An action entry commits its sequence and replay nonce in the same frame.
 // Its proposal/transition is the record recipe; the outbox later commits the wire bytes before sending.
 type frame struct {
-	Kind      string    `json:"kind"`
-	ID        string    `json:"id,omitempty"`
-	Seq       int64     `json:"seq,omitempty"`
-	At        int64     `json:"at,omitempty"` // Unix milliseconds
-	Nonce     string    `json:"nonce,omitempty"`
-	Proposal  *Proposal `json:"proposal,omitempty"`
-	Frozen    *Frozen   `json:"frozen,omitempty"`
-	Result    *Result   `json:"result,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	Note      string    `json:"note,omitempty"`
-	Bytes     []byte    `json:"bytes,omitempty"`
-	Ambiguous bool      `json:"ambiguous,omitempty"`
+	Kind           string    `json:"kind"`
+	ID             string    `json:"id,omitempty"`
+	Seq            int64     `json:"seq,omitempty"`
+	At             int64     `json:"at,omitempty"` // Unix milliseconds
+	Nonce          string    `json:"nonce,omitempty"`
+	Proposal       *Proposal `json:"proposal,omitempty"`
+	Frozen         *Frozen   `json:"frozen,omitempty"`
+	Result         *Result   `json:"result,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Note           string    `json:"note,omitempty"`
+	Bytes          []byte    `json:"bytes,omitempty"`
+	Ambiguous      bool      `json:"ambiguous,omitempty"`
+	CredentialID   []byte    `json:"credential_id,omitempty"`
+	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
+	Batch          []string  `json:"batch,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -58,6 +62,7 @@ type proposalState struct {
 // instance: durability is then unknown and nothing may act on its in-memory view until replay.
 type Journal struct {
 	mu         sync.Mutex
+	dir        string
 	file, lock *os.File
 	id         string
 	states     map[string]*proposalState
@@ -97,7 +102,7 @@ func openJournal(dir string, at time.Time, after string, hooks journalHooks) (*J
 	if err != nil {
 		return nil, err
 	}
-	j := &Journal{lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
+	j := &Journal{dir: dir, lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
 		changed: make(chan struct{}), hooks: hooks}
 	if err := j.load(filepath.Join(dir, journalName), at, after); err != nil {
 		j.Close()
@@ -131,24 +136,59 @@ func (j *Journal) load(path string, at time.Time, after string) error {
 	if j.id <= after {
 		return ErrJournalAge
 	}
+	var batch []frame
+	batchAt := offset
 	for {
 		e, size, err := readFrame(r)
-		if err == io.EOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			// A torn final frame, or approved frames with no commit marker, is not a decision.
+			cut := offset
+			if len(batch) > 0 {
+				cut = batchAt
+			}
+			if err == io.ErrUnexpectedEOF || len(batch) > 0 {
+				if err := f.Truncate(cut); err != nil {
+					return err
+				}
+				if err := j.hooks.sync(f); err != nil {
+					return err
+				}
+			}
 			break
 		}
-		if err == io.ErrUnexpectedEOF {
-			if err := f.Truncate(offset); err != nil {
-				return err
-			}
-			if err := j.hooks.sync(f); err != nil {
-				return err
-			}
-			break
+		if err != nil {
+			return ErrCorrupt
 		}
-		if err != nil || !j.fold(e) {
+		if e.Kind == "approved" && len(e.BatchChallenge) > 0 {
+			if len(batch) == 0 {
+				batchAt = offset
+			}
+			batch = append(batch, e)
+			offset += size
+			continue
+		}
+		if e.Kind == "approved_commit" {
+			if !batchCommitted(batch, e) {
+				return ErrCorrupt
+			}
+			for _, part := range batch {
+				if !j.fold(part) {
+					return ErrCorrupt
+				}
+			}
+			batch = nil
+			offset += size
+			batchAt = offset
+			continue
+		}
+		if len(batch) > 0 {
+			return ErrCorrupt
+		}
+		if !j.fold(e) {
 			return ErrCorrupt
 		}
 		offset += size
+		batchAt = offset
 	}
 	// An unacknowledged attempt may have reached Signal before the process died.
 	if j.delivery.inFlight {
@@ -182,7 +222,7 @@ func (j *Journal) Close() error {
 		err = j.file.Close()
 		j.file = nil
 	}
-	err = errors.Join(err, j.lock.Close())
+	err = errors.Join(err, CloseInstance(j.dir, j.lock))
 	j.lock = nil
 	j.notify()
 	return err
@@ -376,11 +416,14 @@ func (j *Journal) Decline(id, note string, at time.Time) error {
 
 // Approve persists an already-authorized decision. The caller MUST verify the person's assertion over f
 // before calling. This is not exposed over the proposal socket.
-func (j *Journal) Approve(f Frozen, at time.Time) error { return j.ApproveAll([]Frozen{f}, at) }
+func (j *Journal) Approve(f Frozen, at time.Time) error {
+	return j.ApproveAll([]Frozen{f}, nil, nil, at)
+}
 
-// ApproveAll commits every frozen approval or none of the checks. The frames are written together and
-// synced once. A crash can still tear the last frame; earlier complete frames of that write remain.
-func (j *Journal) ApproveAll(items []Frozen, at time.Time) error {
+// ApproveAll commits every frozen approval or none of them. A batch is several approved frames plus a
+// commit marker; replay applies the frames only when that marker is present. credentialID is recorded on
+// each approved frame. batchChallenge is recorded only for a batch.
+func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopping {
@@ -408,7 +451,14 @@ func (j *Journal) ApproveAll(items []Frozen, at time.Time) error {
 		if err != nil || !reflect.DeepEqual(f, bound) || at.Before(p.ProposedAt) {
 			return ErrStale
 		}
-		frames = append(frames, frame{ID: f.ID, Kind: "approved", Frozen: &bound})
+		part := frame{ID: f.ID, Kind: "approved", Frozen: &bound, CredentialID: append([]byte(nil), credentialID...)}
+		if len(items) > 1 {
+			part.BatchChallenge = append([]byte(nil), batchChallenge...)
+		}
+		frames = append(frames, part)
+	}
+	if len(items) > 1 && len(batchChallenge) == 0 {
+		return ErrTransition
 	}
 	if !j.healthy() {
 		return ErrJournalIO
@@ -416,6 +466,18 @@ func (j *Journal) ApproveAll(items []Frozen, at time.Time) error {
 	for i := range frames {
 		frames[i].Seq, frames[i].Nonce, frames[i].At = j.lastSeq+int64(i)+1, j.hooks.nonce(), at.UnixMilli()
 		if appendFrame(j.file, frames[i]) != nil {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	if len(frames) > 1 {
+		ids := make([]string, len(frames))
+		for i := range frames {
+			ids[i] = frames[i].ID
+		}
+		marker := frame{Kind: "approved_commit", CredentialID: append([]byte(nil), credentialID...), BatchChallenge: append([]byte(nil), batchChallenge...), Batch: ids}
+		if appendFrame(j.file, marker) != nil {
 			j.failed = true
 			j.notify()
 			return ErrJournalIO
@@ -570,6 +632,55 @@ func (j *Journal) fold(e frame) bool {
 	j.lastSeq++
 	j.queue = append(j.queue, &e)
 	return true
+}
+
+func batchCommitted(parts []frame, marker frame) bool {
+	if len(parts) < 2 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
+		return false
+	}
+	for i, part := range parts {
+		if marker.Batch[i] != part.ID || !bytes.Equal(part.BatchChallenge, marker.BatchChallenge) || !bytes.Equal(part.CredentialID, marker.CredentialID) {
+			return false
+		}
+	}
+	return true
+}
+
+// PasskeyMarks reports the latest local passkey_added and passkeys_reset times in the journal.
+// A missing journal is a first registration, not an error.
+func PasskeyMarks(dir string) (added, reset time.Time, err error) {
+	f, err := OpenPrivate(filepath.Join(dir, journalName), os.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	if _, _, err := readFrame(r); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	for {
+		e, _, err := readFrame(r)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return added, reset, nil
+		}
+		if err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+		at := time.UnixMilli(e.At).UTC()
+		switch e.Kind {
+		case "passkey_added":
+			if added.IsZero() || at.After(added) {
+				added = at
+			}
+		case "passkeys_reset":
+			if reset.IsZero() || at.After(reset) {
+				reset = at
+			}
+		}
+	}
 }
 
 func foldTransition(s *proposalState, e frame) bool {

@@ -109,6 +109,7 @@ func securityHeaders(t *testing.T, w *httptest.ResponseRecorder, secure bool) {
 	if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" ||
 		h.Get("Referrer-Policy") != "no-referrer" || !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
 		!strings.Contains(h.Get("Content-Security-Policy"), "default-src 'none'") ||
+		!strings.Contains(h.Get("Content-Security-Policy"), "connect-src 'self'") ||
 		(h.Get("Strict-Transport-Security") != "") != secure || h.Get("Access-Control-Allow-Origin") != "" {
 		t.Fatal("unexpected security headers", h)
 	}

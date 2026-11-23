@@ -233,5 +233,5 @@ func TestSocketStartupFailureClosesReviewAndReleasesLock(t *testing.T) {
 	if err != nil {
 		t.Fatal("startup leaked the instance lock:", err)
 	}
-	lock.Close()
+	approval.CloseInstance(opts.StateDir, lock)
 }
