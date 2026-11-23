@@ -236,6 +236,16 @@ struct SlackAPI: Sendable {
     /// unknown outcome.
     static let actionTimeout: TimeInterval = 25
 
+    /// The deadlines the app's clients use, unless a test injects its own.
+    static let productionTimeouts = Timeouts(intake: intakeTimeout, action: actionTimeout)
+
+    /// Tests inject generous deadlines: the whole suite's TLS fixtures run at once, and a slow CI runner can take
+    /// longer than the production deadlines to schedule a request. Production keeps its own.
+    struct Timeouts: Sendable {
+        let intake: TimeInterval
+        let action: TimeInterval
+    }
+
     static func connect(_ token: Secret, timeout: TimeInterval) throws -> ServiceClient {
         try ServiceClient(origin: SlackSettings.origin, authorization: token, timeout: timeout, resourceTimeout: timeout)
     }

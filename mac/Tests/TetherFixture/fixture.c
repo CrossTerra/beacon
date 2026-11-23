@@ -95,7 +95,11 @@ int main(int argc, char **argv) {
             {.argv = detach},                                  // a runner tree: never restarted
         };
         char *env[] = {"PATH=/usr/bin:/bin", NULL};
-        return tether_run(STDIN_FILENO, dir, specs, 3, env, 1000, TETHER_ACTIVE);
+        unsigned ack_ms = argc > 3 && strcmp(argv[3], "short-ack") == 0 ? 1000 : 30000;
+        // "legacy": as with the retired LaunchAgent installed, no fixed service at all; runs only.
+        if (argc > 3 && strcmp(argv[3], "legacy") == 0)
+            return tether_run(STDIN_FILENO, dir, specs, 0, env, 1000, ack_ms, TETHER_LEGACY);
+        return tether_run(STDIN_FILENO, dir, specs, 3, env, 1000, ack_ms, TETHER_ACTIVE);
     }
     record();
     if (strcmp(argv[1], "idle") == 0) {
@@ -125,6 +129,30 @@ int main(int argc, char **argv) {
         }
         touch("watch-restarted");
         forever();
+    }
+    if (strcmp(argv[1], "runner") == 0) {
+        // A run: its prompt on standard input, its report on standard output. "exit N" exits with N;
+        // "hang" leaves a child in its group and a detached grandchild, all ignoring TERM, and waits.
+        char prompt[256] = {0}, cwd[PATH_MAX] = {0};
+        ssize_t n = read(STDIN_FILENO, prompt, sizeof(prompt) - 1);
+        if (n < 0 || !getcwd(cwd, sizeof(cwd))) return 1;
+        const char *marker = getenv("BEACON_SUPERVISOR");
+        const char *extra = getenv("RUN_VAR");
+        printf("cwd=%s\nprompt=%s\nmarker=%s\nrun_var=%s\n", cwd, prompt, marker ? marker : "", extra ? extra : "");
+        fprintf(stderr, "runner stderr\n");
+        if (fflush(stdout) != 0 || fflush(stderr) != 0) return 1;
+        int code;
+        if (sscanf(prompt, "exit %d", &code) == 1) return code;
+        if (strncmp(prompt, "hang", 4) == 0) {
+            signal(SIGTERM, SIG_IGN);
+            if (fork() == 0) {
+                record();
+                forever();
+            }
+            if (fork() == 0) leaked_grandchild();
+            forever();
+        }
+        return 2;
     }
     if (strcmp(argv[1], "detach") == 0) {
         pid_t in_group = fork();

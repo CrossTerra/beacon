@@ -5,7 +5,7 @@ import Foundation
 /// clears the wait and resumes whatever that drain stopped, instead of being lost to its backoff.
 @MainActor
 public final class DeliveryScheduler {
-    public typealias Connect = () throws -> (transport: any RecordTransport, person: String)
+    public typealias Connect = () throws -> (transport: any RecordTransport, person: String, handle: String?)
 
     public private(set) var message: String
     /// Called with every new message, for the app's status line.
@@ -43,9 +43,10 @@ public final class DeliveryScheduler {
             let message: String
             var outcome: OutboxSender.Outcome?
             do {
-                let (transport, person) = try connect()
+                let (transport, person, handle) = try connect()
                 do {
-                    outcome = try await OutboxSender(journal: journal, transport: transport, person: person).drain()
+                    outcome = try await OutboxSender(journal: journal, transport: transport, person: person,
+                                                     handle: handle).drain()
                     message = ""
                 } catch {
                     message = "Delivery error in the journal: \(error)"

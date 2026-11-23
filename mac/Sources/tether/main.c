@@ -44,7 +44,7 @@ static int session(void) {
     char *collector_argv[] = {collector, "run", "--summary", NULL};
     const struct tether_spec specs[] = {{.argv = collector_argv, .restart = true, .lifetime = true, .log = log}};
     char *env[] = {home, "PATH=/usr/bin:/bin", "LANG=C", "BEACON_TETHERED=1", NULL};
-    return tether_run(STDIN_FILENO, state, specs, legacy_installed ? 0 : 1, env, TETHER_GRACE_MS,
+    return tether_run(STDIN_FILENO, state, specs, legacy_installed ? 0 : 1, env, TETHER_GRACE_MS, TETHER_LAUNCH_ACK_MS,
                       legacy_installed ? TETHER_LEGACY : TETHER_ACTIVE);
 }
 

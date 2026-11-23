@@ -136,6 +136,31 @@ struct DeskTests {
         #expect(approved["sealed"]?["metadata"]?["original_model"] == "anthropic/claude-opus-5")
     }
 
+    @Test func aRunResolveInFlightDoesNotFreezeAfterTetherStops() async throws {
+        let (journal, merges) = try filledJournal(scratchPath(), at: clock.now, count: 1)
+        let run = Proposal(request: request("agent.run", runParams), client: "c", at: clock.now)
+        try journal.add(run)
+        let clock = self.clock
+        var ready = true
+        let desk = ApprovalDesk(journal: journal, resolver: resolver, runServicesReady: { ready }, now: { clock.now })
+        resolver.gated = true
+        defer { resolver.release() }
+        desk.select(run.id)
+        let obsolete = try #require(desk.freezing)
+
+        ready = false
+        desk.runAvailabilityChanged()
+        resolver.release()
+        await obsolete.value
+        #expect(desk.frozen == nil && obsolete.isCancelled)
+        #expect(desk.problem?.contains("stays pending") == true)
+        #expect(journal.proposal(run.id, at: clock.now)?.status == .pending)
+
+        let merge = try await frozen(desk, merges[0])
+        desk.runAvailabilityChanged()
+        #expect(desk.frozen?.token == merge, "merge snapshots don't depend on tether")
+    }
+
     @Test func quitDisablesApprovalAndExpiresUnstarted() async throws {
         let (desk, journal, ids) = try desk()
         let token = try await frozen(desk, ids[0])

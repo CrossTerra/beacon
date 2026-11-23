@@ -10,11 +10,30 @@ the person in their login session.
 | --- | --- | --- |
 | Collector | `Contents/Helpers/beacon run --summary`, with the default config (`~/Library/Application Support/beacon/config.yaml`) | After a non-zero exit, with backoff |
 | Signal watches | None yet. They join the same fixed list in plan part 4 | After a non-zero exit, with backoff |
-| Runners | None yet. They arrive with agent runs | Never |
+| Runs | One per approved `agent.run`, as the app describes it (below) | Never |
 
-The commands are compiled into `tether`. The app passes no command, path, credential or setting to it. Each
-service gets a cleared environment: `HOME`, a system `PATH`, the C locale, `BEACON_TETHERED=1` and
-`BEACON_SUPERVISOR`, a random marker for this session and service. Standard error goes to `/dev/null`.
+The collector's command is compiled into `tether`, and it gets a cleared environment: `HOME`, a system `PATH`, the
+C locale, `BEACON_TETHERED=1` and `BEACON_SUPERVISOR`, a random marker for this session and service. Its standard
+error goes to `/dev/null`.
+
+**Runs.** The app asks for a run by writing `L <runner id>` on the lease, after writing the run's directory,
+`~/Library/Application Support/beacon/runs/<runner id>/` (`0700`): `launch` (the working directory, its device and
+inode as the app approved it, the arguments and the environment, NUL-separated) and `prompt`. `tether` opens the
+working directory once and compares its device and inode bits with the pinned ones; another directory at that path is
+refused with `ESTALE` and nothing starts. It spawns a suspended leader for a new process group, in that directory
+by its descriptor, with `prompt` as its standard input and its standard output and error in new `output` and
+`errors` files there (`0600`, refused if they exist). It adds its own `BEACON_SUPERVISOR` marker for the run and drops
+any the app passed. It sends `#prepared <id> <pid>` and waits for `A <id>`, which Beacon sends only after it
+registers the process group. Only then does tether resume the run, write `started` with the pid, and reply with
+`#started <id> <pid>`. Without acknowledgement within five seconds, or if the lease closes first, tether kills
+and reaps the suspended process without resuming it or writing `started`, and reports `#failed <id> <errno>`
+(`ETIMEDOUT` or `ECANCELED`) if the app can still read the lease. Waiting does not block other jobs. A resumed run
+reports `#exited <id> <status>` (the exit code, or 128 plus the signal) and `#gone <id>` once every process of the
+run is gone. At most 256 runs are alive at once; a run that ended gives its slot back. Lines to the app are written
+whole, blocking at most a second.
+`K <runner id>` stops a run as cleanup stops any service: TERM to its group and every tracked process, KILL after the
+grace period. A run is never restarted. What the app puts in a run's environment is in
+[approvals](approvals.md#agent-runs).
 
 The collector's standard output, its pass summaries, is appended to `~/Library/Logs/Beacon/collector.log`
 (mode `0600`, in a `0700` directory). It is the same summary-only output the LaunchAgent wrote: totals and
@@ -52,7 +71,8 @@ dry run writes none) the menu says so and shows no badge.
 
 If `~/Library/LaunchAgents/dev.beacon.agent.plist` exists, `tether` does not start the collector, because two
 collectors would contend for one outbox. The menu says **Collector not started: run beacon service uninstall,
-then reopen Beacon**. Before you do, check two things the old job may have relied on.
+then reopen Beacon**, and keeps saying it while runs start and end in that session: `tether` reports the collector's
+state only for the collector job, never for a run, which reports through its own lines. Before you do, check two things the old job may have relied on.
 
 **A config at another path.** `tether` runs the collector with the default config,
 `~/Library/Application Support/beacon/config.yaml`, and does not pass `BEACON_CONFIG`. See which config the old
@@ -90,11 +110,12 @@ Then run `beacon service uninstall` and reopen Beacon.
 
 ## How it stops
 
-The app holds one end of a socket pair. `tether` holds the other on its standard input. The app never writes to
-it. **Quit Beacon** closes the app's write half and waits for `tether` to confirm cleanup. If the app crashes or
+The app holds one end of a socket pair. `tether` holds the other on its standard input. The app writes only the
+run commands above; anything else on the lease is ignored. **Quit Beacon** closes the app's write half and waits for
+`tether` to confirm cleanup, of the collector and every run alike. If the app crashes or
 is force-quit, the kernel closes its end. Either way, `tether` stops:
 
-1. It starts nothing more. A pending restart is cancelled.
+1. A pending restart is cancelled. Suspended runs that were not acknowledged are killed without being resumed.
 2. It sends SIGTERM to every service's process group and every process it tracks for that service.
 3. After 15 seconds, it sends SIGKILL to whatever remains.
 4. It confirms with the kernel's process table that no tracked process is left, reaps each service and sends a
@@ -124,6 +145,12 @@ anything. If they are still there 5 seconds after the SIGKILL, it gives up and s
 **Services stopped without confirmation**. A lock (`tether.lock` in the same directory) allows one session at a time. A second app gets
 **Another Beacon session is running** and starts nothing.
 
+The ready signal follows the marker sweep, even when the old LaunchAgent prevents starting the collector. After an
+unconfirmed stop, Beacon keeps the known run groups until that signal and a kernel check confirm the groups are
+gone. It does not approve a new run or let an unattributed socket peer act as a proposal owner while recovery is
+unconfirmed. The app rechecks group existence without sending a signal if a known group is still present. A
+session opened at Quit only to sweep closes the old runs once their groups are gone, but never enables approval.
+
 Quit also expires every approval that was not durably started. Recovery applies the same rule to approvals
 already recorded. The journal connects that rule to stored proposals in a later pull request.
 
@@ -131,8 +158,8 @@ already recorded. The journal connects that rule to stored proposals in a later 
 
 - A descendant can still escape. It must leave the process group, its parent must exit within 100 ms, and it must
   either clear `BEACON_SUPERVISOR` or run an Apple platform binary. macOS hides the environment of platform
-  binaries from other processes. `tether` does not run untrusted code yet. Runners need this reviewed before
-  they are added.
+  binaries from other processes. A run is an agent working as the person, so it can do this; the plan accepts
+  that limit (13.00-D12, D22): `tether` stops what Beacon started, and a run is not a sandbox.
 - Signals go to process IDs from the process table. A process that exits between the read and the signal could,
   in principle, have its ID reused by another of the person's processes.
 - Every service runs as the person, with the person's file access and Keychain prompts. `tether` supervises
@@ -156,6 +183,18 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
   listener, and nothing restarts during shutdown;
 - a killed `tether` leaves processes that the next session stops before it reports ready;
 - a second session is refused while the first runs;
+- a run stays suspended until the ack for its own id; timeout and Quit before acknowledgement kill it without
+  running it or leaving a `started` mark;
+- a run starts in its directory with its prompt on standard input, the app's environment and `tether`'s own
+  marker (a marker in the launch file is dropped); `started` holds its pid; its exit code and its end are
+  reported, its output and errors are kept `0600`, and the same run cannot start twice;
+- a directory swapped in at the run's path after the app pinned it is refused with `ESTALE`, and nothing starts;
+- a signed device decimal is not that directory's pin; the unsigned bits of its device still start the run;
+- 300 runs one after another all start in one session: only live runs count against the limit;
+- stopping a run stops its whole tree, a child that ignores TERM and a detached grandchild included, and leaves the
+  collector running; two runs run at once, and Quit stops both;
+- a launch that cannot start (no run directory, a missing working directory, a malformed launch file) is reported
+  and starts nothing, malformed commands are ignored, and a good run still starts afterwards;
 - the real Go collector exits 0 on SIGTERM, and exits when its lifetime pipe closes.
 
 CI runs these on macOS. They install nothing, use no Keychain and contact nothing outside loopback.
