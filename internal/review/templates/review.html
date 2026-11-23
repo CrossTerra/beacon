@@ -12,6 +12,39 @@
 </html>
 {{end}}
 
+{{define "register"}}
+{{template "head" "Register passkey"}}
+<h1>Register a passkey</h1>
+<p>This needs the one-time code from <code>beacon setup --state-dir DIR</code>. Scripts are required for the passkey.</p>
+<noscript><p>Turn scripts on to register a passkey. <code>navigator.credentials</code> is only reachable from script.</p></noscript>
+<form method="post" action="/passkeys/new">
+<label>Setup code <input name="code" autocomplete="off" required></label>
+<button type="submit">Continue</button>
+</form>
+{{template "end"}}
+{{end}}
+
+{{define "ceremony"}}
+{{template "head" "Register passkey"}}
+<h1>Register a passkey</h1>
+<noscript><p>Turn scripts on. The passkey API is only reachable from script.</p></noscript>
+<p id="ceremony-error"></p>
+<form id="ceremony-form" method="post" action="/passkeys">
+<input type="hidden" name="credential_id" value="">
+<input type="hidden" name="create_client_data" value="">
+<input type="hidden" name="assert_client_data" value="">
+<input type="hidden" name="attestation_object" value="">
+<input type="hidden" name="prf_enabled" value="">
+<input type="hidden" name="authenticator_data" value="">
+<input type="hidden" name="signature" value="">
+<input type="hidden" name="prf_output" value="">
+<button type="button" id="ceremony-go">Register passkey</button>
+</form>
+<script type="application/json" id="ceremony">{{.}}</script>
+<script src="/static/passkey.js"></script>
+{{template "end"}}
+{{end}}
+
 {{define "sign-in"}}
 {{template "head" "Sign in"}}
 <h1>Sign in to Beacon</h1>

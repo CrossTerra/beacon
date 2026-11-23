@@ -76,57 +76,60 @@ func Issue(dir string, now time.Time) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// Begin consumes a live setup code and returns the two challenges the browser must sign.
-// The first is for create. The second is for the PRF assertion that wraps the vault key.
-func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (create, assert []byte, err error) {
+// Begin consumes a live setup code and returns the create challenge, the assertion challenge,
+// and the PRF salt the assertion must evaluate. The salt is an input to the authenticator.
+func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (create, assert, salt []byte, err error) {
 	if rp.ID == "" || rp.Origin == "" {
-		return nil, nil, errors.New("no canonical review origin")
+		return nil, nil, nil, errors.New("no canonical review origin")
 	}
 	raw, err := base64.RawURLEncoding.Strict().DecodeString(code)
 	if err != nil || len(raw) != tokenBytes {
-		return nil, nil, ErrSetup
+		return nil, nil, nil, ErrSetup
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); err == nil {
-		return nil, nil, ErrRegistered
+		return nil, nil, nil, ErrRegistered
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	f, err := approval.OpenPrivate(filepath.Join(dir, "setup-code.json"), os.O_RDWR)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, ErrSetup
+			return nil, nil, nil, ErrSetup
 		}
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer f.Close()
 	var stored codeFile
 	if err := json.NewDecoder(f).Decode(&stored); err != nil || len(stored.Hash) != sha256.Size {
-		return nil, nil, ErrSetup
+		return nil, nil, nil, ErrSetup
 	}
 	sum := sha256.Sum256(raw)
 	if subtle.ConstantTimeCompare(sum[:], stored.Hash) != 1 || !now.Before(stored.Expires) {
-		return nil, nil, ErrSetup
+		return nil, nil, nil, ErrSetup
 	}
-	create, assert = make([]byte, tokenBytes), make([]byte, tokenBytes)
+	create, assert, salt = make([]byte, tokenBytes), make([]byte, tokenBytes), make([]byte, prfBytes)
 	if _, err := rand.Read(create); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if _, err := rand.Read(assert); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	if _, err := rand.Read(salt); err != nil {
+		return nil, nil, nil, err
 	}
 	body, err := json.Marshal(pendingFile{
-		Origin: rp.Origin, RPID: rp.ID, Create: create, Assert: assert, Expires: now.Add(pendingLife).UTC(),
+		Origin: rp.Origin, RPID: rp.ID, Create: create, Assert: assert, Salt: salt, Expires: now.Add(pendingLife).UTC(),
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := writeNew(dir, "register-pending.json", body); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := os.Remove(filepath.Join(dir, "setup-code.json")); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return create, assert, nil
+	return create, assert, salt, nil
 }
 
 // Finish verifies the create ceremony and the following assertion, then stores the
@@ -160,17 +163,13 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err != nil {
 		return err
 	}
-	salt := make([]byte, prfBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return err
-	}
-	wrapped, err := wrapKey(assert.PRFOutput, salt, []byte(rp.Origin))
+	wrapped, err := wrapKey(assert.PRFOutput, pending.Salt, []byte(rp.Origin))
 	if err != nil {
 		return err
 	}
 	body, err := json.Marshal(storeFile{Origin: rp.Origin, RPID: rp.ID, Credentials: []credential{{
 		ID: reg.CredentialID, COSE: reg.COSEKey, Alg: int64(reg.Algorithm), SignCount: got.SignCount,
-		Salt: salt, Wrap: wrapped, Name: "Passkey", Added: now.UTC(),
+		Salt: pending.Salt, Wrap: wrapped, Name: "Passkey", Added: now.UTC(),
 	}}})
 	if err != nil {
 		return err
@@ -179,6 +178,47 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 		return err
 	}
 	return os.Remove(filepath.Join(dir, "register-pending.json"))
+}
+
+// OpenVault unwraps the write-vault data key for one credential. The caller must clear the key.
+// A wrong PRF output fails closed and approves nothing.
+func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte, err error) {
+	if len(prf) != prfBytes {
+		return nil, ErrPRF
+	}
+	defer clear(prf)
+	body, err := os.ReadFile(filepath.Join(dir, "passkeys.json"))
+	if err != nil {
+		return nil, err
+	}
+	var stored storeFile
+	if err := json.Unmarshal(body, &stored); err != nil || stored.Origin != origin {
+		return nil, ErrPending
+	}
+	var found *credential
+	for i := range stored.Credentials {
+		if subtle.ConstantTimeCompare(stored.Credentials[i].ID, credentialID) == 1 {
+			found = &stored.Credentials[i]
+			break
+		}
+	}
+	if found == nil {
+		return nil, errors.New("passkey not registered")
+	}
+	kek, err := hkdf.Key(sha256.New, prf, found.Salt, hkdfInfo, keyBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(kek)
+	block, err := aes.NewCipher(kek)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
 }
 
 func wrapKey(prf, salt, origin []byte) (wrapped, error) {
@@ -217,6 +257,7 @@ type pendingFile struct {
 	RPID    string    `json:"rp_id"`
 	Create  []byte    `json:"create_challenge"`
 	Assert  []byte    `json:"assert_challenge"`
+	Salt    []byte    `json:"prf_salt"`
 	Expires time.Time `json:"expires"`
 }
 

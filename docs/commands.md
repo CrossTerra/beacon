@@ -363,7 +363,7 @@ session. Open it privately, then follow the `review_url` or use the pending list
 codes and sessions, not unexpired proposals.
 
 `setup` prints a 10-minute, one-use passkey code. It refuses while `serve` holds the directory. The code is
-not stored. Registration is not on the page yet. See [Go approvals](go-approvals.md#passkey-setup).
+not stored. With `serve` running, open `/passkeys/new` and enter the code. See [Go approvals](go-approvals.md#passkey-setup).
 
 All three action types are review-only here. Use synthetic proposals: their parameters and reasons remain
 in the local journal as plaintext. There is no keychain access or live Signal delivery, and no way to approve,

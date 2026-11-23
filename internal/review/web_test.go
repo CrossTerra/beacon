@@ -46,10 +46,13 @@ func site(t *testing.T, tailnet bool, now func() time.Time) (*Site, *approval.Jo
 	if tailnet {
 		o = makeOrigin(t, tailOrigin, login)
 	}
-	j, err := approval.OpenJournal(filepath.Join(t.TempDir(), "state"), now(), "")
+	dir := filepath.Join(t.TempDir(), "state")
+	j, err := approval.OpenJournal(dir, now(), "")
 	must(t, err)
 	t.Cleanup(func() { must(t, j.Close()) })
-	return New(o, j, now), j
+	s := New(o, j, now)
+	s.SetState(dir)
+	return s, j
 }
 
 func (s *Site) request(method, path string, body io.Reader) *http.Request {

@@ -20,11 +20,11 @@ func TestSetupCodeRegistersOnePasskeyAndWrapsAVaultKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
-	createCh, assertCh, err := Begin(dir, rp, code, now)
-	if err != nil {
+	createCh, assertCh, salt, err := Begin(dir, rp, code, now)
+	if err != nil || len(salt) != 32 {
 		t.Fatal(err)
 	}
-	if _, _, err := Begin(dir, rp, code, now); err != ErrSetup {
+	if _, _, _, err := Begin(dir, rp, code, now); err != ErrSetup {
 		t.Fatalf("setup code reused: %v", err)
 	}
 	key, err := webauthntest.Generate(webauthntest.AlgES256)
@@ -67,7 +67,7 @@ func TestSetupCodeRegistersOnePasskeyAndWrapsAVaultKey(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal(err)
 	}
-	if _, _, err := Begin(dir, rp, code, now); err != ErrRegistered {
+	if _, _, _, err := Begin(dir, rp, code, now); err != ErrRegistered {
 		t.Fatalf("second passkey: %v", err)
 	}
 }

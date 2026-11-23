@@ -6,8 +6,8 @@ separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of
 The preview does not read collector config, Keychain items, vaults or the Swift journal. There is no installer
 cutover, migration, live Signal credential source, provider lookup, provider write or runner launch. The three
 schemas (`github.merge`, `slack.post`, `agent.run`) are for review only. There is no approve or decline
-control, batch decision, or notification. `beacon setup` can print a one-time passkey code for that
-directory. Registration itself is not on the page yet.
+control, batch decision, or notification. `beacon setup` prints a one-time passkey code for that directory. `/passkeys/new` takes the code
+and registers one passkey. The PRF output is not stored. Approval is not on the page yet.
 
 ## Passkey setup
 
@@ -15,7 +15,8 @@ directory. Registration itself is not on the page yet.
 instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
 ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
 The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
-no page for this yet, and approval still does not run.
+`/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Approval
+still does not run from the page.
 
 ## Journal and record delivery
 

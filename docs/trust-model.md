@@ -211,9 +211,9 @@ checkout's opencode configuration does not deny.
     review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
     Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
     login header does not identify local processes; cookies can be received by another port on the same host.
-    The pages have no action, approval or settings routes. `beacon setup` can print a one-time passkey code
-    into that directory and refuses while the preview is running. A registration stores a public key and a
-    data key wrapped under a PRF output; it does not store the output, and it does not approve. See
+    The pages have no approval or settings routes. `beacon setup` prints a one-time passkey code and
+    refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
+    a public key and a data key wrapped under a PRF output, not the output, and it does not approve. See
     [Go approvals](go-approvals.md).
 
 ## Known limits

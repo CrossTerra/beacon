@@ -54,6 +54,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 		}
 	}()
 	desk := review.New(opts.Origin, j, opts.Now)
+	desk.SetState(opts.StateDir)
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
 		Attribute: opts.Attribute, IssueOpen: desk.IssueOpen})
