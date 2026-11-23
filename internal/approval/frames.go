@@ -89,12 +89,40 @@ func createJournal(path, id string, sync func(*os.File) error) error {
 		return err
 	}
 	defer p.Close()
-	// Publish the rename with the same full-sync hook as a frame. A directory can reject that
-	// call after its own fsync; a plain fsync is then enough. Any other error stays a failure.
-	if err := sync(p); err == nil || !fullSyncRejected(err) {
+	// The hook sees the directory. It is not the disk flush: os.File.Sync is F_FULLFSYNC on macOS,
+	// so it cannot fall back to fsync. A rejection is continued; any other error stops creation.
+	if err := sync(p); err != nil && !fullSyncRejected(err) {
 		return err
 	}
-	return p.Sync()
+	_, err = syncParent(p)
+	return err
+}
+
+const (
+	flushFull = "F_FULLFSYNC"
+	flushSync = "fsync"
+)
+
+// flushDir reports the call that reached the disk. full is nil where F_FULLFSYNC does not exist.
+// A rejected full flush falls back to the fsync syscall, not os.File.Sync.
+func flushDir(f *os.File, full, plain func(int) error) (string, error) {
+	fd := int(f.Fd())
+	if full != nil {
+		err := full(fd)
+		if err == nil {
+			return flushFull, nil
+		}
+		if !fullSyncRejected(err) {
+			return "", err
+		}
+	}
+	if plain == nil {
+		return "", errors.New("directory fsync is unavailable")
+	}
+	if err := plain(fd); err != nil {
+		return "", err
+	}
+	return flushSync, nil
 }
 
 func fullSyncRejected(err error) bool {

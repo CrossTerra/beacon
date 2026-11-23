@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -320,27 +321,63 @@ func TestReplayDoesNotRevalidateHistoricalParameters(t *testing.T) {
 	}
 }
 
-func TestDirectorySyncFallsBackOnlyWhenFullSyncIsRejected(t *testing.T) {
+func TestCreateJournalCallsTheSyncHookForTheDirectory(t *testing.T) {
 	id := "jrn_01m7wyd4m0f858m2ga1850m2ga"
-	sync := func(reject error) func(*os.File) error {
+	hook := func(reject error, saw *bool) func(*os.File) error {
 		return func(f *os.File) error {
 			info, err := f.Stat()
 			must(t, err)
-			if info.IsDir() {
-				return reject
+			if !info.IsDir() {
+				return nil
 			}
-			return nil
+			*saw = true
+			return reject
 		}
 	}
+	var saw bool
 	path := filepath.Join(t.TempDir(), journalName)
-	if err := createJournal(path, id, sync(unix.EINVAL)); err != nil {
-		t.Fatal(err)
+	if err := createJournal(path, id, hook(nil, &saw)); err != nil || !saw {
+		t.Fatalf("directory hook called=%v: %v", saw, err)
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal(err)
+	saw = false
+	if err := createJournal(filepath.Join(t.TempDir(), journalName), id, hook(unix.EINVAL, &saw)); err != nil || !saw {
+		t.Fatalf("rejected full sync did not still see the directory (called=%v): %v", saw, err)
 	}
-	rejected := filepath.Join(t.TempDir(), journalName)
-	if err := createJournal(rejected, id, sync(os.ErrInvalid)); !errors.Is(err, os.ErrInvalid) {
-		t.Fatalf("directory sync failure was hidden: %v", err)
+	saw = false
+	if err := createJournal(filepath.Join(t.TempDir(), journalName), id, hook(os.ErrInvalid, &saw)); !errors.Is(err, os.ErrInvalid) || !saw {
+		t.Fatalf("directory hook called=%v, error hidden: %v", saw, err)
+	}
+}
+
+func TestDirectoryFlushReportsTheCallThatReachedDisk(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.Open(dir)
+	must(t, err)
+	defer f.Close()
+	how, err := syncParent(f)
+	must(t, err)
+	switch runtime.GOOS {
+	case "darwin":
+		if how != flushFull && how != flushSync {
+			t.Fatalf("directory flush reported %q", how)
+		}
+	default:
+		if how != flushSync {
+			t.Fatalf("directory flush reported %q", how)
+		}
+	}
+	t.Logf("directory flush: %s", how)
+
+	var full, plain int
+	how, err = flushDir(f, func(int) error { full++; return nil }, func(int) error { plain++; return os.ErrInvalid })
+	if err != nil || how != flushFull || full != 1 || plain != 0 {
+		t.Fatalf("supported full flush: %s calls=%d/%d err=%v", how, full, plain, err)
+	}
+	how, err = flushDir(f, func(int) error { full++; return unix.ENOTSUP }, func(int) error { plain++; return nil })
+	if err != nil || how != flushSync || plain != 1 {
+		t.Fatalf("rejected full flush: %s fsyncs=%d err=%v", how, plain, err)
+	}
+	if _, err := flushDir(f, func(int) error { return os.ErrClosed }, func(int) error { plain++; return nil }); !errors.Is(err, os.ErrClosed) || plain != 1 {
+		t.Fatalf("non-rejection fell back to fsync: %v, fsyncs=%d", err, plain)
 	}
 }

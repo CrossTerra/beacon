@@ -23,9 +23,11 @@ after that copy, and only when the bad frame is the final frame, every earlier f
 it cannot hide a send Signal may already have stored. If that cannot be shown, leave the service stopped.
 Each append is synced (`fsync`, plus `F_FULLFSYNC` on macOS) before publishing its result. The portable
 `golang.org/x/sys/unix` dependency supplies the lock, no-follow file opens and the macOS full flush. The
-directory rename that publishes a new journal uses that same full flush, and falls back to `fsync` only if
-the directory rejects it. Proposals and any frozen snapshots are plaintext on disk. Keep the preview
-directory private and use synthetic proposals.
+directory rename that publishes a new journal is flushed on the directory descriptor itself. On macOS that
+is `F_FULLFSYNC` when the directory accepts it, otherwise the `fsync` syscall. `os.File.Sync` is not that
+fallback: on macOS it is also `F_FULLFSYNC` and would fail the same way. Linux uses `fsync`. The flush
+reports which call reached the disk, `F_FULLFSYNC` or `fsync`. Proposals and any frozen snapshots are
+plaintext on disk. Keep the preview directory private and use synthetic proposals.
 
 An approval that did not start expires at restart or shutdown. A durable start without a result becomes
 `outcome_unknown` at restart; only a read-back result can settle it. Replay does not dispatch. A supplied
