@@ -40,4 +40,11 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
 pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
                       int cwd);
 
+// As tether_spawn_at, but started suspended when `held` is not NULL. `*held` is 1 when the process is suspended
+// and must be resumed with tether_resume; 0 when it is already running (the spawn could not suspend it).
+pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[], int input, int output, int error,
+                        int cwd, int *held);
+// Resumes a process started suspended. 0 on success.
+int tether_resume(pid_t pid);
+
 #endif

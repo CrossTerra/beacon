@@ -32,7 +32,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           swift build --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
-          swift test --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
+          # Serial: the Slack and tether suites start servers and processes, and under a loaded runner a parallel
+          # run times out on a deadline that is fine alone. Production deadlines are unchanged.
+          swift test --no-parallel --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
           bash scripts/test-tether.sh
       - name: Stage the unsigned Beacon.app
         if: runner.os == 'macOS'

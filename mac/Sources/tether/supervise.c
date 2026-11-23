@@ -462,12 +462,21 @@ static void launch(struct session *s, const char *id) {
         in = openat(run, "prompt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         out = openat(run, "output", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         err = openat(run, "errors", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_at(r->argv[0], r->argv, env, in, out, err, dir) : -1;
+        int suspended = 0;
+        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_held(r->argv[0], r->argv, env, in, out, err, dir, &suspended) : -1;
         error = errno;
         if (pid > 0) {
             job->pid = pid;
             job->started_at = now_ms();
             mark_started(run, pid);
+            // Before it can run: the app records the group (the leader's pid) before anything the run does.
+            send_line(s->lease, "%c" "started %s %d\n", TETHER_LINE, id, pid);
+            if (suspended && tether_resume(pid) != 0) {
+                tether_kill(pid, SIGKILL);
+                job->cleaning = true;
+                job->term_sent = true;
+                job->kill_at = now_ms();
+            }
         } else {
             // The slot stays free for the next run.
             *job = (struct job){.retired = true, .lifetime = -1};
@@ -482,7 +491,7 @@ static void launch(struct session *s, const char *id) {
     if (run >= 0) close(run);
     free(env);
     if (pid > 0) {
-        send_line(s->lease, "%c" "started %s %d\n", TETHER_LINE, id, pid);
+        // `started` was sent before the process was resumed.
     } else {
         free_runner(r);
         send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, error);

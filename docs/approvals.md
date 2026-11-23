@@ -340,8 +340,11 @@ otherwise). With no answer (tether ended), the outcome is unknown until the next
 process group from the kernel's audit token for the connection; one that is the group of a run it launched (tether
 keeps each run's leader unreaped until the whole group is gone, so that group id cannot name another) makes the
 proposal that run's: `verified: true` with its `runner_id` in the record, "from run …" in the window, and readable
-only by the same run. Beacon keeps that assignment after an unconfirmed stop until the next session's sweep and a
-kernel check confirm the old groups are gone. A process outside a known group is treated as an ordinary client only
+only by the same run. The run starts suspended and is resumed only after that group is recorded, so nothing it does
+happens first. A connection is resolved per request, not once at accept: one that arrived before the record is a
+run's by the time it asks anything. A process in a group Beacon did not record whose ancestor is a run it launched
+is neither the run nor Bosun: it can neither read, withdraw nor create proposals, nor quit. Beacon keeps that assignment after an unconfirmed stop until the next session's sweep and a kernel check confirm
+the old groups are gone. A process outside a known group is treated as an ordinary client only
 outside recovery. Approving a run's proposal is a separate approval (D22).
 
 **`--auto`.** Nobody is at a terminal to answer a permission prompt, so every run passes `--auto`: opencode approves

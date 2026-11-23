@@ -326,7 +326,7 @@ struct SlackTests {
         try await h.approve(proposal)
         try await h.fixture.configure(["post_mode": "unclear"])
         #expect(try await h.handler.execute(proposal.id) == .executed(confirmedBy: "read_back"))
-        #expect(h.fixture.timeouts.withLock { $0 } == [30, 30, 30, 30])
+        #expect(h.fixture.timeouts.withLock { $0 } == [30, 60, 60, 60])
     }
 
     /// Either operation id confirms a lost reply: Slack may keep the metadata, client_msg_id, or both.

@@ -1,5 +1,6 @@
 import Combine
 import Darwin
+import Darwin
 import Foundation
 
 /// Why a run is not offered, or was stopped before launch. Lowercase codes, as Signal records them.
@@ -250,6 +251,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
     public func started(_ runner: String, pid: pid_t) {
         guard let id = pending.removeValue(forKey: runner) else { return }
         forgetLaunch(runner)
+        // Before anything else: the run's group is the leader's pid, and a connection from it is already a run's.
         attribution.add(leader: pid, runner: runner)
         record { try journal.result(id, executed: true, confirmedBy: "reply", fields: launched(id), at: now()) }
         guard !quitting else {
@@ -568,6 +570,9 @@ public final class RunAttribution: @unchecked Sendable {
         case run(String)
         case external(UInt64)
         case unknown
+        /// In a process group Beacon did not record, with an ancestor that is a run it launched. Not the person's
+        /// client: it can neither act as Bosun nor as that run.
+        case unverifiedRun
 
         var runner: String? {
             if case .run(let id) = self { return id }
@@ -619,15 +624,38 @@ public final class RunAttribution: @unchecked Sendable {
             let group = getpgid(pid)
             guard group > 0 else { return .unknown }
             if let runner = leaders[group] { return .run(runner) }
+            if launchedAncestor(of: pid) { return .unverifiedRun }
             return awaitingSweep ? .unknown : .external(epoch)
         }
+    }
+
+    /// Whether a Beacon-launched process is an ancestor of `pid`: a run's descendant that left its group before the
+    /// group was recorded. Bounded, and it never follows a process that has exited.
+    private func launchedAncestor(of pid: pid_t) -> Bool {
+        var seen = Set<pid_t>()
+        var current = pid
+        for _ in 0..<16 {
+            guard current > 1, seen.insert(current).inserted else { return false }
+            let parent = ppid(of: current)
+            guard parent > 1 else { return false }
+            if let runner = leaders[getpgid(parent)], leaders[parent] == nil || leaders[parent] == runner { return true }
+            current = parent
+        }
+        return false
+    }
+
+    private func ppid(of pid: pid_t) -> pid_t {
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard size == MemoryLayout<proc_bsdinfo>.size else { return 0 }
+        return pid_t(info.pbi_ppid)
     }
 
     func canAccessProposals(_ peer: Peer) -> Bool {
         switch peer {
         case .run: return true
         case .external(let connected): return lock.withLock { !awaitingSweep && connected == epoch }
-        case .unknown: return false
+        case .unknown, .unverifiedRun: return false
         }
     }
 }

@@ -515,7 +515,8 @@ struct RunTests {
     }
 
     /// tether ending while a run works: it failed (`supervisor_ended`), then closed once tether confirmed; without
-    /// confirmation it is not closed. A confirmed stop leaves no run ownership to recover.
+    /// confirmation it is not closed. A confirmed stop leaves no run ownership; an unconfirmed one keeps it until the
+    /// next session's sweep confirms the old groups are gone.
     @Test func tetherEndingWhileARunWorks() async throws {
         for verified in [true, false] {
             let h = try RunHarness()
@@ -596,6 +597,7 @@ struct RunTests {
         #expect(h.journal.proposal(unanswered, at: Date())?.status == .outcomeUnknown)
         #expect(try h.records(unanswered).last?["metadata"]?["reason"] == "supervisor_ended")
         #expect(h.handler.hasUnclosedRuns)
+        // The old groups stay recorded through the sweep, so a survivor is still that run's until it confirms.
         #expect(h.handler.attribution.peer(of: pid) == .run(runner))
         #expect(h.handler.attribution.peer(of: getpid()) == .unknown)
 
@@ -603,6 +605,8 @@ struct RunTests {
         h.handler.servicesReady(h.launcher)
         #expect(!h.handler.isReady && h.handler.hasUnclosedRuns)
         #expect(h.handler.attribution.peer(of: pid) == .run(runner))
+        // The sweep only finishes once the old group is gone, so it must still be there.
+        #expect(kill(-pid, 0) == 0)
         h.launcher.stopAll()
         swept = true
         try await h.until("the old process group to be gone") { kill(-pid, 0) == -1 && errno == ESRCH }

@@ -13,6 +13,13 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
 
 pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
                       int cwd) {
+    return tether_spawn_held(image, argv, env, input, output, error, cwd, NULL);
+}
+
+// As tether_spawn_at, but the process starts suspended: it cannot run until tether_resume. A run is recorded
+// (its group is its pid) before it is resumed, so nothing it does happens before Beacon knows the group.
+pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[], int input, int output, int error,
+                        int cwd, int *held) {
     posix_spawn_file_actions_t files;
     posix_spawnattr_t attrs;
     if (posix_spawn_file_actions_init(&files) != 0) return -1;
@@ -23,6 +30,7 @@ pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], 
         sigfillset(&defaults);
         short flags = POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP |
                       POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+        if (held) flags |= POSIX_SPAWN_START_SUSPENDED;
         int err = input < 0
             ? posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
             : posix_spawn_file_actions_adddup2(&files, input, STDIN_FILENO);
@@ -47,7 +55,12 @@ pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], 
         posix_spawnattr_destroy(&attrs);
     }
     posix_spawn_file_actions_destroy(&files);
+    if (held) *held = pid > 0;
     return pid;
+}
+
+int tether_resume(pid_t pid) {
+    return kill(pid, SIGCONT) == 0 ? 0 : -1;
 }
 
 int tether_open_session(const char *helper, pid_t *pid) {

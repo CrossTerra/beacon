@@ -180,8 +180,7 @@ public final class ProposalServer: @unchecked Sendable {
                 close(fd)
                 continue
             }
-            let peer = attribution?.peer(of: pid) ?? .external(0)
-            let connection = Connection(fd: fd, client: client, executable: executable, peer: peer, queue: queue, now: now)
+            let connection = Connection(fd: fd, client: client, executable: executable, pid: pid, queue: queue, now: now)
             connection.onFrame = { [weak self, weak connection] frame in
                 guard let self, let connection else { return }
                 self.handle(frame, on: connection)
@@ -250,8 +249,14 @@ public final class ProposalServer: @unchecked Sendable {
         connection.resume()
     }
 
+    /// The run this connection belongs to now, resolved per request: a connection admitted before its run's group was
+    /// recorded is a run's by the time it asks anything.
+    private func peer(of connection: Connection) -> RunAttribution.Peer {
+        attribution?.peer(of: connection.pid) ?? .external(0)
+    }
+
     private func canAccessProposals(_ connection: Connection) -> Bool {
-        attribution?.canAccessProposals(connection.peer) ?? true
+        attribution?.canAccessProposals(peer(of: connection)) ?? true
     }
 
     private func handle(_ frame: Data, on connection: Connection) {
@@ -275,7 +280,7 @@ public final class ProposalServer: @unchecked Sendable {
             propose(request, on: connection, at: date)
         case "quit":
             // A run Beacon launched uses the same CLI, but may not quit the app that supervises it.
-            guard let quit, quit.client == connection.client.name, connection.peer.runner == nil else {
+            guard let quit, quit.client == connection.client.name, peer(of: connection).runner == nil else {
                 return connection.reply(ProposalServer.invalid("/op"))
             }
             guard request.count == 1 else { return connection.reply(ProposalServer.invalid("")) }
@@ -361,7 +366,7 @@ public final class ProposalServer: @unchecked Sendable {
                        slackPlacement: SlackPlacement? = nil) -> Bool {
         let client = connection.client.name
         let proposal = Proposal(request: parsed, client: client, at: date, clientPath: connection.executable,
-                                clientRequirement: connection.client.requirement, runner: connection.peer.runner,
+                                clientRequirement: connection.client.requirement, runner: peer(of: connection).runner,
                                 slackPlacement: slackPlacement)
         do {
             try book.add(proposal)
@@ -410,7 +415,7 @@ public final class ProposalServer: @unchecked Sendable {
         }
         // Ownership is the client and the run: Bosun cannot read a run's proposals, nor a run Bosun's or another run's.
         guard let proposal = book.proposal(id, at: date), proposal.client == connection.client.name,
-              proposal.runner == connection.peer.runner else {
+              proposal.runner == peer(of: connection).runner else {
             connection.reply(ProposalServer.error("not_found"))
             return nil
         }
@@ -443,8 +448,8 @@ final class Connection {
     let client: AdmittedClient
     /// The executable the kernel's code reference for the peer names.
     let executable: String?
-    /// The peer's run or external identity, assigned when it connected. Unknown peers may only call `types`.
-    let peer: RunAttribution.Peer
+    /// The connected process. Its run is resolved per request: a connection can arrive before its run's group is recorded.
+    let pid: pid_t
     var onFrame: ((Data) -> Void)?
     var onClose: (() -> Void)?
     var wait: Wait?
@@ -459,12 +464,12 @@ final class Connection {
     private var closed = false
     private var limit = 0
 
-    init(fd: Int32, client: AdmittedClient, executable: String?, peer: RunAttribution.Peer,
+    init(fd: Int32, client: AdmittedClient, executable: String?, pid: pid_t,
          queue: DispatchQueue, now: @escaping () -> Date) {
         self.fd = fd
         self.client = client
         self.executable = executable
-        self.peer = peer
+        self.pid = pid
         self.now = now
         lastActive = now()
         source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)

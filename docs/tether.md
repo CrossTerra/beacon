@@ -100,7 +100,8 @@ and keeps the session file, so the next session tries again before it starts any
 **Services stopped without confirmation**, and the app quits. The app also stops waiting after 23 seconds, in
 case `tether` itself stops responding. Quit never hangs.
 
-Each service starts as the leader of a new process group. `tether` observes a leader's exit without reaping it.
+Each service starts as the leader of a new process group. A run starts suspended and is resumed only after its start
+is reported, so Beacon records its group before it can run. `tether` observes a leader's exit without reaping it.
 The zombie keeps the group ID reserved, so the group cannot be confused with an unrelated one. It is reaped only
 once its whole tree is gone. A restart of the collector or a watch waits for that cleanup too.
 

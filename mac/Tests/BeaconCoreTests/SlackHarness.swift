@@ -149,7 +149,7 @@ final class SlackHarness {
 
     /// Generous: the whole suite's TLS fixtures run at once, and a slow CI runner can take longer than the
     /// production deadlines to schedule a request. Production keeps its own.
-    static let testTimeouts = SlackAPI.Timeouts(intake: 30, action: 30)
+    static let testTimeouts = SlackAPI.Timeouts(intake: 30, action: 60)
 
     private static func handler(journal: Journal, vault: Vault, url: URL, clock: Clock, budget: ReadBudget,
                                 intakePerHour: Int = 30, readBackBudget: ReadBudget = ReadBudget(perHour: 60, concurrent: 2),
