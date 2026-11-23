@@ -26,6 +26,9 @@ public struct Proposal: Equatable, Sendable {
     /// the local journal only; Signal's contract has no field for them.
     public let clientPath: String?
     public let clientRequirement: String?
+    /// The run Beacon launched that proposed this, when the connecting process was in that run's process group
+    /// (`RunAttribution`); nil for anyone else, Bosun included. Only the same client and run may read it.
+    public let runner: String?
     public let proposedAt: Date
     public let expiresAt: Date
     public var status: ProposalStatus
@@ -37,7 +40,7 @@ public struct Proposal: Equatable, Sendable {
 
     public init(request: ProposalRequest, client: String, at date: Date, id: String = PublicID.make("apr"),
                 salt: String = randomHex(16), expiresAt: Date? = nil, clientPath: String? = nil,
-                clientRequirement: String? = nil, slackPlacement: SlackPlacement? = nil) {
+                clientRequirement: String? = nil, runner: String? = nil, slackPlacement: SlackPlacement? = nil) {
         self.id = id
         type = request.type
         params = request.params
@@ -51,6 +54,7 @@ public struct Proposal: Equatable, Sendable {
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement
+        self.runner = runner
         proposedAt = date
         self.expiresAt = expiresAt ?? date.addingTimeInterval(Proposal.lifetime)
         status = .pending
@@ -63,7 +67,7 @@ extension Proposal {
     /// tightening must not make an old journal unreadable.
     init(stored id: String, type: ActionType, params: JSON, salt: String, reason: String, agent: String,
          session: String?, subject: String?, client: String, clientPath: String?, clientRequirement: String?,
-         proposedAt: Date, expiresAt: Date, slackPlacement: SlackPlacement? = nil) {
+         runner: String?, proposedAt: Date, expiresAt: Date, slackPlacement: SlackPlacement? = nil) {
         self.id = id
         self.type = type
         self.params = params
@@ -77,6 +81,7 @@ extension Proposal {
         self.client = client
         self.clientPath = clientPath
         self.clientRequirement = clientRequirement
+        self.runner = runner
         self.proposedAt = proposedAt
         self.expiresAt = expiresAt
         status = .pending
@@ -98,18 +103,24 @@ public protocol ProposalBook: AnyObject {
     func proposal(_ id: String, at date: Date) -> Proposal?
     func withdraw(_ id: String, at date: Date) throws -> Proposal
     func pendingCount(client: String?, at date: Date) -> Int
+    /// The runner id Beacon allocated for an agent run when it was proposed; nil for other types.
+    func runnerID(_ id: String) -> String?
 }
 
 public final class MemoryBook: ProposalBook {
     public var changed: ((String) -> Void)?
     private var proposals: [String: Proposal] = [:]
+    private var runners: [String: String] = [:]
 
     public init() {}
 
     public func add(_ proposal: Proposal) throws {
         proposals[proposal.id] = proposal
+        if proposal.type == .agentRun { runners[proposal.id] = PublicID.make("run") }
         changed?(proposal.id)
     }
+
+    public func runnerID(_ id: String) -> String? { runners[id] }
 
     public func proposal(_ id: String, at date: Date) -> Proposal? {
         guard var proposal = proposals[id] else { return nil }

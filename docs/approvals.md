@@ -6,8 +6,8 @@ window, and Beacon carries it out with its own credentials. This page describes 
 **Status.** The code is in `mac/Sources/BeaconCore`, with the window in `mac/Sources/Beacon`. When it runs as
 `dev.beacon.app`, signed with a certificate, the app opens its vault key, its journal and the socket. An unsigned or
 ad-hoc build opens none of them. Adding a service account in Settings enables [GitHub merges](#merges) or
-[Slack posts](#slack-posts), independently. `agent.run` has no handler yet. Once Signal is added in Settings, the
-outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
+[Slack posts](#slack-posts), independently, and adding a checkout enables [agent runs](#agent-runs). Once Signal is
+added in Settings, the outbox goes to Signal's record API ([delivery](#delivery-to-signal)).
 
 ## The contract with Signal
 
@@ -47,18 +47,29 @@ it is closed with `frame_too_large`, which frees its wait.
 | `op` | Request | Reply |
 | --- | --- | --- |
 | `types` | nothing else | `{ types: [{ type, params }] }`, the enabled types and their JSON Schemas |
-| `propose` | `type`, `params`, `reason`, `agent: { name, session? }`, `context?: { subject }` | `{ id, params_hash, status: "pending", version }` |
+| `propose` | `type`, `params`, `reason`, `agent: { name, session? }`, `context?: { subject }` | `{ id, params_hash, status: "pending", version }`, and `runner_id` for an `agent.run` |
 | `get` | `id` | `{ id, status, version }` |
 | `wait` | `id`, `after`, `timeout` (1 to 300 seconds) | the same, once `version` is past `after` or the timeout ends |
 | `withdraw` | `id` | the same, while pending; otherwise `not_pending` |
-| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for the bundled CLI (`scripts/install.sh`) |
+| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for a peer that matches the bundled CLI's code requirement (`scripts/install.sh`) and is confirmed to be external |
 
 The proposals live in the [journal](#the-journal-and-the-outbox). There is no operation to approve, list proposals, read history or see runners. `get`, `wait` and `withdraw` answer
-only the client identity that made the proposal. Any other id reads as `not_found`. Clients with the same admitted
-identity cannot tell their proposals apart. Each proposal's `proposed` entry records, locally, the client's
+only the client identity that made the proposal, and the same run: a connection from a process in the process group
+of a run Beacon launched is that run's ([agent runs](#agent-runs)). Any other id reads as `not_found`, so Bosun and a
+run cannot read or withdraw each other's proposals, nor one run another's. Clients with the same admitted identity
+and no run cannot tell their proposals apart. Each proposal's `proposed` entry records, locally, the client's
 executable path and the requirement it satisfied, from the kernel's code reference for the connection. Neither is
-sent to Signal. A self-reported agent name or session is recorded as such
-(`verified: false`).
+sent to Signal. A self-reported agent name or session is recorded as such (`verified: false`). A proposal from a
+run is recorded with `verified: true` and the run's `runner_id` in `proposer`, and the window shows which run it came
+from.
+
+Before the startup sweep and after an unconfirmed tether stop, Beacon keeps any known run assignments, but a peer
+it cannot attribute to a run cannot `propose`, `get`, `wait` or `withdraw`. It gets `busy`, including for waits
+already in flight and for a Slack proposal whose intake lookup was in flight (nothing is stored); `types` is still
+available. After the sweep and the check that the old run groups are gone,
+external clients must reconnect. A connection that was not cleared does not gain access by staying open. The quit
+operation refuses runs, descendants known to have left a run's group, and unclassified peers, even when they use
+the bundled CLI. The installer can fall back to SIGTERM if the socket refuses the request.
 
 **Limits.** At most 32 connections, 16 concurrent waits, 20 pending proposals per client identity, 40 pending in
 all and 60 proposals per identity per hour. Past a limit the reply is `busy`. An incomplete frame is dropped with
@@ -98,7 +109,10 @@ the account (for a merge, the GitHub login), origin, destination (`main · #147 
 provider facts Beacon resolved, such as **Checks: 3 passed** or a Slack conversation's visibility, kept apart from
 the agent's reason. The message or prompt shows invisible and bidirectional characters as `⟨U+…⟩`. _Show exact
 parameters_ shows the stable account id, the destination and params as canonical JSON, and the approval hash.
-Once approved, the selected proposal stays shown with its result, including an unknown outcome being read back.
+Once approved, the selected proposal stays shown with its result, including an unknown outcome being read back. For
+an agent run the window shows the checkout's name, branch and path, the full prompt (scrollable), and a model
+picker; once launched, whether it is running, with **Stop the run**, then its report or why it ended. The menu counts
+the runs working.
 
 **Approve** (or ⌘↩ in the window) is enabled only once Beacon has resolved the action and frozen a snapshot of
 the proposal id, its version, the final params, account, origin, destination and `approved_hash` (13.00-D29).
@@ -141,12 +155,16 @@ Each entry becomes one Signal record ([the contract](#the-contract-with-signal))
 on first delivery with the person's `act_…` id, and kept. A merge is about its pull request
 (`github:pr:{owner}/{repo}#{n}`), with the repository as the proposal spelled it, never lowercased. From the approval
 on, the records use GitHub's own spelling (`full_name`, read in the preflight and kept in the local approval entry)
-when it names the same repository, case aside; Signal compares merge subjects case-insensitively. For Slack the
+when it names the same repository, case aside; Signal compares merge subjects case-insensitively. A run is about
+itself, `agent-run:{handle}:{runner id without run_}`, with the person's Signal handle from Settings; without the
+handle its records cannot be built, and delivery stops there until Signal is connected again. For Slack the
 subject is fixed at intake for the entire lifecycle: `slack:{channel}:{thread_ts}` for a public reply or
 `slack:{channel}:{YYYY-MM-DD}` for a top-level public post, using the proposal's local day even if approval is
 after midnight. For private channels, DMs and group DMs it is the person's own `signal:actor:{act_…}` subject.
 Beacon never uses the proposer's `context.subject` to route these records. Signal seals the draft, reason and
-approved destination at `owner+agents`, even on a public subject. The sender posts only the first undelivered record. It
+approved destination at `owner+agents`, even on a public subject. A launched run's later life is recorded as runner
+events (`app.runner.working`, `finished`, `failed`, `closed`, …), each in the journal and the outbox like any entry.
+The sender posts only the first undelivered record. It
 moves on only after Signal stores it or answers with its identical replay. A lost answer or an unreachable Signal
 resends the same bytes later, and a `409` or another refusal stops delivery at that record.
 
@@ -271,6 +289,116 @@ Every request goes only to the configured origin. Paths are built from the valid
 SHA (`.` and `..` refused). Redirects are refused, so the token goes nowhere else. Proxy settings are ignored, an
 answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origin from the app's settings.
 
+## Agent runs
+
+`agent.run` (13.00, _Agent runs_, D21, D37) launches opencode in one of the person's checkouts with a full prompt
+and a model. Its params are Signal's: `checkout` (a name from Settings, never a path), `prompt` (1 to 32,000
+characters, exactly as proposed) and `model` (an opencode `provider/model` id). The agent's name and session are the
+proposal's `agent`, as for any type. Beacon allocates the run's runner id when the proposal arrives and returns it
+from `propose` as `runner_id`: every record of the run carries it, and Bosun's watch routes the run's report by it
+to the session that asked. A run's records are about `agent-run:{handle}:{runner id without run_}`.
+
+**Settings** lists the checkouts: a name and a directory the person picks. The path is stored resolved; two names may
+point at one directory.
+
+**Before approval** Beacon reads the checkout's directory identity (`vol:{device}/inode:{inode}`, the contract's
+`checkout_id`; both numbers are the unsigned decimals of the directory's device and inode bits, so a negative
+Darwin device is the same volume) and its branch from `.git/HEAD` (a worktree's too; `detached:{sha7}` or `none`
+otherwise), and the
+models opencode lists (`opencode models --standalone`, read at most once a minute). The proposed model must be one
+of them. The window shows the checkout's path and branch, the full prompt and a model picker that starts at the
+proposed model; the model is the one field the person may change (D7), recorded as `edited: ["model"]` with the
+original. It says when the checkout has its own `bin/run`: Beacon runs bare opencode without it, as Bosun's plain
+mode does. The account is the macOS user (`macos:user:{name}`) and the origin `null`.
+
+**Only while tether is ready.** Before the startup sweep or if tether stops, Approve is disabled for runs. The desk
+drops any run snapshot, rejects clicks or keystrokes bound to it, and shows that the supervisor is not ready. The
+proposal stays pending; nothing is consumed or recorded as failed. Once the new session has swept and the old run
+groups are gone, the desk resolves the selected run again. Merge snapshots do not depend on tether.
+
+**Approval claims the checkout.** One run per checkout, under any of its names; runs in different checkouts run in
+parallel. Approving a proposal for a busy checkout is refused with the reason, and it stays pending until approved
+again once that run ends. A claim is freed when the run's processes are all gone, or when a start fails before
+launch. Freeing a checkout never starts anything by itself.
+
+**Launch.** After the durable start Beacon checks again: the checkout still has the approved identity (otherwise
+`checkout_changed` or `checkout_missing`), opencode is on the login `PATH` (`opencode_missing`), the model is still
+configured (`model_unavailable`). Each refusal is `failed` (`pre_dispatch`) with nothing launched. It then writes
+`~/Library/Application Support/beacon/runs/{runner id}/` (`0700`): `prompt`, the approved prompt, and `launch`, which
+pins the checkout's approved device and inode, and asks [tether](tether.md) to start
+
+```
+opencode run --standalone --format json --auto --model {model}
+```
+
+in the checkout, with the prompt on standard input (opencode reads a piped prompt as is), its own process group,
+and its output and errors in `output` and `errors` beside the prompt (`0600`). tether opens the checkout's directory
+once, compares its device and inode with the pinned ones and starts the run in it by that descriptor, so a directory
+swapped in at the path after Beacon's check (reading the login environment and the models can take a minute) is
+refused, and nothing starts. `--standalone` gives the run a private opencode server inside that group, so stopping
+the group stops the agent. Tether spawns the process suspended. Beacon registers its process group and then
+acknowledges it over the lease; tether resumes it only after receiving that acknowledgement. If there is no
+acknowledgement within five seconds, tether kills and reaps the suspended process. A confirmed resume is `executed`
+(`reply`, with the runner id), then `app.runner.working`; refusal is `failed` (`checkout_changed` for a swapped
+directory, `launch_failed` for a timeout or other failed launch). With no answer (tether ended), the outcome is
+unknown until the next launch reads it back.
+
+**A run's own proposals.** A run can propose with `beacon act` like any client. Beacon finds the connecting process's
+process group from the kernel's audit token for the connection; one that is the group of a run it launched (tether
+keeps each run's leader unreaped until the whole group is gone, so that group id cannot name another) makes the
+proposal that run's: `verified: true` with its `runner_id` in the record, "from run …" in the window, and readable
+only by the same run. The group is registered before the process can connect. Beacon rechecks attribution per
+request and before completing asynchronous requests. A socket that changes identity must reconnect. A process in
+an unrecorded group whose ancestor belongs to a run is neither the run nor Bosun: it can neither read, withdraw nor
+create proposals, nor quit. A peer whose ancestry cannot be checked is not treated as external. Beacon keeps
+known group assignments after an unconfirmed stop until the next session's sweep and a kernel check confirm the
+groups are gone. Approving a run's proposal is a separate approval (D22).
+
+**`--auto`.** Nobody is at a terminal to answer a permission prompt, so every run passes `--auto`: opencode approves
+any permission the checkout's opencode configuration does not explicitly deny, and cancels questions. The person
+chose this; the approval window says so for every run. A launch approval is not a sandbox (D22): the agent works as
+the person, with their files, sessions and credentials.
+
+**What a run inherits.** The person's login environment, as their Terminal has it: Beacon runs their login shell
+once per launch (`$SHELL -l -i -c`, bounded to ten seconds, in its own process group) and passes the variables it
+prints, so `PATH` and anything their profile exports, tokens included, reach the run. Nothing comes from Beacon's
+own environment or vault: no GitHub token, Signal key or other credential Beacon holds is passed, and variables
+starting with `BEACON_` are dropped. opencode uses its own sign-in for the model. tether adds only its
+`BEACON_SUPERVISOR` marker.
+
+**The report.** When opencode exits, Beacon reads its JSON events: the report is the text of the last assistant
+message (a part opencode completes after the session goes idle is joined to the one before), capped at 32,000
+characters by keeping the end with a note of the full length. Exit 0 is `app.runner.finished` with the report, or
+"The run ended without a final message." Any other exit is `app.runner.failed`: `exit_{code}`, `signal_{n}` or
+`interrupted` (130), with opencode's last error message as the detail, or else the end of its standard error.
+`app.runner.closed` follows once every process of the run is gone. The report and detail are sealed and marked
+`from: "runner"`; Signal and Bosun treat them as data (contract, _Delivering a run's report to Bosun_).
+
+**Stopping.** The person can stop a running run from its detail in the window: its whole group is stopped and it is
+`failed`, `stopped`. A run whose output and errors together pass 64 MiB is stopped as `output_too_large`. The report
+is read off the main thread, and a run's records keep their order: its report or failure always comes before
+`closed`. Quit records each run still working as `failed`, `stopped_at_quit`; tether stops them with everything else,
+and they are closed once it confirms. Quit does not acknowledge a still-suspended launch. A resume tether confirms
+after Quit began is recorded `executed`, then
+`failed`, `stopped_at_quit`, never `working`; no run is closed without an outcome first. A Stop that cannot reach
+tether (its end of the lease is closed: the write fails with `EPIPE`, which never raises SIGPIPE in the app) leaves
+the run unmarked, and tether's end settles it. If tether ends on its own while the app runs, each run still working is
+`failed`, `supervisor_ended`, and closed if tether confirmed its processes gone; a launch still waiting for its answer
+is `outcome_unknown` (`supervisor_ended`), read back later. Either way the session's claims end with it. A launched
+run cannot become unknown (the contract allows only runner events after `executed`), so an unconfirmed one stays
+unclosed: the app starts tether again (at most three times in ten minutes), whose new session first stops every
+process the old one left, runs included, and then closes them. If tether is gone at Quit while a run is unclosed,
+Quit starts a session only to do that sweep, then quits. After a crash, the next launch, once tether has stopped what was left: a launched run not closed is
+`failed`, `interrupted`, and closed; a start whose launch went unanswered is read back from its run directory.
+tether writes `started`, with the pid, only after it started a run (it creates `output` before, so `output` proves
+nothing): with `started` the run started (`executed`, `read_back`, then interrupted and closed), and without it
+nothing started (`failed`, `not_launched`, `read_back`).
+
+Beacon deletes `launch` (which holds the environment, and so any token the profile exports) and `prompt` as soon as
+tether has answered, when a launch fails before or without an answer, and, at the next launch, from every run
+directory a crash left. `output`, `errors` and `started` stay in the run's directory, readable only by the person:
+they hold what opencode wrote, the report included.
+
 ## Slack posts
 
 **Settings.** In [Slack apps](https://api.slack.com/apps), open your workspace app (or create one from scratch)
@@ -333,7 +461,8 @@ lookups have a four-second deadline, so `beacon act propose` answers within its 
 reads, the write and read-back use their own client with a 25-second deadline, so a slow `chat.postMessage` is not
 cut short into an unknown outcome. Every answer is capped at 8 MiB, and no redirect is followed. The Swift fixture
 tests need Go on `PATH`; they use a loopback TLS server and a fixture vault key, not a live Slack token or the
-Keychain.
+Keychain. The fixture clients use generous deadlines, because the whole suite's fixtures run at once and a slow
+runner can take longer than the production deadlines to schedule a request.
 
 ## The vault
 

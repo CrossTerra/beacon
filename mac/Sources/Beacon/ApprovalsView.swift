@@ -10,8 +10,8 @@ struct ApprovalsView: View {
 
     var body: some View {
         Group {
-            if let desk = service.desk {
-                DeskView(desk: desk, status: service.status, openSettings: openSettings)
+            if let desk = service.desk, let runs = service.runs {
+                DeskView(desk: desk, runs: runs, status: service.status, openSettings: openSettings)
             } else {
                 ContentUnavailableView {
                     Label("No approvals", systemImage: "checkmark.shield")
@@ -28,6 +28,7 @@ struct ApprovalsView: View {
 
 private struct DeskView: View {
     @ObservedObject var desk: ApprovalDesk
+    @ObservedObject var runs: RunHandler
     let status: String
     let openSettings: () -> Void
     @State private var note = ""
@@ -72,8 +73,23 @@ private struct DeskView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(visibleText(outcome.text)).font(.headline).textSelection(.enabled)
                             if let link = outcome.link { Link("Open the pull request on GitHub", destination: link) }
+                            if runs.isRunning(proposal.id) {
+                                Button("Stop the run", role: .destructive) { runs.stop(proposal.id) }
+                            }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
+                }
+                if proposal.type == .agentRun, let words = desk.journal.runnerWords(proposal.id) {
+                    GroupBox(words["report"] != nil ? "The run's report (its own words)" : "What the run said") {
+                        ScrollView {
+                            Text(visibleText(words["report"]?.stringValue ?? words["detail"]?.stringValue
+                                    ?? words["error"]?.stringValue ?? ""))
+                                .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxHeight: 320)
+                    }
+                }
+                if proposal.type == .agentRun, proposal.status == .pending {
+                    modelPicker(proposal)
                 }
                 if let frozen = desk.frozen, frozen.approval.id == proposal.id {
                     GroupBox("What Beacon will do") {
@@ -92,6 +108,9 @@ private struct DeskView: View {
                 GroupBox("The agent says (unverified)") {
                     VStack(alignment: .leading, spacing: 4) {
                         row("Agent", proposal.agent + (proposal.session.map { " · session \($0)" } ?? ""))
+                        if let runner = proposal.runner {
+                            row("From", "run \(runner), launched by Beacon (verified by its process group)")
+                        }
                         row("Client", proposal.client + (proposal.clientPath.map { " · \($0)" } ?? ""))
                         Text(visibleText(proposal.reason)).textSelection(.enabled)
                     }.frame(maxWidth: .infinity, alignment: .leading)
@@ -108,9 +127,11 @@ private struct DeskView: View {
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else if let text = params["prompt"]?.stringValue {
-                    GroupBox("Prompt") {
-                        Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    GroupBox("Prompt, in full (\(text.unicodeScalars.count) characters)") {
+                        ScrollView {
+                            Text(verbatim: visibleText(text)).font(.body.monospaced()).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(minHeight: 60, maxHeight: 360)
                     }
                 }
                 DisclosureGroup("Show exact parameters") {
@@ -140,7 +161,8 @@ private struct DeskView: View {
                         .disabled(token == nil || desk.stopping)
                     }
                 }
-                if proposal.status == .outcomeUnknown {
+                // A run's unknown launch is settled by tether's recovery, not by reading a provider.
+                if proposal.status == .outcomeUnknown && proposal.type != .agentRun {
                     Button("Read again") { desk.readAgain() }
                 }
                 if let problem = desk.problem, desk.frozen == nil, proposal.status != .pending {
@@ -149,6 +171,18 @@ private struct DeskView: View {
             }
             .padding()
         }
+    }
+
+    /// The one field the person may change (D7): opencode's configured models, starting at the proposed one.
+    private func modelPicker(_ proposal: Proposal) -> some View {
+        let proposed = proposal.params["model"]?.stringValue ?? ""
+        let choices = runs.models.contains(proposed) || runs.models.isEmpty ? runs.models : [proposed] + runs.models
+        return Picker("Model", selection: Binding(get: { desk.model ?? proposed }, set: { desk.choose(model: $0) })) {
+            ForEach(choices.isEmpty ? [proposed] : choices, id: \.self) { model in
+                Text(model == proposed ? "\(model) (proposed)" : model).tag(model)
+            }
+        }
+        .disabled(desk.stopping)
     }
 
     private func row(_ label: String, _ value: String) -> some View {

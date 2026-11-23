@@ -16,6 +16,7 @@ public final class PostHandler: ActionResolver, Sendable {
     /// A verified `auth.test` for intake, reused for `identityCacheTime`. The window and the write always read afresh.
     private let identityCache = Locked<(key: String, identity: SlackIdentity, at: Date)?>(nil)
     static let identityCacheTime: TimeInterval = 600
+    private let timeouts: SlackAPI.Timeouts
     private let now: @Sendable () -> Date
     private let rates = SlackRateLimits()
     private let reconciling = Locked<Set<String>>([])
@@ -30,9 +31,11 @@ public final class PostHandler: ActionResolver, Sendable {
 
     init(journal: Journal, settings: @escaping @Sendable () -> SlackSettings?, vault: Vault, budget: ReadBudget = ReadBudget(),
          intakePerHour: Int = 30, readBackBudget: ReadBudget = ReadBudget(perHour: 60, concurrent: 2),
+         timeouts: SlackAPI.Timeouts = SlackAPI.productionTimeouts,
          now: @escaping @Sendable () -> Date, connect: @escaping SlackAPI.Connect) {
         self.journal = journal
         self.settings = settings
+        self.timeouts = timeouts
         self.budget = budget
         self.intakePerHour = intakePerHour
         self.readBackBudget = readBackBudget
@@ -116,7 +119,7 @@ public final class PostHandler: ActionResolver, Sendable {
     /// A client for one purpose: intake keeps its short deadline, everything else has its own client with the
     /// action deadline, and each purpose keeps its own 429 deadlines.
     private func api(_ settings: SlackSettings, _ purpose: SlackRateLimits.Purpose) throws -> SlackAPI {
-        let timeout = purpose == .intake ? SlackAPI.intakeTimeout : SlackAPI.actionTimeout
+        let timeout = purpose == .intake ? timeouts.intake : timeouts.action
         return SlackAPI(client: try connect(settings, timeout), workspace: settings.workspace, rates: rates, purpose: purpose, now: now)
     }
 

@@ -12,6 +12,22 @@ func selfRequirement() -> String {
     return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 
+/// Vary the ancestry returned for the signed test client without moving the entire test process between groups.
+private struct TestProcesses {
+    let attribution: RunAttribution
+    private let table: Locked<[pid_t: RunAttribution.ProcessInfo]>
+
+    init() {
+        let table = Locked([getpid(): RunAttribution.ProcessInfo(group: 10, parent: 1)])
+        self.table = table
+        attribution = RunAttribution(processInfo: { pid in table.withLock { $0[pid] } })
+    }
+
+    func set(group: pid_t, parent: pid_t = 1, for pid: pid_t = getpid()) {
+        table.withLock { $0[pid] = .init(group: group, parent: parent) }
+    }
+}
+
 final class Clock: @unchecked Sendable {
     private let lock = NSLock()
     private var date = Date(timeIntervalSince1970: 1_800_000_000)
@@ -38,13 +54,14 @@ final class Harness: @unchecked Sendable {
     let server: ProposalServer
 
     init(clients: [AdmittedClient] = [AdmittedClient(name: "beacon-act", requirement: selfRequirement())],
-         enabled: [ActionType] = ActionType.allCases, limits: ServerLimits = ServerLimits()) throws {
+         enabled: [ActionType] = ActionType.allCases, attribution: RunAttribution? = nil,
+         limits: ServerLimits = ServerLimits(), slackLookup: ProposalServer.SlackLookup? = nil) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent("sock-" + randomHex(4)).path
         path = directory + "/run/act.sock"
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         let clock = self.clock
-        server = ProposalServer(path: path, clients: clients, book: book, enabled: enabled, limits: limits,
-                                now: { clock.now }, queue: queue)
+        server = ProposalServer(path: path, clients: clients, book: book, enabled: enabled, attribution: attribution, limits: limits,
+                                now: { clock.now }, queue: queue, slackLookup: slackLookup)
         try server.start()
     }
 
@@ -61,16 +78,24 @@ final class Client {
     let fd: Int32
 
     init(path: String) throws {
-        fd = socket(AF_UNIX, SOCK_STREAM, 0)
         var address = try ProposalServer.address(path)
+        let socket = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard socket >= 0 else { throw ServerError.system(errno) }
+        var timeout = timeval(tv_sec: 30, tv_usec: 0), one: Int32 = 1
+        let configured = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0
+            && setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0
+            && setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size)) == 0
         let connected = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                configured && Darwin.connect(socket, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
         }
-        guard connected == 0 else { throw ServerError.system(errno) }
-        var timeout = timeval(tv_sec: 8, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        guard connected else {
+            let code = errno
+            close(socket)
+            throw ServerError.system(code)
+        }
+        fd = socket
     }
 
     deinit { close(fd) }
@@ -138,22 +163,195 @@ struct ProposalServerTests {
         #expect(client.call(.object(["op": "withdraw", "id": .string(id)]))?["status"] == "withdrawn")
         #expect(client.call(.object(["op": "withdraw", "id": .string(id)]))?["error"] == "not_pending")
         #expect(client.call(.object(["op": "get", "id": .string(id)]))?["version"] == .int(2))
+        #expect(reply["runner_id"] == nil, "only a run has a runner id")
+
+        // A run's reply carries the runner id Beacon allocated, by which its reports are routed.
+        var run = mergeProposal().objectValue!
+        run["type"] = "agent.run"
+        run["params"] = runParams
+        run["context"] = nil
+        #expect(client.call(.object(run))?["error"] == "type_disabled")
+        let runs = try Harness(enabled: [.agentRun])
+        let launched = try #require(try runs.connect().call(.object(run)))
+        let runner = try #require(launched["runner_id"]?.stringValue)
+        #expect(PublicID.isValid(runner, prefix: "run"))
+        #expect(runs.queue.sync { runs.book.runnerID(launched["id"]!.stringValue!) } == runner)
     }
 
-    /// `quit` answers only the client the app names, and only once the app has set what quitting does.
-    @Test func quitIsForTheNamedClientOnly() throws {
-        let h = try Harness()
+    /// A proposal from a process in a run's group is that run's: verified, with its runner id, and only that run
+    /// reads it. Bosun's proposals are not the run's to read or withdraw, nor another run's.
+    @Test func aRunsProposalsAreItsOwn() throws {
+        let processes = TestProcesses(), attribution = processes.attribution
+        try #require(attribution.completeSweep())
+        let h = try Harness(enabled: [.githubMerge], attribution: attribution)
+        let bosun = try h.connect()
+        let bosunID = try #require(bosun.call(mergeProposal())?["id"]?.stringValue)
+
+        let runner = "run_01m7x1v080ec1r60r30c1g60r3"
+        // The launch handshake records the group before the run can connect.
+        attribution.add(leader: 11, runner: runner)
+        processes.set(group: 11)
+        let run = try h.connect()
+        #expect(run.call(.object(["op": "get", "id": .string(bosunID)]))?["error"] == "not_found")
+        #expect(run.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
+        let runID = try #require(run.call(mergeProposal(number: 141))?["id"]?.stringValue)
+        let stored = try #require(h.queue.sync { h.book.proposal(runID, at: h.clock.now) })
+        #expect(stored.runner == runner)
+        #expect(run.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
+
+        attribution.add(leader: 12, runner: "run_01m7x1v080ec1r60r30c1g60r4")
+        processes.set(group: 12)
+        let other = try h.connect()
+        #expect(other.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
+        processes.set(group: 10)
+        #expect(bosun.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
+        #expect(bosun.call(.object(["op": "get", "id": .string(bosunID)]))?["status"] == "pending")
+
+        // A fresh peer from a known group keeps that ownership while the sweep is pending.
+        attribution.sessionEnded(verified: false)
+        processes.set(group: 11)
+        let duringSweep = try h.connect()
+        #expect(duringSweep.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
+        #expect(duringSweep.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
+        let anotherID = try #require(duringSweep.call(mergeProposal(number: 142))?["id"]?.stringValue)
+        #expect(h.queue.sync { h.book.proposal(anotherID, at: h.clock.now)?.runner } == runner)
+    }
+
+    /// A Slack proposal's intake lookup is asynchronous. If recovery begins while it is in flight, the connection
+    /// is no longer attributable and nothing is stored when the lookup returns.
+    @Test func recoveryDuringASlackLookupStoresNothing() throws {
+        let attribution = TestProcesses().attribution
+        #expect(attribution.completeSweep())
+        let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+        let h = try Harness(enabled: [.slackPost], attribution: attribution, slackLookup: { _, _ in
+            entered.signal()
+            let released = await withCheckedContinuation { done in
+                DispatchQueue.global().async { done.resume(returning: gate.wait(timeout: .now() + 30) == .success) }
+            }
+            try #require(released, "the Slack lookup fixture's gate was never released")
+            return SlackPlacement(account: "slack:user:U0PERSON", visibility: .public)
+        })
+        let client = try h.connect()
+        do {
+            defer { gate.signal() }
+            client.send(SlackHarness.frame())
+            try #require(entered.wait(timeout: .now() + 30) == .success)
+            attribution.sessionEnded(verified: false)
+        }
+        #expect(client.receive() == .object(["error": "busy"]))
+        #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 0)
+    }
+
+    @Test func unknownPeersCannotUseProposalOwnershipUntilTheSweep() throws {
+        let attribution = TestProcesses().attribution
+        let h = try Harness(attribution: attribution)
+        let beforeFirstSweep = try h.connect()
+        #expect(beforeFirstSweep.call(mergeProposal())?["error"] == "busy")
+        #expect(attribution.completeSweep())
+
+        let bosun = try h.connect()
+        let id = try #require(bosun.call(mergeProposal())?["id"])
+        let get: JSON = .object(["op": "get", "id": id])
+        let withdraw: JSON = .object(["op": "withdraw", "id": id])
+        let wait: JSON = .object(["op": "wait", "id": id, "after": .int(1), "timeout": .int(30)])
+        let waiter = try h.connect()
+        #expect(waiter.call(get)?["status"] == "pending")
+        waiter.send(wait)
+
+        attribution.sessionEnded(verified: false)
+        let unclassified = try h.connect()
+        for peer in [unclassified, bosun] {
+            #expect(peer.call(.object(["op": "types"]))?["types"] != nil)
+            for request in [get, withdraw, wait, mergeProposal(number: 141)] {
+                #expect(peer.call(request) == .object(["error": "busy"]))
+            }
+        }
+        #expect(waiter.receive()?["error"] == "busy", "a wait in flight cannot see the result during recovery")
+        #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 1)
+
+        #expect(attribution.completeSweep())
+        // None of the old sockets can acquire Bosun's identity by outlasting the sweep.
+        for peer in [beforeFirstSweep, unclassified, bosun] {
+            #expect(peer.call(get)?["error"] == "busy")
+        }
+        let reconnected = try h.connect()
+        #expect(reconnected.call(get)?["status"] == "pending")
+        #expect(reconnected.call(withdraw)?["status"] == "withdrawn")
+    }
+
+    /// The proposed record says who proposed: a run, verified, with its id; anyone else unverified, without one.
+    @Test func theRecordNamesTheRunThatProposed() throws {
+        let path = scratchPath()
+        let journal = try Journal(path: path, at: Date(timeIntervalSince1970: 1_800_000_000))
+        let t = Date(timeIntervalSince1970: 1_800_000_000)
+        let fromRun = Proposal(request: request("github.merge", mergeParams), client: "beacon-act", at: t,
+                               runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        let fromBosun = Proposal(request: request("github.merge", mergeParams), client: "beacon-act", at: t)
+        try journal.add(fromRun)
+        try journal.add(fromBosun)
+        let records = try deliverAll(journal)
+        #expect(records[0]["metadata"]?["proposer"]?["verified"] == .bool(true))
+        #expect(records[0]["metadata"]?["proposer"]?["runner_id"] == "run_01m7x1v080ec1r60r30c1g60r3")
+        #expect(records[1]["metadata"]?["proposer"]?["verified"] == .bool(false))
+        #expect(records[1]["metadata"]?["proposer"]?["runner_id"] == nil)
+        // The journal keeps it across a relaunch.
+        let reopened = try Journal(path: path, at: t)
+        #expect(reopened.proposal(fromRun.id, at: t)?.runner == "run_01m7x1v080ec1r60r30c1g60r3")
+    }
+
+    @Test func quitRequiresTheVerifiedInstallerCLIIdentity() throws {
+        let attribution = TestProcesses().attribution
+        try #require(attribution.completeSweep())
+        let clientIdentity = AdmittedClient(name: "beacon-act", requirement: selfRequirement())
+        let h = try Harness(clients: [clientIdentity], attribution: attribution)
         let client = try h.connect()
         #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        let asked = NSLock()
-        nonisolated(unsafe) var quits = 0
-        h.server.quit = (client: "someone-else", action: { asked.withLock { quits += 1 } })
+        let quits = Locked(0)
+        // The name alone is not the identity.
+        h.server.quit = (client: .init(name: "beacon-act", requirement: "identifier \"dev.beacon.other\""),
+                         action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        h.server.quit = (client: clientIdentity, action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit", "now": .bool(true)]))?["error"] == "invalid")
-        #expect(asked.withLock { quits } == 0)
+        #expect(quits.withLock { $0 } == 0)
         #expect(client.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
-        #expect(asked.withLock { quits } == 1)
+        // Quit replies before asking the app to terminate.
+        #expect(h.queue.sync { quits.withLock { $0 } } == 1)
+    }
+
+    /// Only an explicitly external peer may quit, even when all peers satisfy the installer's signature.
+    @Test func runsEscapedDescendantsAndUnknownPeersCannotQuit() throws {
+        let processes = TestProcesses(), attribution = processes.attribution
+        let h = try Harness(attribution: attribution)
+        let quits = Locked(0)
+        h.server.quit = (client: .init(name: "beacon-act", requirement: selfRequirement()), action: { quits.withLock { $0 += 1 } })
+        let quit: JSON = .object(["op": "quit"])
+        let denied: JSON = .object(["error": "invalid", "field": "/op"])
+        let beforeSweep = try h.connect()
+        #expect(beforeSweep.call(quit) == denied)
+        try #require(attribution.completeSweep())
+        #expect(beforeSweep.call(quit) == denied, "an unknown connection must reconnect after the sweep")
+        let external = try h.connect()
+        #expect(external.call(quit) == .object(["status": "quitting"]))
+
+        attribution.add(leader: 11, runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        processes.set(group: 11)
+        let run = try h.connect()
+        #expect(run.call(quit) == denied)
+        let parent = getpid() == 11 ? pid_t(12) : pid_t(11)
+        processes.set(group: 11, for: parent)
+        processes.set(group: 13, parent: parent)
+        #expect(attribution.peer(of: getpid()) == .unverifiedRun)
+        let escaped = try h.connect()
+        #expect(escaped.call(quit) == denied)
+        #expect(escaped.call(mergeProposal())?["error"] == "busy")
+        #expect(external.call(quit) == denied, "ancestry is checked again on an already-admitted socket")
+
+        // A failed ancestry probe is not proof that a process is external.
+        processes.set(group: 13, parent: getpid())
+        #expect(attribution.peer(of: getpid()) == .unknown)
+        #expect(try h.connect().call(quit) == denied)
+        #expect(h.queue.sync { quits.withLock { $0 } } == 1)
     }
 
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {

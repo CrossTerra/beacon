@@ -171,14 +171,17 @@ struct SignalDeliveryTests {
     @Test func deliversTheFixtureJournalInOrder() async throws {
         let signal = FakeSignalServer()
         let (journal, entries) = try replaySignalFixture()
-        let sender = OutboxSender(journal: journal, transport: try transport(signal), person: person)
+        let sender = OutboxSender(journal: journal, transport: try transport(signal), person: person, handle: handle)
         #expect(try await sender.drain() == .done(sent: entries.count))
         #expect(signal.stored.map(\.key) == (1...entries.count).map { "beacon:\(journal.id):\($0)" })
         for (entry, stored) in zip(entries, signal.stored) {
             var expected = entry["body"]!.objectValue!
-            if expected["metadata"]!["action"] != "github.merge" { expected["subject"] = .string("signal:actor:\(person)") }
+            switch expected["metadata"]!["action"]!.stringValue! {
+            case "slack.post": expected["subject"] = .string("signal:actor:\(person)")
             // The repository as spelled (see reproducesSignalsFixtureJournal).
-            else { expected["subject"] = "github:pr:CrossTerra/signal#140" }
+            case "github.merge": expected["subject"] = "github:pr:CrossTerra/signal#140"
+            default: break
+            }
             expected["key"] = .string(stored.key)
             #expect(stored.bytes == JSON.object(expected).canonicalData, "\(entry["note"]!.stringValue!)")
         }
