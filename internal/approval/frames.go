@@ -9,8 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -89,11 +87,9 @@ func createJournal(path, id string, sync func(*os.File) error) error {
 		return err
 	}
 	defer p.Close()
-	// The hook sees the directory. It is not the disk flush: os.File.Sync is F_FULLFSYNC on macOS,
-	// so it cannot fall back to fsync. A rejection is continued; any other error stops creation.
-	if err := sync(p); err != nil && !fullSyncRejected(err) {
-		return err
-	}
+	// The hook is notified. It is not the flush: on macOS its File.Sync is F_FULLFSYNC, and returning
+	// that error would skip the fsync syscall. syncParent owns the directory descriptor.
+	sync(p)
 	_, err = syncParent(p)
 	return err
 }
@@ -104,16 +100,12 @@ const (
 )
 
 // flushDir reports the call that reached the disk. full is nil where F_FULLFSYNC does not exist.
-// A rejected full flush falls back to the fsync syscall, not os.File.Sync.
+// Any F_FULLFSYNC failure falls back to plain, which must be the fsync syscall, not os.File.Sync.
 func flushDir(f *os.File, full, plain func(int) error) (string, error) {
 	fd := int(f.Fd())
 	if full != nil {
-		err := full(fd)
-		if err == nil {
+		if err := full(fd); err == nil {
 			return flushFull, nil
-		}
-		if !fullSyncRejected(err) {
-			return "", err
 		}
 	}
 	if plain == nil {
@@ -123,8 +115,4 @@ func flushDir(f *os.File, full, plain func(int) error) (string, error) {
 		return "", err
 	}
 	return flushSync, nil
-}
-
-func fullSyncRejected(err error) bool {
-	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP)
 }

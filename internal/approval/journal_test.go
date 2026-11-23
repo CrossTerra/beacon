@@ -8,10 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 var t0 = time.Unix(1_800_000_000, 0).UTC()
@@ -339,13 +338,12 @@ func TestCreateJournalCallsTheSyncHookForTheDirectory(t *testing.T) {
 	if err := createJournal(path, id, hook(nil, &saw)); err != nil || !saw {
 		t.Fatalf("directory hook called=%v: %v", saw, err)
 	}
+	// File.Sync wraps syscall.Errno. That must not skip unix.Fsync: it is not a unix.Errno, and os.File.Sync
+	// would only repeat F_FULLFSYNC.
 	saw = false
-	if err := createJournal(filepath.Join(t.TempDir(), journalName), id, hook(unix.EINVAL, &saw)); err != nil || !saw {
-		t.Fatalf("rejected full sync did not still see the directory (called=%v): %v", saw, err)
-	}
-	saw = false
-	if err := createJournal(filepath.Join(t.TempDir(), journalName), id, hook(os.ErrInvalid, &saw)); !errors.Is(err, os.ErrInvalid) || !saw {
-		t.Fatalf("directory hook called=%v, error hidden: %v", saw, err)
+	wrapped := &os.PathError{Op: "sync", Path: "dir", Err: syscall.EINVAL}
+	if err := createJournal(filepath.Join(t.TempDir(), journalName), id, hook(wrapped, &saw)); err != nil || !saw {
+		t.Fatalf("File.Sync failure skipped the fsync fallback (called=%v): %v", saw, err)
 	}
 }
 
@@ -373,11 +371,14 @@ func TestDirectoryFlushReportsTheCallThatReachedDisk(t *testing.T) {
 	if err != nil || how != flushFull || full != 1 || plain != 0 {
 		t.Fatalf("supported full flush: %s calls=%d/%d err=%v", how, full, plain, err)
 	}
-	how, err = flushDir(f, func(int) error { full++; return unix.ENOTSUP }, func(int) error { plain++; return nil })
+	how, err = flushDir(f, func(int) error { full++; return syscall.EINVAL }, func(int) error { plain++; return nil })
 	if err != nil || how != flushSync || plain != 1 {
-		t.Fatalf("rejected full flush: %s fsyncs=%d err=%v", how, plain, err)
+		t.Fatalf("F_FULLFSYNC failure: %s fsyncs=%d err=%v", how, plain, err)
 	}
-	if _, err := flushDir(f, func(int) error { return os.ErrClosed }, func(int) error { plain++; return nil }); !errors.Is(err, os.ErrClosed) || plain != 1 {
-		t.Fatalf("non-rejection fell back to fsync: %v, fsyncs=%d", err, plain)
+	if _, err := flushDir(f, func(int) error { return os.ErrClosed }, func(int) error {
+		plain++
+		return os.ErrInvalid
+	}); !errors.Is(err, os.ErrInvalid) || plain != 2 {
+		t.Fatalf("failed fsync syscall: %v, fsyncs=%d", err, plain)
 	}
 }

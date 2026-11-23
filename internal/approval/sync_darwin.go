@@ -15,8 +15,13 @@ func syncJournal(f *os.File) error {
 }
 
 func syncParent(f *os.File) (string, error) {
-	return flushDir(f, func(fd int) error {
-		_, err := unix.FcntlInt(uintptr(fd), unix.F_FULLFSYNC, 0)
-		return err
-	}, unix.Fsync)
+	fd := int(f.Fd())
+	// os.File.Sync is F_FULLFSYNC on macOS, so it cannot be this fallback.
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_FULLFSYNC, 0); err != nil {
+		if ferr := unix.Fsync(fd); ferr != nil { // syscall.Fsync
+			return "", ferr
+		}
+		return flushSync, nil
+	}
+	return flushFull, nil
 }

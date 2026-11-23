@@ -24,9 +24,9 @@ it cannot hide a send Signal may already have stored. If that cannot be shown, l
 Each append is synced (`fsync`, plus `F_FULLFSYNC` on macOS) before publishing its result. The portable
 `golang.org/x/sys/unix` dependency supplies the lock, no-follow file opens and the macOS full flush. The
 directory rename that publishes a new journal is flushed on the directory descriptor itself. On macOS that
-is `F_FULLFSYNC` when the directory accepts it, otherwise the `fsync` syscall. `os.File.Sync` is not that
-fallback: on macOS it is also `F_FULLFSYNC` and would fail the same way. Linux uses `fsync`. The flush
-reports which call reached the disk, `F_FULLFSYNC` or `fsync`. Proposals and any frozen snapshots are
+is `F_FULLFSYNC`. If that call fails, Beacon calls `unix.Fsync` (`syscall.Fsync`) on the same descriptor.
+It does not call `os.File.Sync`: on macOS that is also `F_FULLFSYNC` and would fail the same way. Linux uses `unix.Fsync`. The flush reports which call reached the disk, `F_FULLFSYNC` or `fsync`.
+Proposals and any frozen snapshots are
 plaintext on disk. Keep the preview directory private and use synthetic proposals.
 
 An approval that did not start expires at restart or shutdown. A durable start without a result becomes
