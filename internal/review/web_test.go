@@ -290,8 +290,8 @@ func TestPostChecksOriginAndCSRFButDoesNotHandleAMutation(t *testing.T) {
 			session           bool
 			status            int
 		}{
-			{[]string{canonical}, "", "csrf=" + csrf, "/approve", true, 405},
-			{nil, "same-origin", "csrf=" + csrf, "/freeze", true, 405},
+			{[]string{canonical}, "", "csrf=" + csrf, "/decline", true, 405},
+			{nil, "same-origin", "csrf=" + csrf, "/freeze", true, 409},
 			{nil, "", "csrf=" + csrf, "/freeze", true, 403},
 			{nil, "same-site", "csrf=" + csrf, "/freeze", true, 403},
 			{[]string{""}, "same-origin", "csrf=" + csrf, "/freeze", true, 403},

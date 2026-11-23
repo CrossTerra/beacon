@@ -34,8 +34,10 @@ type Site struct {
 	origin   approval.Origin
 	journal  proposals
 	state    string
+	resolve  func(approval.Proposal) (approval.Binding, error)
 	now      func() time.Time
 	sessions sessions
+	held     map[string]held
 }
 
 func New(origin approval.Origin, j proposals, now func() time.Time) *Site {
@@ -52,6 +54,9 @@ func (s *Site) IssueOpen() (string, bool) { return s.sessions.issue(s.now()) }
 
 // SetState is the preview directory that holds the setup code and passkeys.
 func (s *Site) SetState(dir string) { s.state = dir }
+
+// SetResolver supplies a checked account binding. The preview leaves it nil: it does not invent one.
+func (s *Site) SetResolver(fn func(approval.Proposal) (approval.Binding, error)) { s.resolve = fn }
 
 const tailLogin = "Tailscale-User-Login"
 
@@ -73,6 +78,14 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Host != s.origin.Host() || s.origin.Secure() && (len(login) != 1 || login[0] != s.origin.TailscaleLogin()) ||
 		!s.origin.Secure() && len(login) != 0 {
 		http.Error(w, "request refused", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/freeze" || r.URL.Path == "/approve") {
+		if !s.allowForm(w, r) {
+			http.Error(w, "form refused", http.StatusForbidden)
+			return
+		}
+		s.decide(w, r)
 		return
 	}
 	if r.Method == http.MethodPost && (r.URL.Path == "/passkeys/new" || r.URL.Path == "/passkeys") {

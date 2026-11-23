@@ -375,26 +375,66 @@ func (j *Journal) Decline(id, note string, at time.Time) error {
 }
 
 // Approve persists an already-authorized decision. The caller MUST verify the person's assertion over f
-// before calling. This is not exposed over HTTP or the proposal socket.
-func (j *Journal) Approve(f Frozen, at time.Time) error {
+// before calling. This is not exposed over the proposal socket.
+func (j *Journal) Approve(f Frozen, at time.Time) error { return j.ApproveAll([]Frozen{f}, at) }
+
+// ApproveAll commits every frozen approval or none of the checks. The frames are written together and
+// synced once. A crash can still tear the last frame; earlier complete frames of that write remain.
+func (j *Journal) ApproveAll(items []Frozen, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopping {
 		return ErrStopping
 	}
-	if err := j.require(f.ID, "pending", at); err != nil {
-		return err
+	if len(items) == 0 || len(items) > 10 {
+		return ErrTransition
 	}
-	p := j.states[f.ID].Proposal
-	selected := ""
-	if p.Type == Run {
-		selected = text(f.Params, "model")
+	seen := map[string]bool{}
+	frames := make([]frame, 0, len(items))
+	for _, f := range items {
+		if seen[f.ID] {
+			return ErrTransition
+		}
+		seen[f.ID] = true
+		if err := j.require(f.ID, "pending", at); err != nil {
+			return err
+		}
+		p := j.states[f.ID].Proposal
+		selected := ""
+		if p.Type == Run {
+			selected = text(f.Params, "model")
+		}
+		bound, err := Freeze(p, f.Binding, selected)
+		if err != nil || !reflect.DeepEqual(f, bound) || at.Before(p.ProposedAt) {
+			return ErrStale
+		}
+		frames = append(frames, frame{ID: f.ID, Kind: "approved", Frozen: &bound})
 	}
-	bound, err := Freeze(p, f.Binding, selected)
-	if err != nil || !reflect.DeepEqual(f, bound) || at.Before(p.ProposedAt) {
-		return ErrStale
+	if !j.healthy() {
+		return ErrJournalIO
 	}
-	return j.action(frame{ID: f.ID, Kind: "approved", Frozen: &bound}, at)
+	for i := range frames {
+		frames[i].Seq, frames[i].Nonce, frames[i].At = j.lastSeq+int64(i)+1, j.hooks.nonce(), at.UnixMilli()
+		if appendFrame(j.file, frames[i]) != nil {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	if j.hooks.sync(j.file) != nil {
+		j.failed = true
+		j.notify()
+		return ErrJournalIO
+	}
+	for i := range frames {
+		if !j.fold(frames[i]) {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	j.notify()
+	return nil
 }
 
 // Start commits the no-retry barrier before the handler may perform a write. Once started, a process

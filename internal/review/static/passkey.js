@@ -27,10 +27,11 @@ function run() {
   if (!el || !form || !button) return;
   var opts = JSON.parse(el.textContent);
   button.addEventListener("click", function () {
-    register(opts).then(function (fields) {
+    var op = opts.kind === "approve" ? approve(opts) : register(opts);
+    op.then(function (fields) {
       Object.keys(fields).forEach(function (name) { setField(form, name, fields[name]); });
       var params = new URLSearchParams(new FormData(form));
-      fetch("/passkeys", {
+      fetch(form.getAttribute("action"), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": location.origin },
         body: params.toString(),
@@ -47,6 +48,28 @@ function run() {
 function show(err) {
   var out = document.getElementById("ceremony-error");
   if (out) out.textContent = err && err.name ? err.name : "error";
+}
+
+function approve(opts) {
+  return navigator.credentials.get({ publicKey: {
+    challenge: b64urlToBytes(opts.challenge),
+    rpId: opts.rpId,
+    allowCredentials: [{ type: "public-key", id: b64urlToBytes(opts.id) }],
+    userVerification: "required",
+    timeout: 120000,
+    extensions: { prf: { eval: { first: b64urlToBytes(opts.salt) } } }
+  } }).then(function (cred) {
+    var got = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+    var prf = got && got.prf && got.prf.results && got.prf.results.first ? bytesToB64url(got.prf.results.first) : "";
+    return {
+      nonce: opts.nonce,
+      credential_id: bytesToB64url(cred.rawId),
+      client_data_json: bytesToB64url(cred.response.clientDataJSON),
+      authenticator_data: bytesToB64url(cred.response.authenticatorData),
+      signature: bytesToB64url(cred.response.signature),
+      prf_output: prf
+    };
+  });
 }
 
 function register(opts) {

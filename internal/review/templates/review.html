@@ -29,7 +29,9 @@
 <h1>Register a passkey</h1>
 <noscript><p>Turn scripts on. The passkey API is only reachable from script.</p></noscript>
 <p id="ceremony-error"></p>
-<form id="ceremony-form" method="post" action="/passkeys">
+<form id="ceremony-form" method="post" action="{{.Action}}">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="nonce" value="">
 <input type="hidden" name="credential_id" value="">
 <input type="hidden" name="create_client_data" value="">
 <input type="hidden" name="assert_client_data" value="">
@@ -40,7 +42,7 @@
 <input type="hidden" name="prf_output" value="">
 <button type="button" id="ceremony-go">Register passkey</button>
 </form>
-<script type="application/json" id="ceremony">{{.}}</script>
+<script type="application/json" id="ceremony">{{.JSON}}</script>
 <script src="/static/passkey.js"></script>
 {{template "end"}}
 {{end}}
@@ -56,7 +58,7 @@
 {{define "pending"}}
 {{template "head" "Pending proposals"}}
 <h1>Pending proposals</h1>
-<p>These pages are read-only. Beacon cannot take action from them.</p>
+<p>These pages do not dispatch an action. Approval is recorded only after a passkey assertion, and only when an account binding has been resolved. This preview does not resolve an account, so it does not freeze or approve.</p>
 <ol>
 {{range .}}
   <li><a href="/p/{{.ID}}">{{action .Type}}</a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>

@@ -37,7 +37,7 @@ func (s *Site) register(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "registration unavailable", http.StatusInternalServerError)
 			return
 		}
-		render(w, "ceremony", http.StatusOK, template.JS(opts))
+		render(w, "ceremony", http.StatusOK, ceremonyPage{JSON: template.JS(opts), Action: "/passkeys"})
 		return
 	}
 	raw := func(name string) []byte {
@@ -59,6 +59,12 @@ func (s *Site) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, "sign-in", http.StatusOK, false)
+}
+
+type ceremonyPage struct {
+	JSON   template.JS
+	CSRF   string
+	Action string
 }
 
 func rpID(host string) string {

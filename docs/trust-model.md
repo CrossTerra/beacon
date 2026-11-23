@@ -213,7 +213,9 @@ checkout's opencode configuration does not deny.
     login header does not identify local processes; cookies can be received by another port on the same host.
     The pages have no approval or settings routes. `beacon setup` prints a one-time passkey code and
     refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
-    a public key and a data key wrapped under a PRF output, not the output, and it does not approve. See
+    a public key and a data key wrapped under a PRF output, not the output. A later assertion can record
+    an approval only for a resolved binding, and only if the PRF output unwraps that key. The preview
+    supplies no resolver and starts no handler, so a live page does not freeze or dispatch. See
     [Go approvals](go-approvals.md).
 
 ## Known limits

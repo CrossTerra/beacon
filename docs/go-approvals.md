@@ -15,8 +15,13 @@ and registers one passkey. The PRF output is not stored. Approval is not on the 
 instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
 ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
 The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
-`/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Approval
-still does not run from the page.
+`/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies.
+
+A signed-in browser can freeze a proposal only when a resolver supplies the account binding. This preview
+does not set one, so the page does not freeze a live proposal and does not invent an account. When a
+binding is supplied, one assertion covers that frozen hash, or a batch of at most 10 merges or posts.
+An `agent.run` cannot join a batch. The assertion is refused unless its PRF output unwraps the write
+vault. The journal then records `approved`. Nothing is started or sent: no Go handler is wired.
 
 ## Journal and record delivery
 
