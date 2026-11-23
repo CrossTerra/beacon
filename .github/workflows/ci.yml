@@ -26,7 +26,12 @@ jobs:
         run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
       - name: Gates
         run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          if [ "$RUNNER_OS" = Linux ]; then
+            BEACON_TEST_CHROME="$(command -v google-chrome)"
+            export BEACON_TEST_CHROME
+          fi
           scripts/gates.sh
       - name: Build and test Beacon.app
         if: runner.os == 'macOS'

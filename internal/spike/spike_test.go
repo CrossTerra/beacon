@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CrossTerra/beacon/internal/webauthn"
 	"github.com/CrossTerra/beacon/internal/webauthntest"
 )
 
@@ -215,6 +216,51 @@ func TestRegisterAssertAndPRFHash(t *testing.T) {
 	rec = post(t, h, "localhost:7317", "http://localhost:7317", "/assert", form)
 	if !strings.Contains(rec.Body.String(), "Matches the PRF hash") || !strings.Contains(rec.Body.String(), want) {
 		t.Fatalf("second assert body %s", rec.Body.String())
+	}
+}
+
+func TestAddDoesNotPublishOnSaveError(t *testing.T) {
+	const rpID = "localhost"
+	s := newServer(t, "")
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := webauthn.Registration{CredentialID: key.ID, COSEKey: key.COSE, Algorithm: webauthn.AlgES256}
+
+	// A directory in place of the credential file prevents rename even as root.
+	path := filepath.Join(s.dir, "credentials.json")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.add(rpID, reg); err == nil {
+		t.Fatal("registration succeeded without saving")
+	}
+	if _, ok := s.cred(rpID, key.ID); ok {
+		t.Fatal("unsaved passkey is available for assertion")
+	}
+	if len(s.credsFor(rpID)) != 0 {
+		t.Fatal("unsaved passkey is listed")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.add(rpID, reg); err != nil {
+		t.Fatalf("retrying registration: %v", err)
+	}
+	if _, ok := s.cred(rpID, key.ID); !ok {
+		t.Fatal("saved passkey is not available for assertion")
+	}
+	reloaded, err := New(Config{DataDir: s.dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reloaded.cred(rpID, key.ID); !ok {
+		t.Fatal("saved passkey was not reloaded")
 	}
 }
 

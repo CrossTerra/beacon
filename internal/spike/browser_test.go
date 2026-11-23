@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,16 @@ func TestBrowser(t *testing.T) {
 		<-errc
 	}()
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, append(
-		chromedp.DefaultExecAllocatorOptions[:],
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", "new"),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
-	)...)
+		chromedp.WSURLReadTimeout(60*time.Second),
+	)
+	if chrome := os.Getenv("BEACON_TEST_CHROME"); chrome != "" {
+		opts = append(opts, chromedp.ExecPath(chrome))
+	}
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
 	taskCtx, taskCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(func(string, ...any) {}))
 	defer taskCancel()

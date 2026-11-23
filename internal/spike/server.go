@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -519,7 +520,8 @@ func (s *Server) add(rpID string, reg webauthn.Registration) error {
 	if len(s.state.Credentials) >= maxCredentials {
 		return errFull
 	}
-	s.state.Credentials = append(s.state.Credentials, credential{
+	next := s.state
+	next.Credentials = append(slices.Clone(next.Credentials), credential{
 		ID:        id,
 		RPID:      rpID,
 		Algorithm: int64(reg.Algorithm),
@@ -529,7 +531,11 @@ func (s *Server) add(rpID string, reg webauthn.Registration) error {
 		AAGUID:    hex.EncodeToString(reg.AAGUID[:]),
 		Added:     s.now().UTC(),
 	})
-	return saveState(s.dir, s.state)
+	if err := saveState(s.dir, next); err != nil {
+		return err
+	}
+	s.state = next
+	return nil
 }
 
 func (s *Server) credsFor(rpID string) []credential {

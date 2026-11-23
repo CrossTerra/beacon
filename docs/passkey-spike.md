@@ -3,7 +3,8 @@
 This is the 13.01 part 1 spike, not the service. `beacon spike-passkey` listens on `127.0.0.1:7317` and
 `[::1]:7317` only. It registers a passkey with the WebAuthn PRF extension, refuses one without PRF, and asserts
 with user verification. The page shows the SHA-256 of the PRF output so the same passkey can be compared across
-devices. It never shows or logs the output itself.
+devices. It never shows or logs the output itself. The spike only lists or accepts a passkey for assertions
+after saving its registration.
 
 The spike accepts both `http://localhost:7317` and `https://{machine}.{tailnet}.ts.net` at once, so both origins
 can be tried without a restart. A passkey is bound to the origin it was registered on. The later service has one
@@ -155,7 +156,9 @@ go test -count=1 -run TestBrowser ./internal/spike/
 ```
 
 That registers and asserts with PRF, refuses a credential without PRF, and refuses a wrong origin. Record that row
-as covered by the test. Chrome has to be on `PATH` or at the usual macOS application path.
+as covered by the test. By default the test looks for Chrome on `PATH` or at the usual macOS application path.
+Set `BEACON_TEST_CHROME` to select a specific executable, as Ubuntu CI does with the runner's preinstalled
+`google-chrome`.
 
 ## When to stop
 

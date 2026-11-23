@@ -115,11 +115,12 @@ func saveState(dir string, st diskState) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	// The temporary file is already 0600; rename commits the save.
 	if err := os.Rename(tmpName, path); err != nil {
 		return err
 	}
 	cleanup = false
-	return os.Chmod(path, 0o600)
+	return nil
 }
 
 func checkOwned(path string) error {
