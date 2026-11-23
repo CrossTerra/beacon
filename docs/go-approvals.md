@@ -21,7 +21,8 @@ A signed-in browser can freeze a proposal only when a resolver supplies the acco
 does not set one, so the page does not freeze a live proposal and does not invent an account. When a
 binding is supplied, one assertion covers that frozen hash, or a batch of at most 10 merges or posts.
 An `agent.run` cannot join a batch. The assertion is refused unless its PRF output unwraps the write
-vault. The journal then records `approved`. Nothing is started or sent: no Go handler is wired.
+vault. The journal then records `approved`. `approvalserve.Dispatch` is the only path to a handler. It is nil:
+`github.merge`, `slack.post`, and `agent.run` exist in Swift, not in Go, so nothing is started or sent.
 
 ## Unattended vault
 
