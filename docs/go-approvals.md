@@ -52,3 +52,26 @@ Limits from Swift are retained: newline-delimited JSON at most 256 KiB per frame
 of up to 300 seconds, 20 pending and 60 proposals per hour per identity, and 40 pending overall. Hourly
 counters are in memory. Partial frames and idle connections time out. A disconnected waiter frees its slot
 without waiting for a journal change. This slice has no preflight or provider calls to budget.
+
+## Browser review
+
+The review listeners bind only `127.0.0.1:7317` and `[::1]:7317`. Both must bind; there is no fallback
+port. The canonical origin is `http://localhost:7317` or one `https://{machine}.{tailnet}.ts.net`
+name. The service does not set up or contact Tailscale. In tailnet mode the reverse proxy must preserve
+the canonical `Host` and pass the configured `Tailscale-User-Login`. This header filters proxy traffic;
+it does not authenticate a local process. Old `GET` links on `localhost:7317` redirect to the canonical
+path without forwarding the query. Other hosts and the loopback IP literals are not valid origins.
+
+An admitted socket peer can mint a two-minute, single-use `open` code. `/open` exchanges it for a
+12-hour, memory-only review session and redirects without the code. The cookie is HttpOnly and
+SameSite=Lax; tailnet mode uses `Secure` and `__Host-`. Cookies are not isolated by port, so a server
+on another port of the same host can receive one if the signed-in browser visits it. Restart invalidates
+all codes and sessions.
+
+Only a signed-in browser sees the pending list and proposal detail. If the journal already holds a
+frozen snapshot for a proposal, its frozen parameters and resolved binding have a separate detail view.
+No web request can freeze, approve, decline, dispatch or change settings. POSTs require the canonical
+`Origin` (or `Sec-Fetch-Site: same-origin` if absent), a session and its form CSRF token, and there are
+no POST handlers. The embedded HTML and CSS need no scripts or external resources. Templates escape
+proposer content and make invisible formatting visible without changing the stored bytes. Responses are
+not cached or frameable, and the service does not log requests, codes or proposal text.
