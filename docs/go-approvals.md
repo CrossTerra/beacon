@@ -25,5 +25,9 @@ those bytes unchanged. A conflict stops the head until explicit resume. When the
 resume can rebuild for corrected settings. Local labels (PID and executable) and a proposer's context never go
 to Signal. Without a trusted Slack intake lookup, Slack records use the person's own subject.
 
+The delivery worker waits 30 seconds after a retryable failure, then doubles the delay up to 15 minutes. A
+longer `Retry-After` from a rate limit or server failure takes precedence (up to an hour). New proposals do not
+shorten the wait or clear a stop. An explicit resume can bypass backoff, including when requested during a send.
+
 The Go contract tests use the unmodified [Signal fixtures](../internal/approval/testdata/) and a fake Signal
 over loopback. The sender has no live caller yet; the collector's outbox and its egress are unchanged.
