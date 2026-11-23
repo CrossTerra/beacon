@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
 	"time"
@@ -142,14 +143,13 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	item, ok := s.held[key]
-	if ok {
-		delete(s.held, key)
-	}
-	s.sessions.mu.Unlock()
 	if !ok || item.session != sid || !at.Before(item.expires) {
+		s.sessions.mu.Unlock()
 		http.Error(w, "approval refused", http.StatusConflict)
 		return
 	}
+	delete(s.held, key)
+	s.sessions.mu.Unlock()
 	hashes := make([]string, len(item.items))
 	for i, f := range item.items {
 		hashes[i] = f.Hash
@@ -198,6 +198,10 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keyBytes, err := passkey.OpenVault(s.state, id, raw("prf_output"), s.origin.URL())
+	if errors.Is(err, passkey.ErrReset) {
+		http.Error(w, "passkey reset", http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(w, "approval refused", http.StatusUnauthorized)
 		return

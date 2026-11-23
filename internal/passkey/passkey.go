@@ -43,6 +43,7 @@ var (
 	ErrRegistered = errors.New("a passkey is already registered")
 	ErrPRF        = errors.New("passkey registration needs PRF")
 	ErrVault      = errors.New("write vault is absent or does not match this passkey")
+	ErrReset      = errors.New("write vault does not match the recorded passkey")
 	ErrSignCount  = errors.New("sign count did not increase")
 )
 
@@ -68,6 +69,11 @@ func Issue(dir string, now time.Time) (string, error) {
 		return "", err
 	}
 	defer approval.CloseInstance(dir, lock)
+	mu.Lock()
+	defer mu.Unlock()
+	if err := clearDebris(dir); err != nil {
+		return "", err
+	}
 	reset, block, err := priorPasskeys(dir)
 	if err != nil {
 		return "", err
@@ -111,6 +117,9 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	defer release()
 	mu.Lock()
 	defer mu.Unlock()
+	if err := clearDebris(dir); err != nil {
+		return nil, nil, nil, err
+	}
 	raw, err := base64.RawURLEncoding.Strict().DecodeString(code)
 	if err != nil || len(raw) != tokenBytes {
 		return nil, nil, nil, ErrSetup
@@ -214,9 +223,43 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 		return err
 	}
 	if err := publishNew(dir, "passkeys.json", body); err != nil {
+		os.Remove(filepath.Join(dir, writeVaultName))
 		return err
 	}
 	return os.Remove(filepath.Join(dir, "register-pending.json"))
+}
+
+// CommitAdded records the write-vault hash. If that record fails, both registration files are removed.
+func CommitAdded(dir string, at time.Time, record func([]byte, time.Time) error) error {
+	hash, err := VaultHash(dir)
+	if err != nil || record == nil {
+		Abandon(dir)
+		if err == nil {
+			err = errors.New("passkey was not recorded")
+		}
+		return err
+	}
+	if err := record(hash, at); err != nil {
+		Abandon(dir)
+		return err
+	}
+	return nil
+}
+
+// VaultHash is the SHA-256 of write-vault.json.
+func VaultHash(dir string) ([]byte, error) {
+	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(body)
+	return append([]byte(nil), sum[:]...), nil
+}
+
+// Abandon removes a registration that was not recorded. The reset marker stays.
+func Abandon(dir string) {
+	os.Remove(filepath.Join(dir, "passkeys.json"))
+	os.Remove(filepath.Join(dir, writeVaultName))
 }
 
 // OpenVault unwraps the write-vault data key for one credential. The caller must clear the key.
@@ -226,6 +269,24 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 		return nil, ErrPRF
 	}
 	defer clear(prf)
+	vaultBody, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrVault
+		}
+		return nil, err
+	}
+	sum := sha256.Sum256(vaultBody)
+	recorded, active, err := approval.PasskeyVault(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !active || subtle.ConstantTimeCompare(sum[:], recorded) != 1 {
+		if active {
+			_ = approval.NoteVaultMismatch(dir, time.Now().UTC())
+		}
+		return nil, ErrReset
+	}
 	body, err := os.ReadFile(filepath.Join(dir, "passkeys.json"))
 	if err != nil {
 		return nil, err
@@ -385,11 +446,10 @@ func NoteSignCount(dir string, id []byte, count uint32) error {
 // Reset records a journal reset, leaves a marker, and removes the passkey list and write vault.
 // The marker stays, so a later registration must use a code issued after that journal reset.
 func Reset(dir string, at time.Time, record func(string, time.Time) error) error {
-	release, err := withInstance(dir)
-	if err != nil {
-		return err
+	// The caller opens the journal first, which already holds the instance lock.
+	if !approval.HoldsInstance(dir) {
+		return approval.ErrLocked
 	}
-	defer release()
 	mu.Lock()
 	defer mu.Unlock()
 	if record == nil {
@@ -408,6 +468,22 @@ func Reset(dir string, at time.Time, record func(string, time.Time) error) error
 		return err
 	}
 	if err := os.Remove(filepath.Join(dir, "passkeys.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, writeVaultName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func clearDebris(dir string) error {
+	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	added, _, err := approval.PasskeyMarks(dir)
+	if err != nil || !added.IsZero() {
 		return err
 	}
 	if err := os.Remove(filepath.Join(dir, writeVaultName)); err != nil && !errors.Is(err, os.ErrNotExist) {

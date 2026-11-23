@@ -17,10 +17,15 @@ ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps 
 The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
 `/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
 takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
-The first registration writes `write-vault.json`, a key-check sealed under the new data key. Deleting
-`passkeys.json` does not allow another first registration while that file, `passkey-reset.json`, or a
-journal `passkey_added` shows a passkey existed. A later registration needs `passkeys_reset` in the
-journal, and the setup code must be issued after that reset.
+The first registration writes `write-vault.json`, a key-check sealed under the new data key. Its SHA-256
+is stored on the `passkey_added` journal frame. `OpenVault` refuses a file that does not match the latest
+`passkey_added` with no later `passkeys_reset`, and records that mismatch as `passkeys_reset`
+(`vault_mismatch`). A same-user process can still replace both files and the check. The real backstop is
+that write credentials are sealed under the real data key, so a swapped vault approves nothing that can
+execute. Handlers must fail closed when they cannot unseal. Deleting `passkeys.json` does not allow
+another first registration while a recorded passkey exists. `beacon setup --reset-passkeys` (service
+stopped) opens the journal and records `passkeys_reset`. A later setup code must be issued after that
+reset. A vault left behind with no `passkey_added` is failed-registration debris and is removed.
 
 A signed-in browser can freeze a proposal only when a resolver supplies the account binding. This preview
 does not set one, so the page does not freeze a live proposal and does not invent an account. When a

@@ -347,7 +347,7 @@ beacon act --state-dir DIR get ID
 beacon act --state-dir DIR wait ID [--after VERSION] [--timeout SECONDS]
 beacon act --state-dir DIR withdraw ID
 beacon open --state-dir DIR
-beacon setup --state-dir DIR
+beacon setup --state-dir DIR [--reset-passkeys]
 ```
 
 `serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
@@ -363,7 +363,8 @@ session. Open it privately, then follow the `review_url` or use the pending list
 codes and sessions, not unexpired proposals.
 
 `setup` prints a 10-minute, one-use passkey code. It refuses while `serve` holds the directory. The code is
-not stored. With `serve` running, open `/passkeys/new` and enter the code. See [Go approvals](go-approvals.md#passkey-setup).
+not stored. With `serve` running, open `/passkeys/new` and enter the code. `--reset-passkeys` records a
+passkey reset and removes the passkey list and write vault; the service must be stopped. See [Go approvals](go-approvals.md#passkey-setup).
 
 All three action types are review-only here. Use synthetic proposals: their parameters and reasons remain
 in the local journal as plaintext. There is no keychain access or live Signal delivery, and no way to approve,

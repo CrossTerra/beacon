@@ -3,6 +3,7 @@ package review
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
 	"time"
@@ -59,11 +60,15 @@ func (s *Site) register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "registration refused", http.StatusUnauthorized)
 		return
 	}
-	if rec, ok := s.journal.(interface{ RecordLocal(string, time.Time) error }); ok {
-		if err := rec.RecordLocal("passkey_added", s.now()); err != nil {
-			http.Error(w, "registration refused", http.StatusInternalServerError)
-			return
-		}
+	record := func([]byte, time.Time) error { return errors.New("passkey was not recorded") }
+	if rec, ok := s.journal.(interface {
+		RecordPasskey([]byte, time.Time) error
+	}); ok {
+		record = rec.RecordPasskey
+	}
+	if err := passkey.CommitAdded(s.state, s.now(), record); err != nil {
+		http.Error(w, "registration refused", http.StatusInternalServerError)
+		return
 	}
 	render(w, "registered", http.StatusOK, nil)
 }

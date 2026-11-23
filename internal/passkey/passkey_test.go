@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,6 +78,7 @@ func TestSetupCodeRegistersOnePasskeyAndWrapsAVaultKey(t *testing.T) {
 
 func TestOpenVaultRejectsAForgedWrapAndAMissingVault(t *testing.T) {
 	dir, rp, prf, id := register(t)
+	noteVault(t, dir)
 	key, err := OpenVault(dir, id, append([]byte(nil), prf...), approval.LocalOrigin)
 	if err != nil || len(key) != 32 {
 		t.Fatal(err)
@@ -117,8 +119,97 @@ func TestOpenVaultRejectsAForgedWrapAndAMissingVault(t *testing.T) {
 	_ = rp
 }
 
+func TestSwappedVaultIsAJournalledReset(t *testing.T) {
+	dir, _, prf, id := register(t)
+	noteVault(t, dir)
+	forged := bytes.Repeat([]byte{0x22}, 32)
+	wrapped, data, err := wrapKey(forged, bytes.Repeat([]byte{0x33}, 32), []byte(approval.LocalOrigin))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(data)
+	if err := os.WriteFile(filepath.Join(dir, writeVaultName), []byte("swapped-vault"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "passkeys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored storeFile
+	if err := json.Unmarshal(body, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored.Credentials[0].Wrap = wrapped
+	stored.Credentials[0].Salt = bytes.Repeat([]byte{0x33}, 32)
+	next, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "passkeys.json"), next, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenVault(dir, id, append([]byte(nil), forged...), approval.LocalOrigin); err != ErrReset {
+		t.Fatalf("swapped vault: %v", err)
+	}
+	journal, err := os.ReadFile(filepath.Join(dir, "journal.log"))
+	if err != nil || !bytes.Contains(journal, []byte("vault_mismatch")) {
+		t.Fatal("mismatch was not journalled")
+	}
+	_ = prf
+}
+
+func TestUnrecordedVaultIsDebrisAndAFailedRecordRollsBack(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0).UTC()
+	if err := approval.PrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, writeVaultName), []byte("debris"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, err := Issue(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	if _, _, _, err := Begin(dir, rp, code, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
+		t.Fatal("debris vault was kept")
+	}
+	dir, _, _, _ = register(t)
+	if err := CommitAdded(dir, now, func([]byte, time.Time) error { return errors.New("disk") }); err == nil {
+		t.Fatal("failed record was accepted")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); !os.IsNotExist(err) {
+		t.Fatal("passkeys.json survived a failed record")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
+		t.Fatal("write vault survived a failed record")
+	}
+}
+
+func noteVault(t *testing.T, dir string) *approval.Journal {
+	t.Helper()
+	j, err := approval.OpenJournal(dir, time.Unix(1_800_000_000, 0).UTC(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { j.Close() })
+	hash, err := VaultHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordPasskey(hash, time.Unix(1_800_000_000, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
 func TestDeletedPasskeyListDoesNotBypassReset(t *testing.T) {
 	dir, rp, _, _ := register(t)
+	noteVault(t, dir).Close()
 	if err := os.Remove(filepath.Join(dir, "passkeys.json")); err != nil {
 		t.Fatal(err)
 	}

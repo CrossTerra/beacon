@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// liveJournals lets a passkey check record a reset while this process already holds the journal.
+var liveJournals sync.Map
+
 var (
 	ErrNotFound   = errors.New("proposal not found")
 	ErrTransition = errors.New("proposal is not in the required state")
@@ -44,6 +47,7 @@ type frame struct {
 	CredentialID   []byte    `json:"credential_id,omitempty"`
 	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
 	Batch          []string  `json:"batch,omitempty"`
+	VaultHash      []byte    `json:"vault_hash,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -102,12 +106,13 @@ func openJournal(dir string, at time.Time, after string, hooks journalHooks) (*J
 	if err != nil {
 		return nil, err
 	}
-	j := &Journal{dir: dir, lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
+	j := &Journal{dir: filepath.Clean(dir), lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
 		changed: make(chan struct{}), hooks: hooks}
 	if err := j.load(filepath.Join(dir, journalName), at, after); err != nil {
 		j.Close()
 		return nil, err
 	}
+	liveJournals.Store(j.dir, j)
 	return j, nil
 }
 
@@ -214,6 +219,7 @@ func (j *Journal) ID() string { return j.id }
 func (j *Journal) Close() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	liveJournals.Delete(j.dir)
 	if j.lock == nil {
 		return nil
 	}
@@ -269,12 +275,33 @@ func (j *Journal) transition(id, kind, reason string, at time.Time) error {
 
 // RecordLocal writes a local audit marker without allocating a record sequence. It takes no credential or payload.
 func (j *Journal) RecordLocal(kind string, at time.Time) error {
+	return j.recordLocal(kind, "", nil, at)
+}
+
+// RecordPasskey records the SHA-256 of write-vault.json. OpenVault refuses a different file.
+func (j *Journal) RecordPasskey(hash []byte, at time.Time) error {
+	if len(hash) != 32 {
+		return Invalid("/vault_hash")
+	}
+	return j.recordLocal("passkey_added", "", append([]byte(nil), hash...), at)
+}
+
+func (j *Journal) recordLocal(kind, reason string, hash []byte, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if !localKind(kind) {
 		return Invalid("/kind")
 	}
-	return j.commit(frame{Kind: kind, At: at.UnixMilli()})
+	return j.commit(frame{Kind: kind, At: at.UnixMilli(), Reason: reason, VaultHash: hash})
+}
+
+// NoteVaultMismatch records a visible passkey reset while this process holds the journal.
+func NoteVaultMismatch(dir string, at time.Time) error {
+	v, ok := liveJournals.Load(filepath.Clean(dir))
+	if !ok {
+		return ErrLocked
+	}
+	return v.(*Journal).recordLocal("passkeys_reset", "vault_mismatch", nil, at)
 }
 
 func localKind(kind string) bool {
@@ -649,35 +676,55 @@ func batchCommitted(parts []frame, marker frame) bool {
 // PasskeyMarks reports the latest local passkey_added and passkeys_reset times in the journal.
 // A missing journal is a first registration, not an error.
 func PasskeyMarks(dir string) (added, reset time.Time, err error) {
+	st, err := scanPasskeys(dir)
+	return st.added, st.reset, err
+}
+
+// PasskeyVault is the SHA-256 recorded on the latest passkey_added that no later passkeys_reset superseded.
+func PasskeyVault(dir string) (hash []byte, active bool, err error) {
+	st, err := scanPasskeys(dir)
+	if err != nil || st.added.IsZero() || !st.reset.IsZero() && !st.added.After(st.reset) || len(st.hash) != 32 {
+		return nil, false, err
+	}
+	return append([]byte(nil), st.hash...), true, nil
+}
+
+type passkeyScan struct {
+	added, reset time.Time
+	hash         []byte
+}
+
+func scanPasskeys(dir string) (passkeyScan, error) {
+	var st passkeyScan
 	f, err := OpenPrivate(filepath.Join(dir, journalName), os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
-		return time.Time{}, time.Time{}, nil
+		return st, nil
 	}
 	if err != nil {
-		return time.Time{}, time.Time{}, err
+		return st, err
 	}
 	defer f.Close()
 	r := bufio.NewReader(f)
 	if _, _, err := readFrame(r); err != nil {
-		return time.Time{}, time.Time{}, err
+		return st, err
 	}
 	for {
 		e, _, err := readFrame(r)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return added, reset, nil
+			return st, nil
 		}
 		if err != nil {
-			return time.Time{}, time.Time{}, err
+			return passkeyScan{}, err
 		}
 		at := time.UnixMilli(e.At).UTC()
 		switch e.Kind {
 		case "passkey_added":
-			if added.IsZero() || at.After(added) {
-				added = at
+			if st.added.IsZero() || !at.Before(st.added) {
+				st.added, st.hash = at, append([]byte(nil), e.VaultHash...)
 			}
 		case "passkeys_reset":
-			if reset.IsZero() || at.After(reset) {
-				reset = at
+			if st.reset.IsZero() || at.After(st.reset) {
+				st.reset = at
 			}
 		}
 	}

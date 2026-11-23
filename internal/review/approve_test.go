@@ -39,6 +39,9 @@ func TestAssertionApprovesTheFrozenBatchAndDoesNotStart(t *testing.T) {
 	j, err := approval.OpenJournal(dir, start, "")
 	must(t, err)
 	t.Cleanup(func() { j.Close() })
+	hash, err := passkey.VaultHash(dir)
+	must(t, err)
+	must(t, j.RecordPasskey(hash, start))
 	s := New(makeOrigin(t, approval.LocalOrigin, ""), j, func() time.Time { return start })
 	s.SetState(dir)
 	s.SetResolver(func(p approval.Proposal) (approval.Binding, error) {
@@ -134,8 +137,7 @@ func TestFreezeNonceIsBoundToTheSessionAndANewFreezeCancelsTheOld(t *testing.T) 
 	postApproval(t, s, cookie, key, prf, first.Nonce, first.Challenge, http.StatusConflict)
 	other := signIn(t, s)
 	postApproval(t, s, other, key, prf, second.Nonce, second.Challenge, http.StatusConflict)
-	third := freezeNonce(t, s, cookie, p.ID)
-	postApproval(t, s, cookie, key, prf, third.Nonce, third.Challenge, http.StatusOK)
+	postApproval(t, s, cookie, key, prf, second.Nonce, second.Challenge, http.StatusOK)
 }
 
 func TestNoNonceIsHeldWhenTheCeremonyCannotBeBuilt(t *testing.T) {
@@ -223,6 +225,9 @@ func registeredPreview(t *testing.T) (*Site, *http.Cookie, *webauthntest.Key, []
 	j, err := approval.OpenJournal(dir, start, "")
 	must(t, err)
 	t.Cleanup(func() { j.Close() })
+	hash, err := passkey.VaultHash(dir)
+	must(t, err)
+	must(t, j.RecordPasskey(hash, start))
 	s := New(makeOrigin(t, approval.LocalOrigin, ""), j, func() time.Time { return start })
 	s.SetState(dir)
 	s.SetResolver(func(p approval.Proposal) (approval.Binding, error) {

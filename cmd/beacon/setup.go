@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/passkey"
 )
 
 func (a *app) cmdSetup(args []string) error {
 	fs, path := a.reviewFlags("setup")
+	reset := fs.Bool("reset-passkeys", false, "record a passkey reset and remove the passkey list and write vault")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -20,6 +22,19 @@ func (a *app) cmdSetup(args []string) error {
 	}
 	dir, err := reviewStateDir(*path)
 	if err != nil {
+		return err
+	}
+	if *reset {
+		j, err := approval.OpenJournal(dir, a.now(), "")
+		if err != nil {
+			return err
+		}
+		err = passkey.Reset(dir, a.now(), j.RecordLocal)
+		j.Close()
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(a.stdout, "passkeys reset")
 		return err
 	}
 	code, err := passkey.Issue(dir, a.now())
