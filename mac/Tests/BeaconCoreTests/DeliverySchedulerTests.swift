@@ -44,8 +44,12 @@ struct DeliverySchedulerTests {
         return (scheduler, journal)
     }
 
-    func whileWaiting(_ transport: GatedTransport) async {
-        while transport.waiting == 0 { await Task.yield() }
+    func whileWaiting(_ transport: GatedTransport) async throws {
+        let deadline = ContinuousClock.now + .seconds(20)
+        while transport.waiting == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(transport.waiting > 0, "the delivery never reached the gated transport")
     }
 
     /// A resume during a drain that ends in a retry is not lost to the backoff: it runs as soon as the drain ends.
@@ -54,7 +58,8 @@ struct DeliverySchedulerTests {
         transport.script = [.retry(after: 600, ambiguous: false)]
         let (scheduler, journal) = try scheduler(transport)
         scheduler.deliver()
-        await whileWaiting(transport)
+        defer { transport.release() }
+        try await whileWaiting(transport)
         scheduler.resume()
         transport.release()
         await scheduler.idle()
@@ -69,7 +74,8 @@ struct DeliverySchedulerTests {
         transport.script = [.stop(reason: "refused:400:/metadata/person")]
         let (scheduler, journal) = try scheduler(transport)
         scheduler.deliver()
-        await whileWaiting(transport)
+        defer { transport.release() }
+        try await whileWaiting(transport)
         scheduler.resume()
         transport.release()
         await scheduler.idle()

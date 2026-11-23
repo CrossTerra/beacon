@@ -144,6 +144,7 @@ struct DeskTests {
         var ready = true
         let desk = ApprovalDesk(journal: journal, resolver: resolver, runServicesReady: { ready }, now: { clock.now })
         resolver.gated = true
+        defer { resolver.release() }
         desk.select(run.id)
         let obsolete = try #require(desk.freezing)
 

@@ -210,6 +210,13 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func stopFixture(server *httptest.Server) {
+	// The parent is done, even if a cancelled client left a request body half sent. Close the listener and
+	// active connections before httptest waits for handlers, so reads of those bodies can finish.
+	_ = server.Config.Close()
+	server.Close()
+}
+
 func main() {
 	s := &slack{settings: settings{
 		User: "U0PERSON", Workspace: "T0WORKSPACE", Members: []string{"U0PERSON", "U0OTHER"},
@@ -218,7 +225,7 @@ func main() {
 		Parent: object{"ts": parent, "type": "message", "thread_ts": parent, "text": "Parent’s first line\nNot part of the preview."},
 	}}
 	server := httptest.NewTLSServer(s)
-	defer server.Close()
+	defer stopFixture(server)
 	fmt.Println(server.URL + " " + base64.StdEncoding.EncodeToString(server.Certificate().Raw))
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }

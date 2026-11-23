@@ -116,9 +116,13 @@ CI adds these gates without using a signing identity:
 ```bash
 scratch=$(mktemp -d)
 swift build --package-path mac --scratch-path "$scratch"
-swift test --package-path mac --scratch-path "$scratch"
+python3 scripts/test-swift.py --scratch-path "$scratch"
 bash scripts/test-tether.sh
 ```
+
+The Swift gate runs serially with live output. It gives each Swift Testing test two minutes from its start and the
+whole test command eight minutes. The watchdog runs outside Swift so it can stop even a blocked syscall or a test
+that ignores cancellation. CI caps the gates job at 30 minutes.
 
 The shortcut test constructs local events without registering a global hot key or opening a window. To stage a
 bundle for a manual smoke test, run `scripts/build-app.sh FULL_COMMIT_ID` from a checkout at that commit with no

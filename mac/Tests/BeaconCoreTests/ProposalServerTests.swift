@@ -78,16 +78,24 @@ final class Client {
     let fd: Int32
 
     init(path: String) throws {
-        fd = socket(AF_UNIX, SOCK_STREAM, 0)
         var address = try ProposalServer.address(path)
+        let socket = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard socket >= 0 else { throw ServerError.system(errno) }
+        var timeout = timeval(tv_sec: 30, tv_usec: 0), one: Int32 = 1
+        let configured = setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0
+            && setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0
+            && setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size)) == 0
         let connected = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                configured && Darwin.connect(socket, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) == 0
+            }
         }
-        guard connected == 0 else { throw ServerError.system(errno) }
-        var timeout = timeval(tv_sec: 30, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        guard connected else {
+            let code = errno
+            close(socket)
+            throw ServerError.system(code)
+        }
+        fd = socket
     }
 
     deinit { close(fd) }
@@ -217,14 +225,19 @@ struct ProposalServerTests {
         let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
         let h = try Harness(enabled: [.slackPost], attribution: attribution, slackLookup: { _, _ in
             entered.signal()
-            await withCheckedContinuation { done in DispatchQueue.global().async { gate.wait(); done.resume() } }
+            let released = await withCheckedContinuation { done in
+                DispatchQueue.global().async { done.resume(returning: gate.wait(timeout: .now() + 30) == .success) }
+            }
+            try #require(released, "the Slack lookup fixture's gate was never released")
             return SlackPlacement(account: "slack:user:U0PERSON", visibility: .public)
         })
         let client = try h.connect()
-        client.send(SlackHarness.frame())
-        #expect(entered.wait(timeout: .now() + 30) == .success)
-        attribution.sessionEnded(verified: false)
-        gate.signal()
+        do {
+            defer { gate.signal() }
+            client.send(SlackHarness.frame())
+            try #require(entered.wait(timeout: .now() + 30) == .success)
+            attribution.sessionEnded(verified: false)
+        }
         #expect(client.receive() == .object(["error": "busy"]))
         #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 0)
     }

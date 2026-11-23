@@ -13,20 +13,25 @@ struct TetherSessionTests {
         defer { signal(SIGPIPE, previous) }
         var events: [TetherSession.Event] = []
         let session = TetherSession(fd: pair[0]) { events.append($0) }
-        // tether is alive: the command is written whole.
-        #expect(session.launch("run_a1"))
-        var buffer = [UInt8](repeating: 0, count: 64)
-        let n = read(pair[1], &buffer, buffer.count)
-        #expect(n > 0 && String(decoding: buffer[..<n], as: UTF8.self) == "L run_a1\n")
-        #expect(session.acknowledgeLaunch("run_a1"))
-        let ack = read(pair[1], &buffer, buffer.count)
-        #expect(ack > 0 && String(decoding: buffer[..<ack], as: UTF8.self) == "A run_a1\n")
+        do {
+            defer { close(pair[1]) }
+            // Each synchronous send must leave a whole line readable immediately; never wait for missing bytes.
+            try #require(session.launch("run_a1"))
+            expectCommand("L run_a1\n", on: pair[1])
+            try #require(session.acknowledgeLaunch("run_a1"))
+            expectCommand("A run_a1\n", on: pair[1])
+        }
         // tether is gone.
-        close(pair[1])
         #expect(!session.launch("run_a2"))
         #expect(!session.acknowledgeLaunch("run_a1"))
         #expect(!session.stopRun("run_a1"))
         #expect(!session.stop("run_a1"))
         _ = events
+    }
+
+    private func expectCommand(_ command: String, on fd: Int32) {
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let n = recv(fd, &buffer, buffer.count, MSG_DONTWAIT)
+        #expect(String(decoding: buffer.prefix(max(n, 0)), as: UTF8.self) == command)
     }
 }

@@ -124,7 +124,11 @@ final class FakeLauncher: RunLauncher {
         Task { @MainActor in self.handler?.started(runner, pid: pid) }
         Thread.detachNewThread { [weak self] in
             var status: Int32 = 0
-            while waitpid(pid, &status, 0) < 0 && errno == EINTR {}
+            if !reapFixtureChild(pid, seconds: 45, status: &status) {
+                Issue.record("fake run did not exit within 45s")
+                killpg(pid, SIGKILL)
+                guard reapFixtureChild(pid, seconds: 5, status: &status) else { return }
+            }
             let code = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
             killpg(pid, SIGKILL)
             Task { @MainActor in
@@ -168,7 +172,7 @@ final class FakeLauncher: RunLauncher {
 
     private func stopSuspended(_ pid: pid_t) {
         kill(pid, SIGKILL)
-        while waitpid(pid, nil, 0) < 0 && errno == EINTR {}
+        #expect(reapFixtureChild(pid, seconds: 5), "suspended run did not exit after SIGKILL")
     }
 }
 
@@ -260,11 +264,11 @@ final class RunHarness {
         return id
     }
 
-    func until(_ what: String, timeout: TimeInterval = 20, _ check: () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(timeout)
+    func until(_ what: String, _ check: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(20)
         while !check() {
-            guard Date() < deadline else { throw Timeout(what: what) }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            guard ContinuousClock.now < deadline else { throw Timeout(what: what) }
+            try await Task.sleep(for: .milliseconds(20))
         }
     }
 

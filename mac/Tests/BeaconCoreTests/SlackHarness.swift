@@ -2,11 +2,12 @@ import Darwin
 import Foundation
 import Security
 import Testing
+import TetherSupport
 @testable import BeaconCore
 
 /// A real loopback TLS server, rather than a URLProtocol that cannot expose CFNetwork replaying a write.
 final class SlackFixture {
-    private let child: Process
+    private let child: pid_t
     private let lifetime: FileHandle
     private let control: ServiceClient
     let connect: SlackAPI.Connect
@@ -14,33 +15,26 @@ final class SlackFixture {
     let timeouts: Locked<[TimeInterval]>
 
     init() throws {
-        let process = Process()
         let input = Pipe(), output = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        // mac/Tests/BeaconCoreTests/SlackHarness.swift -> repository root. No module downloads or inherited secrets.
-        let file = URL(fileURLWithPath: #filePath)
-        process.currentDirectoryURL = (0..<4).reduce(file) { url, _ in url.deletingLastPathComponent() }
-        process.environment = [
-            "PATH": ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/opt/homebrew/bin",
-            "HOME": NSHomeDirectory(), "GOENV": "off", "GOWORK": "off", "GOTOOLCHAIN": "local",
-            "GOPROXY": "off", "GOSUMDB": "off", "GOAUTH": "off", "CGO_ENABLED": "0",
-        ]
-        process.arguments = ["go", "run", "-mod=readonly", "./mac/Tests/SlackFixture"]
-        try process.run()
+        let pid = try Self.spawn(input: input.fileHandleForReading, output: output.fileHandleForWriting)
         let lifetime = input.fileHandleForWriting
+        let reader = output.fileHandleForReading
+        defer { try? reader.close() }
         do {
-            let output = output.fileHandleForReading
             let deadline = ContinuousClock.now + .seconds(45)
-            var line = Data()
+            var line = Data(), buffer = [UInt8](repeating: 0, count: 1024)
+            guard fcntl(reader.fileDescriptor, F_SETFL, O_NONBLOCK) == 0 else { throw POSIXError(.EIO) }
             while !line.contains(10) {
-                var fd = pollfd(fd: output.fileDescriptor, events: Int16(POLLIN), revents: 0)
-                guard ContinuousClock.now < deadline, line.count < 4096, poll(&fd, 1, 1000) >= 0 else { throw ServiceError.malformed }
-                if fd.revents == 0 { continue }
-                let data = output.availableData
-                guard !data.isEmpty else { throw ServiceError.malformed }
-                line.append(data)
+                guard ContinuousClock.now < deadline else { throw POSIXError(.ETIMEDOUT) }
+                guard line.count < 4096 else { throw ServiceError.malformed }
+                var fd = pollfd(fd: reader.fileDescriptor, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&fd, 1, 1000)
+                if ready == 0 || (ready < 0 && errno == EINTR) { continue }
+                guard ready > 0 else { throw ServiceError.malformed }
+                let count = read(fd.fd, &buffer, buffer.count)
+                if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                guard count > 0 else { throw ServiceError.malformed }
+                line.append(contentsOf: buffer.prefix(count))
             }
             let fields = String(decoding: line, as: UTF8.self).split(whereSeparator: \.isWhitespace)
             guard fields.count == 2, let origin = URL(string: String(fields[0])), origin.scheme == "https", origin.host == "127.0.0.1",
@@ -57,17 +51,52 @@ final class SlackFixture {
                                         delegate: FixtureTLS(certificate: certificate))
         } catch {
             try? lifetime.close()
-            process.terminate()
-            process.waitUntilExit()
+            Self.killAndReap(pid)
             throw error
         }
-        child = process
+        child = pid
         self.lifetime = lifetime
     }
 
     deinit {
         try? lifetime.close()
-        child.waitUntilExit()
+        if !reapFixtureChild(child, seconds: 5) {
+            Issue.record("Slack TLS fixture did not exit after stdin closed")
+            Self.killAndReap(child)
+        }
+    }
+
+    private static func spawn(input: FileHandle, output: FileHandle) throws -> pid_t {
+        defer {
+            try? input.close()
+            try? output.close()
+        }
+        // mac/Tests/BeaconCoreTests/SlackHarness.swift -> repository root. No module downloads or inherited secrets.
+        let root = (0..<4).reduce(URL(fileURLWithPath: #filePath)) { url, _ in url.deletingLastPathComponent() }
+        let cwd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard cwd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(cwd) }
+        let image = "/usr/bin/env"
+        let arguments = [image, "go", "run", "-mod=readonly", "./mac/Tests/SlackFixture"]
+        let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/opt/homebrew/bin"
+        let environment = [
+            "PATH=\(path)", "HOME=\(NSHomeDirectory())", "GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local",
+            "GOPROXY=off", "GOSUMDB=off", "GOAUTH=off", "CGO_ENABLED=0",
+        ]
+        let argv = arguments.map { strdup($0) } + [nil], env = environment.map { strdup($0) } + [nil]
+        defer {
+            argv.forEach { free($0) }
+            env.forEach { free($0) }
+        }
+        // Give go run and its fixture one group and no extra pipe ends, so closing stdin really sends EOF.
+        let pid = tether_spawn_at(image, argv, env, input.fileDescriptor, output.fileDescriptor, STDERR_FILENO, cwd)
+        guard pid > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return pid
+    }
+
+    private static func killAndReap(_ pid: pid_t) {
+        killpg(pid, SIGKILL)
+        #expect(reapFixtureChild(pid, seconds: 3), "Slack TLS fixture did not exit after SIGKILL")
     }
 
     func configure(_ fields: [String: JSON]) async throws {
@@ -147,8 +176,7 @@ final class SlackHarness {
 
     deinit { try? FileManager.default.removeItem(at: directory) }
 
-    /// Generous: the whole suite's TLS fixtures run at once, and a slow CI runner can take longer than the
-    /// production deadlines to schedule a request. Production keeps its own.
+    /// Allow a loaded runner more time to schedule a fixture request. Production keeps its own deadlines.
     static let testTimeouts = SlackAPI.Timeouts(intake: 30, action: 60)
 
     private static func handler(journal: Journal, vault: Vault, url: URL, clock: Clock, budget: ReadBudget,
