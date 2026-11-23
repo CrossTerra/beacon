@@ -31,3 +31,24 @@ shorten the wait or clear a stop. An explicit resume can bypass backoff, includi
 
 The Go contract tests use the unmodified [Signal fixtures](../internal/approval/testdata/) and a fake Signal
 over loopback. The sender has no live caller yet; the collector's outbox and its egress are unchanged.
+
+## Proposal socket
+
+The Go socket lives at `run/act.sock` (`0600`, in a `0700` directory). It admits only the service's own
+user ID from the kernel (`SO_PEERCRED` on Linux; `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS). The
+client checks the socket and its directories for ownership and mode before it connects, then checks the
+listener's kernel user ID. Neither check verifies code signatures. The signed Swift socket and client
+are unchanged.
+
+The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
+on Linux; the `proc_pidpath` kernel query on macOS without cgo). Neither reads arguments or environment.
+An internal supervisor hook can attribute a
+connection to a live run using the kernel PID, never the request's agent or context. Attribution is pinned
+at connect time; PID reuse is a limit. `get`, `wait` and `withdraw` are scoped to the same run, or to the
+shared unattributed identity. The socket also supports `types`, `propose` (which returns `review_url` from
+the configured origin) and `open` (a hook for a read-only sign-in code). There is no `quit`, list or approve.
+
+Limits from Swift are retained: newline-delimited JSON at most 256 KiB per frame, 32 connections, 16 waits
+of up to 300 seconds, 20 pending and 60 proposals per hour per identity, and 40 pending overall. Hourly
+counters are in memory. Partial frames and idle connections time out. A disconnected waiter frees its slot
+without waiting for a journal change. This slice has no preflight or provider calls to budget.
