@@ -23,6 +23,14 @@ binding is supplied, one assertion covers that frozen hash, or a batch of at mos
 An `agent.run` cannot join a batch. The assertion is refused unless its PRF output unwraps the write
 vault. The journal then records `approved`. Nothing is started or sent: no Go handler is wired.
 
+## Unattended vault
+
+`unattended.kdbx` is a KDBX 4 database opened by `unattended.keyx`, a 32-byte key file created `0600`.
+There is no master password. Entries are found by `beacon.service`, `beacon.origin`, `beacon.account`,
+`beacon.workspace`, and `beacon.use`, not by title. A write that finds the file changed under it writes
+nothing (`vault_conflict`). Linux Secret Service is not wired; both platforms use the key file. The
+preview does not yet read a collector token from this vault.
+
 ## Journal and record delivery
 
 `journal.log` is an owner-only append-only file, protected by `instance.lock` in the private state directory.

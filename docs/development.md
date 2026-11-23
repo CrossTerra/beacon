@@ -1,6 +1,6 @@
 # Development
 
-Go 1.24 (see `go.mod`). On macOS the keychain uses the Security framework through cgo; elsewhere Beacon builds
+Go 1.26 (see `go.mod`). The unattended vault library requires it. On macOS the keychain uses the Security framework through cgo; elsewhere Beacon builds
 without it and `beacon init` and `beacon run` in send mode report that there is no system keychain.
 
 ## Gates
@@ -89,6 +89,7 @@ is recorded as replayed; a 409 stops the key; and a second instance sends nothin
 | --- | --- |
 | `go.yaml.in/yaml/v3` | The rules file is YAML (DEC-5) and the standard library has no YAML parser. This is the YAML organisation's maintained copy of `gopkg.in/yaml.v3`. It reports duplicate keys and unknown fields, which the rules file needs. |
 | `golang.org/x/sys` | The Go review preview uses `unix` for file locks and no-follow opens, macOS `F_FULLFSYNC`, kernel socket credentials, and macOS process labels without cgo. |
+| `github.com/tobischo/gokeepasslib/v3` | The unattended KDBX 4 vault (13.01-D24). Pinned at v3.7.1. It needs Go 1.26 and pulls in `github.com/tobischo/argon2` and `golang.org/x/crypto`. |
 | `github.com/fxamacker/cbor/v2` | WebAuthn authenticator data and COSE keys are CBOR (13.01-D22). Its module pulls in `github.com/x448/float16`. |
 | `github.com/go-webauthn/webauthn` | Test-only cross-check of the narrow verifier. Not imported by non-test code, so it is not linked into the binary. |
 | `github.com/chromedp/chromedp` | Test-only headless Chrome virtual authenticator. Not linked into the binary. The browser test needs Chrome, which the macOS and ubuntu-latest runners already have. |
