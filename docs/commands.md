@@ -318,8 +318,9 @@ beacon act withdraw ID
 beacon act quit
 ```
 
-The client for Beacon.app's proposal socket ([approvals](approvals.md)). `propose` reads one JSON object from
-standard input, `{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
+Without `--state-dir`, this is the client for Beacon.app's proposal socket ([approvals](approvals.md)). `propose`
+reads one JSON object from standard input,
+`{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
 Each command sends one request and prints the app's one-line JSON reply. A reply with `error` exits 1. `wait`
 defaults to `--after 0 --timeout 300`. There is no command to approve or list. `quit` asks the app to quit as its
 menu's Quit does; the app answers it only for its bundled CLI, and `scripts/install.sh` uses it to replace a running
@@ -331,6 +332,38 @@ names another signature. Before sending a byte, `beacon act` checks the socket's
 requirement using the kernel's audit token. A listener with another signature, or run by another user, receives
 nothing. It takes no `--config` and reads no credential. Until an action type is enabled, `propose` answers
 `type_disabled`.
+
+## Go review preview
+
+Use a locally built binary on macOS or Linux and a dedicated scratch directory outside the collector and
+Beacon.app state. The directory must be owned by you with mode `0700`. `serve` creates it if it is missing
+and its parent exists. Run as your own user, not root. The preview commands do not use `--config`.
+
+```bash
+beacon serve --state-dir DIR [--origin ORIGIN] [--tailscale-login LOGIN]
+beacon act --state-dir DIR types
+beacon act --state-dir DIR propose < FIXTURE.json
+beacon act --state-dir DIR get ID
+beacon act --state-dir DIR wait ID [--after VERSION] [--timeout SECONDS]
+beacon act --state-dir DIR withdraw ID
+beacon open --state-dir DIR
+```
+
+`serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
+SIGTERM to stop it. `--origin` defaults to `http://localhost:7317`. With an existing private Tailscale Serve
+proxy, set `--origin https://MACHINE.TAILNET.ts.net` (substitute the exact lowercase name) and
+`--tailscale-login LOGIN` to the one expected `Tailscale-User-Login`. `serve` does not configure or verify
+that proxy. Use localhost when you do not have one.
+
+`act` requires `--state-dir DIR` **before** the operation to select the Go socket. It uses the same request
+shape and adds `review_url` to `propose` replies. Go `act` has no `quit`, and a failed Go connection never
+tries the signed route. `open` prints (but does not launch) a two-minute, one-use link for a read-only browser
+session. Open it privately, then follow the `review_url` or use the pending list. Restart clears all sign-in
+codes and sessions, not unexpired proposals.
+
+All three action types are review-only here. Use synthetic proposals: their parameters and reasons remain
+in the local journal as plaintext. There is no keychain access or live Signal delivery, and no way to approve,
+post, merge or run a job through this preview. See [Go approvals](go-approvals.md) for the trust boundary.
 
 ## `beacon keychain list`
 

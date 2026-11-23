@@ -329,6 +329,13 @@ func (j *Journal) Pending(at time.Time) ([]Proposal, error) {
 	return pending, nil
 }
 
+// Expire updates the journal even with no client reading it. It also wakes waiters and delivery.
+func (j *Journal) Expire(at time.Time) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.sweep(at)
+}
+
 func ordered(m map[string]*proposalState) []*proposalState {
 	return slices.SortedFunc(maps.Values(m), func(a, b *proposalState) int { return a.order - b.order })
 }

@@ -189,6 +189,15 @@ no credential itself ([tether](tether.md#collector-health-in-the-menu)).
      with exact text, the approved user and destination in the bounded time window, the outcome stays unknown.
      Intake lookups, window preflights and read-back each have their own read budget and their own 429 deadlines,
      so a proposer cannot spend the window's reads.
+16. **The Go preview is separate and cannot act.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
+    are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
+    takes the signed route above; there is no fallback. The preview reads no keychain item or live credential,
+    starts no subprocess and makes no outbound HTTP request. Its socket trusts the kernel's user ID, not a code
+    signature. Anyone running as that user can submit, read the owner-only plaintext journal, or get a one-use
+    review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
+    Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
+    login header does not identify local processes; cookies can be received by another port on the same host.
+    The pages have no action, approval or settings routes. See [Go approvals](go-approvals.md).
 
 ## Known limits
 

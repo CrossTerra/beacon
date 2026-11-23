@@ -1,7 +1,12 @@
-# Go approval service (13.01, in progress)
+# Go approval service (13.01 read-only preview)
 
-This code does not replace Beacon.app or its signed client. There is no migration or live Signal credential
-source in this slice of Part 2. No Go code calls a provider action or starts a runner.
+This slice of Part 2 is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
+separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of `beacon act`. Default
+`beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
+The preview does not read collector config, Keychain items, vaults or the Swift journal. There is no installer
+cutover, migration, live Signal credential source, provider lookup, provider write or runner launch. The three
+schemas (`github.merge`, `slack.post`, `agent.run`) are for review only. There are no passkeys, approve or decline
+controls, batch decisions or notifications.
 
 ## Journal and record delivery
 
@@ -10,11 +15,15 @@ The first frame fixes the format version and the journal's UUIDv7. A frame has a
 complement), a JSON payload and a checksum. A short final frame is truncated to the last complete frame;
 a bad checksum or invalid complete frame stops startup rather than silently losing prior work. Each append is
 synced (`fsync`, plus `F_FULLFSYNC` on macOS) before publishing its result. The portable `golang.org/x/sys/unix`
-dependency supplies the lock, no-follow file opens and the macOS full flush.
+dependency supplies the lock, no-follow file opens and the macOS full flush. Proposals and any frozen snapshots
+are plaintext on disk. Keep the preview directory private and use synthetic proposals.
 
 An approval that did not start expires at restart or shutdown. A durable start without a result becomes
 `outcome_unknown` at restart; only a read-back result can settle it. Replay does not dispatch. A supplied
-archive ID is a lower bound for the new journal, not an import: the Go ID must sort strictly after it.
+archive ID at the journal API is a lower bound for a new journal, not an import: the Go ID must sort strictly
+after it. Pending proposals survive a restart until their 24-hour deadline. The service sweeps expiries even
+without a browser or socket read, waking waiters after the expiry is durable. Ctrl-C or SIGTERM stops the service,
+closes both listeners and the socket, cancels any fixture delivery, and releases the instance lock.
 
 An action frame fixes its Signal record sequence and replay nonce. Local markers and cursor changes consume
 no sequence numbers. The ordered sender projects the head of the outbox into Signal's fixed envelope, syncs
@@ -30,7 +39,9 @@ longer `Retry-After` from a rate limit or server failure takes precedence (up to
 shorten the wait or clear a stop. An explicit resume can bypass backoff, including when requested during a send.
 
 The Go contract tests use the unmodified [Signal fixtures](../internal/approval/testdata/) and a fake Signal
-over loopback. The sender has no live caller yet; the collector's outbox and its egress are unchanged.
+over loopback. `approvalserve.Options.ConnectRecords` lets tests drive the worker through the service lifecycle.
+The CLI leaves that hook unset, so no records leave via `beacon serve`; the collector's outbox and egress are
+unchanged.
 
 ## Proposal socket
 
@@ -42,11 +53,11 @@ are unchanged.
 
 The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
 on Linux; the `proc_pidpath` kernel query on macOS without cgo). Neither reads arguments or environment.
-An internal supervisor hook can attribute a
-connection to a live run using the kernel PID, never the request's agent or context. Attribution is pinned
+An internal hook for the future supervisor can attribute a connection to a live run using the kernel PID,
+never the request's agent or context. All CLI preview peers are unattributed. Attribution is pinned
 at connect time; PID reuse is a limit. `get`, `wait` and `withdraw` are scoped to the same run, or to the
 shared unattributed identity. The socket also supports `types`, `propose` (which returns `review_url` from
-the configured origin) and `open` (a hook for a read-only sign-in code). There is no `quit`, list or approve.
+the configured origin) and `open` (issues a read-only sign-in code). There is no `quit`, list or approve.
 
 Limits from Swift are retained: newline-delimited JSON at most 256 KiB per frame, 32 connections, 16 waits
 of up to 300 seconds, 20 pending and 60 proposals per hour per identity, and 40 pending overall. Hourly
@@ -56,20 +67,23 @@ without waiting for a journal change. This slice has no preflight or provider ca
 ## Browser review
 
 The review listeners bind only `127.0.0.1:7317` and `[::1]:7317`. Both must bind; there is no fallback
-port. The canonical origin is `http://localhost:7317` or one `https://{machine}.{tailnet}.ts.net`
-name. The service does not set up or contact Tailscale. In tailnet mode the reverse proxy must preserve
-the canonical `Host` and pass the configured `Tailscale-User-Login`. This header filters proxy traffic;
+port. The canonical `--origin` defaults to `http://localhost:7317`; one `https://{machine}.{tailnet}.ts.net`
+name can be configured together with `--tailscale-login`. The service does not set up, check or contact Tailscale.
+In tailnet mode the existing private reverse proxy must preserve the canonical `Host` and pass the configured
+`Tailscale-User-Login`. This header filters proxy traffic;
 it does not authenticate a local process. Old `GET` links on `localhost:7317` redirect to the canonical
 path without forwarding the query. Other hosts and the loopback IP literals are not valid origins.
 
-An admitted socket peer can mint a two-minute, single-use `open` code. `/open` exchanges it for a
-12-hour, memory-only review session and redirects without the code. The cookie is HttpOnly and
+An admitted socket peer can mint a two-minute, single-use `open` code. `beacon open` prints the validated link
+instead of passing the bearer code to a browser opener. Treat it as a secret until used or expired. `/open`
+exchanges it for a 12-hour, memory-only review session and redirects without the code. The cookie is HttpOnly and
 SameSite=Lax; tailnet mode uses `Secure` and `__Host-`. Cookies are not isolated by port, so a server
 on another port of the same host can receive one if the signed-in browser visits it. Restart invalidates
 all codes and sessions.
 
 Only a signed-in browser sees the pending list and proposal detail. If the journal already holds a
-frozen snapshot for a proposal, its frozen parameters and resolved binding have a separate detail view.
+frozen snapshot for a proposal, its frozen parameters and resolved binding have a separate detail view. The
+preview cannot create one through the CLI or the browser.
 No web request can freeze, approve, decline, dispatch or change settings. POSTs require the canonical
 `Origin` (or `Sec-Fetch-Site: same-origin` if absent), a session and its form CSRF token, and there are
 no POST handlers. The embedded HTML and CSS need no scripts or external resources. Templates escape

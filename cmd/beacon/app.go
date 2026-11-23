@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -75,6 +76,8 @@ type app struct {
 	identify  func(context.Context, string) (service.Identity, error)
 	// actSettingsFile replaces ~/Library/Application Support/beacon/act.json. Tests set it.
 	actSettingsFile string
+	// approvalListeners replaces the review port with ephemeral loopback listeners in tests.
+	approvalListeners func() ([]net.Listener, error)
 	// appSettingsFile replaces ~/Library/Application Support/beacon/app/settings.json. Tests set it.
 	appSettingsFile string
 	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
@@ -111,11 +114,12 @@ Commands:
   status        print the last pass; --coverage adds how well each source is being read
   service       uninstall, status or logs of the retired per-user collector job
   act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
+  serve         run the read-only Go approval preview in a separate --state-dir
+  open          print a one-time browser sign-in link for that --state-dir
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
 
-Every command but version, act and keychain repair takes --config PATH (default: $BEACON_CONFIG, else the user config
-directory).
+Collector commands take --config PATH (default: $BEACON_CONFIG, else the user config directory).
 `
 
 type exitError struct{ code int }
@@ -167,6 +171,10 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdKeychain(rest)
 	case "act":
 		err = a.cmdAct(ctx, rest)
+	case "serve":
+		err = a.cmdServe(ctx, rest)
+	case "open":
+		err = a.cmdOpen(ctx, rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "help", "-h", "--help":

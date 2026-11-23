@@ -16,7 +16,7 @@
 {{template "head" "Sign in"}}
 <h1>Sign in to Beacon</h1>
 {{if .}}<p>This sign-in link could not be used. It may have expired or already been used.</p>{{end}}
-<p>Run <code>beacon open</code> on the machine running Beacon for a one-time review link.</p>
+<p>Run <code>beacon open --state-dir DIR</code> on the machine running Beacon for a one-time review link.</p>
 {{template "end"}}
 {{end}}
 
