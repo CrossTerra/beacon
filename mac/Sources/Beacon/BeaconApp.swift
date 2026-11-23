@@ -33,6 +33,16 @@ private struct MenuTitle: View {
     }
 }
 
+private struct RunsLine: View {
+    @ObservedObject var runs: RunHandler
+
+    var body: some View {
+        if !runs.running.isEmpty {
+            Text(runs.running.count == 1 ? "1 agent run working" : "\(runs.running.count) agent runs working")
+        }
+    }
+}
+
 private struct BeaconMenu: View {
     @ObservedObject var delegate: BeaconDelegate
 
@@ -48,6 +58,7 @@ private struct BeaconMenu: View {
         }
         Divider()
         Text(delegate.servicesStatus)
+        if let runs = delegate.approvals.runs { RunsLine(runs: runs) }
         let health = delegate.health
         Text(health.statusLine)
         ForEach(health.failing) { source in
@@ -81,6 +92,8 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var repairAvailable: Bool { FileManager.default.isExecutableFile(atPath: cli.path) }
     private var stopping = false
     private var awaitingQuit = false
+    /// The session started without the collector: the retired LaunchAgent is installed.
+    private var collectorHeldBack = false
     private var countTimer: Timer?
     private var terminate: (any DispatchSourceSignal)?
 
@@ -112,28 +125,73 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         updateCount()
         shortcut = ApprovalShortcut { [weak self] in self?.showApprovals() }
         shortcutAvailable = shortcut != nil
+        openServices()
+    }
+
+    private func openServices() {
         services = TetherSession.open { [weak self] event in
             self?.servicesChanged(event)
         }
         servicesStatus = services == nil ? "Services unavailable" : "Starting services…"
     }
 
+    /// Restarts of tether after it ended on its own, at most three in ten minutes. A new session first stops every
+    /// process the old one left (its marker sweep), runs included, then starts the collector again.
+    private var restarts: [Date] = []
+
+    private func restartServices() {
+        restarts = restarts.filter { Date().timeIntervalSince($0) < 600 }
+        guard !stopping, services == nil, restarts.count < 3 else { return }
+        restarts.append(Date())
+        openServices()
+    }
+
     private func servicesChanged(_ event: TetherSession.Event) {
         let running: String
+        let runs = approvals.runs
         switch event {
-        case .active: running = "Starting collector…"
+        case .active, .legacyCollectorInstalled:
+            // Both indicate the startup sweep completed. Only the collector is held back by the old LaunchAgent.
+            if let services { runs?.servicesReady(services) }
+            collectorHeldBack = event == .legacyCollectorInstalled
+            running = event == .active ? "Starting collector…"
+                : "Collector not started: run beacon service uninstall, then reopen Beacon"
+        case .collectorRunning where collectorHeldBack, .collectorRestarting where collectorHeldBack,
+             .collectorExited where collectorHeldBack:
+            // No collector runs in this session; keep saying why.
+            return
         case .collectorRunning: running = "Collector running"
         case .collectorRestarting: running = "Collector stopped with an error; restarting soon"
         case .collectorExited: running = "Collector stopped"
-        case .legacyCollectorInstalled:
-            running = "Collector not started: run beacon service uninstall, then reopen Beacon"
         case .busy:
             servicesStatus = "Another Beacon session is running"
             finishServices()
             return
         case .stopped(let verified):
             servicesStatus = verified ? "Services stopped" : "Services stopped without confirmation"
+            runs?.servicesStopped(verified: verified)
             finishServices()
+            if !stopping {
+                // tether ended on its own. A new session sweeps what it left (an unconfirmed run's processes too) and
+                // starts the collector again.
+                servicesStatus = "Services stopped; restarting them to stop anything left behind…"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.restartServices() }
+            }
+            return
+        case .runPrepared(let id, let pid):
+            runs?.prepared(id, pid: pid)
+            return
+        case .runStarted(let id, let pid):
+            runs?.started(id, pid: pid)
+            return
+        case .runNotStarted(let id, let code):
+            runs?.notStarted(id, errno: code)
+            return
+        case .runExited(let id, let status):
+            runs?.exited(id, status: status)
+            return
+        case .runGone(let id):
+            runs?.gone(id)
             return
         }
         if !stopping { servicesStatus = running }
@@ -158,6 +216,11 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         approvals.stop()
         countTimer?.invalidate()
         shortcut = nil
+        if services == nil, approvals.runs?.hasUnclosedRuns == true {
+            // tether is gone, but a run it could not confirm stopped may still be running: a session started only to
+            // be stopped sweeps every process the last one left, then confirms.
+            openServices()
+        }
         guard let services else { return .terminateNow }
         awaitingQuit = true
         servicesStatus = "Stopping services…"

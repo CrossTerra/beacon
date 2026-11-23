@@ -35,16 +35,19 @@ public final class OutboxSender: @unchecked Sendable {
     private let journal: Journal
     private let transport: any RecordTransport
     private let person: String
+    private let handle: String?
 
-    public init(journal: Journal, transport: any RecordTransport, person: String) {
+    /// `person` is every record's `metadata.person`; `handle` the person's Signal handle, which a run's subject names.
+    public init(journal: Journal, transport: any RecordTransport, person: String, handle: String? = nil) {
         self.journal = journal
         self.transport = transport
         self.person = person
+        self.handle = handle
     }
 
     public func drain() async throws -> Outcome {
         var sent = 0
-        while let (seq, bytes) = try journal.nextDelivery(person: person) {
+        while let (seq, bytes) = try journal.nextDelivery(person: person, handle: handle) {
             let answer: RecordAnswer
             do {
                 answer = try await transport.post(bytes)

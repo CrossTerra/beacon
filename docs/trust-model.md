@@ -10,10 +10,18 @@ in Settings, it merges approved pull requests through that account's API origin.
 destinations and posts approved messages at `https://slack.com`. With Signal added, it sends its journal's
 records to Signal's record API with its app actor's key. Those are its only network connections, and
 `beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
-collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
-commands, paths, secrets or item content. The menu's collector health reads only the collector's `pass.json` and
-`coverage.json` (names, times and fixed codes); its keychain repair item opens Terminal on the bundled CLI and reads
-no credential itself ([tether](tether.md#collector-health-in-the-menu)).
+collector as the same user while the app is open. The app and `tether` share one socket pair that carries only a
+run's id when the app starts or stops an approved agent run, never a path, secret or item content. Tether's reply
+is that id, its process group and the outcome. The menu's collector health reads only the collector's `pass.json`
+and `coverage.json` (names, times and fixed codes); its keychain repair item opens Terminal on the bundled CLI and
+reads no credential itself ([tether](tether.md#collector-health-in-the-menu)).
+
+With a checkout in Settings, an approved `agent.run` starts opencode in that checkout through `tether`
+([agent runs](approvals.md#agent-runs)). The run is the person's agent, not part of Beacon: it works with the
+person's files, their login shell's environment (which may hold tokens their profile exports) and opencode's own
+sign-in, and it reaches whatever hosts the agent decides to, which `beacon egress` does not list. Beacon passes it
+none of the credentials Beacon holds, and every run uses `--auto`, so opencode approves any permission the
+checkout's opencode configuration does not deny.
 
 ## What crosses the boundary
 
@@ -169,8 +177,14 @@ no credential itself ([tether](tether.md#collector-health-in-the-menu)).
     ([approvals](approvals.md)). The app writes the client's trust (`act.json`, its own designated requirement)
     on first launch and refuses to open the socket if the file names another signature. An approval is one
     click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
-    proposal once. Quit and relaunch expire every approval that has no durable start, and a start without a result
-    is never dispatched again. The journal and outbox hold prompts and messages in plain text in a `0700` directory.
+     proposal once. Tether resumes an approved run only after Beacon acknowledges recording its process group. Without
+     the acknowledgement tether kills the suspended process. The installer CLI must match its code requirement and
+     be positively identified as external to use `quit`; runs, their known descendants and unclassified peers cannot.
+     A run's snapshot is dropped when its supervisor stops. After an unconfirmed stop, known run
+    groups keep their ownership, and other peers cannot create, read or withdraw proposals until the sweep and
+    group checks confirm recovery. Quit and relaunch expire every approval that has no durable start, and a start
+    without a result is never dispatched again. The journal and outbox hold prompts and messages in plain text in
+    a `0700` directory.
 14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
     holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
     reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
@@ -191,6 +205,13 @@ no credential itself ([tether](tether.md#collector-health-in-the-menu)).
      so a proposer cannot spend the window's reads.
 
 ## Known limits
+
+- **An agent run is not a sandbox (13.00-D12, D22).** It runs as the person, with `--auto`, their login environment
+  and their files, and can do anything they can. Approving it approves a launch in one checkout, not what the agent
+  then does; a checkout's own `bin/run` guardrails are not applied. A descendant that leaves its process group in the
+  ways [tether](tether.md#limits) describes can outlive Stop and Quit. The run's output and errors stay in
+  `~/Library/Application Support/beacon/runs/`, readable by the person; its launch file (the login environment)
+  and prompt are deleted once tether answers, after a failed launch, and at the next launch after a crash.
 
 - **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in
   plain cannot be undone after the send. New plain rules should start as `hold` until their output has been checked

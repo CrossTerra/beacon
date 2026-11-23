@@ -11,6 +11,9 @@ final class ApprovalService: ObservableObject {
     @Published private(set) var slack: SlackSettings?
     @Published private(set) var signal: SignalSettings?
     @Published private(set) var delivery = "Records are not sent: add Signal in Settings"
+    @Published private(set) var checkouts: [CheckoutSettings] = []
+    /// The agent.run handler, once the journal is open.
+    @Published private(set) var runs: RunHandler?
     private var journal: Journal?
     private var deliverer: Timer?
     private var scheduler: DeliveryScheduler?
@@ -42,13 +45,14 @@ final class ApprovalService: ObservableObject {
             github = settings.github
             slack = settings.slack
             signal = settings.signal
+            checkouts = settings.checkouts ?? []
             let journal = try Journal(path: paths.journal.path, at: Date())
             self.journal = journal
             let settingsURL0 = paths.settings
             let scheduler = DeliveryScheduler(journal: journal, connect: {
                 guard let signal = try AppSettings.load(settingsURL0).signal else { throw VaultError.notFound }
                 guard signal.usable else { throw SignalSetup.Refusal.noPerson }
-                return (try SignalRecords.connect(signal, vault: vault), signal.person)
+                return (try SignalRecords.connect(signal, vault: vault), signal.person, signal.personHandle)
             }, message: delivery)
             scheduler.onMessage = { [weak self] message in self?.delivery = message }
             self.scheduler = scheduler
@@ -67,14 +71,23 @@ final class ApprovalService: ObservableObject {
                                     vault: vault, budget: budget)
             self.merges = merges
             self.posts = posts
-            let desk = ApprovalDesk(journal: journal, resolver: Resolvers(merges: merges, posts: posts))
-            desk.onApproved = { id in
-                switch journal.approval(id)?.type {
+            let runs = RunHandler(journal: journal, checkouts: { (try? AppSettings.load(settingsURL))?.checkouts ?? [] },
+                                  runs: paths.runs)
+            self.runs = runs
+            let desk = ApprovalDesk(journal: journal, resolver: ActionRouter(merges: merges, runs: runs, posts: posts),
+                                    runServicesReady: { runs.isReady })
+            runs.onAvailabilityChanged = { [weak desk] in desk?.runAvailabilityChanged() }
+            desk.claim = { runs.claim($0) }
+            desk.release = { runs.release($0) }
+            desk.onApproved = { [weak journal] id in
+                switch journal?.proposal(id, at: Date())?.type {
+                case .agentRun: Task { try? await runs.execute(id) }
                 case .githubMerge: Task { _ = try? await merges.execute(id) }
                 case .slackPost: Task { _ = try? await posts.execute(id) }
-                default: break
+                case nil: break
                 }
             }
+            // A run's unknown launch is settled by tether's recovery, not by Read again.
             desk.onReadBack = { [weak self] id in
                 Task { @MainActor in
                     switch journal.proposal(id, at: Date())?.type {
@@ -101,15 +114,17 @@ final class ApprovalService: ObservableObject {
                 return
             }
             let cli = bundle.bundleURL.appendingPathComponent("Contents/Helpers/beacon").path
-            guard let client = ClientTrust.requirement(of: cli) else {
+            guard let clientRequirement = ClientTrust.requirement(of: cli) else {
                 status = "Not accepting proposals: the bundled beacon CLI is not signed"
                 return
             }
-            let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
-                                        book: journal, enabled: [], slackLookup: posts.place)
+            let client = AdmittedClient(name: "beacon-act", requirement: clientRequirement)
+            let server = ProposalServer(path: paths.socket.path, clients: [client],
+                                        book: journal, enabled: [], attribution: runs.attribution,
+                                        slackLookup: posts.place)
             // scripts/install.sh quits a running Beacon through the bundled CLI, as the menu's Quit does, without
             // asking for permission to control the app.
-            server.quit = (client: "beacon-act", action: {
+            server.quit = (client: client, action: {
                 DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
             })
             try server.start()
@@ -231,13 +246,43 @@ final class ApprovalService: ObservableObject {
         updateEnabled()
     }
 
+    /// Adds a checkout agent runs may use. Returns why not, or nil.
+    func addCheckout(name: String, path: String) -> String? {
+        do {
+            var settings = try AppSettings.load(paths.settings)
+            try settings.add(try CheckoutSettings.make(name: name, path: path))
+            try settings.save(paths.settings)
+            checkouts = settings.checkouts ?? []
+            updateEnabled()
+            return nil
+        } catch CheckoutSettings.Refusal.name {
+            return "A checkout name is lowercase letters, digits, '.', '_' and '-', starting with a letter or digit."
+        } catch CheckoutSettings.Refusal.path {
+            return "That is not an existing folder."
+        } catch CheckoutSettings.Refusal.taken {
+            return "Another checkout has that name."
+        } catch {
+            return "The settings could not be saved."
+        }
+    }
+
+    func removeCheckout(_ name: String) {
+        guard var settings = try? AppSettings.load(paths.settings) else { return }
+        settings.removeCheckout(name)
+        try? settings.save(paths.settings)
+        checkouts = settings.checkouts ?? []
+        updateEnabled()
+    }
+
     private func updateEnabled() {
         guard let server else { return }
         var types: [ActionType] = []
         if github != nil { types.append(.githubMerge) }
         if slack != nil { types.append(.slackPost) }
+        if !checkouts.isEmpty { types.append(.agentRun) }
         server.enabled = types
-        status = types.isEmpty ? "Accepting proposals (add a GitHub or Slack account in Settings)"
+        status = types.isEmpty
+            ? "Accepting proposals (no action type enabled: add a GitHub or Slack account, or a checkout, in Settings)"
             : "Accepting \(types.map(\.rawValue).joined(separator: ", ")) proposals"
     }
 
@@ -269,21 +314,9 @@ final class ApprovalService: ObservableObject {
         postReadBack?.invalidate()
         postReading?.cancel()
         deliverer?.invalidate()
+        runs?.beginShutdown()
         desk?.beginShutdown()
         server?.stop()
         server = nil
-    }
-}
-
-private struct Resolvers: ActionResolver {
-    let merges: MergeHandler
-    let posts: PostHandler
-
-    func resolve(_ proposal: Proposal, model: String?) async throws -> ResolvedAction {
-        switch proposal.type {
-        case .githubMerge: try await merges.resolve(proposal, model: model)
-        case .slackPost: try await posts.resolve(proposal, model: model)
-        case .agentRun: try await NoResolver().resolve(proposal, model: model)
-        }
     }
 }
