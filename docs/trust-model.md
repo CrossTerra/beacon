@@ -11,7 +11,9 @@ destinations and posts approved messages at `https://slack.com`. With Signal add
 records to Signal's record API with its app actor's key. Those are its only network connections, and
 `beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
 collector as the same user while the app is open. The app and `tether` share one socket pair that carries no
-commands, paths, secrets or item content.
+commands, paths, secrets or item content. The menu's collector health reads only the collector's `pass.json` and
+`coverage.json` (names, times and fixed codes); its keychain repair item opens Terminal on the bundled CLI and reads
+no credential itself ([tether](tether.md#collector-health-in-the-menu)).
 
 ## What crosses the boundary
 

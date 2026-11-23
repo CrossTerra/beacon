@@ -652,7 +652,11 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
-		return fail(logs.ReasonKeychain, failText(logs.ReasonKeychain, e))
+		reason := logs.ReasonKeychain
+		if errors.Is(err, keychain.ErrReadRefused) {
+			reason = logs.ReasonKeychainRead
+		}
+		return fail(reason, failText(reason, e))
 	}
 	instance, err := lease.Instance(e.cfg.StatePath())
 	if err != nil {
@@ -798,12 +802,14 @@ func (a *app) sourceLoops(work, interrupt context.Context, e *env, r *runner.Run
 			return res, nil
 		}
 		a.recordPass(lr.state, lr.instance, rep, passOutcome(err, a.termFired()), []string{name})
+		// Keep local coverage even when the send half fails. Never report to Signal after a failed pass.
+		observeErr := a.observe(ctx, lr, names, every, rep, err == nil)
 		if err != nil {
 			reason, text := sendFailure(err, e)
 			return res, loopFailure{reason: reason, text: text, recorded: true}
 		}
-		if err := a.observe(ctx, lr, names, every, rep); err != nil {
-			reason := runner.Classify(err)
+		if observeErr != nil {
+			reason := runner.Classify(observeErr)
 			return res, loopFailure{reason: reason, text: failText(reason, e)}
 		}
 		return res, nil
@@ -870,7 +876,10 @@ func (a *app) sourcelessPass(ctx context.Context, e *env, r *runner.Runner, lr l
 // observe records what a send pass's sources came to in coverage.json and, while this instance holds the lease and is
 // not stopping, reports it to Signal. A record that cannot be read starts again; one that cannot be written is left,
 // as pass.json is. Only a body the outbox could not record is an error.
-func (a *app) observe(ctx context.Context, lr loopRun, names []string, every map[string]time.Duration, rep *runner.Report) error {
+func (a *app) observe(ctx context.Context, lr loopRun, names []string, every map[string]time.Duration, rep *runner.Report, report bool) error {
+	if rep == nil {
+		return nil
+	}
 	rec, err := coverage.Read(lr.state)
 	if err != nil {
 		rec = coverage.Record{}
@@ -881,7 +890,7 @@ func (a *app) observe(ctx context.Context, lr loopRun, names []string, every map
 			Paused: sp.Paused, Limited: sp.Limited, Names: sp.Warning, Reach: sp.Reach}, a.now())
 	}
 	_ = coverage.Write(lr.state, rec)
-	if lr.reporter == nil || rep.Lease == nil || !rep.Lease.Held || a.termFired() {
+	if !report || lr.reporter == nil || rep.Lease == nil || !rep.Lease.Held || a.termFired() {
 		return nil
 	}
 	for _, sp := range rep.Ran {
@@ -935,6 +944,8 @@ func failText(reason logs.Reason, e *env) string {
 		return "another beacon process holds the outbox in this state directory"
 	case logs.ReasonKeychain:
 		return fmt.Sprintf("the Signal key is not in the keychain as %s/%s; store it with beacon init", keychain.Service, e.cfg.KeychainAccount())
+	case logs.ReasonKeychainRead:
+		return "macOS refused to read the Signal key; run beacon keychain repair"
 	case logs.ReasonState:
 		return "the state directory could not be read or written; beacon outbox shows the outbox"
 	case logs.ReasonCanceled:

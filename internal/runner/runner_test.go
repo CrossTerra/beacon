@@ -542,6 +542,7 @@ func TestClassify(t *testing.T) {
 		logs.ReasonEgress:       &url.Error{Op: "Post", URL: "x", Err: &egress.DeniedError{Address: "a:1"}},
 		logs.ReasonLocked:       outbox.ErrLocked,
 		logs.ReasonKeychain:     keychain.ErrNotFound,
+		logs.ReasonKeychainRead: fmt.Errorf("source: %w", keychain.ErrReadRefused),
 		logs.ReasonState:        &fs.PathError{Op: "open", Path: "/state/outbox.jsonl", Err: fs.ErrPermission},
 		logs.ReasonInternal:     errors.New(`outbox: key "fx:1" appended twice`),
 	}

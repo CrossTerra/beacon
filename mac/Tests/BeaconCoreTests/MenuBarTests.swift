@@ -17,4 +17,10 @@ struct MenuBarTests {
         #expect(MenuBarItem.accessibilityLabel(pending: 1) == "Beacon, 1 pending approval")
         #expect(MenuBarItem.accessibilityLabel(pending: 3) == "Beacon, 3 pending approvals")
     }
+
+    @Test func anUnhealthyCollectorIsBadged() {
+        #expect(MenuBarItem.badge(pending: 0, unhealthy: true) == "!")
+        #expect(MenuBarItem.badge(pending: 4, unhealthy: true) == "! 4")
+        #expect(MenuBarItem.accessibilityLabel(pending: 0, unhealthy: true) == "Beacon, no pending approvals, collector needs attention")
+    }
 }

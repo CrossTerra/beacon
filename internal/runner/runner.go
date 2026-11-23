@@ -189,6 +189,8 @@ type Report struct {
 	Results []Sent
 	// LeaseReason says why the lease could not be checked, when it could not; empty when Signal answered.
 	LeaseReason logs.Reason
+	// SendReason is a transient interruption while writing pending events. It does not fail the run.
+	SendReason logs.Reason
 	// Pending is how many event bodies are still waiting to be sent after the pass. Lease claims are not counted.
 	Pending int
 	// Failed are sources that could not be collected. Their cursors were not moved.
@@ -907,6 +909,8 @@ func Classify(err error) logs.Reason {
 		return logs.ReasonEgress
 	case errors.Is(err, outbox.ErrLocked):
 		return logs.ReasonLocked
+	case errors.Is(err, keychain.ErrReadRefused):
+		return logs.ReasonKeychainRead
 	case errors.Is(err, keychain.ErrNotFound):
 		return logs.ReasonKeychain
 	case errors.Is(err, source.ErrRateLimited):
@@ -971,6 +975,7 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 			continue
 		}
 		if !r.Now().Before(st.Until) {
+			rep.SendReason = logs.ReasonLeaseExpired
 			r.Log.Log(logs.LeaseExpired, logs.Period(st.Period))
 			return nil
 		}
@@ -980,12 +985,14 @@ func (r *Runner) sendPending(ctx context.Context, rep *Report) error {
 		cancel()
 		if err != nil {
 			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+				rep.SendReason = logs.ReasonLeaseExpired
 				r.Log.Log(logs.LeaseExpired, logs.Period(st.Period))
 				return nil
 			}
 			r.Log.Log(logs.SendStopped, logs.Why(Classify(err)))
 			if errors.Is(err, signal.ErrUnavailable) {
 				// Later bodies may close asks this one opens, so they wait for it.
+				rep.SendReason = logs.ReasonUnavailable
 				return nil
 			}
 			return err

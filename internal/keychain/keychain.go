@@ -23,6 +23,9 @@ const Service = "beacon"
 // ErrNotFound is returned when no item exists for the account.
 var ErrNotFound = errors.New("keychain: item not found")
 
+// ErrReadRefused means macOS did not authorize a credential read. It is distinct from a missing item.
+var ErrReadRefused = errors.New("keychain: credential read refused")
+
 // ErrAdHocBuild is returned by NewSystem in a build that is not signed with a certificate: go build, go run and test
 // binaries are signed ad hoc. Such a build never touches the login keychain.
 var ErrAdHocBuild = errors.New("keychain: this beacon is not signed with a certificate (go build, go run and test binaries are ad hoc), so it does not use the login keychain; install it with scripts/install.sh")

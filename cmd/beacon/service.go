@@ -288,13 +288,17 @@ func (a *app) recordPass(dir, instance string, rep *runner.Report, outcome strin
 		case rep.Lease.Held:
 			p.Lease = service.LeaseHeld
 			p.Holder = instance
+			until := rep.Lease.Until.UTC()
+			p.LeaseUntil = &until
 		case rep.LeaseReason == "":
 			p.Lease = service.LeaseOther
 		default:
 			p.Lease = service.LeaseNotTaken
 		}
+		p.LeaseReason = string(rep.LeaseReason)
 	}
 	if rep != nil {
+		p.SendReason = string(rep.SendReason)
 		for _, w := range rep.Withheld {
 			p.Withheld = append(p.Withheld, service.Withheld{Source: w.Source, Prefix: w.Prefix, Reason: string(w.Reason)})
 		}
