@@ -63,10 +63,15 @@ func listen(dir string) (*listener, error) {
 	return s, nil
 }
 
-// Only a refused dial to an existing, private socket indicates a stale listener. In particular, a
-// timeout (e.g. a full listen backlog) is not permission to unlink, nor is a non-socket or a symlink.
+// Only a refused dial to a socket owned by this user indicates a stale listener. The parent run
+// directory is already 0700. ListenUnix creates the socket at 0777&^umask and chmod 0600 runs after,
+// so a crash between those steps can leave another mode. A timeout is not permission to unlink, nor
+// is a non-socket or a symlink. dial still requires exact 0600.
 func removeStale(path string) error {
-	info, err := approval.CheckPrivate(path, socketMode)
+	if _, err := approval.CheckPrivate(filepath.Dir(path), os.ModeDir|0o700); err != nil {
+		return err
+	}
+	info, err := ownedSocket(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -82,6 +87,18 @@ func removeStale(path string) error {
 		return err
 	}
 	return removeSocket(path, info)
+}
+
+func ownedSocket(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Getuid() || info.Mode()&os.ModeType != os.ModeSocket {
+		return nil, approval.ErrPrivate
+	}
+	return info, nil
 }
 
 func removeSocket(path string, bound os.FileInfo) error {

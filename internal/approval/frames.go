@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -87,5 +89,14 @@ func createJournal(path, id string, sync func(*os.File) error) error {
 		return err
 	}
 	defer p.Close()
+	// Publish the rename with the same full-sync hook as a frame. A directory can reject that
+	// call after its own fsync; a plain fsync is then enough. Any other error stays a failure.
+	if err := sync(p); err == nil || !fullSyncRejected(err) {
+		return err
+	}
 	return p.Sync()
+}
+
+func fullSyncRejected(err error) bool {
+	return errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP)
 }

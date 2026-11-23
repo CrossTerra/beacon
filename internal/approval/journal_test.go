@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var t0 = time.Unix(1_800_000_000, 0).UTC()
@@ -315,5 +317,30 @@ func TestReplayDoesNotRevalidateHistoricalParameters(t *testing.T) {
 	}
 	if _, err := j.Add(r, PeerLabel{}, t0); err != Invalid("/params/checkout") {
 		t.Fatalf("old schema accepted at intake: %v", err)
+	}
+}
+
+func TestDirectorySyncFallsBackOnlyWhenFullSyncIsRejected(t *testing.T) {
+	id := "jrn_01m7wyd4m0f858m2ga1850m2ga"
+	sync := func(reject error) func(*os.File) error {
+		return func(f *os.File) error {
+			info, err := f.Stat()
+			must(t, err)
+			if info.IsDir() {
+				return reject
+			}
+			return nil
+		}
+	}
+	path := filepath.Join(t.TempDir(), journalName)
+	if err := createJournal(path, id, sync(unix.EINVAL)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	rejected := filepath.Join(t.TempDir(), journalName)
+	if err := createJournal(rejected, id, sync(os.ErrInvalid)); !errors.Is(err, os.ErrInvalid) {
+		t.Fatalf("directory sync failure was hidden: %v", err)
 	}
 }

@@ -414,6 +414,47 @@ func TestSocketPathsRejectUnsafeFilesAndPermitStaleSocket(t *testing.T) {
 	}
 }
 
+func TestRestartReplacesSocketLeftBeforeChmod(t *testing.T) {
+	dir := testDir(t)
+	run, path := paths(dir)
+	check(t, os.Mkdir(run, 0o700))
+	live, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	check(t, err)
+	live.SetUnlinkOnClose(false)
+	check(t, os.Chmod(path, 0o755)) // ListenUnix's 0777&^umask, before the 0600 chmod
+	before, err := os.Lstat(path)
+	check(t, err)
+	if _, err := listen(dir); !errors.Is(err, ErrInUse) {
+		t.Fatalf("replaced a live loose-mode socket: %v", err)
+	}
+	if after, err := os.Lstat(path); err != nil || !os.SameFile(before, after) || after.Mode().Perm() != 0o755 {
+		t.Fatal("live socket was replaced or chmodded", err)
+	}
+	if _, err := dial(t.Context(), dir); !errors.Is(err, approval.ErrPrivate) {
+		t.Fatalf("dial accepted mode 0755: %v", err)
+	}
+	check(t, live.Close())
+	if os.Getuid() == 0 {
+		check(t, os.Chown(path, 65534, -1))
+		if _, err := listen(dir); !errors.Is(err, approval.ErrPrivate) {
+			t.Fatalf("replaced a foreign socket: %v", err)
+		}
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatal("foreign socket was removed", err)
+		}
+		check(t, os.Chown(path, 0, -1))
+	}
+	l, err := listen(dir)
+	check(t, err)
+	t.Cleanup(func() { check(t, l.Close()) })
+	if _, err := approval.CheckPrivate(path, socketMode); err != nil {
+		t.Fatal("replacement was not 0600:", err)
+	}
+	c, err := dial(t.Context(), dir)
+	check(t, err)
+	c.Close()
+}
+
 func TestClientRefusesUnsafeSocketBeforeDial(t *testing.T) {
 	dir := testDir(t)
 	run, path := paths(dir)

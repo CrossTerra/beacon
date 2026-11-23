@@ -12,11 +12,20 @@ controls, batch decisions or notifications.
 
 `journal.log` is an owner-only append-only file, protected by `instance.lock` in the private state directory.
 The first frame fixes the format version and the journal's UUIDv7. A frame has a length (and its bitwise
-complement), a JSON payload and a checksum. A short final frame is truncated to the last complete frame;
-a bad checksum or invalid complete frame stops startup rather than silently losing prior work. Each append is
-synced (`fsync`, plus `F_FULLFSYNC` on macOS) before publishing its result. The portable `golang.org/x/sys/unix`
-dependency supplies the lock, no-follow file opens and the macOS full flush. Proposals and any frozen snapshots
-are plaintext on disk. Keep the preview directory private and use synthetic proposals.
+complement), a JSON payload and a checksum. A short final frame is truncated to the last complete frame.
+A complete frame with a bad CRC, or any other invalid complete frame, stops startup and leaves `journal.log`
+unchanged. `beacon serve` prints `approval journal is corrupt or from an unsupported format` and exits. It
+does not listen, deliver, or mint a new journal id. Copy the state directory before changing anything.
+Restore `journal.log` from a copy that ends on a good frame and has the same journal id. Do not delete the
+damaged file to start over: a new id would begin Signal sequence 1, and the damaged file may be the only
+record of bytes already sent. Beacon will not drop a bad-CRC frame. Truncating one by hand is only safe
+after that copy, and only when the bad frame is the final frame, every earlier frame is intact, and dropping
+it cannot hide a send Signal may already have stored. If that cannot be shown, leave the service stopped.
+Each append is synced (`fsync`, plus `F_FULLFSYNC` on macOS) before publishing its result. The portable
+`golang.org/x/sys/unix` dependency supplies the lock, no-follow file opens and the macOS full flush. The
+directory rename that publishes a new journal uses that same full flush, and falls back to `fsync` only if
+the directory rejects it. Proposals and any frozen snapshots are plaintext on disk. Keep the preview
+directory private and use synthetic proposals.
 
 An approval that did not start expires at restart or shutdown. A durable start without a result becomes
 `outcome_unknown` at restart; only a read-back result can settle it. Replay does not dispatch. A supplied
@@ -45,10 +54,12 @@ unchanged.
 
 ## Proposal socket
 
-The Go socket lives at `run/act.sock` (`0600`, in a `0700` directory). It admits only the service's own
-user ID from the kernel (`SO_PEERCRED` on Linux; `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS). The
-client checks the socket and its directories for ownership and mode before it connects, then checks the
-listener's kernel user ID. Neither check verifies code signatures. The signed Swift socket and client
+The Go socket lives at `run/act.sock` (`0600`, in a `0700` directory). Binding can leave a wider mode if
+the process dies before the following chmod. Restart removes that dead socket when this user owns it;
+it does not remove a live socket, a symlink, a non-socket, or another user's socket. The client still
+requires exact `0600` before it connects. The listener admits only the service's own user ID from the
+kernel (`SO_PEERCRED` on Linux; `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS). The client then checks
+the listener's kernel user ID. Neither check verifies code signatures. The signed Swift socket and client
 are unchanged.
 
 The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
