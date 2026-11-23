@@ -1,7 +1,7 @@
 # Commands
 
-Every command but `version` takes `--config PATH`. See [`configuration.md`](configuration.md) for where the config
-is found otherwise.
+Every command but `version`, `act`, `keychain repair` and `spike-passkey` takes `--config PATH`. See
+[`configuration.md`](configuration.md) for where the config is found otherwise.
 
 ## `beacon init`
 
@@ -350,6 +350,13 @@ item; choose Always Allow), stores a copy as `repair:<account>`, deletes the ite
 check the bytes, and deletes the copy. If it stops part way, the copy keeps the value and the next run restores it.
 It prints the account names it repaired and never a value. It takes no `--config`: it repairs every Beacon item. A
 build that is not signed with a certificate refuses it, as it refuses every keychain read.
+
+## `beacon spike-passkey`
+
+The passkey PRF spike (13.01 part 1). It listens on `127.0.0.1:7317` and `[::1]:7317` only, registers a passkey
+with the PRF extension, and asserts with user verification. It prints a SHA-256 of the PRF output, never the
+output. It does not read the keychain and does not contact any host. How to run it, including through
+`tailscale serve`, is [the spike runbook](passkey-spike.md).
 
 ## `beacon version`
 
