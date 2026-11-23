@@ -175,7 +175,8 @@ Set `BEACON_TEST_CHROME` to select a specific executable, as Ubuntu CI does with
 If Safari on the Mac, saving to iCloud Keychain, does not get `prf.enabled` on the ts.net origin, or the iPhone
 assertion has no PRF output, or the hash differs from the Mac's hash for that same origin: stop. Do not build the
 write vault on PRF for that combination. Record the row and leave D6, D9 and D14 for another look. The 2026-11-23
-Mac and iPhone run did not hit this stop. Linux is still unrecorded.
+Mac and iPhone run did not hit this stop. Linux passkey testing is deferred (Winton, Nov 23) and is not a
+blocker for the next slice.
 
 ## Afterwards
 
@@ -196,7 +197,7 @@ output. Delete `$HOME/beacon-spike` when you are done with the trial.
 Headers, one row per request you care about. Recorded 2026-11-23 on Winton's Mac and iPhone. The login header
 was checked against `--tailscale-login` and matched. The login itself is not written here. Other Tailscale
 header values were not copied into this file. Funnel and tagged-device curls were not part of this run. Linux
-has no machine at hand yet.
+passkey testing is deferred (Winton, Nov 23), not a blocker for the next slice.
 
 | From | Host | Origin | Tailscale-User-Login | Tailscale-User-Name | Tailscale-User-Profile-Pic | Other Tailscale-* headers |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -205,8 +206,8 @@ has no machine at hand yet.
 | iPhone Safari, this Mac's ts.net | `wintons-macbook-air.tail6421f3.ts.net` | `https://wintons-macbook-air.tail6421f3.ts.net` | matched `--tailscale-login` | | | not copied |
 | curl, Funnel header | not run | | | | | |
 | curl, no login (tagged shape) | not run | | | | | |
-| Mac Safari, Linux ts.net | not run | | | | | |
-| iPhone Safari, Linux ts.net | not run | | | | | |
+| Mac Safari, Linux ts.net | deferred (Winton, Nov 23) | | | | | |
+| iPhone Safari, Linux ts.net | deferred (Winton, Nov 23) | | | | | |
 
 Passkeys. The PRF hash is the hex on the page. It is not copied into this file. A localhost hash and a ts.net
 hash are different passkeys; only the same origin is comparable. The iPhone hash must equal the Mac hash for
@@ -219,6 +220,6 @@ combination has PRF, and the synced passkey gives the same output on both device
 | Safari (Mac) | iCloud Keychain, Touch ID | `http://localhost:7317` | enabled | stable; two assertions matched | registered on this origin |
 | Safari (Mac) | iCloud Keychain, Touch ID | `https://wintons-macbook-air.tail6421f3.ts.net` | enabled | stable | registered again; `tailscale serve` to `127.0.0.1:7317`, login checked |
 | Safari (iPhone) | iCloud Keychain, Face ID | `https://wintons-macbook-air.tail6421f3.ts.net` | enabled | matches the Mac row above | synced passkey, not re-registered |
-| Safari (Mac) | iCloud Keychain, Touch ID | `https://{linux}.{tailnet}.ts.net` | | | not run; no Linux machine at hand |
-| Safari (iPhone) | iCloud Keychain, Face ID | `https://{linux}.{tailnet}.ts.net` | | | not run |
+| Safari (Mac) | iCloud Keychain, Touch ID | `https://{linux}.{tailnet}.ts.net` | | | deferred (Winton, Nov 23); not a blocker |
+| Safari (iPhone) | iCloud Keychain, Face ID | `https://{linux}.{tailnet}.ts.net` | | | deferred (Winton, Nov 23); not a blocker |
 | Chrome virtual authenticator | virtual, PRF on | `http://localhost:7317` | yes (test) | (test) | `go test -run TestBrowser ./internal/spike/`; covers Linux localhost in CI |
