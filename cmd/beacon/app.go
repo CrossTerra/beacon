@@ -113,9 +113,10 @@ Commands:
   act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
+  spike-passkey serve the passkey PRF spike on localhost:7317 (13.01 part 1)
 
-Every command but version, act and keychain repair takes --config PATH (default: $BEACON_CONFIG, else the user config
-directory).
+Every command but version, act, keychain repair and spike-passkey takes --config PATH (default: $BEACON_CONFIG, else
+the user config directory).
 `
 
 type exitError struct{ code int }
@@ -169,6 +170,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdAct(ctx, rest)
 	case "version", "--version":
 		err = a.cmdVersion()
+	case "spike-passkey":
+		err = a.cmdSpikePasskey(ctx, rest)
 	case "help", "-h", "--help":
 		fmt.Fprint(a.stdout, usage)
 		return 0

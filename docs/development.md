@@ -87,8 +87,14 @@ is recorded as replayed; a 409 stops the key; and a second instance sends nothin
 | Module | Why |
 | --- | --- |
 | `go.yaml.in/yaml/v3` | The rules file is YAML (DEC-5) and the standard library has no YAML parser. This is the YAML organisation's maintained copy of `gopkg.in/yaml.v3`. It reports duplicate keys and unknown fields, which the rules file needs. |
+| `github.com/fxamacker/cbor/v2` | WebAuthn authenticator data and COSE keys are CBOR (13.01-D22). Its module pulls in `github.com/x448/float16`. |
+| `github.com/go-webauthn/webauthn` | Test-only cross-check of the narrow verifier. Not imported by non-test code, so it is not linked into the binary. |
+| `github.com/chromedp/chromedp` | Test-only headless Chrome virtual authenticator. Not linked into the binary. The browser test needs Chrome; CI installs it on Linux, and macOS runners already have it. |
 
-Everything else is the standard library.
+`beacon spike-passkey` is the passkey spike ([runbook](passkey-spike.md)). Its tests are in `internal/webauthn` and
+`internal/spike`: the verifier against a software authenticator and against `go-webauthn`, the origin and header
+checks, and one headless Chrome run that registers and asserts with PRF, refuses a credential without PRF, and
+refuses a wrong origin.
 
 ## Local builds and the keychain
 
