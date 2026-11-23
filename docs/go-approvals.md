@@ -5,8 +5,17 @@ separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of
 `beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
 The preview does not read collector config, Keychain items, vaults or the Swift journal. There is no installer
 cutover, migration, live Signal credential source, provider lookup, provider write or runner launch. The three
-schemas (`github.merge`, `slack.post`, `agent.run`) are for review only. There are no passkeys, approve or decline
-controls, batch decisions or notifications.
+schemas (`github.merge`, `slack.post`, `agent.run`) are for review only. There is no approve or decline
+control, batch decision, or notification. `beacon setup` can print a one-time passkey code for that
+directory. Registration itself is not on the page yet.
+
+## Passkey setup
+
+`beacon setup --state-dir DIR` prints a 10-minute, one-use code and does not store the code. It holds the
+instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
+ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
+The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
+no page for this yet, and approval still does not run.
 
 ## Journal and record delivery
 
