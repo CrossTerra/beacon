@@ -10,8 +10,11 @@ in Settings, it merges approved pull requests through that account's API origin.
 destinations and posts approved messages at `https://slack.com`. With Signal added, it sends its journal's
 records to Signal's record API with its app actor's key. Those are its only network connections, and
 `beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
-collector as the same user while the app is open. The app and `tether` share one socket pair for service status and
-approved-run control: run ids, process group ids, acknowledgements and outcomes, never paths, secrets or item content.
+collector as the same user while the app is open. The app and `tether` share one socket pair that carries only a
+run's id when the app starts or stops an approved agent run, never a path, secret or item content. Tether's reply
+is that id, its process group and the outcome. The menu's collector health reads only the collector's `pass.json`
+and `coverage.json` (names, times and fixed codes); its keychain repair item opens Terminal on the bundled CLI and
+reads no credential itself ([tether](tether.md#collector-health-in-the-menu)).
 
 With a checkout in Settings, an approved `agent.run` starts opencode in that checkout through `tether`
 ([agent runs](approvals.md#agent-runs)). The run is the person's agent, not part of Beacon: it works with the

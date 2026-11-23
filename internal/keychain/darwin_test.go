@@ -15,3 +15,15 @@ func TestSystemRefusesAnAdHocBuild(t *testing.T) {
 		t.Fatalf("NewSystem in an ad-hoc test binary: %v", err)
 	}
 }
+
+// The statuses readRefused names are the Security framework's, so a refused prompt is not reported as a missing item.
+func TestReadRefusedMatchesTheSecurityFramework(t *testing.T) {
+	for _, s := range securityRefusals() {
+		if !readRefused(s) {
+			t.Errorf("status %d is a refusal", s)
+		}
+	}
+	if readRefused(securityNotFound()) || readRefused(0) {
+		t.Fatal("a missing item or success is not a refusal")
+	}
+}

@@ -184,6 +184,29 @@ func bytesRepeat(b byte, n int) []byte {
 	return out
 }
 
+func TestPassHealthFields(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC)
+	until := at.Add(45 * time.Minute)
+	p := Pass{At: at, Outcome: "ok", Lease: LeaseHeld, Holder: "0123456789abcdef", LeaseUntil: &until, SendReason: "unavailable"}
+	if err := WritePass(dir, p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadPass(dir)
+	if err != nil || got.LeaseUntil == nil || !got.LeaseUntil.Equal(until) || got.SendReason != "unavailable" {
+		t.Fatalf("%v %+v", err, got)
+	}
+	for _, bad := range []Pass{
+		{At: at, Outcome: "ok", Lease: LeaseOther, LeaseUntil: &until},
+		{At: at, Outcome: "ok", LeaseReason: "Signal said no"},
+		{At: at, Outcome: "ok", SendReason: "x\ny"},
+	} {
+		if err := WritePass(dir, bad); err == nil {
+			t.Fatalf("accepted %+v", bad)
+		}
+	}
+}
+
 func TestPassWithheld(t *testing.T) {
 	dir := t.TempDir()
 	at := time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC)

@@ -43,7 +43,29 @@ The collector also records `pass.json` and `coverage.json`, which `beacon status
 
 The menu shows the collector's state as `tether` reports it: starting, running, stopped with an error and
 restarting after the backoff, or stopped. "Running" means the process is up. A pass can still fail inside it,
-for example on a refused key; `beacon status` shows the last pass and its reason.
+for example on a refused key, so the menu also shows the collector's health from its own records.
+
+## Collector health in the menu
+
+Every five seconds the app reads `pass.json` and `coverage.json` from the state directory named by the default
+config's top-level `state:` (relative to the config's directory, as the collector resolves it; LF, CRLF and CR
+line endings alike). It reads nothing
+else, contacts nothing and reads no credential. Each record is capped at 64 KiB, and a field that is not a source
+name, a time or a fixed code makes the record unreadable rather than shown. The menu shows:
+
+- a status line: **Collecting**; **Some sources failing** (a source failed two passes in a row, as `beacon status
+  --coverage` counts it); or **Not writing to Signal** (the last pass failed, the lease is held by another
+  Beacon, was not taken or has run out, or sending stopped part way through a pass);
+- each failing source with its reason class, such as **github: Keychain read refused** or **slack: Credential
+  refused**;
+- the lease: held until a time, expired at a time, held by another Beacon, or not taken and why; and why the
+  last pass failed, when it did.
+
+While a source fails or the collector is not writing to Signal, the menu bar icon shows `!` beside it. When the cause
+is a refused keychain read (`keychain_read_refused`: macOS denied, cancelled or could not show the access
+prompt, typically after a rebuild signed with another certificate), **Run beacon keychain repair…** opens Terminal
+with a script that runs this bundle's `beacon keychain repair`; you answer its prompts there. With no record yet (a
+dry run writes none) the menu says so and shows no badge.
 
 ## Moving from the retired LaunchAgent
 
