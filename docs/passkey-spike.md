@@ -54,10 +54,20 @@ Tailscale is installed on the Mac and the iPhone, same tailnet, MagicDNS on, HTT
 `tailscale serve status` already shows a config, copy it down before changing it. `tailscale serve reset` clears
 every serve config on this machine, not just this one.
 
+On this Mac the `tailscale` CLI is not on `PATH`. It is
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`. The commands below use that path when the name is not
+on `PATH`.
+
+`--tailscale-login` is the person's Tailscale login, the `LoginName` from `tailscale status --json` (an email
+address for a personal tailnet), not the display name. A wrong login refuses every ts.net request.
+
+Stop the localhost spike before starting it again. Both modes bind port 7317, and a second process does not
+pick another port.
+
 In another terminal:
 
 ```bash
-tailscale status --json
+/Applications/Tailscale.app/Contents/MacOS/Tailscale status --json
 ```
 
 Read this machine's DNS name (`Self.DNSName`, without the trailing dot) and your login (`User` → that
@@ -72,16 +82,16 @@ Stop the spike (Ctrl+C) and start it again with that login, exactly as the heade
   --tailscale-login 'you@example.com'
 ```
 
-Then:
+Then, with the same Mac binary:
 
 ```bash
-tailscale serve --bg --https=443 http://127.0.0.1:7317
-tailscale serve status
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --bg --https=443 http://127.0.0.1:7317
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve status
 ```
 
 `status` must show port 443 proxying to `127.0.0.1:7317`, and must not show Funnel. If it shows Funnel, turn it
-off (`tailscale funnel --https=443 off`, or `tailscale serve reset` if that was the only config) and run the serve
-command again.
+off (`Tailscale funnel --https=443 off`, or `Tailscale serve reset` if that was the only config) and run the serve
+command again. `Tailscale` here is that same binary.
 
 In Safari, open `https://{machine}.{tailnet}.ts.net` (no port). This is a different origin from localhost, so
 register again, still to iCloud Keychain, still with Touch ID.
@@ -164,11 +174,14 @@ Set `BEACON_TEST_CHROME` to select a specific executable, as Ubuntu CI does with
 
 If Safari on the Mac, saving to iCloud Keychain, does not get `prf.enabled` on the ts.net origin, or the iPhone
 assertion has no PRF output, or the hash differs from the Mac's hash for that same origin: stop. Do not build the
-write vault on PRF for that combination. Record the row and leave D6, D9 and D14 for another look.
+write vault on PRF for that combination. Record the row and leave D6, D9 and D14 for another look. The 2026-11-23
+Mac and iPhone run did not hit this stop. Linux is still unrecorded.
 
 ## Afterwards
 
-Ctrl+C stops the spike. If you changed serve config and had nothing else served:
+Ctrl+C stops the spike. If you changed serve config and had nothing else served, reset it with the same
+`tailscale` binary you used (`/Applications/Tailscale.app/Contents/MacOS/Tailscale` on this Mac; `tailscale` on
+`PATH` on Linux):
 
 ```bash
 tailscale serve reset
@@ -180,26 +193,32 @@ output. Delete `$HOME/beacon-spike` when you are done with the trial.
 
 ## What to record
 
-Headers, one row per request you care about:
+Headers, one row per request you care about. Recorded 2026-11-23 on Winton's Mac and iPhone. The login header
+was checked against `--tailscale-login` and matched. The login itself is not written here. Other Tailscale
+header values were not copied into this file. Funnel and tagged-device curls were not part of this run. Linux
+has no machine at hand yet.
 
 | From | Host | Origin | Tailscale-User-Login | Tailscale-User-Name | Tailscale-User-Profile-Pic | Other Tailscale-* headers |
 | --- | --- | --- | --- | --- | --- | --- |
-| Mac Safari, localhost | | | (absent) | | | |
-| Mac Safari, this Mac's ts.net | | | | | | |
-| iPhone Safari, this Mac's ts.net | | | | | | |
-| curl, Funnel header | refused | | | | | |
-| curl, no login (tagged shape) | refused | | | | | |
-| Mac Safari, Linux ts.net | | | | | | |
-| iPhone Safari, Linux ts.net | | | | | | |
+| Mac Safari, localhost | `localhost:7317` | `http://localhost:7317` | absent | | | none observed |
+| Mac Safari, this Mac's ts.net | `wintons-macbook-air.tail6421f3.ts.net` | `https://wintons-macbook-air.tail6421f3.ts.net` | matched `--tailscale-login` | | | not copied |
+| iPhone Safari, this Mac's ts.net | `wintons-macbook-air.tail6421f3.ts.net` | `https://wintons-macbook-air.tail6421f3.ts.net` | matched `--tailscale-login` | | | not copied |
+| curl, Funnel header | not run | | | | | |
+| curl, no login (tagged shape) | not run | | | | | |
+| Mac Safari, Linux ts.net | not run | | | | | |
+| iPhone Safari, Linux ts.net | not run | | | | | |
 
-Passkeys. The PRF hash is the hex on the page. A localhost hash and a ts.net hash are different passkeys; only
-the same origin is comparable. The iPhone hash must equal the Mac hash for that same ts.net name.
+Passkeys. The PRF hash is the hex on the page. It is not copied into this file. A localhost hash and a ts.net
+hash are different passkeys; only the same origin is comparable. The iPhone hash must equal the Mac hash for
+that same ts.net name. This run's Mac and iPhone hashes for the Mac's ts.net origin did match. Two assertions
+on localhost gave the same hash. The ts.net assertion hash was stable. That is enough to keep D6: this
+combination has PRF, and the synced passkey gives the same output on both devices.
 
 | Browser | Authenticator | Origin | PRF | PRF hash | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Safari (Mac) | iCloud Keychain, Touch ID | `http://localhost:7317` | | | |
-| Safari (Mac) | iCloud Keychain, Touch ID | `https://{mac}.{tailnet}.ts.net` | | | |
-| Safari (iPhone) | iCloud Keychain, Face ID | `https://{mac}.{tailnet}.ts.net` | | | same hash as the Mac row above? |
-| Safari (Mac) | iCloud Keychain, Touch ID | `https://{linux}.{tailnet}.ts.net` | | | |
-| Safari (iPhone) | iCloud Keychain, Face ID | `https://{linux}.{tailnet}.ts.net` | | | same hash as the Linux Mac row? |
-| Chrome virtual authenticator | virtual, PRF on | `http://localhost:7317` | yes (test) | (test) | `go test -run TestBrowser ./internal/spike/` |
+| Safari (Mac) | iCloud Keychain, Touch ID | `http://localhost:7317` | enabled | stable; two assertions matched | registered on this origin |
+| Safari (Mac) | iCloud Keychain, Touch ID | `https://wintons-macbook-air.tail6421f3.ts.net` | enabled | stable | registered again; `tailscale serve` to `127.0.0.1:7317`, login checked |
+| Safari (iPhone) | iCloud Keychain, Face ID | `https://wintons-macbook-air.tail6421f3.ts.net` | enabled | matches the Mac row above | synced passkey, not re-registered |
+| Safari (Mac) | iCloud Keychain, Touch ID | `https://{linux}.{tailnet}.ts.net` | | | not run; no Linux machine at hand |
+| Safari (iPhone) | iCloud Keychain, Face ID | `https://{linux}.{tailnet}.ts.net` | | | not run |
+| Chrome virtual authenticator | virtual, PRF on | `http://localhost:7317` | yes (test) | (test) | `go test -run TestBrowser ./internal/spike/`; covers Linux localhost in CI |
