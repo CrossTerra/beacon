@@ -176,7 +176,7 @@ func find(g *gokeepasslib.Group, b Binding) []*gokeepasslib.Entry {
 }
 
 func newDB(key []byte) (*gokeepasslib.Database, error) {
-	db := gokeepasslib.NewDatabase(gokeepasslib.WithDatabaseKDBXVersion40())
+	db := gokeepasslib.NewDatabase(gokeepasslib.WithDatabaseKDBXVersion4())
 	cred, err := gokeepasslib.NewKeyDataCredentials(key)
 	if err != nil {
 		return nil, err
