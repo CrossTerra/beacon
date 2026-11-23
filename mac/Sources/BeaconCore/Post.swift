@@ -61,11 +61,13 @@ public final class PostHandler: ActionResolver, Sendable {
             return created
         }
         return try await preflight(settings, .intake, budget) { api in
-            _ = try await self.identify(api, settings, cached: true)
+            let identity = try await self.identify(api, settings, cached: true)
             let info = try await api.conversation(draft.channel)
             guard let visibility = info.visibility else { throw SlackRefusal.visibilityUnknown }
+            let words = try await self.words(api, draft: draft, settings: settings, identity: identity,
+                                              conversation: info, visibility: visibility)
             try self.requireCurrent(settings)
-            return SlackPlacement(account: settings.account, visibility: visibility)
+            return SlackPlacement(account: settings.account, visibility: visibility, words: words.line)
         }
     }
 
@@ -81,26 +83,98 @@ public final class PostHandler: ActionResolver, Sendable {
         return try await preflight(settings, .preflight, budget) { api in
             try api.canPost()
             let (identity, conversation, parent) = try await self.read(api, draft, settings, placement)
-            let label: String
-            if placement.visibility == .dm {
-                guard let other = conversation.user else { throw SlackRefusal.unavailable }
-                label = "DM with \(try await api.userName(other)) (\(other))"
-            } else if let name = conversation.name, !name.isEmpty {
-                label = placement.visibility == .groupDM ? name : "#\(name)"
-            } else if placement.visibility == .groupDM {
-                label = "Group DM"
-            } else {
-                throw SlackRefusal.unavailable
-            }
+            let words = try await self.words(api, draft: draft, settings: settings, identity: identity,
+                                              conversation: conversation, visibility: placement.visibility)
             try self.requireCurrent(settings)
-            var facts = ["Workspace": "\(identity.team) (\(identity.team_id))", "Visibility": placement.visibility.rawValue]
-            if let thread = draft.thread, let parent {
+            var facts = ["Workspace": words.workspace, "Visibility": words.visibility]
+            if draft.thread != nil, let parent {
                 let firstLine = parent.text?.prefix(while: { !$0.isNewline }) ?? ""
-                facts["Thread"] = "\(thread) · \(firstLine.isEmpty ? "(no text on first line)" : String(firstLine))"
+                facts["Thread"] = SlackDisplay.shown(String(firstLine)) ?? "(no text on first line)"
             }
             return ResolvedAction(origin: SlackSettings.origin, account: settings.account, destination: draft.destination,
-                                  facts: facts, readAt: at, accountLabel: "\(identity.user) (\(identity.user_id))",
-                                  destinationLabel: "\(label) (\(draft.channel))")
+                                  facts: facts, readAt: at, accountLabel: SlackDisplay.shown(identity.user) ?? identity.user,
+                                  destinationLabel: words.conversation)
+        }
+    }
+
+    /// The destination in the person's words. A failed name lookup does not fail the proposal: the window says
+    /// which channel it could not name. User names are cached for ten minutes, on the caller's read budget.
+    private struct Words {
+        let conversation: String
+        let visibility: String
+        let workspace: String
+        var line: String { "\(conversation) · \(visibility) · \(workspace)" }
+    }
+
+    private struct CachedName { let value: String; let at: Date }
+    private let userNames = Locked<[String: CachedName]>([:])
+    private let groupPhrases = Locked<[String: CachedName]>([:])
+
+    private func words(_ api: SlackAPI, draft: SlackDraft, settings: SlackSettings, identity: SlackIdentity,
+                       conversation: SlackConversation, visibility: SlackVisibility) async throws -> Words {
+        let phrase = try await conversationWords(api, draft: draft, user: settings.userID, conversation: conversation,
+                                                   visibility: visibility)
+        return Words(conversation: phrase, visibility: visibility.word,
+                     workspace: SlackDisplay.shown(identity.team) ?? "unknown workspace")
+    }
+
+    private func conversationWords(_ api: SlackAPI, draft: SlackDraft, user: String, conversation: SlackConversation,
+                                   visibility: SlackVisibility) async throws -> String {
+        switch visibility {
+        case .public, .private:
+            if let raw = conversation.name, let name = SlackDisplay.shown(raw) { return "#\(name)" }
+            return SlackDisplay.unknown(draft.channel)
+        case .dm:
+            guard let other = conversation.user, Field.matches(other, "[UW][A-Z0-9]{0,31}") else {
+                return SlackDisplay.unknown(draft.channel)
+            }
+            if other == user { return "DM with yourself" }
+            if let name = try await displayUser(api, other) { return "DM with \(name)" }
+            return SlackDisplay.unknown(draft.channel)
+        case .groupDM:
+            return try await groupWords(api, draft.channel, except: user)
+        }
+    }
+
+    /// Other members' real names, in user-id order, at most eight. A lookup that fails is omitted; if none can be
+    /// read, the channel id is shown rather than a blank.
+    private func groupWords(_ api: SlackAPI, _ channel: String, except user: String) async throws -> String {
+        let key = "\(api.workspace)/\(channel)", at = now()
+        if let hit = groupPhrases.withLock({ $0[key] }), at >= hit.at, at.timeIntervalSince(hit.at) < Self.identityCacheTime {
+            return hit.value
+        }
+        let ids: [String]
+        do {
+            ids = try await api.memberIDs(channel)
+        } catch {
+            if error is CancellationError { throw error }
+            return SlackDisplay.unknown(channel)
+        }
+        let others = ids.filter { $0 != user && Field.matches($0, "[UW][A-Z0-9]{0,31}") }.sorted()
+        var names: [String] = []
+        for id in others.prefix(8) {
+            if let name = try await displayUser(api, id) { names.append(name) }
+        }
+        guard !names.isEmpty else { return SlackDisplay.unknown(channel) }
+        var phrase = "Group DM with \(names.joined(separator: ", "))"
+        if others.count > names.count { phrase += " +\(others.count - names.count)" }
+        groupPhrases.withLock { $0[key] = CachedName(value: phrase, at: at) }
+        return phrase
+    }
+
+    /// `users.info`'s real name, cached for ten minutes. Nil when Slack will not say; cancellation still propagates.
+    private func displayUser(_ api: SlackAPI, _ id: String) async throws -> String? {
+        let key = "\(api.workspace)/\(id)", at = now()
+        if let hit = userNames.withLock({ $0[key] }), at >= hit.at, at.timeIntervalSince(hit.at) < Self.identityCacheTime {
+            return hit.value
+        }
+        do {
+            guard let name = SlackDisplay.shown(try await api.userName(id)) else { return nil }
+            userNames.withLock { $0[key] = CachedName(value: name, at: at) }
+            return name
+        } catch {
+            if error is CancellationError { throw error }
+            return nil
         }
     }
 
@@ -341,7 +415,12 @@ public enum SlackSetup {
         do {
             let api = SlackAPI(client: try connect(token, SlackAPI.actionTimeout), workspace: "", rates: SlackRateLimits(),
                                now: { Date() })
-            identity = try await api.identity()
+            let auth = try await api.account()
+            identity = auth.identity
+            let header = auth.scopes?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !header.isEmpty else { throw SlackRefusal.missingScope(nil) }
+            let missing = SlackScopes.missing(from: header)
+            guard missing.isEmpty else { throw SlackRefusal.missingScope(missing.joined(separator: ", ")) }
         } catch let refusal as SlackRefusal {
             throw refusal
         } catch {

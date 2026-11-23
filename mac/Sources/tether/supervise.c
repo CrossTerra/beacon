@@ -448,6 +448,30 @@ static void mark_started(int run, pid_t pid) {
     close(fd);
 }
 
+// The environment tether passes: the launch file's, without OLDPWD or a PWD that is not this checkout, plus
+// PWD set to the directory it enters and the job marker. The caller frees the array and `pwd`.
+static char **checkout_env(char **env, const char *cwd, char *marker, char **pwd) {
+    size_t envc = 0;
+    while (env[envc]) envc++;
+    *pwd = NULL;
+    char **child = calloc(envc + 3, sizeof(*child));
+    if (!child || asprintf(pwd, "PWD=%s", cwd) < 0) {
+        free(child);
+        free(*pwd);
+        *pwd = NULL;
+        return NULL;
+    }
+    size_t n = 0;
+    for (size_t i = 0; i < envc; i++) {
+        if (strncmp(env[i], "PWD=", 4) == 0 || strncmp(env[i], "OLDPWD=", 7) == 0) continue;
+        child[n++] = env[i];
+    }
+    child[n++] = *pwd;
+    child[n++] = marker;
+    child[n] = NULL;
+    return child;
+}
+
 // Prepares the run `id` suspended as a new job: its own process group, never restarted, in the working directory
 // the app pinned (opened once, compared by device and inode, and entered by descriptor, so a directory
 // swapped in at that path is refused with ESTALE), with standard input from the run's prompt file and
@@ -484,14 +508,16 @@ static void launch(struct session *s, const char *id) {
     if (job) {
         *job = (struct job){.spec = &r->spec, .runner = r, .lifetime = -1};
         snprintf(job->entry, sizeof(job->entry), TETHER_MARKER "%s:r%s", s->token, id);
-        size_t envc = 0;
-        while (env[envc]) envc++;
-        env[envc] = job->entry;
+        char *pwd = NULL;
+        char **child = checkout_env(env, cwd, job->entry, &pwd);
         in = openat(run, "prompt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         out = openat(run, "output", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         err = openat(run, "errors", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_suspended(r->argv[0], r->argv, env, in, out, err, dir) : -1;
-        error = errno;
+        pid = child && in >= 0 && out >= 0 && err >= 0
+                  ? tether_spawn_suspended(r->argv[0], r->argv, child, in, out, err, dir) : -1;
+        error = child ? errno : ENOMEM;
+        free(child);
+        free(pwd);
         if (pid > 0) {
             job->pid = pid;
             r->dir = run;

@@ -47,6 +47,14 @@ type settings struct {
 	Metadata string `json:"metadata"`
 	// DropClientID discards client_msg_id, as an API post may.
 	DropClientID bool `json:"drop_client_id"`
+	// Users overrides users.info by id. Names "refuse" is a missing scope, so a name lookup can fail.
+	Users map[string]object `json:"users"`
+	Names string            `json:"names"`
+	// Needed and Provided are Slack's missing_scope fields. Scopes is the X-OAuth-Scopes header; empty means
+	// every scope Beacon requires, and "omit" sends none.
+	Needed   string `json:"needed"`
+	Provided string `json:"provided"`
+	Scopes   string `json:"scopes"`
 }
 
 type call struct {
@@ -69,7 +77,18 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	write := func(v object) { _ = json.NewEncoder(w).Encode(v) }
-	refuse := func(code string) { write(object{"ok": false, "error": code}) }
+	refuse := func(code string) {
+		body := object{"ok": false, "error": code}
+		if code == "missing_scope" {
+			if s.settings.Needed != "" {
+				body["needed"] = s.settings.Needed
+			}
+			if s.settings.Provided != "" {
+				body["provided"] = s.settings.Provided
+			}
+		}
+		write(body)
+	}
 	if r.URL.Path == "/fixture" {
 		switch r.Method {
 		case http.MethodGet:
@@ -122,6 +141,14 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch method {
 	case "auth.test":
+		if c.Scopes != "omit" {
+			scopes := c.Scopes
+			if scopes == "" {
+				scopes = "chat:write,channels:read,groups:read,im:read,mpim:read,users:read," +
+					"channels:history,groups:history,im:history,mpim:history"
+			}
+			w.Header().Set("X-OAuth-Scopes", scopes)
+		}
 		v := object{"ok": true, "team_id": c.Workspace, "team": "Fixture Workspace", "user_id": user, "user": "fixture-user"}
 		if c.Bot {
 			v["bot_id"] = "B0BOT"
@@ -132,7 +159,14 @@ func (s *slack) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "conversations.members":
 		write(object{"ok": true, "members": c.Members})
 	case "users.info":
-		write(object{"ok": true, "user": object{"id": q.Get("user"), "name": "dana", "real_name": "Dana Scully"}})
+		if c.Names == "refuse" {
+			refuse("missing_scope")
+			return
+		}
+		id := q.Get("user")
+		user := object{"id": id, "name": "dana", "real_name": "Dana Scully"}
+		maps.Copy(user, c.Users[id])
+		write(object{"ok": true, "user": user})
 	case "conversations.replies", "conversations.history":
 		if method == "conversations.replies" && q.Get("ts") != parent {
 			refuse("thread_not_found")

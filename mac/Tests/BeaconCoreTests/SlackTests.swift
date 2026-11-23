@@ -14,6 +14,14 @@ struct SlackTests {
 
         let saved = try await h.register()
         #expect(saved.connected == "Posts to Fixture Workspace (T0WORKSPACE) as fixture-user (U0PERSON)")
+        try await h.fixture.configure(["scopes": "channels:read"])
+        await #expect(throws: SlackRefusal.missingScope("chat:write, groups:read, im:read, mpim:read, users:read, channels:history, groups:history, im:history, mpim:history")) {
+            try await h.register()
+        }
+        #expect(try AppSettings.load(h.settingsURL).slack == saved, "a token missing a scope is not saved")
+        try await h.fixture.configure(["scopes": "omit"])
+        await #expect(throws: SlackRefusal.missingScope(nil)) { try await h.register() }
+        try await h.fixture.configure(["scopes": ""])
         #expect(try AppSettings.load(h.settingsURL).slack == saved)
         #expect(try CredentialBinding.normalize(SlackSettings.origin) == "https://slack.com")
         let binding = try saved.binding
@@ -69,10 +77,15 @@ struct SlackTests {
         #expect(desk.frozen == nil)
         await desk.freezing?.value
         let frozen = try #require(desk.frozen)
-        #expect(frozen.resolved.accountLabel == "fixture-user (U0PERSON)")
-        #expect(frozen.resolved.destinationLabel == "#general (C0GENERAL)")
-        #expect(frozen.resolved.facts == ["Workspace": "Fixture Workspace (T0WORKSPACE)", "Visibility": "Public channel",
-                                            "Thread": "\(SlackHarness.root) · Parent’s first line"])
+        #expect(h.journal.proposal(id, at: clock.now)?.slackWords == "#general · public · Fixture Workspace")
+        #expect(slackApprovalTitle(words: h.journal.proposal(id, at: clock.now)?.slackWords, channel: "C0GENERAL") ==
+                "Post in Slack #general · public · Fixture Workspace")
+        #expect(frozen.resolved.accountLabel == "fixture-user")
+        #expect(frozen.resolved.destinationLabel == "#general")
+        #expect(frozen.resolved.facts == ["Workspace": "Fixture Workspace", "Visibility": "public",
+                                            "Thread": "Parent’s first line"])
+        #expect(frozen.approval.destination.canonical.contains("T0WORKSPACE"))
+        #expect(frozen.approval.destination.canonical.contains("C0GENERAL"))
         #expect(frozen.approval.origin == "https://slack.com")
         let text = try #require(frozen.approval.params["text"]?.stringValue)
         #expect(text.utf8.elementsEqual(SlackHarness.draft.utf8))
@@ -136,17 +149,20 @@ struct SlackTests {
     @Test func privateChannelsAndDMsStayOnThePersonalSubject() async throws {
         let h = try SlackHarness()
         try await h.register()
-        let destinations: [(String, [String: JSON], SlackVisibility, String)] = [
-            ("C0SECRET", ["is_private": .bool(true)], .private, "#secret (C0SECRET)"),
-            ("D0DANA", ["is_im": .bool(true), "user": "U0OTHER"], .dm, "DM with Dana Scully (U0OTHER) (D0DANA)"),
-            ("G0GROUP", ["is_mpim": .bool(true)], .groupDM, "secret (G0GROUP)"),
+        let destinations: [(String, [String: JSON], SlackVisibility, String, String)] = [
+            ("C0SECRET", ["is_private": .bool(true)], .private, "#secret", "private"),
+            ("D0DANA", ["is_im": .bool(true), "user": "U0OTHER"], .dm, "DM with Dana Scully", "DM"),
+            ("G0GROUP", ["is_mpim": .bool(true)], .groupDM, "Group DM with Dana Scully", "group DM"),
         ]
-        for (id, flags, visibility, label) in destinations {
+        for (id, flags, visibility, label, word) in destinations {
             try await h.channel(["id": .string(id), "name": "secret", "is_member": .null].merging(flags, uniquingKeysWith: { _, new in new }))
             let proposal = try await h.propose(channel: id)
             let resolved = try await h.handler.resolve(proposal, model: nil)
-            #expect(resolved.facts["Visibility"] == visibility.rawValue)
+            #expect(proposal.slackPlacement?.visibility == visibility)
+            #expect(resolved.facts["Visibility"] == word)
             #expect(resolved.destinationLabel == label)
+            #expect(proposal.slackWords == "\(label) · \(word) · Fixture Workspace")
+            #expect(resolved.destinationLabel?.contains(id) == false)
             // A person can decline a valid draft without a POST.
             try h.journal.decline(proposal.id, note: "Not today", at: h.clock.now)
             await #expect(throws: JournalError.transition) { try await h.handler.execute(proposal.id) }
@@ -154,8 +170,72 @@ struct SlackTests {
         let records = try deliverAll(h.journal)
         #expect(records.count == 6)
         #expect(records.allSatisfy { $0["subject"] == .string("signal:actor:\(person)") && !$0.canonical.contains("C0UNTRUSTED") })
-        #expect(try await h.fixture.calls().filter { $0["path"] == "/api/conversations.members" }.count == 3)
+        #expect(try await h.fixture.calls().filter { $0["path"] == "/api/conversations.members" }.count == 4)
         #expect(try await h.fixture.posts().isEmpty)
+    }
+
+    /// Names are read at intake, on that budget, and reused for ten minutes. A failed lookup still names the channel
+    /// id; it does not hide the destination or block approval. The words stay out of the Signal record.
+    @Test func namesAreResolvedAtIntakeCachedAndNeverHideAFailedLookup() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        try await h.channel(["id": "D0DANA", "is_im": .bool(true), "is_channel": .bool(false), "user": "U0OTHER",
+                             "is_member": .bool(true)])
+        let first = try await h.propose(channel: "D0DANA", thread: nil)
+        #expect(first.slackWords == "DM with Dana Scully · DM · Fixture Workspace")
+        #expect(slackApprovalTitle(words: first.slackWords, channel: "D0DANA") ==
+                "Post in Slack DM with Dana Scully · DM · Fixture Workspace")
+        let userReads = { try await h.fixture.calls().filter { $0["path"] == "/api/users.info" }.count }
+        #expect(try await userReads() == 1)
+        let second = try await h.propose(channel: "D0DANA", thread: nil)
+        #expect(second.slackWords == first.slackWords)
+        #expect(try await userReads() == 1)
+        let resolved = try await h.handler.resolve(first, model: nil)
+        #expect(resolved.destinationLabel == "DM with Dana Scully")
+        #expect(resolved.accountLabel == "fixture-user")
+        #expect(resolved.facts["Workspace"] == "Fixture Workspace")
+        #expect(resolved.facts["Visibility"] == "DM")
+        #expect(resolved.destinationLabel?.contains("D0DANA") == false)
+        #expect(resolved.accountLabel?.contains("U0PERSON") == false)
+        #expect(try await userReads() == 1)
+        let proposed = try #require(try h.journal.nextDelivery(person: person))
+        let record = String(decoding: proposed.bytes, as: UTF8.self)
+        #expect(!record.contains("Dana Scully") && !record.contains("Fixture Workspace") && !record.contains("DM with"))
+        h.clock.advance(601)
+        _ = try await h.propose(channel: "D0DANA", thread: nil)
+        #expect(try await userReads() == 2)
+
+        try await h.channel(["id": "D0SELF", "is_im": .bool(true), "is_channel": .bool(false), "user": "U0PERSON",
+                             "is_member": .bool(true)])
+        let selfDM = try await h.propose(channel: "D0SELF", thread: nil)
+        #expect(selfDM.slackWords == "DM with yourself · DM · Fixture Workspace")
+        #expect(try await userReads() == 2)
+
+        try await h.fixture.configure([
+            "members": .array(["U0PERSON", "U0FOX", "U0OTHER"].map(JSON.string)),
+            "users": .object(["U0FOX": .object(["real_name": "Fox Mulder"]), "U0OTHER": .object(["real_name": "Dana Scully"])]),
+        ])
+        try await h.channel(["id": "G0GROUP", "is_mpim": .bool(true), "is_channel": .bool(false), "name": "mpdm-secret",
+                             "is_member": .bool(true)])
+        let group = try await h.propose(channel: "G0GROUP", thread: nil)
+        #expect(group.slackWords == "Group DM with Fox Mulder, Dana Scully · group DM · Fixture Workspace")
+        #expect(group.slackWords?.contains("mpdm-secret") == false)
+        #expect(try await h.handler.resolve(group, model: nil).destinationLabel == "Group DM with Fox Mulder, Dana Scully")
+
+        try await h.fixture.configure(["names": "refuse"])
+        try await h.channel(["id": "D0GONE", "is_im": .bool(true), "is_channel": .bool(false), "user": "U0MISSING",
+                             "is_member": .bool(true)])
+        let unknown = try await h.propose(channel: "D0GONE", thread: nil)
+        #expect(unknown.slackWords == "unknown channel D0GONE · DM · Fixture Workspace")
+        #expect(slackApprovalTitle(words: nil, channel: "D0GONE") == "Post in Slack unknown channel D0GONE")
+        let frozen = try await h.handler.resolve(unknown, model: nil)
+        #expect(frozen.destinationLabel == "unknown channel D0GONE")
+        #expect(frozen.facts["Workspace"] == "Fixture Workspace")
+
+        try await h.channel(["id": "C0NONAME", "name": "", "is_member": .bool(true)])
+        let nameless = try await h.propose(channel: "C0NONAME", thread: nil)
+        #expect(nameless.slackWords == "unknown channel C0NONAME · public · Fixture Workspace")
+        #expect(try await h.handler.resolve(nameless, model: nil).destinationLabel == "unknown channel C0NONAME")
     }
 
     @Test func changedAccountWorkspaceVisibilityMembershipOrRootStopsTheWrite() async throws {
@@ -244,6 +324,28 @@ struct SlackTests {
         }
     }
 
+    /// Slack's missing_scope names the scope in `needed`. That name is the result the window shows; `provided` is not.
+    @Test func aMissingScopeNamesTheScopeSlackRequired() async throws {
+        let h = try SlackHarness()
+        try await h.register()
+        let named = try await h.propose()
+        try await h.approve(named)
+        try await h.fixture.configure(["post_mode": "refuse:missing_scope", "needed": "chat:write", "provided": "channels:read"])
+        #expect(try await h.handler.execute(named.id) == .failed(error: "missing_scope", confirmedBy: "reply"))
+        let outcome = try #require(h.journal.outcome(named.id))
+        #expect(outcome["result"] == "The token lacks the Slack scope chat:write.")
+        #expect(outcome["result"]?.stringValue?.contains("channels:read") == false)
+        let proposal = try #require(h.journal.proposal(named.id, at: h.clock.now))
+        #expect(ActionOutcome.describe(proposal, approval: nil, result: outcome)?.text ==
+                "Not posted: The token lacks the Slack scope chat:write.")
+        #expect(try await h.handler.reconcile(named.id) == .unknown)
+        try await h.fixture.configure(["needed": "not a scope"])
+        let unnamed = try await h.propose()
+        try await h.approve(unnamed)
+        #expect(try await h.handler.execute(unnamed.id) == .failed(error: "missing_scope", confirmedBy: "reply"))
+        #expect(h.journal.outcome(unnamed.id)?["result"] == "The token lacks a Slack scope. Check the scopes listed in Settings.")
+    }
+
     /// A token that may not post metadata is refused before the write: one POST, a definite failure, no read-back.
     @Test func refusedMetadataIsADefiniteFailure() async throws {
         let h = try SlackHarness()
@@ -310,7 +412,7 @@ struct SlackTests {
         // Another admitted client has its own budget.
         _ = try await h.propose(client: "other-client")
         // The window's Read again still has all of its reads.
-        #expect(try await h.handler.resolve(first, model: nil).facts["Visibility"] == "Public channel")
+        #expect(try await h.handler.resolve(first, model: nil).facts["Visibility"] == "public")
         h.clock.advance(601)
         _ = try await h.propose(client: "other-client")
         #expect(try await h.fixture.calls().suffix(2).map { $0["path"] } == ["/api/auth.test", "/api/conversations.info"])

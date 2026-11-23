@@ -221,7 +221,8 @@ final class RunHarness {
         journal = try Journal(path: root.appendingPathComponent("journal.sqlite").path, at: Date())
         checkouts = [CheckoutSettings(name: "signal", path: checkout.path)]
         environment = ["PATH": bin.path + ":/usr/bin:/bin", "HOME": root.path, "FAKE_LOG": log.path,
-                       "SECRET_LOOKING": "from-the-profile", "BEACON_SUPERVISOR": "leaked"]
+                       "PWD": root.path, "OLDPWD": "/tmp", "SECRET_LOOKING": "from-the-profile",
+                       "BEACON_SUPERVISOR": "leaked"]
         let runs = root.appendingPathComponent("runs")
         launcher = FakeLauncher(runs: runs)
         var holder: RunHarness?
@@ -333,6 +334,10 @@ struct RunTests {
         #expect(env["SECRET_LOOKING"] == "from-the-profile", "the login environment reaches the run")
         #expect(env["BEACON_SUPERVISOR"] == nil, "Beacon's own variables never do")
         #expect(env["PATH"] == h.environment["PATH"])
+        // getcwd is the checkout tether entered. $PWD must name it too: the login snapshot's PWD does not, and
+        // opencode's shell trusts $PWD. OLDPWD is not passed.
+        #expect(env["PWD"] == h.checkout.path)
+        #expect(env["OLDPWD"] == nil)
         // Once started, the launch (the environment) and the prompt are gone; the output stays, the person's alone.
         let directory = h.root.appendingPathComponent("runs/\(runner)")
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch").path))

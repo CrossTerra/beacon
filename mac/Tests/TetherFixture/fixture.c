@@ -138,7 +138,10 @@ int main(int argc, char **argv) {
         if (n < 0 || !getcwd(cwd, sizeof(cwd))) return 1;
         const char *marker = getenv("BEACON_SUPERVISOR");
         const char *extra = getenv("RUN_VAR");
-        printf("cwd=%s\nprompt=%s\nmarker=%s\nrun_var=%s\n", cwd, prompt, marker ? marker : "", extra ? extra : "");
+        const char *pwd = getenv("PWD");
+        const char *old = getenv("OLDPWD");
+        printf("cwd=%s\npwd=%s\noldpwd=%s\nprompt=%s\nmarker=%s\nrun_var=%s\n",
+               cwd, pwd ? pwd : "", old ? old : "", prompt, marker ? marker : "", extra ? extra : "");
         fprintf(stderr, "runner stderr\n");
         if (fflush(stdout) != 0 || fflush(stderr) != 0) return 1;
         int code;
