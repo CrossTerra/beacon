@@ -163,6 +163,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.restartServices() }
             }
             return
+        case .runPrepared(let id, let pid):
+            runs?.prepared(id, pid: pid)
+            return
         case .runStarted(let id, let pid):
             runs?.started(id, pid: pid)
             return

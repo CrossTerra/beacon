@@ -114,16 +114,17 @@ final class ApprovalService: ObservableObject {
                 return
             }
             let cli = bundle.bundleURL.appendingPathComponent("Contents/Helpers/beacon").path
-            guard let client = ClientTrust.requirement(of: cli) else {
+            guard let clientRequirement = ClientTrust.requirement(of: cli) else {
                 status = "Not accepting proposals: the bundled beacon CLI is not signed"
                 return
             }
-            let server = ProposalServer(path: paths.socket.path, clients: [AdmittedClient(name: "beacon-act", requirement: client)],
+            let client = AdmittedClient(name: "beacon-act", requirement: clientRequirement)
+            let server = ProposalServer(path: paths.socket.path, clients: [client],
                                         book: journal, enabled: [], attribution: runs.attribution,
                                         slackLookup: posts.place)
             // scripts/install.sh quits a running Beacon through the bundled CLI, as the menu's Quit does, without
             // asking for permission to control the app.
-            server.quit = (client: "beacon-act", action: {
+            server.quit = (client: client, action: {
                 DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
             })
             try server.start()

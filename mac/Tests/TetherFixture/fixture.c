@@ -95,9 +95,11 @@ int main(int argc, char **argv) {
             {.argv = detach},                                  // a runner tree: never restarted
         };
         char *env[] = {"PATH=/usr/bin:/bin", NULL};
+        unsigned ack_ms = argc > 3 && strcmp(argv[3], "short-ack") == 0 ? 1000 : 30000;
         // "legacy": as with the retired LaunchAgent installed, no fixed service at all; runs only.
-        if (argc > 3 && strcmp(argv[3], "legacy") == 0) return tether_run(STDIN_FILENO, dir, specs, 0, env, 1000, TETHER_LEGACY);
-        return tether_run(STDIN_FILENO, dir, specs, 3, env, 1000, TETHER_ACTIVE);
+        if (argc > 3 && strcmp(argv[3], "legacy") == 0)
+            return tether_run(STDIN_FILENO, dir, specs, 0, env, 1000, ack_ms, TETHER_LEGACY);
+        return tether_run(STDIN_FILENO, dir, specs, 3, env, 1000, ack_ms, TETHER_ACTIVE);
     }
     record();
     if (strcmp(argv[1], "idle") == 0) {

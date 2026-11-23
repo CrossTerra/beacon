@@ -10,8 +10,8 @@ in Settings, it merges approved pull requests through that account's API origin.
 destinations and posts approved messages at `https://slack.com`. With Signal added, it sends its journal's
 records to Signal's record API with its app actor's key. Those are its only network connections, and
 `beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
-collector as the same user while the app is open. The app and `tether` share one socket pair that carries only a
-run's id when the app starts or stops an approved agent run, never a path, secret or item content.
+collector as the same user while the app is open. The app and `tether` share one socket pair for service status and
+approved-run control: run ids, process group ids, acknowledgements and outcomes, never paths, secrets or item content.
 
 With a checkout in Settings, an approved `agent.run` starts opencode in that checkout through `tether`
 ([agent runs](approvals.md#agent-runs)). The run is the person's agent, not part of Beacon: it works with the
@@ -174,7 +174,10 @@ checkout's opencode configuration does not deny.
     ([approvals](approvals.md)). The app writes the client's trust (`act.json`, its own designated requirement)
     on first launch and refuses to open the socket if the file names another signature. An approval is one
     click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
-    proposal once. A run's snapshot is dropped when its supervisor stops. After an unconfirmed stop, known run
+     proposal once. Tether resumes an approved run only after Beacon acknowledges recording its process group. Without
+     the acknowledgement tether kills the suspended process. The installer CLI must match its code requirement and
+     be positively identified as external to use `quit`; runs, their known descendants and unclassified peers cannot.
+     A run's snapshot is dropped when its supervisor stops. After an unconfirmed stop, known run
     groups keep their ownership, and other peers cannot create, read or withdraw proposals until the sweep and
     group checks confirm recovery. Quit and relaunch expire every approval that has no durable start, and a start
     without a result is never dispatched again. The journal and outbox hold prompts and messages in plain text in

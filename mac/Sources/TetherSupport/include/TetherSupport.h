@@ -5,10 +5,12 @@
 
 // Lease bytes from tether to the app. Half-closing the app's end asks for a stop, and the
 // kernel closes it if the app dies. The app writes only runner commands, one per line:
-//   "L <id>\n" launches the run described in <state>/runs/<id>/, "K <id>\n" stops it.
+//   "L <id>\n" prepares the run described in <state>/runs/<id>/, "A <id>\n" acknowledges that Beacon
+//   recorded its process group, and "K <id>\n" stops it.
 // tether answers each run with lines that start with TETHER_LINE:
-//   "#started <id> <pid>", "#failed <id> <errno>" (nothing was started; ESTALE when the working
-//   directory is not the one the launch file pins),
+//   "#prepared <id> <pid>" (suspended; the pid is also the group id), "#started <id> <pid>" (resumed
+//   after acknowledgement), "#failed <id> <errno>" (never resumed; ESTALE for a changed checkout,
+//   ETIMEDOUT for a missing acknowledgement),
 //   "#exited <id> <status>" (the exit code, or 128 + the signal), and
 //   "#gone <id>" once every process of the run is gone.
 #define TETHER_ACTIVE 'A'  // services started
@@ -40,10 +42,9 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
 pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
                       int cwd);
 
-// As tether_spawn_at, but started suspended when `held` is not NULL. `*held` is 1 when the process is suspended
-// and must be resumed with tether_resume; 0 when it is already running (the spawn could not suspend it).
-pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[], int input, int output, int error,
-                        int cwd, int *held);
+// As tether_spawn_at, but the new group leader cannot run until tether_resume. No unsuspended fallback.
+pid_t tether_spawn_suspended(const char *image, char *const argv[], char *const env[], int input, int output,
+                             int error, int cwd);
 // Resumes a process started suspended. 0 on success.
 int tether_resume(pid_t pid);
 

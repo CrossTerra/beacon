@@ -1,6 +1,5 @@
 import Combine
 import Darwin
-import Darwin
 import Foundation
 
 /// Why a run is not offered, or was stopped before launch. Lowercase codes, as Signal records them.
@@ -26,12 +25,14 @@ public enum RunRefusal: String, Error, Sendable {
 }
 
 /// Starts and stops runs. The app's is `tether`; tests use a stand-in that keeps the same contract: a launch reads
-/// `runs/<id>/launch` and `prompt`, and the answers come back through `RunHandler.started`, `notStarted`, `exited`
-/// and `gone`.
+/// `runs/<id>/launch` and `prompt`. The launcher reports `prepared` while the process is suspended, and only
+/// reports `started` after it receives the acknowledgement and resumes the process.
 @MainActor
 public protocol RunLauncher: AnyObject {
     /// False if the request could not be made: nothing was started.
     func launch(_ runnerID: String) -> Bool
+    /// Tell the launcher it may resume this run: its group is registered. False if the command could not be sent.
+    func acknowledgeLaunch(_ runnerID: String) -> Bool
     /// False if the request could not be made (the supervisor is gone): nothing was asked to stop.
     @discardableResult
     func stop(_ runnerID: String) -> Bool
@@ -71,6 +72,7 @@ public final class RunHandler: ObservableObject, ActionResolver {
     struct Run {
         let proposal: String
         let checkout: String
+        var leader: pid_t?
         var exited = false
         var stopReason: String?
     }
@@ -246,13 +248,19 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     // MARK: The launcher's answers
 
-    /// The run started as the leader of process group `pid`. Its `beacon act` calls are attributed to it from now
-    /// until it is gone (tether keeps the leader unreaped until then, so the group id is not reused).
-    public func started(_ runner: String, pid: pid_t) {
-        guard let id = pending.removeValue(forKey: runner) else { return }
-        forgetLaunch(runner)
-        // Before anything else: the run's group is the leader's pid, and a connection from it is already a run's.
+    /// The group leader is suspended. Register the group before letting tether resume it. This is not evidence
+    /// of launch: a lost acknowledgement or Quit leaves the run pending until tether reports the result.
+    public func prepared(_ runner: String, pid: pid_t) {
+        guard !quitting, let launcher, pending[runner] != nil, let run = runs[runner], run.leader == nil, pid > 1 else { return }
+        runs[runner]?.leader = pid
         attribution.add(leader: pid, runner: runner)
+        _ = launcher.acknowledgeLaunch(runner)
+    }
+
+    /// Tether resumed the process. Its group is already registered and stays so until the run is gone.
+    public func started(_ runner: String, pid: pid_t) {
+        guard runs[runner]?.leader == pid, let id = pending.removeValue(forKey: runner) else { return }
+        forgetLaunch(runner)
         record { try journal.result(id, executed: true, confirmedBy: "reply", fields: launched(id), at: now()) }
         guard !quitting else {
             // The launch was answered after Quit began: it started, and tether is stopping it with everything else.
@@ -268,12 +276,14 @@ public final class RunHandler: ObservableObject, ActionResolver {
         guard let id = pending.removeValue(forKey: runner) else { return }
         forgetLaunch(runner)
         runs[runner] = nil
+        attribution.remove(runner: runner)
         // ESTALE: the directory at the checkout's path is not the one approved.
         let refusal: RunRefusal = code == ESTALE ? .checkoutChanged : .launchFailed
+        let reason = code == ETIMEDOUT ? "Beacon did not acknowledge the suspended launch in time."
+            : "tether did not start opencode (error \(code))."
         record {
             try journal.result(id, executed: false, confirmedBy: "reply",
-                               fields: ["error": .string(refusal.rawValue),
-                                        "result": .string("tether did not start opencode (error \(code)).")], at: now())
+                               fields: ["error": .string(refusal.rawValue), "result": .string(reason)], at: now())
         }
         release(id)
     }
@@ -341,8 +351,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
     // MARK: Quit and relaunch
 
     /// Quit: every run still working is recorded as stopped at Quit; tether then stops them all. A launch with no
-    /// answer yet is recorded the same way if tether answers `started` before the session ends, and otherwise is
-    /// left to the next launch's recovery.
+    /// answer yet is recorded the same way if tether already resumed it and answers `started` before the session
+    /// ends. Do not acknowledge any more suspended launches.
     public func beginShutdown() {
         quitting = true
         watch?.invalidate()
@@ -426,8 +436,8 @@ public final class RunHandler: ObservableObject, ActionResolver {
 
     /// After a relaunch, once tether has stopped anything a crashed session left. Every run directory loses its
     /// `launch` and `prompt` (a crash can leave them). A launched run that was not closed failed as `interrupted`
-    /// and is closed now. A start whose launch is unknown is read back: tether writes `started`, with the pid, only
-    /// after it started the run, so with it the run started, and without it nothing did.
+    /// and is closed now. A start whose launch is unknown is read back from tether's `started` marker, written
+    /// after it resumes the process. A suspended launch that timed out never writes the marker.
     func recover() {
         let directories = (try? FileManager.default.contentsOfDirectory(atPath: runsDirectory.path)) ?? []
         for runner in directories where pending[runner] == nil { forgetLaunch(runner) }
@@ -580,13 +590,21 @@ public final class RunAttribution: @unchecked Sendable {
         }
     }
 
+    struct ProcessInfo: Sendable {
+        let group: pid_t
+        let parent: pid_t
+    }
+
     private let lock = NSLock()
+    private let processInfo: @Sendable (pid_t) -> ProcessInfo?
     private var leaders: [pid_t: String] = [:]
     private var awaitingSweep = true
     // A connection admitted as external before an unconfirmed stop must reconnect after the sweep.
     private var epoch: UInt64 = 0
 
-    public init() {}
+    public convenience init() { self.init(processInfo: Self.kernelProcessInfo) }
+
+    init(processInfo: @escaping @Sendable (pid_t) -> ProcessInfo?) { self.processInfo = processInfo }
 
     func add(leader: pid_t, runner: String) {
         guard leader > 0 else { return }
@@ -620,35 +638,31 @@ public final class RunAttribution: @unchecked Sendable {
 
     func peer(of pid: pid_t) -> Peer {
         lock.withLock {
-            guard pid > 0 else { return .unknown }
-            let group = getpgid(pid)
-            guard group > 0 else { return .unknown }
-            if let runner = leaders[group] { return .run(runner) }
-            if launchedAncestor(of: pid) { return .unverifiedRun }
-            return awaitingSweep ? .unknown : .external(epoch)
+            guard pid > 1, let process = processInfo(pid), process.group > 0 else { return .unknown }
+            if let runner = leaders[process.group] { return .run(runner) }
+            if leaders[pid] != nil { return .unverifiedRun }
+            // A descendant that left its group's boundaries is not a verified run and is not an external client.
+            // Do not classify a peer as external if the ancestry could not be inspected.
+            var seen: Set<pid_t> = [pid]
+            var parent = process.parent
+            for _ in 0..<64 {
+                if parent == 1 { return awaitingSweep ? .unknown : .external(epoch) }
+                guard parent > 1, seen.insert(parent).inserted, let ancestor = processInfo(parent) else { break }
+                if leaders[parent] != nil || leaders[ancestor.group] != nil { return .unverifiedRun }
+                parent = ancestor.parent
+            }
+            return .unknown
         }
     }
 
-    /// Whether a Beacon-launched process is an ancestor of `pid`: a run's descendant that left its group before the
-    /// group was recorded. Bounded, and it never follows a process that has exited.
-    private func launchedAncestor(of pid: pid_t) -> Bool {
-        var seen = Set<pid_t>()
-        var current = pid
-        for _ in 0..<16 {
-            guard current > 1, seen.insert(current).inserted else { return false }
-            let parent = ppid(of: current)
-            guard parent > 1 else { return false }
-            if let runner = leaders[getpgid(parent)], leaders[parent] == nil || leaders[parent] == runner { return true }
-            current = parent
-        }
-        return false
-    }
-
-    private func ppid(of pid: pid_t) -> pid_t {
-        var info = proc_bsdinfo()
-        let size = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
-        guard size == MemoryLayout<proc_bsdinfo>.size else { return 0 }
-        return pid_t(info.pbi_ppid)
+    private static func kernelProcessInfo(_ pid: pid_t) -> ProcessInfo? {
+        // Read only process-table metadata. Unlike proc_pidinfo, this can also see the ancestry through a
+        // differently owned process, without reading any command, environment or credential.
+        var name = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc(), size = MemoryLayout<kinfo_proc>.size
+        guard sysctl(&name, u_int(name.count), &info, &size, nil, 0) == 0, size == MemoryLayout<kinfo_proc>.size,
+              info.kp_proc.p_pid == pid, info.kp_proc.p_stat != SZOMB else { return nil }
+        return ProcessInfo(group: info.kp_eproc.e_pgid, parent: info.kp_eproc.e_ppid)
     }
 
     func canAccessProposals(_ peer: Peer) -> Bool {

@@ -6,57 +6,26 @@ import Testing
 
 /// The test process connects to its own listener, so the kernel's peer check runs for real: the admitted
 /// requirement is this process's own cdhash.
-/// A process in its own process group, parented by this one, that exits when its parent does. With `spawnChild`,
-/// it first starts another such process of its own and writes that child's pid, so a test can see a descendant
-/// that left a run's group.
-func spawnGroupLeader(spawnChild: Bool = false) -> (pid: pid_t, child: pid_t) {
-    let pipe = Pipe()
-    var pid: pid_t = 0
-    var actions: posix_spawn_file_actions_t?
-    var attrs: posix_spawnattr_t?
-    guard posix_spawn_file_actions_init(&actions) == 0, posix_spawnattr_init(&attrs) == 0,
-          posix_spawnattr_setflags(&attrs, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)) == 0,
-          posix_spawnattr_setpgroup(&attrs, 0) == 0,
-          posix_spawn_file_actions_adddup2(&actions, pipe.fileHandleForWriting.fileDescriptor, STDOUT_FILENO) == 0 else { return (-1, 0) }
-    defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attrs) }
-    let helper = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("GroupLeader/main.swift").path
-    let binary = FileManager.default.temporaryDirectory.appendingPathComponent("group-leader").path
-    if !FileManager.default.isExecutableFile(atPath: binary) {
-        let compiling = Process()
-        compiling.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        compiling.arguments = ["swiftc", "-parse-as-library", "-O", "-o", binary, helper]
-        try? compiling.run(); compiling.waitUntilExit()
-    }
-    let argv: [UnsafeMutablePointer<CChar>?] = [strdup(binary), spawnChild ? strdup("child") : nil, nil]
-    defer { argv.forEach { free($0) } }
-    let spawned = posix_spawn(&pid, binary, &actions, &attrs, argv, environ)
-    guard spawned == 0 else { fputs("posix_spawn: \(spawned) helper \(helper)\n", stderr); return (-1, 0) }
-    try? pipe.fileHandleForWriting.close()
-    var child: pid_t = 0
-    if spawnChild {
-        let reading = pipe.fileHandleForReading
-        var waited = pollfd(fd: reading.fileDescriptor, events: Int16(POLLIN), revents: 0)
-        var bytes = [UInt8](repeating: 0, count: 64), read = 0
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline && !bytes[..<read].contains(10) && poll(&waited, 1, 1_000) > 0 {
-            let n = Darwin.read(reading.fileDescriptor, &bytes[read], bytes.count - read)
-            if n <= 0 { break }
-            read += n
-        }
-        if let line = String(bytes: bytes[..<read], encoding: .utf8) {
-            child = pid_t(line.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-            if child == 0 { fputs("group-leader said: \(line.debugDescription)\n", stderr) }
-        } else {
-            fputs("group-leader said nothing in 30 s\n", stderr)
-        }
-    }
-    return (pid, child)
-}
-
 func selfRequirement() -> String {
     var buffer = [CChar](repeating: 0, count: 256)
     precondition(beacon_self_cdhash_requirement(&buffer, buffer.count))
     return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+}
+
+/// Vary the ancestry returned for the signed test client without moving the entire test process between groups.
+private struct TestProcesses {
+    let attribution: RunAttribution
+    private let table: Locked<[pid_t: RunAttribution.ProcessInfo]>
+
+    init() {
+        let table = Locked([getpid(): RunAttribution.ProcessInfo(group: 10, parent: 1)])
+        self.table = table
+        attribution = RunAttribution(processInfo: { pid in table.withLock { $0[pid] } })
+    }
+
+    func set(group: pid_t, parent: pid_t = 1, for pid: pid_t = getpid()) {
+        table.withLock { $0[pid] = .init(group: group, parent: parent) }
+    }
 }
 
 final class Clock: @unchecked Sendable {
@@ -115,17 +84,11 @@ final class Client {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
         guard connected == 0 else { throw ServerError.system(errno) }
-        var timeout = timeval(tv_sec: 8, tv_usec: 0)
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-        var peer = pid_t(0), len = socklen_t(MemoryLayout<pid_t>.size)
-        getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &len)
-        pid = peer
     }
-
-    /// The connected process, from the kernel.
-    private(set) var pid: pid_t = 0
 
     deinit { close(fd) }
 
@@ -210,20 +173,17 @@ struct ProposalServerTests {
     /// A proposal from a process in a run's group is that run's: verified, with its runner id, and only that run
     /// reads it. Bosun's proposals are not the run's to read or withdraw, nor another run's.
     @Test func aRunsProposalsAreItsOwn() throws {
-        let attribution = RunAttribution()
-        #expect(attribution.completeSweep())
+        let processes = TestProcesses(), attribution = processes.attribution
+        try #require(attribution.completeSweep())
         let h = try Harness(enabled: [.githubMerge], attribution: attribution)
         let bosun = try h.connect()
         let bosunID = try #require(bosun.call(mergeProposal())?["id"]?.stringValue)
 
         let runner = "run_01m7x1v080ec1r60r30c1g60r3"
-        let (group, _) = spawnGroupLeader()
-        try #require(group > 0)
-        defer { kill(group, SIGKILL); waitpid(group, nil, 0) }
-        attribution.add(leader: group, runner: runner)
-        // The connection is resolved per request, so recording the group after it connected still makes it the run's.
+        // The launch handshake records the group before the run can connect.
+        attribution.add(leader: 11, runner: runner)
+        processes.set(group: 11)
         let run = try h.connect()
-        #expect(setpgid(run.pid, group) == 0)
         #expect(run.call(.object(["op": "get", "id": .string(bosunID)]))?["error"] == "not_found")
         #expect(run.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
         let runID = try #require(run.call(mergeProposal(number: 141))?["id"]?.stringValue)
@@ -231,68 +191,28 @@ struct ProposalServerTests {
         #expect(stored.runner == runner)
         #expect(run.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
 
-        let (otherGroup, _) = spawnGroupLeader()
-        try #require(otherGroup > 0)
-        defer { kill(otherGroup, SIGKILL); waitpid(otherGroup, nil, 0) }
-        attribution.add(leader: otherGroup, runner: "run_01m7x1v080ec1r60r30c1g60r4")
+        attribution.add(leader: 12, runner: "run_01m7x1v080ec1r60r30c1g60r4")
+        processes.set(group: 12)
         let other = try h.connect()
-        #expect(setpgid(other.pid, otherGroup) == 0)
         #expect(other.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
-        #expect(setpgid(other.pid, 0) == 0) // Back to its own group: Bosun again.
+        processes.set(group: 10)
         #expect(bosun.call(.object(["op": "get", "id": .string(runID)]))?["error"] == "not_found")
         #expect(bosun.call(.object(["op": "get", "id": .string(bosunID)]))?["status"] == "pending")
 
-        // A connection from a known group still belongs to that run while the sweep is pending: the group was recorded
-        // before the session ended, and the connection is resolved per request.
+        // A fresh peer from a known group keeps that ownership while the sweep is pending.
         attribution.sessionEnded(verified: false)
-        attribution.add(leader: group, runner: runner)
+        processes.set(group: 11)
         let duringSweep = try h.connect()
-        #expect(setpgid(duringSweep.pid, group) == 0)
         #expect(duringSweep.call(.object(["op": "get", "id": .string(runID)]))?["status"] == "pending")
         #expect(duringSweep.call(.object(["op": "withdraw", "id": .string(bosunID)]))?["error"] == "not_found")
         let anotherID = try #require(duringSweep.call(mergeProposal(number: 142))?["id"]?.stringValue)
         #expect(h.queue.sync { h.book.proposal(anotherID, at: h.clock.now)?.runner } == runner)
     }
 
-    /// #38 with #40: a Slack proposal's intake lookup is asynchronous. If recovery begins while it is in flight, the
-    /// connection is no longer attributable and nothing is stored when the lookup returns.
-    /// Bugbot on #38: a connection is resolved per request, so one admitted before its run's group was recorded is
-    /// that run's once it is, and cannot act as Bosun in between. A process in an unrecorded group whose parent is a
-    /// run Beacon launched is neither the run nor Bosun.
-    @Test func aRunCannotActAsBosunBeforeItsGroupIsRecorded() throws {
-        let attribution = RunAttribution()
-        #expect(attribution.completeSweep())
-        let h = try Harness(enabled: [.githubMerge], attribution: attribution)
-        let bosun = try h.connect()
-        let bosunID = try #require(bosun.call(mergeProposal())?["id"]?.stringValue)
-
-        let runner = "run_01m7x1v080ec1r60r30c1g60r3"
-        let (child, _) = spawnGroupLeader()
-        try #require(child > 0)
-        let deadline = Date().addingTimeInterval(30)
-        while Date() < deadline {
-            var info = proc_bsdinfo()
-            if proc_pidinfo(child, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size,
-               info.pbi_pgid == UInt32(child) { break }
-            usleep(10_000)
-        }
-        // Before the group is recorded, the child is an external client, the same as Bosun.
-        #expect(attribution.peer(of: child) == .external(0))
-        #expect(attribution.canAccessProposals(attribution.peer(of: child)))
-        attribution.add(leader: child, runner: runner)
-        #expect(attribution.peer(of: child) == .run(runner))
-        // A descendant that left the group before it was recorded is neither the run nor Bosun.
-        let (run, grandchild) = spawnGroupLeader(spawnChild: true)
-        try #require(run > 0 && grandchild > 0)
-        attribution.add(leader: run, runner: runner)
-        #expect(attribution.peer(of: grandchild) == .unverifiedRun)
-        #expect(!attribution.canAccessProposals(attribution.peer(of: grandchild)))
-        for pid in [child, run, grandchild] { kill(pid, SIGKILL); waitpid(pid, nil, 0) }
-        #expect(bosun.call(.object(["op": "get", "id": .string(bosunID)]))?["status"] == "pending")
-    }
-
+    /// A Slack proposal's intake lookup is asynchronous. If recovery begins while it is in flight, the connection
+    /// is no longer attributable and nothing is stored when the lookup returns.
     @Test func recoveryDuringASlackLookupStoresNothing() throws {
-        let attribution = RunAttribution()
+        let attribution = TestProcesses().attribution
         #expect(attribution.completeSweep())
         let entered = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
         let h = try Harness(enabled: [.slackPost], attribution: attribution, slackLookup: { _, _ in
@@ -310,7 +230,7 @@ struct ProposalServerTests {
     }
 
     @Test func unknownPeersCannotUseProposalOwnershipUntilTheSweep() throws {
-        let attribution = RunAttribution()
+        let attribution = TestProcesses().attribution
         let h = try Harness(attribution: attribution)
         let beforeFirstSweep = try h.connect()
         #expect(beforeFirstSweep.call(mergeProposal())?["error"] == "busy")
@@ -336,22 +256,11 @@ struct ProposalServerTests {
         #expect(waiter.receive()?["error"] == "busy", "a wait in flight cannot see the result during recovery")
         #expect(h.queue.sync { h.book.pendingCount(client: nil, at: h.clock.now) } == 1)
 
-        let (fresh, _) = spawnGroupLeader()
-        #expect(fresh > 0)
-        defer { kill(fresh, SIGKILL); waitpid(fresh, nil, 0) }
         #expect(attribution.completeSweep())
-        // The sweep cleared the old epoch; join a group that is not one, as a connection that outlasted the sweep.
-        let (stale, _) = spawnGroupLeader()
-        try #require(stale > 0)
-        defer { kill(stale, SIGKILL); waitpid(stale, nil, 0) }
-        attribution.sessionEnded(verified: false)
-        for peer in [beforeFirstSweep, unclassified, bosun] { #expect(setpgid(peer.pid, stale) == 0) }
         // None of the old sockets can acquire Bosun's identity by outlasting the sweep.
         for peer in [beforeFirstSweep, unclassified, bosun] {
             #expect(peer.call(get)?["error"] == "busy")
         }
-        #expect(setpgid(0, fresh) == 0) // This process, after the end: a fresh external client.
-        #expect(attribution.completeSweep()) // The second end above started another sweep; finish it.
         let reconnected = try h.connect()
         #expect(reconnected.call(get)?["status"] == "pending")
         #expect(reconnected.call(withdraw)?["status"] == "withdrawn")
@@ -377,41 +286,59 @@ struct ProposalServerTests {
         #expect(reopened.proposal(fromRun.id, at: t)?.runner == "run_01m7x1v080ec1r60r30c1g60r3")
     }
 
-    /// `quit` answers only the client the app names, and only once the app has set what quitting does.
-    @Test func quitIsForTheNamedClientOnly() throws {
-        let h = try Harness()
+    @Test func quitRequiresTheVerifiedInstallerCLIIdentity() throws {
+        let attribution = TestProcesses().attribution
+        try #require(attribution.completeSweep())
+        let clientIdentity = AdmittedClient(name: "beacon-act", requirement: selfRequirement())
+        let h = try Harness(clients: [clientIdentity], attribution: attribution)
         let client = try h.connect()
         #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        let asked = NSLock()
-        nonisolated(unsafe) var quits = 0
-        h.server.quit = (client: "someone-else", action: { asked.withLock { quits += 1 } })
+        let quits = Locked(0)
+        // The name alone is not the identity.
+        h.server.quit = (client: .init(name: "beacon-act", requirement: "identifier \"dev.beacon.other\""),
+                         action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        h.server.quit = (client: clientIdentity, action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit", "now": .bool(true)]))?["error"] == "invalid")
-        #expect(asked.withLock { quits } == 0)
+        #expect(quits.withLock { $0 } == 0)
         #expect(client.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
-        #expect(asked.withLock { quits } == 1)
+        // Quit replies before asking the app to terminate.
+        #expect(h.queue.sync { quits.withLock { $0 } } == 1)
     }
 
-    /// A run Beacon launched connects with the same CLI, but cannot quit the app that supervises it. The install
-    /// script can, also while recovery has not yet attributed its peers.
-    @Test func aRunCannotQuitTheApp() throws {
-        let attribution = RunAttribution()
+    /// Only an explicitly external peer may quit, even when all peers satisfy the installer's signature.
+    @Test func runsEscapedDescendantsAndUnknownPeersCannotQuit() throws {
+        let processes = TestProcesses(), attribution = processes.attribution
         let h = try Harness(attribution: attribution)
-        let asked = NSLock()
-        nonisolated(unsafe) var quits = 0
-        h.server.quit = (client: "beacon-act", action: { asked.withLock { quits += 1 } })
+        let quits = Locked(0)
+        h.server.quit = (client: .init(name: "beacon-act", requirement: selfRequirement()), action: { quits.withLock { $0 += 1 } })
+        let quit: JSON = .object(["op": "quit"])
+        let denied: JSON = .object(["error": "invalid", "field": "/op"])
         let beforeSweep = try h.connect()
-        #expect(beforeSweep.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
-        #expect(attribution.completeSweep())
-        let (group, _) = spawnGroupLeader()
-        try #require(group > 0)
-        defer { kill(group, SIGKILL); waitpid(group, nil, 0) }
-        attribution.add(leader: group, runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        #expect(beforeSweep.call(quit) == denied)
+        try #require(attribution.completeSweep())
+        #expect(beforeSweep.call(quit) == denied, "an unknown connection must reconnect after the sweep")
+        let external = try h.connect()
+        #expect(external.call(quit) == .object(["status": "quitting"]))
+
+        attribution.add(leader: 11, runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        processes.set(group: 11)
         let run = try h.connect()
-        #expect(setpgid(run.pid, group) == 0)
-        #expect(run.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        #expect(asked.withLock { quits } == 1)
+        #expect(run.call(quit) == denied)
+        let parent = getpid() == 11 ? pid_t(12) : pid_t(11)
+        processes.set(group: 11, for: parent)
+        processes.set(group: 13, parent: parent)
+        #expect(attribution.peer(of: getpid()) == .unverifiedRun)
+        let escaped = try h.connect()
+        #expect(escaped.call(quit) == denied)
+        #expect(escaped.call(mergeProposal())?["error"] == "busy")
+        #expect(external.call(quit) == denied, "ancestry is checked again on an already-admitted socket")
+
+        // A failed ancestry probe is not proof that a process is external.
+        processes.set(group: 13, parent: getpid())
+        #expect(attribution.peer(of: getpid()) == .unknown)
+        #expect(try h.connect().call(quit) == denied)
+        #expect(h.queue.sync { quits.withLock { $0 } } == 1)
     }
 
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {

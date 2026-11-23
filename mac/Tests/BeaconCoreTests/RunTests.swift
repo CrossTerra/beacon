@@ -53,16 +53,18 @@ sys.exit(9)
 """#
 
 /// tether's side of a run, in-process: reads `runs/<id>/launch` and `prompt`, opens the pinned directory and refuses
-/// it with ESTALE unless its device and inode match, starts the run in it as the leader of a new process group with
-/// its output and errors beside them, writes `started`, reports its exit, kills what is left of its group and
-/// reports it gone. `stop` sends TERM to the group, then KILL after half a second.
+/// it with ESTALE unless its device and inode match, and prepares the suspended group leader. Once acknowledged it
+/// resumes, writes `started`, and reports its exit and cleanup. `stop` sends TERM, then KILL after half a second.
 @MainActor
 final class FakeLauncher: RunLauncher {
     let runs: URL
     weak var handler: RunHandler?
     var refuse = false
     var silent = false
+    var onAcknowledge: ((String, pid_t) -> Void)?
+    private(set) var acknowledgements: [String] = []
     private(set) var pids: [String: pid_t] = [:]
+    private var suspended: Set<String> = []
 
     init(runs: URL) { self.runs = runs }
 
@@ -88,17 +90,34 @@ final class FakeLauncher: RunLauncher {
         let output = open(directory.appendingPathComponent("output").path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         let errors = open(directory.appendingPathComponent("errors").path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
         let cArgs = argv.map { strdup($0) } + [nil], cEnv = env.map { strdup($0) } + [nil]
-        let pid = tether_spawn_at(argv[0], cArgs, cEnv, input, output, errors, cwd)
+        let pid = tether_spawn_suspended(argv[0], cArgs, cEnv, input, output, errors, cwd)
+        let code = errno
         cArgs.forEach { free($0) }
         cEnv.forEach { free($0) }
         [input, output, errors, cwd].forEach { close($0) }
-        if pid > 0 { try? Data("\(pid)\n".utf8).write(to: directory.appendingPathComponent("started")) }
         guard pid > 0 else {
-            let code = errno
             Task { @MainActor in self.handler?.notStarted(runner, errno: code) }
             return true
         }
         pids[runner] = pid
+        suspended.insert(runner)
+        Task { @MainActor in self.handler?.prepared(runner, pid: pid) }
+        return true
+    }
+
+    func acknowledgeLaunch(_ runner: String) -> Bool {
+        acknowledgements.append(runner)
+        if silent { return true }
+        guard let pid = pids[runner], suspended.remove(runner) != nil else { return false }
+        onAcknowledge?(runner, pid)
+        if tether_resume(pid) != 0 {
+            let code = errno
+            stopSuspended(pid)
+            pids[runner] = nil
+            Task { @MainActor in self.handler?.notStarted(runner, errno: code) }
+            return true
+        }
+        try? Data("\(pid)\n".utf8).write(to: runs.appendingPathComponent(runner).appendingPathComponent("started"))
         Task { @MainActor in self.handler?.started(runner, pid: pid) }
         Thread.detachNewThread { [weak self] in
             var status: Int32 = 0
@@ -120,13 +139,34 @@ final class FakeLauncher: RunLauncher {
     func stop(_ runner: String) -> Bool {
         guard !refuseStop else { return false }
         guard let pid = pids[runner] else { return true }
+        if suspended.remove(runner) != nil {
+            stopSuspended(pid)
+            pids[runner] = nil
+            handler?.notStarted(runner, errno: ECANCELED)
+            return true
+        }
         killpg(pid, SIGTERM)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { killpg(pid, SIGKILL) }
         return true
     }
 
     /// Quit: every group is killed, as tether's cleanup does.
-    func stopAll() { pids.values.forEach { killpg($0, SIGKILL) } }
+    func stopAll() {
+        for (runner, pid) in pids {
+            if suspended.remove(runner) != nil {
+                stopSuspended(pid)
+                pids[runner] = nil
+                handler?.notStarted(runner, errno: ECANCELED)
+            } else {
+                killpg(pid, SIGKILL)
+            }
+        }
+    }
+
+    private func stopSuspended(_ pid: pid_t) {
+        kill(pid, SIGKILL)
+        while waitpid(pid, nil, 0) < 0 && errno == EINTR {}
+    }
 }
 
 final class SwapBox: @unchecked Sendable {
@@ -256,11 +296,17 @@ struct RunTests {
         #expect(resolved.destination["checkout_id"]?.stringValue?.hasPrefix("vol:") == true)
         #expect(resolved.destinationLabel == "signal · main · \(h.checkout.path)")
         #expect(resolved.facts["Runs as"]?.contains("--auto") == true)
+        h.launcher.onAcknowledge = { [weak h] runner, pid in
+            #expect(h?.handler.attribution.peer(of: pid) == .run(runner))
+            #expect(h?.journal.proposal(id, at: Date())?.status == .started)
+            #expect(h?.calls == 0, "the runner has not executed yet")
+        }
         try await h.approve(id)
         try await h.handler.execute(id)
         try await h.until("the run to end") { !h.handler.isRunning(id) && h.journal.runnerState(id) == "runner_closed" }
 
         let runner = h.journal.runnerID(id)!
+        #expect(h.launcher.acknowledgements == [runner])
         let records = try h.records(id)
         #expect(records.map { $0["type"]!.stringValue! } == [
             "app.action.proposed", "app.action.approved", "app.action.started", "app.action.executed",
@@ -291,6 +337,36 @@ struct RunTests {
         #expect(h.handler.claim(try FrozenApproval(h.journal.proposal(try h.propose("x"), at: Date())!, origin: nil,
                                                    account: "macos:user:winton", destination: resolved.destination)) == nil,
                 "the checkout is free once the run is gone")
+    }
+
+    @Test func aTimedOutAcknowledgementFailsTheLaunchWithoutARunnerOutcome() async throws {
+        let h = try RunHarness()
+        h.launcher.silent = true
+        let id = try await h.run("succeed")
+        let runner = try #require(h.journal.runnerID(id))
+        h.handler.prepared(runner, pid: 99_999)
+        #expect(h.launcher.acknowledgements == [runner])
+        #expect(h.journal.proposal(id, at: Date())?.status == .started)
+        h.handler.notStarted(runner, errno: ETIMEDOUT)
+        let records = try h.records(id)
+        #expect(records.map { $0["type"] } == ["app.action.proposed", "app.action.approved", "app.action.started", "app.action.failed"])
+        #expect(records.last?["metadata"]?["error"] == "launch_failed")
+        #expect(records.last?["metadata"]?["confirmed_by"] == "reply")
+        #expect(h.journal.runnerState(id) == nil && !h.handler.isRunning(id))
+        #expect(try await h.approve(try h.propose("succeed")) == nil, "the checkout is free again")
+    }
+
+    @Test func quitDoesNotAcknowledgeAPreparedLaunch() async throws {
+        let h = try RunHarness()
+        h.launcher.silent = true
+        let id = try await h.run("succeed")
+        let runner = try #require(h.journal.runnerID(id))
+        h.handler.beginShutdown()
+        h.handler.prepared(runner, pid: 99_999)
+        #expect(h.launcher.acknowledgements.isEmpty)
+        h.handler.notStarted(runner, errno: ECANCELED)
+        #expect(h.journal.outcome(id)?["error"] == "launch_failed")
+        #expect(h.journal.runnerState(id) == nil)
     }
 
     @Test func aFailedRunSaysWhy() async throws {
@@ -370,6 +446,8 @@ struct RunTests {
             let id = try await h.run("hang")
             #expect(h.journal.proposal(id, at: Date())?.status == .started)
             let runner = try #require(h.journal.runnerID(id))
+            h.handler.prepared(runner, pid: 99_999)
+            #expect(h.launcher.acknowledgements == [runner])
             h.handler.beginShutdown()
             h.handler.started(runner, pid: 99_999)
             #expect(h.journal.runnerState(id) == "runner_failed")

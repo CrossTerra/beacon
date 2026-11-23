@@ -51,7 +51,7 @@ it is closed with `frame_too_large`, which frees its wait.
 | `get` | `id` | `{ id, status, version }` |
 | `wait` | `id`, `after`, `timeout` (1 to 300 seconds) | the same, once `version` is past `after` or the timeout ends |
 | `withdraw` | `id` | the same, while pending; otherwise `not_pending` |
-| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for the bundled CLI (`scripts/install.sh`), and never from a run Beacon launched |
+| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for a peer that matches the bundled CLI's code requirement (`scripts/install.sh`) and is confirmed to be external |
 
 The proposals live in the [journal](#the-journal-and-the-outbox). There is no operation to approve, list proposals, read history or see runners. `get`, `wait` and `withdraw` answer
 only the client identity that made the proposal, and the same run: a connection from a process in the process group
@@ -67,7 +67,9 @@ Before the startup sweep and after an unconfirmed tether stop, Beacon keeps any 
 it cannot attribute to a run cannot `propose`, `get`, `wait` or `withdraw`. It gets `busy`, including for waits
 already in flight and for a Slack proposal whose intake lookup was in flight (nothing is stored); `types` is still
 available. After the sweep and the check that the old run groups are gone,
-external clients must reconnect. A connection that was not cleared does not gain access by staying open.
+external clients must reconnect. A connection that was not cleared does not gain access by staying open. The quit
+operation refuses runs, descendants known to have left a run's group, and unclassified peers, even when they use
+the bundled CLI. The installer can fall back to SIGTERM if the socket refuses the request.
 
 **Limits.** At most 32 connections, 16 concurrent waits, 20 pending proposals per client identity, 40 pending in
 all and 60 proposals per identity per hour. Past a limit the reply is `busy`. An incomplete frame is dropped with
@@ -332,20 +334,23 @@ and its output and errors in `output` and `errors` beside the prompt (`0600`). t
 once, compares its device and inode with the pinned ones and starts the run in it by that descriptor, so a directory
 swapped in at the path after Beacon's check (reading the login environment and the models can take a minute) is
 refused, and nothing starts. `--standalone` gives the run a private opencode server inside that group, so stopping
-the group stops the agent. tether's answer is the result: started is `executed` (`reply`, with the runner id), then
-`app.runner.working`; not started is `failed` (`checkout_changed` for a swapped directory, `launch_failed`
-otherwise). With no answer (tether ended), the outcome is unknown until the next launch reads it back.
+the group stops the agent. Tether spawns the process suspended. Beacon registers its process group and then
+acknowledges it over the lease; tether resumes it only after receiving that acknowledgement. If there is no
+acknowledgement within five seconds, tether kills and reaps the suspended process. A confirmed resume is `executed`
+(`reply`, with the runner id), then `app.runner.working`; refusal is `failed` (`checkout_changed` for a swapped
+directory, `launch_failed` for a timeout or other failed launch). With no answer (tether ended), the outcome is
+unknown until the next launch reads it back.
 
 **A run's own proposals.** A run can propose with `beacon act` like any client. Beacon finds the connecting process's
 process group from the kernel's audit token for the connection; one that is the group of a run it launched (tether
 keeps each run's leader unreaped until the whole group is gone, so that group id cannot name another) makes the
 proposal that run's: `verified: true` with its `runner_id` in the record, "from run …" in the window, and readable
-only by the same run. The run starts suspended and is resumed only after that group is recorded, so nothing it does
-happens first. A connection is resolved per request, not once at accept: one that arrived before the record is a
-run's by the time it asks anything. A process in a group Beacon did not record whose ancestor is a run it launched
-is neither the run nor Bosun: it can neither read, withdraw nor create proposals, nor quit. Beacon keeps that assignment after an unconfirmed stop until the next session's sweep and a kernel check confirm
-the old groups are gone. A process outside a known group is treated as an ordinary client only
-outside recovery. Approving a run's proposal is a separate approval (D22).
+only by the same run. The group is registered before the process can connect. Beacon rechecks attribution per
+request and before completing asynchronous requests. A socket that changes identity must reconnect. A process in
+an unrecorded group whose ancestor belongs to a run is neither the run nor Bosun: it can neither read, withdraw nor
+create proposals, nor quit. A peer whose ancestry cannot be checked is not treated as external. Beacon keeps
+known group assignments after an unconfirmed stop until the next session's sweep and a kernel check confirm the
+groups are gone. Approving a run's proposal is a separate approval (D22).
 
 **`--auto`.** Nobody is at a terminal to answer a permission prompt, so every run passes `--auto`: opencode approves
 any permission the checkout's opencode configuration does not explicitly deny, and cancels questions. The person
@@ -371,7 +376,8 @@ characters by keeping the end with a note of the full length. Exit 0 is `app.run
 `failed`, `stopped`. A run whose output and errors together pass 64 MiB is stopped as `output_too_large`. The report
 is read off the main thread, and a run's records keep their order: its report or failure always comes before
 `closed`. Quit records each run still working as `failed`, `stopped_at_quit`; tether stops them with everything else,
-and they are closed once it confirms. A launch tether answers `started` after Quit began is recorded `executed`, then
+and they are closed once it confirms. Quit does not acknowledge a still-suspended launch. A resume tether confirms
+after Quit began is recorded `executed`, then
 `failed`, `stopped_at_quit`, never `working`; no run is closed without an outcome first. A Stop that cannot reach
 tether (its end of the lease is closed: the write fails with `EPIPE`, which never raises SIGPIPE in the app) leaves
 the run unmarked, and tether's end settles it. If tether ends on its own while the app runs, each run still working is

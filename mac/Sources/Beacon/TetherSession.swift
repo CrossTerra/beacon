@@ -12,6 +12,8 @@ final class TetherSession: RunLauncher {
         case collectorRunning, collectorRestarting, collectorExited
         /// Cleanup ended. `verified` is false when the helper closed the lease without confirming it.
         case stopped(verified: Bool)
+        /// A run's group leader is suspended until Beacon acknowledges its group.
+        case runPrepared(id: String, pid: Int32)
         /// A run's process started, as the leader of its own group.
         case runStarted(id: String, pid: Int32)
         /// A run could not start; nothing of it runs.
@@ -68,6 +70,8 @@ final class TetherSession: RunLauncher {
 
     /// Asks tether to start the run described in its `runs/<id>/` directory. False if the request could not be sent.
     func launch(_ id: String) -> Bool { command("L", id) }
+
+    func acknowledgeLaunch(_ id: String) -> Bool { command("A", id) }
 
     /// Asks tether to stop the run: TERM to its group, KILL after the grace period.
     @discardableResult
@@ -133,6 +137,7 @@ final class TetherSession: RunLauncher {
         guard words.count >= 2 else { return }
         let id = words[1], value = words.count > 2 ? Int32(words[2]) : nil
         switch (words[0], value) {
+        case ("prepared", let pid?): event(.runPrepared(id: id, pid: pid))
         case ("started", let pid?): event(.runStarted(id: id, pid: pid))
         case ("failed", let code?): event(.runNotStarted(id: id, errno: code))
         case ("exited", let status?): event(.runExited(id: id, status: status))

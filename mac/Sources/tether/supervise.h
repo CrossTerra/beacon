@@ -6,6 +6,7 @@
 #include <sys/types.h>
 
 #define TETHER_GRACE_MS 15000
+#define TETHER_LAUNCH_ACK_MS 5000
 #define TETHER_MARKER "BEACON_SUPERVISOR="
 
 struct tether_spec {
@@ -21,11 +22,12 @@ struct tether_spec {
 // until the lease reads EOF or an error, or until SIGTERM or SIGINT. Then it stops every
 // process in each job's group and every tracked descendant, verifies that none remain,
 // and sends TETHER_STOPPED. Each job's processes carry TETHER_MARKER "<session>:<job>".
-// The first job's state changes are reported with TETHER_RUNNING, TETHER_WAITING and TETHER_EXITED.
+// The collector's state changes are reported with TETHER_RUNNING, TETHER_WAITING and TETHER_EXITED.
+// A run stays suspended for at most launch_ack_ms unless the app acknowledges recording its group.
 // If processes remain TETHER_GIVE_UP_MS after the grace period, at startup or shutdown, it
 // returns 4 without TETHER_STOPPED and keeps the session file, so the next session sweeps again.
 int tether_run(int lease, const char *state_dir, const struct tether_spec *specs, size_t count,
-               char *const *env, unsigned grace_ms, char ready);
+               char *const *env, unsigned grace_ms, unsigned launch_ack_ms, char ready);
 
 // Signals go through this hook, so tests can model a process that does not stop.
 extern int (*tether_kill)(pid_t, int);

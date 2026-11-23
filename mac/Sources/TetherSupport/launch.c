@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -11,15 +12,8 @@ pid_t tether_spawn(const char *image, char *const argv[], char *const env[], int
     return tether_spawn_at(image, argv, env, input, output, -1, -1);
 }
 
-pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
-                      int cwd) {
-    return tether_spawn_held(image, argv, env, input, output, error, cwd, NULL);
-}
-
-// As tether_spawn_at, but the process starts suspended: it cannot run until tether_resume. A run is recorded
-// (its group is its pid) before it is resumed, so nothing it does happens before Beacon knows the group.
-pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[], int input, int output, int error,
-                        int cwd, int *held) {
+static pid_t spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
+                      int cwd, bool suspended) {
     posix_spawn_file_actions_t files;
     posix_spawnattr_t attrs;
     if (posix_spawn_file_actions_init(&files) != 0) return -1;
@@ -30,7 +24,7 @@ pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[]
         sigfillset(&defaults);
         short flags = POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP |
                       POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
-        if (held) flags |= POSIX_SPAWN_START_SUSPENDED;
+        if (suspended) flags |= POSIX_SPAWN_START_SUSPENDED;
         int err = input < 0
             ? posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
             : posix_spawn_file_actions_adddup2(&files, input, STDIN_FILENO);
@@ -55,8 +49,17 @@ pid_t tether_spawn_held(const char *image, char *const argv[], char *const env[]
         posix_spawnattr_destroy(&attrs);
     }
     posix_spawn_file_actions_destroy(&files);
-    if (held) *held = pid > 0;
     return pid;
+}
+
+pid_t tether_spawn_at(const char *image, char *const argv[], char *const env[], int input, int output, int error,
+                      int cwd) {
+    return spawn_at(image, argv, env, input, output, error, cwd, false);
+}
+
+pid_t tether_spawn_suspended(const char *image, char *const argv[], char *const env[], int input, int output,
+                             int error, int cwd) {
+    return spawn_at(image, argv, env, input, output, error, cwd, true);
 }
 
 int tether_resume(pid_t pid) {

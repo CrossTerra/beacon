@@ -18,9 +18,13 @@ struct TetherSessionTests {
         var buffer = [UInt8](repeating: 0, count: 64)
         let n = read(pair[1], &buffer, buffer.count)
         #expect(n > 0 && String(decoding: buffer[..<n], as: UTF8.self) == "L run_a1\n")
+        #expect(session.acknowledgeLaunch("run_a1"))
+        let ack = read(pair[1], &buffer, buffer.count)
+        #expect(ack > 0 && String(decoding: buffer[..<ack], as: UTF8.self) == "A run_a1\n")
         // tether is gone.
         close(pair[1])
         #expect(!session.launch("run_a2"))
+        #expect(!session.acknowledgeLaunch("run_a1"))
         #expect(!session.stopRun("run_a1"))
         #expect(!session.stop("run_a1"))
         _ = events

@@ -37,6 +37,10 @@ struct runner {
     char id[TETHER_ID_MAX + 1];
     char *launch; // The launch file's bytes; argv and env point into it.
     char **argv;
+    int dir; // Pinned run directory, open through the launch handshake.
+    uint64_t ack_deadline;
+    int launch_error;
+    bool resumed;
     bool exit_reported;
 };
 
@@ -63,6 +67,7 @@ struct session {
     size_t count;
     char *const *env;
     unsigned grace_ms;
+    unsigned launch_ack_ms;
     struct tracked *tracked;
     size_t ntracked, cap;
     char command[TETHER_ID_MAX + 8];
@@ -194,7 +199,7 @@ static void report(struct session *s, size_t j, char state) {
 
 // A run's exit: its code, or 128 plus the signal that ended it. Sent once.
 static void report_exit(struct session *s, struct job *job, int code, int status) {
-    if (!job->runner || job->runner->exit_reported) return;
+    if (!job->runner || !job->runner->resumed || job->runner->exit_reported) return;
     job->runner->exit_reported = true;
     int value = code == CLD_EXITED ? status : 128 + status;
     send_line(s->lease, "%c" "exited %s %d\n", TETHER_LINE, job->runner->id, value);
@@ -247,13 +252,18 @@ static void start(struct session *s, size_t j, uint64_t now) {
     }
 }
 
+// macOS can return CLD_STOPPED for a suspended child even with WEXITED. Only a death lets us reap a leader.
+static bool child_exited(const siginfo_t *info) {
+    return info->si_pid > 0 && (info->si_code == CLD_EXITED || info->si_code == CLD_KILLED || info->si_code == CLD_DUMPED);
+}
+
 // One step of a job. Restarts happen only while `running`, so shutdown starts nothing.
 static void step(struct session *s, size_t j, bool running, uint64_t now) {
     struct job *job = &s->jobs[j];
     if (job->pid > 0 && !job->cleaning) {
         siginfo_t info = {0};
         // Observe the exit without reaping: the zombie keeps the group id reserved.
-        if (waitid(P_PID, job->pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && info.si_pid == job->pid) {
+        if (waitid(P_PID, job->pid, &info, WEXITED | WNOHANG | WNOWAIT) == 0 && child_exited(&info)) {
             job->cleaning = true;
             job->term_sent = false;
             job->clean_exit = info.si_code == CLD_EXITED && info.si_status == 0;
@@ -276,7 +286,18 @@ static void step(struct session *s, size_t j, bool running, uint64_t now) {
             if (job->lifetime >= 0) close(job->lifetime);
             job->lifetime = -1;
             if (!reaped) return; // A sweep at shutdown of a job with no leader.
-            if (job->runner) send_line(s->lease, "%c" "gone %s\n", TETHER_LINE, job->runner->id);
+            if (job->runner) {
+                struct runner *r = job->runner;
+                if (r->resumed) {
+                    send_line(s->lease, "%c" "gone %s\n", TETHER_LINE, r->id);
+                } else {
+                    // A suspended launch that never ran: report failure only once it is gone.
+                    if (r->dir >= 0) close(r->dir);
+                    r->dir = -1;
+                    send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, r->id,
+                              r->launch_error ? r->launch_error : ECHILD);
+                }
+            }
             if (!job->spec->restart || job->clean_exit) {
                 job->retired = true;
                 report(s, j, TETHER_EXITED);
@@ -308,6 +329,7 @@ static struct job *runner_job(struct session *s, const char *id) {
 
 static void free_runner(struct runner *r) {
     if (!r) return;
+    if (r->dir >= 0) close(r->dir);
     free(r->argv);
     free(r->launch);
     free(r);
@@ -337,6 +359,7 @@ static struct runner *read_launch(int run, const char *id, char ***env, const ch
         errno = EINVAL;
         return NULL;
     }
+    r->dir = -1;
     r->launch = buf;
     size_t nfields = 0;
     for (size_t i = 0; i < size; i++) nfields += buf[i] == '\0';
@@ -407,8 +430,7 @@ static struct job *runner_slot(struct session *s) {
     return &s->jobs[s->count - 1];
 }
 
-// Records that the run started, with its pid, once posix_spawn succeeded: the app reads it back after a
-// crash to tell a run that started from one that never did.
+// Records that the run was resumed, with its pid. A prepared but never resumed run leaves no such mark.
 static void mark_started(int run, pid_t pid) {
     int fd = openat(run, "started", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
@@ -419,7 +441,7 @@ static void mark_started(int run, pid_t pid) {
     close(fd);
 }
 
-// Starts the run `id` as a new job: its own process group, never restarted, in the working directory
+// Prepares the run `id` suspended as a new job: its own process group, never restarted, in the working directory
 // the app pinned (opened once, compared by device and inode, and entered by descriptor, so a directory
 // swapped in at that path is refused with ESTALE), with standard input from the run's prompt file and
 // its output and errors in files beside it, created afresh.
@@ -462,21 +484,13 @@ static void launch(struct session *s, const char *id) {
         in = openat(run, "prompt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         out = openat(run, "output", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         err = openat(run, "errors", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        int suspended = 0;
-        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_held(r->argv[0], r->argv, env, in, out, err, dir, &suspended) : -1;
+        pid = in >= 0 && out >= 0 && err >= 0 ? tether_spawn_suspended(r->argv[0], r->argv, env, in, out, err, dir) : -1;
         error = errno;
         if (pid > 0) {
             job->pid = pid;
-            job->started_at = now_ms();
-            mark_started(run, pid);
-            // Before it can run: the app records the group (the leader's pid) before anything the run does.
-            send_line(s->lease, "%c" "started %s %d\n", TETHER_LINE, id, pid);
-            if (suspended && tether_resume(pid) != 0) {
-                tether_kill(pid, SIGKILL);
-                job->cleaning = true;
-                job->term_sent = true;
-                job->kill_at = now_ms();
-            }
+            r->dir = run;
+            run = -1;
+            r->ack_deadline = now_ms() + s->launch_ack_ms;
         } else {
             // The slot stays free for the next run.
             *job = (struct job){.retired = true, .lifetime = -1};
@@ -491,26 +505,68 @@ static void launch(struct session *s, const char *id) {
     if (run >= 0) close(run);
     free(env);
     if (pid > 0) {
-        // `started` was sent before the process was resumed.
+        send_line(s->lease, "%c" "prepared %s %d\n", TETHER_LINE, id, pid);
     } else {
         free_runner(r);
         send_line(s->lease, "%c" "failed %s %d\n", TETHER_LINE, id, error);
     }
 }
 
+static void cancel_launch(struct job *job, int error, uint64_t now) {
+    if (!job->runner || job->runner->resumed || job->pid <= 0 || job->runner->launch_error) return;
+    job->runner->launch_error = error;
+    job->cleaning = true;
+    job->term_sent = true;
+    job->kill_at = now;
+    // Do not resume the suspended child to let it handle TERM.
+    tether_kill(job->pid, SIGKILL);
+}
+
+static void acknowledge_launch(struct session *s, const char *id) {
+    struct job *job = runner_job(s, id);
+    if (!job || job->pid <= 0 || job->cleaning || job->runner->resumed) return;
+    struct runner *r = job->runner;
+    uint64_t now = now_ms();
+    if (now >= r->ack_deadline) {
+        cancel_launch(job, ETIMEDOUT, now);
+        return;
+    }
+    // SIGCONT can succeed against a zombie. Do not report a successful launch if it has already exited.
+    siginfo_t info = {0};
+    if (waitid(P_PID, job->pid, &info, WEXITED | WNOHANG | WNOWAIT) != 0 || child_exited(&info)) {
+        cancel_launch(job, ECHILD, now);
+        return;
+    }
+    if (tether_resume(job->pid) != 0) {
+        cancel_launch(job, errno, now);
+        return;
+    }
+    r->resumed = true;
+    job->started_at = now;
+    mark_started(r->dir, job->pid);
+    close(r->dir);
+    r->dir = -1;
+    send_line(s->lease, "%c" "started %s %d\n", TETHER_LINE, id, job->pid);
+}
+
 // Stops a run as a cleanup stops any job: TERM to its group and tracked processes, KILL after the
-// grace period. Its exit and its end are reported as they happen.
+// grace period. A suspended run is never resumed.
 static void stop_run(struct session *s, const char *id) {
     struct job *job = runner_job(s, id);
     if (job && job->pid > 0 && !job->cleaning) {
+        if (!job->runner->resumed) {
+            cancel_launch(job, ECANCELED, now_ms());
+            return;
+        }
         job->cleaning = true;
         job->term_sent = false;
     }
 }
 
 static void command(struct session *s, char *line) {
-    if (strlen(line) < 3 || line[1] != ' ' || !valid_id(line + 2)) return;
+    if (!live(s) || strlen(line) < 3 || line[1] != ' ' || !valid_id(line + 2)) return;
     if (line[0] == 'L') launch(s, line + 2);
+    if (line[0] == 'A') acknowledge_launch(s, line + 2);
     if (line[0] == 'K') stop_run(s, line + 2);
 }
 
@@ -625,7 +681,7 @@ static bool write_token(int dir, const char *token) {
 }
 
 int tether_run(int lease, const char *state_dir, const struct tether_spec *specs, size_t count,
-               char *const *env, unsigned grace_ms, char ready) {
+               char *const *env, unsigned grace_ms, unsigned launch_ack_ms, char ready) {
     struct sigaction action = {.sa_handler = stop};
     sigemptyset(&action.sa_mask);
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR || sigaction(SIGTERM, &action, NULL) != 0 ||
@@ -658,13 +714,18 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
         snprintf(jobs[j].entry, sizeof(jobs[j].entry), TETHER_MARKER "%s:%zu", token, j);
     }
     struct session s = {.lease = lease, .dir = dir, .token = token, .jobs = jobs, .count = count, .env = env,
-                        .grace_ms = grace_ms};
+                         .grace_ms = grace_ms, .launch_ack_ms = launch_ack_ms};
     if (live(&s)) send_byte(lease, ready);
 
     struct pollfd fd = {.fd = lease, .events = POLLIN};
     while (live(&s)) {
         read_commands(&s);
         if (!live(&s)) break;
+        uint64_t now = now_ms();
+        for (size_t j = 0; j < s.count; j++) {
+            struct job *job = &s.jobs[j];
+            if (job->runner && now >= job->runner->ack_deadline) cancel_launch(job, ETIMEDOUT, now);
+        }
         if (refresh(&s))
             for (size_t j = 0; j < s.count; j++) step(&s, j, live(&s), now_ms());
         poll(&fd, 1, 100);
@@ -674,6 +735,7 @@ int tether_run(int lease, const char *state_dir, const struct tether_spec *specs
     // leader (in backoff, or retired) are swept too: their marked processes are adopted on the next
     // refresh, and the session file is kept unless every job is confirmed empty after that.
     for (size_t j = 0; j < s.count; j++) {
+        cancel_launch(&s.jobs[j], ECANCELED, now_ms());
         if (!s.jobs[j].cleaning) {
             s.jobs[j].cleaning = true;
             s.jobs[j].term_sent = false;

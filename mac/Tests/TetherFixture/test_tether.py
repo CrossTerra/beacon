@@ -1,5 +1,6 @@
 """Tether fixtures. No installation, sudo, real sources or credentials; connections are loopback or socketpairs."""
 
+import errno
 import os
 from pathlib import Path
 import shutil
@@ -64,7 +65,7 @@ class Session:
         self.helper = subprocess.Popen(args, stdin=lease)
         lease.close()
         self.app = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(120)"], stdin=self.holder)
-        self.holder.settimeout(15)
+        self.holder.settimeout(30)
         self.seen = b""
 
     def receive(self):
@@ -106,6 +107,19 @@ class Session:
         fields = [str(cwd), identity, str(len(argv)), *argv, *env]
         (directory / "launch").write_bytes(b"".join(f.encode() + b"\0" for f in fields))
         self.holder.sendall(f"L {run}\n".encode())
+
+    def prepared(self, run):
+        _, name, pid = self.until("#prepared")
+        assert name == run and int(pid) > 0
+        return int(pid)
+
+    def acknowledge(self, run, pid):
+        self.holder.sendall(f"A {run}\n".encode())
+        reply = self.until("#")
+        assert reply == ["#started", run, str(pid)], reply
+
+    def accept_launch(self, run):
+        self.acknowledge(run, self.prepared(run))
 
     def until_closed(self):
         """Reads state reports until the lease closes; returns the last byte, or b"" if none came."""
@@ -274,10 +288,18 @@ def runner_runs_and_reports(fixture, state):
     checkout = state / "checkout"
     checkout.mkdir()
     session.launch(state, "run_a1", "exit 3", checkout)
-    _, run, pid = session.until("#started")
-    assert run == "run_a1" and int(pid) > 0
-    # Written only after the spawn succeeded, with the pid: what the app reads back after a crash.
-    assert (state / "runs" / "run_a1" / "started").read_text() == f"{pid}\n"
+    pid = session.prepared("run_a1")
+    run_dir = state / "runs" / "run_a1"
+    # Acknowledging a different run does not release this one. The second command gives us a reply to wait on.
+    session.holder.sendall(b"A run_wrong\nL run_missing\n")
+    assert session.until("#failed")[1] == "run_missing"
+    assert b"#started run_a1 " not in session.seen
+    assert subprocess.check_output(["ps", "-o", "stat=", "-p", str(pid)], text=True).strip().startswith("T")
+    assert pid not in pids(state) and (run_dir / "output").stat().st_size == 0
+    assert not (run_dir / "started").exists()
+    session.acknowledge("run_a1", pid)
+    # Written only after resume: what the app reads back after a crash.
+    assert (run_dir / "started").read_text() == f"{pid}\n"
     assert session.until("#exited") == ["#exited", "run_a1", "3"]
     assert session.until("#gone") == ["#gone", "run_a1"]
     output = (state / "runs" / "run_a1" / "output").read_text()
@@ -296,12 +318,51 @@ def runner_runs_and_reports(fixture, state):
     assert_clean(state, port)
 
 
+def unacknowledged_launch_times_out(fixture, state):
+    """No ack: tether kills and reaps the suspended process, never runs it, and reports a launch failure."""
+    session, port = started(fixture, state, "short-ack")
+    session.launch(state, "run_no_ack", "exit 0", state)
+    pid = session.prepared("run_no_ack")
+    assert session.until("#failed") == ["#failed", "run_no_ack", str(errno.ETIMEDOUT)]
+    try:
+        os.kill(pid, 0)  # A zombie would still answer: the failure must follow the reap.
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("the suspended child was not reaped before the failure reply")
+    assert pid not in pids(state)
+    directory = state / "runs" / "run_no_ack"
+    assert (directory / "output").stat().st_size == 0 and not (directory / "started").exists()
+    session.holder.sendall(b"A run_no_ack\nL run_missing\n")
+    assert session.until("#failed")[1] == "run_missing"
+    assert b"#started run_no_ack " not in session.seen
+    assert b"#exited run_no_ack " not in session.seen and b"#gone run_no_ack" not in session.seen
+    assert listening(port), "an acknowledgement timeout stopped another service"
+    session.quit()
+    assert_clean(state, port)
+
+
+def quit_during_launch_handshake(fixture, state):
+    """Closing the write half cancels a suspended run, without waiting for its acknowledgement deadline."""
+    session, port = started(fixture, state)
+    session.launch(state, "run_quit", "exit 0", state)
+    pid = session.prepared("run_quit")
+    session.holder.shutdown(socket.SHUT_WR)
+    assert session.until("#failed") == ["#failed", "run_quit", str(errno.ECANCELED)]
+    assert session.until_closed() == b"S"
+    assert session.helper.wait(timeout=10) == 0
+    assert b"#started run_quit " not in session.seen and pid not in pids(state)
+    assert not (state / "runs" / "run_quit" / "started").exists()
+    session.close()
+    assert_clean(state, port)
+
+
 def runner_stopped(fixture, state):
     """Stopping a run stops its whole tree, TERM ignored and a detached grandchild included."""
     session, port = started(fixture, state)
     before = pids(state)
     session.launch(state, "run_b2", "hang", state)
-    session.until("#started")
+    session.accept_launch("run_b2")
     wait_for(lambda: len(list(state.glob("leaked-*"))) == 1, "the run's detached grandchild")
     run = pids(state) - before
     assert len(live(run)) >= 2
@@ -319,10 +380,13 @@ def runners_stop_at_quit(fixture, state):
     """Two runs at once, in two checkouts; Quit stops both, and the next session would sweep them."""
     session, port = started(fixture, state)
     before = pids(state)
+    prepared = {}
     for run in ("run_c1", "run_c2"):
         (state / run).mkdir()
         session.launch(state, run, "hang", state / run)
-        assert session.until("#started")[1] == run
+        prepared[run] = session.prepared(run)
+    for run, pid in prepared.items():
+        session.acknowledge(run, pid)
     wait_for(lambda: len(list(state.glob("leaked-*"))) == 2, "both runs' grandchildren")
     runs = pids(state) - before
     session.quit()
@@ -345,6 +409,7 @@ def runner_bad_launches(fixture, state):
     assert session.until("#failed")[1] == "run_d2"
     # A good run after all that still starts.
     session.launch(state, "run_d3", "exit 0", state)
+    session.accept_launch("run_d3")
     assert session.until("#exited") == ["#exited", "run_d3", "0"]
     assert listening(port)
     session.quit()
@@ -375,7 +440,7 @@ def run_left_by_a_killed_tether(fixture, state):
     session, port = started(fixture, state)
     before = pids(state)
     session.launch(state, "run_k1", "hang", state)
-    session.until("#started")
+    session.accept_launch("run_k1")
     wait_for(lambda: len(list(state.glob("leaked-*"))) == 1, "the run's detached grandchild")
     run = pids(state) - before
     session.helper.kill()
@@ -395,8 +460,7 @@ def many_runs_in_one_session(fixture, state):
     for n in range(300):
         run = f"run_m{n}"
         session.launch(state, run, "exit 0", state)
-        event = session.until("#")
-        assert event[0] == "#started" and event[1] == run, (n, event)
+        session.accept_launch(run)
         assert session.until("#gone")[1] == run
     session.quit()
     assert_clean(state, port)
@@ -410,7 +474,7 @@ def runs_without_a_collector(fixture, state):
     assert session.receive() == b"L"
     for run in ("run_l1", "run_l2"):
         session.launch(state, run, "exit 1", state)
-        assert session.until("#started")[1] == run
+        session.accept_launch(run)
         assert session.until("#exited") == ["#exited", run, "1"]
         assert session.until("#gone") == ["#gone", run]
     session.holder.shutdown(socket.SHUT_WR)
@@ -463,7 +527,8 @@ if __name__ == "__main__":
     for case in (quit_after_restart, quit_with_restart_pending, leaked_grandchild_stopped_at_quit,
                  leaked_grandchild_stopped_before_restart, app_crash, helper_crash_then_recovery,
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
-                 stubborn_sweep_gives_up, runner_runs_and_reports, runner_stopped, runners_stop_at_quit,
+                  stubborn_sweep_gives_up, runner_runs_and_reports, unacknowledged_launch_times_out,
+                  quit_during_launch_handshake, runner_stopped, runners_stop_at_quit,
                  runner_bad_launches, runner_checkout_swapped, run_left_by_a_killed_tether, many_runs_in_one_session,
                  runs_without_a_collector):
         state = Path(tempfile.mkdtemp(prefix="tether-"))

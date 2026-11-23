@@ -20,13 +20,17 @@ error goes to `/dev/null`.
 `~/Library/Application Support/beacon/runs/<runner id>/` (`0700`): `launch` (the working directory, its device and
 inode as the app approved it, the arguments and the environment, NUL-separated) and `prompt`. `tether` opens the
 working directory once and compares its device and inode with the pinned ones; another directory at that path is
-refused with `ESTALE` and nothing starts. It starts the run as the leader of a new process group, in that directory
+refused with `ESTALE` and nothing starts. It spawns a suspended leader for a new process group, in that directory
 by its descriptor, with `prompt` as its standard input and its standard output and error in new `output` and
 `errors` files there (`0600`, refused if they exist). It adds its own `BEACON_SUPERVISOR` marker for the run and drops
-any the app passed. Only once the run started does it write `started` there, with the pid. It answers
-`#started <id> <pid>` or `#failed <id> <errno>` (nothing started), then `#exited <id> <status>` (the exit code, or
-128 plus the signal) and `#gone <id>` once every process of the run is gone. At most 256 runs are alive at once; a
-run that ended gives its slot back. Lines to the app are written whole, blocking at most a second.
+any the app passed. It sends `#prepared <id> <pid>` and waits for `A <id>`, which Beacon sends only after it
+registers the process group. Only then does tether resume the run, write `started` with the pid, and reply with
+`#started <id> <pid>`. Without acknowledgement within five seconds, or if the lease closes first, tether kills
+and reaps the suspended process without resuming it or writing `started`, and reports `#failed <id> <errno>`
+(`ETIMEDOUT` or `ECANCELED`) if the app can still read the lease. Waiting does not block other jobs. A resumed run
+reports `#exited <id> <status>` (the exit code, or 128 plus the signal) and `#gone <id>` once every process of the
+run is gone. At most 256 runs are alive at once; a run that ended gives its slot back. Lines to the app are written
+whole, blocking at most a second.
 `K <runner id>` stops a run as cleanup stops any service: TERM to its group and every tracked process, KILL after the
 grace period. A run is never restarted. What the app puts in a run's environment is in
 [approvals](approvals.md#agent-runs).
@@ -89,7 +93,7 @@ run commands above; anything else on the lease is ignored. **Quit Beacon** close
 `tether` to confirm cleanup, of the collector and every run alike. If the app crashes or
 is force-quit, the kernel closes its end. Either way, `tether` stops:
 
-1. It starts nothing more. A pending restart is cancelled.
+1. A pending restart is cancelled. Suspended runs that were not acknowledged are killed without being resumed.
 2. It sends SIGTERM to every service's process group and every process it tracks for that service.
 3. After 15 seconds, it sends SIGKILL to whatever remains.
 4. It confirms with the kernel's process table that no tracked process is left, reaps each service and sends a
@@ -100,8 +104,7 @@ and keeps the session file, so the next session tries again before it starts any
 **Services stopped without confirmation**, and the app quits. The app also stops waiting after 23 seconds, in
 case `tether` itself stops responding. Quit never hangs.
 
-Each service starts as the leader of a new process group. A run starts suspended and is resumed only after its start
-is reported, so Beacon records its group before it can run. `tether` observes a leader's exit without reaping it.
+Each service starts as the leader of a new process group. `tether` observes a leader's exit without reaping it.
 The zombie keeps the group ID reserved, so the group cannot be confused with an unrelated one. It is reaped only
 once its whole tree is gone. A restart of the collector or a watch waits for that cleanup too.
 
@@ -158,6 +161,8 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
   listener, and nothing restarts during shutdown;
 - a killed `tether` leaves processes that the next session stops before it reports ready;
 - a second session is refused while the first runs;
+- a run stays suspended until the ack for its own id; timeout and Quit before acknowledgement kill it without
+  running it or leaving a `started` mark;
 - a run starts in its directory with its prompt on standard input, the app's environment and `tether`'s own
   marker (a marker in the launch file is dropped); `started` holds its pid; its exit code and its end are
   reported, its output and errors are kept `0600`, and the same run cannot start twice;
