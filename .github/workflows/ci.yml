@@ -24,14 +24,6 @@ jobs:
           go-version-file: go.mod
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
-      - name: Install Chrome
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
       - name: Gates
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
