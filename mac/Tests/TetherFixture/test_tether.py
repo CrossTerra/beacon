@@ -21,6 +21,12 @@ def wait_for(check, what, timeout=8):
     raise AssertionError(f"timed out waiting for {what}")
 
 
+def pinned_identity(path):
+    """The launch pin Beacon writes: unsigned decimals of the device and inode bits."""
+    st = os.stat(path)
+    return f"{st.st_dev & 0xFFFFFFFF}:{st.st_ino}"
+
+
 def live(pids):
     """The pids that exist and are not zombies. A zombie reparented to launchd still answers kill(pid, 0)."""
     if not pids:
@@ -92,16 +98,15 @@ class Session:
             if isinstance(event, str) and event.startswith(prefix):
                 return event.split()
 
-    def launch(self, state, run, prompt, cwd, extra_env=(), pin=None):
-        """Writes the run's directory, pinning `cwd`'s identity (or `pin`'s) as the app does, and asks for it."""
+    def launch(self, state, run, prompt, cwd, extra_env=(), pin=None, identity=None):
+        """Writes the run's directory, pinning `cwd`'s identity (or `pin`'s, or `identity`) as the app does, and asks for it."""
         directory = state / "runs" / run
         directory.mkdir(parents=True)
         (directory / "prompt").write_text(prompt)
         argv = [self.fixture, "runner", str(state)]
         env = ["PATH=/usr/bin:/bin", "RUN_VAR=from-the-app", "BEACON_SUPERVISOR=forged", *extra_env]
         try:
-            st = os.stat(pin or cwd)
-            identity = f"{st.st_dev}:{st.st_ino}"
+            identity = identity if identity is not None else pinned_identity(pin or cwd)
         except FileNotFoundError:
             identity = "1:1"
         fields = [str(cwd), identity, str(len(argv)), *argv, *env]
@@ -416,6 +421,23 @@ def runner_bad_launches(fixture, state):
     assert_clean(state, port)
 
 
+def signed_device_pin_is_refused(fixture, state):
+    """A signed device decimal is not the volume's bits. The unsigned pin of the same directory still starts."""
+    session, port = started(fixture, state)
+    checkout = state / "neg"
+    checkout.mkdir()
+    inode = os.stat(checkout).st_ino
+    session.launch(state, "run_signed", "exit 0", checkout, identity=f"-1:{inode}")
+    failed = session.until("#failed")
+    assert failed == ["#failed", "run_signed", str(errno.EINVAL)], failed
+    assert not (state / "runs" / "run_signed" / "started").exists()
+    session.launch(state, "run_bits", "exit 0", checkout)
+    session.accept_launch("run_bits")
+    assert session.until("#exited") == ["#exited", "run_bits", "0"]
+    session.quit()
+    assert_clean(state, port)
+
+
 def runner_checkout_swapped(fixture, state):
     """A directory swapped in at the checkout's path after the app pinned it is refused: nothing starts."""
     session, port = started(fixture, state)
@@ -529,7 +551,8 @@ if __name__ == "__main__":
                  second_session_refused, collector_restart_reported, stubborn_shutdown_gives_up,
                   stubborn_sweep_gives_up, runner_runs_and_reports, unacknowledged_launch_times_out,
                   quit_during_launch_handshake, runner_stopped, runners_stop_at_quit,
-                 runner_bad_launches, runner_checkout_swapped, run_left_by_a_killed_tether, many_runs_in_one_session,
+                 runner_bad_launches, signed_device_pin_is_refused, runner_checkout_swapped,
+                 run_left_by_a_killed_tether, many_runs_in_one_session,
                  runs_without_a_collector):
         state = Path(tempfile.mkdtemp(prefix="tether-"))
         try:

@@ -81,7 +81,10 @@ final class FakeLauncher: RunLauncher {
         let argv = Array(fields[3..<(3 + argc)]), env = Array(fields[(3 + argc)...])
         let cwd = open(fields[0], O_RDONLY | O_DIRECTORY)
         var info = stat()
-        guard cwd >= 0, fstat(cwd, &info) == 0, "\(info.st_dev):\(info.st_ino)" == fields[1] else {
+        let identity = fields[1].split(separator: ":", omittingEmptySubsequences: false)
+        guard identity.count == 2, let device = UInt64(identity[0]), let inode = UInt64(identity[1]),
+              cwd >= 0, fstat(cwd, &info) == 0,
+              tether_same_identity(info.st_dev, info.st_ino, device, inode) != 0 else {
             if cwd >= 0 { close(cwd) }
             Task { @MainActor in self.handler?.notStarted(runner, errno: ESTALE) }
             return true
@@ -846,5 +849,32 @@ struct RunSupportTests {
         #expect(CheckoutIdentity.read(root.path)?.branch == "none")
         #expect(CheckoutIdentity.read(root.appendingPathComponent("missing").path) == nil)
         #expect(CheckoutIdentity.read(main.path)?.id != CheckoutIdentity.read(worktree.path)?.id)
+        var info = stat()
+        #expect(lstat(main.path, &info) == 0)
+        let read = try #require(CheckoutIdentity.read(main.path))
+        #expect(read.id == CheckoutIdentity.id(device: info.st_dev, inode: info.st_ino))
+        #expect(CheckoutIdentity.pin(read.id) != nil)
+    }
+
+    /// Darwin's device number is signed. The id, the launch pin and tether's check use its bits, so a negative
+    /// device still launches. The old signed decimal made `pin` nil and the approved run `launch_failed`.
+    @Test func aNegativeDeviceIsTheSameVolumeAtThePinAndTheCheck() throws {
+        let device = dev_t(-1)
+        #expect(device < 0)
+        let inode: ino_t = 9
+        let id = CheckoutIdentity.id(device: device, inode: inode)
+        #expect(id == "vol:4294967295/inode:9")
+        let pin = try #require(CheckoutIdentity.pin(id))
+        #expect(pin == "4294967295:9")
+        let parts = pin.split(separator: ":")
+        #expect(tether_same_identity(device, inode, UInt64(parts[0])!, UInt64(parts[1])!) == 1)
+        #expect(CheckoutIdentity.pin("vol:-1/inode:9") == nil)
+        // strtoull of the signed decimal is not this device, and a value above 32 bits must not alias to it.
+        #expect(tether_same_identity(device, inode, UInt64.max, inode) == 0)
+        #expect(tether_same_identity(device, inode, 4294967296, inode) == 0)
+        let minimum = dev_t(Int32.min)
+        #expect(minimum < 0)
+        #expect(CheckoutIdentity.pin(CheckoutIdentity.id(device: minimum, inode: 1)) == "2147483648:1")
+        #expect(tether_same_identity(minimum, 1, 2147483648, 1) == 1)
     }
 }

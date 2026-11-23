@@ -302,7 +302,9 @@ to the session that asked. A run's records are about `agent-run:{handle}:{runner
 point at one directory.
 
 **Before approval** Beacon reads the checkout's directory identity (`vol:{device}/inode:{inode}`, the contract's
-`checkout_id`) and its branch from `.git/HEAD` (a worktree's too; `detached:{sha7}` or `none` otherwise), and the
+`checkout_id`; both numbers are the unsigned decimals of the directory's device and inode bits, so a negative
+Darwin device is the same volume) and its branch from `.git/HEAD` (a worktree's too; `detached:{sha7}` or `none`
+otherwise), and the
 models opencode lists (`opencode models --standalone`, read at most once a minute). The proposed model must be one
 of them. The window shows the checkout's path and branch, the full prompt and a model picker that starts at the
 proposed model; the model is the one field the person may change (D7), recorded as `edited: ["model"]` with the

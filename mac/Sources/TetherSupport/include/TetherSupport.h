@@ -48,4 +48,9 @@ pid_t tether_spawn_suspended(const char *image, char *const argv[], char *const 
 // Resumes a process started suspended. 0 on success.
 int tether_resume(pid_t pid);
 
+// The launch file stores a directory's device and inode as unsigned decimals of their bits.
+// Darwin's dev_t is signed; a negative device is that bit pattern, not a different volume.
+// 1 when `device` and `inode` are exactly those bits.
+int tether_same_identity(dev_t dev, ino_t ino, unsigned long long device, unsigned long long inode);
+
 #endif

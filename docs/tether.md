@@ -19,7 +19,7 @@ error goes to `/dev/null`.
 **Runs.** The app asks for a run by writing `L <runner id>` on the lease, after writing the run's directory,
 `~/Library/Application Support/beacon/runs/<runner id>/` (`0700`): `launch` (the working directory, its device and
 inode as the app approved it, the arguments and the environment, NUL-separated) and `prompt`. `tether` opens the
-working directory once and compares its device and inode with the pinned ones; another directory at that path is
+working directory once and compares its device and inode bits with the pinned ones; another directory at that path is
 refused with `ESTALE` and nothing starts. It spawns a suspended leader for a new process group, in that directory
 by its descriptor, with `prompt` as its standard input and its standard output and error in new `output` and
 `errors` files there (`0600`, refused if they exist). It adds its own `BEACON_SUPERVISOR` marker for the run and drops
@@ -189,6 +189,7 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
   marker (a marker in the launch file is dropped); `started` holds its pid; its exit code and its end are
   reported, its output and errors are kept `0600`, and the same run cannot start twice;
 - a directory swapped in at the run's path after the app pinned it is refused with `ESTALE`, and nothing starts;
+- a signed device decimal is not that directory's pin; the unsigned bits of its device still start the run;
 - 300 runs one after another all start in one session: only live runs count against the limit;
 - stopping a run stops its whole tree, a child that ignores TERM and a detached grandchild included, and leaves the
   collector running; two runs run at once, and Quit stops both;

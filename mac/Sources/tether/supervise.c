@@ -336,10 +336,11 @@ static void free_runner(struct runner *r) {
 }
 
 // Reads <state>/runs/<id>/launch: NUL-terminated fields, the working directory, its identity as
-// "<device>:<inode>" (pinned when the app approved it), the argument count, the arguments (the
-// first an absolute image path), then the environment. Returns the runner with its argv set, its
-// environment in `env` (NULL-terminated, the job's marker still to be added), or NULL with errno set.
-static struct runner *read_launch(int run, const char *id, char ***env, const char **cwd, dev_t *dev, ino_t *ino) {
+// "<device>:<inode>" (the unsigned bits pinned when the app approved it), the argument count, the
+// arguments (the first an absolute image path), then the environment. Returns the runner with its argv
+// set, its environment in `env` (NULL-terminated, the job's marker still to be added), or NULL with errno set.
+static struct runner *read_launch(int run, const char *id, char ***env, const char **cwd,
+                                  unsigned long long *device_out, unsigned long long *inode_out) {
     int fd = openat(run, "launch", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     struct stat st;
     if (fd < 0) return NULL;
@@ -370,19 +371,25 @@ static struct runner *read_launch(int run, const char *id, char ***env, const ch
     }
     for (size_t i = 0, k = 0; i < size; i += strlen(buf + i) + 1) fields[k++] = buf + i;
     char *end = NULL, *colon = NULL, *rest = NULL;
+    errno = 0;
     unsigned long long device = nfields >= 4 ? strtoull(fields[1], &colon, 10) : 0;
+    int device_range = errno;
+    errno = 0;
     unsigned long long inode = colon && *colon == ':' ? strtoull(colon + 1, &rest, 10) : 0;
+    int inode_range = errno;
     long argc = nfields >= 4 ? strtol(fields[2], &end, 10) : 0;
+    // A signed device decimal wraps to a value above 32 bits. It is not the volume's bit pattern.
     if (nfields < 4 || fields[0][0] != '/' || !rest || *rest || colon == fields[1] || !end || *end || argc < 1 ||
-        argc > 64 || (size_t)argc + 3 > nfields || fields[3][0] != '/') {
+        argc > 64 || (size_t)argc + 3 > nfields || fields[3][0] != '/' || device_range == ERANGE ||
+        inode_range == ERANGE || device > UINT32_MAX) {
         free(fields);
         free_runner(r);
         errno = EINVAL;
         return NULL;
     }
     *cwd = fields[0];
-    *dev = (dev_t)device;
-    *ino = (ino_t)inode;
+    *device_out = device;
+    *inode_out = inode;
     r->argv = calloc((size_t)argc + 1, sizeof(*r->argv));
     *env = calloc(nfields - 3 - (size_t)argc + 2, sizeof(**env));
     if (!r->argv || !*env) {
@@ -456,9 +463,8 @@ static void launch(struct session *s, const char *id) {
     if (runs >= 0) close(runs);
     char **env = NULL;
     const char *cwd = NULL;
-    dev_t dev = 0;
-    ino_t ino = 0;
-    struct runner *r = run >= 0 ? read_launch(run, id, &env, &cwd, &dev, &ino) : NULL;
+    unsigned long long device = 0, inode = 0;
+    struct runner *r = run >= 0 ? read_launch(run, id, &env, &cwd, &device, &inode) : NULL;
     if (!r) error = errno;
     int dir = -1;
     if (r) {
@@ -466,7 +472,7 @@ static void launch(struct session *s, const char *id) {
         dir = open(cwd, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (dir < 0) {
             error = errno;
-        } else if (fstat(dir, &st) != 0 || st.st_dev != dev || st.st_ino != ino) {
+        } else if (fstat(dir, &st) != 0 || !tether_same_identity(st.st_dev, st.st_ino, device, inode)) {
             error = ESTALE;
             close(dir);
             dir = -1;

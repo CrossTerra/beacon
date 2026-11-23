@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
@@ -64,6 +65,10 @@ pid_t tether_spawn_suspended(const char *image, char *const argv[], char *const 
 
 int tether_resume(pid_t pid) {
     return kill(pid, SIGCONT) == 0 ? 0 : -1;
+}
+
+int tether_same_identity(dev_t dev, ino_t ino, unsigned long long device, unsigned long long inode) {
+    return device <= UINT32_MAX && (uint32_t)dev == (uint32_t)device && (unsigned long long)ino == inode;
 }
 
 int tether_open_session(const char *helper, pid_t *pid) {

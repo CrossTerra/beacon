@@ -138,24 +138,32 @@ public enum OpencodeModels {
 /// checkout is refused, and the branch checked out.
 public struct CheckoutIdentity: Equatable, Sendable {
     /// `vol:{device}/inode:{inode}`. Two names for one directory have the same id and share a claim.
+    /// Device and inode are the unsigned decimals of their bits. Darwin's device number is signed.
     public let id: String
     public let branch: String
     /// The checkout has its own `bin/run`, which Beacon does not use.
     public let ownRunner: Bool
 
     /// `vol:{device}/inode:{inode}` as tether's launch file pins it, `{device}:{inode}`; nil if it is not one.
+    /// A signed device decimal is not an id: it used to make this nil and the approved run `launch_failed`.
     static func pin(_ id: String) -> String? {
-        let parts = id.split(separator: "/")
+        let parts = id.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2, parts[0].hasPrefix("vol:"), parts[1].hasPrefix("inode:"),
-              let device = UInt64(parts[0].dropFirst(4)), let inode = UInt64(parts[1].dropFirst(6)) else { return nil }
+              let device = UInt64(parts[0].dropFirst(4)), device <= UInt64(UInt32.max),
+              let inode = UInt64(parts[1].dropFirst(6)) else { return nil }
         return "\(device):\(inode)"
+    }
+
+    /// The id tether compares by bits. `device` may be negative; the text is its unsigned value.
+    static func id(device: dev_t, inode: ino_t) -> String {
+        "vol:\(UInt64(UInt32(bitPattern: device)))/inode:\(UInt64(inode))"
     }
 
     public static func read(_ path: String) -> CheckoutIdentity? {
         var info = stat()
         guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { return nil }
         let runner = path + "/bin/run"
-        return CheckoutIdentity(id: "vol:\(info.st_dev)/inode:\(info.st_ino)", branch: branch(path),
+        return CheckoutIdentity(id: id(device: info.st_dev, inode: info.st_ino), branch: branch(path),
                                 ownRunner: FileManager.default.isExecutableFile(atPath: runner))
     }
 
