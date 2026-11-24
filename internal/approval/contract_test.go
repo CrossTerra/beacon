@@ -134,7 +134,7 @@ func TestActionSchemas(t *testing.T) {
 }
 
 // Play the fixture through production journal transitions, fixing ids, salts, times and replay nonces only.
-// The runner lifecycle belongs to supervision, and Slack without a trusted intake never goes on a shared subject.
+// Slack without a trusted intake never goes on a shared subject.
 func fixtureJournal(t *testing.T) (*Journal, []Object) {
 	t.Helper()
 	dir := scratch(t)
@@ -152,9 +152,6 @@ func fixtureJournal(t *testing.T) (*Journal, []Object) {
 	for _, v := range fixture(t, "journal") {
 		r := obj(obj(v)["body"])
 		kind := text(r, "type")
-		if strings.HasPrefix(kind, "app.runner.") {
-			continue
-		}
 		m, sealed := obj(r["metadata"]), obj(r["sealed"])
 		s := obj(sealed["metadata"])
 		id, a := text(m, "proposal"), Action(text(m, "action"))
@@ -201,6 +198,15 @@ func fixtureJournal(t *testing.T) (*Journal, []Object) {
 			must(t, err)
 		case "app.action.declined":
 			must(t, j.Decline(id, text(s, "note"), at))
+		case "app.runner.working", "app.runner.waiting", "app.runner.finished", "app.runner.closed":
+			event := RunnerEvent{Kind: RunnerKind("runner_" + strings.TrimPrefix(kind, "app.runner."))}
+			switch event.Kind {
+			case RunnerWaiting:
+				event.Text = text(s, "question")
+			case RunnerFinished:
+				event.Text = text(s, "report")
+			}
+			must(t, j.RecordRunner(id, event, at))
 		default:
 			t.Fatalf("unhandled fixture %s", kind)
 		}

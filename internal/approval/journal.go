@@ -35,23 +35,25 @@ const startWindow = 10 * time.Minute
 // frame is the v1 disk schema. An action entry commits its sequence and replay nonce in the same frame.
 // Its proposal/transition is the record recipe; the outbox later commits the wire bytes before sending.
 type frame struct {
-	Kind           string    `json:"kind"`
-	ID             string    `json:"id,omitempty"`
-	Seq            int64     `json:"seq,omitempty"`
-	At             int64     `json:"at,omitempty"` // Unix milliseconds
-	Nonce          string    `json:"nonce,omitempty"`
-	Proposal       *Proposal `json:"proposal,omitempty"`
-	Frozen         *Frozen   `json:"frozen,omitempty"`
-	Result         *Result   `json:"result,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Note           string    `json:"note,omitempty"`
-	Bytes          []byte    `json:"bytes,omitempty"`
-	Ambiguous      bool      `json:"ambiguous,omitempty"`
-	CredentialID   []byte    `json:"credential_id,omitempty"`
-	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
-	Batch          []string  `json:"batch,omitempty"`
-	VaultHash      []byte    `json:"vault_hash,omitempty"`
-	SlackOperation string    `json:"slack_operation,omitempty"`
+	Kind           string       `json:"kind"`
+	ID             string       `json:"id,omitempty"`
+	Seq            int64        `json:"seq,omitempty"`
+	At             int64        `json:"at,omitempty"` // Unix milliseconds
+	Nonce          string       `json:"nonce,omitempty"`
+	Proposal       *Proposal    `json:"proposal,omitempty"`
+	Frozen         *Frozen      `json:"frozen,omitempty"`
+	Result         *Result      `json:"result,omitempty"`
+	Reason         string       `json:"reason,omitempty"`
+	Note           string       `json:"note,omitempty"`
+	Bytes          []byte       `json:"bytes,omitempty"`
+	Ambiguous      bool         `json:"ambiguous,omitempty"`
+	CredentialID   []byte       `json:"credential_id,omitempty"`
+	BatchChallenge []byte       `json:"batch_challenge,omitempty"`
+	Batch          []string     `json:"batch,omitempty"`
+	VaultHash      []byte       `json:"vault_hash,omitempty"`
+	SlackOperation string       `json:"slack_operation,omitempty"`
+	Runner         *RunnerEvent `json:"runner,omitempty"`
+	PGID           int          `json:"pgid,omitempty"` // local launch permit; never used to signal on replay
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -61,6 +63,9 @@ type View struct {
 	StartedAt, UnknownAt time.Time
 	Outcome              *Result
 	SlackOperation       string `json:"-"` // durability marker, never part of a wire record
+	RunnerState          RunnerKind
+	RunOutcome           RunnerEvent
+	RunPGID              int `json:"-"` // set only after registering the gated group
 	asserted             bool
 }
 
@@ -635,7 +640,7 @@ func (j *Journal) ClaimDispatch(id string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	s := j.states[id]
-	if !j.dispatchable(s) {
+	if !j.dispatchable(s) || s.Type == Run {
 		return false
 	}
 	s.dispatched = true
@@ -765,10 +770,17 @@ func (j *Journal) fold(e frame) bool {
 	if e.ID == "" {
 		return j.foldDelivery(e)
 	}
+	s := j.states[e.ID]
+	if e.Kind == "run_permit" {
+		if e.Seq != 0 || e.PGID <= 1 || s == nil || s.Type != Run || s.Status != "started" || !s.asserted || s.RunPGID != 0 {
+			return false
+		}
+		s.RunPGID, s.dispatched = e.PGID, true
+		return true
+	}
 	if e.Seq != j.lastSeq+1 || !replayNonce.matches(e.Nonce) || !ValidID(e.ID, "apr") {
 		return false
 	}
-	s := j.states[e.ID]
 	if e.Kind == "proposed" {
 		if s != nil || e.Proposal == nil || e.Proposal.ID != e.ID || e.Proposal.Params == nil ||
 			e.Proposal.Status != "pending" || e.Proposal.Version != 1 || e.Proposal.Slack != nil && !e.Proposal.Slack.valid(e.Proposal.Request) {
@@ -777,6 +789,15 @@ func (j *Journal) fold(e frame) bool {
 		s = &proposalState{View: View{Proposal: *e.Proposal}, order: len(j.order)}
 		j.states[s.ID], j.active[s.ID] = s, s
 		j.order = append(j.order, s)
+	} else if e.Runner != nil {
+		if e.Kind != string(e.Runner.Kind) || e.Runner.check() != nil || !runnerTransition(s, e.Runner.Kind) {
+			return false
+		}
+		s.RunnerState = e.Runner.Kind
+		if s.RunnerState.terminal() {
+			s.RunOutcome = *e.Runner
+		}
+		s.Version++
 	} else {
 		if s == nil || !foldTransition(s, e) {
 			return false

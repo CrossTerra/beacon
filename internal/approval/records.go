@@ -69,13 +69,15 @@ func record(id string, e *frame, s *proposalState, who SignalIdentity) ([]byte, 
 			}
 		}
 	case Run:
-		if actorHandle.matches(who.Handle) && ValidID(s.RunnerID, "run") {
-			subject = "agent-run:" + who.Handle + ":" + strings.TrimPrefix(s.RunnerID, "run_")
+		if !actorHandle.matches(who.Handle) || !ValidID(s.RunnerID, "run") {
+			return nil, Invalid("/subject")
 		}
+		subject = "agent-run:" + who.Handle + ":" + strings.TrimPrefix(s.RunnerID, "run_")
 	}
 	if !contextName.matches(subject) {
 		return nil, Invalid("/subject")
 	}
+	recordType := "app.action." + e.Kind
 	switch e.Kind {
 	case "proposed":
 		m["params_hash"], m["expires_at"] = s.ParamsHash, timestamp(s.ExpiresAt)
@@ -111,10 +113,28 @@ func record(id string, e *frame, s *proposalState, who SignalIdentity) ([]byte, 
 		setText(sealed, "evidence", e.Result.Evidence)
 		setText(sealed, "result", e.Result.Text)
 	default:
-		return nil, Invalid("/type")
+		if e.Runner == nil || s.Type != Run {
+			return nil, Invalid("/type")
+		}
+		recordType = "app.runner." + strings.TrimPrefix(e.Kind, "runner_")
+		m["runner_id"] = s.RunnerID
+		switch e.Runner.Kind {
+		case RunnerWaiting:
+			sealed["question"] = e.Runner.Text
+		case RunnerStalled:
+			sealed["last_output"] = e.Runner.Text
+		case RunnerFinished:
+			sealed["report"] = e.Runner.Text
+		case RunnerFailed:
+			m["error"] = e.Runner.Error
+			setText(sealed, "detail", e.Runner.Text)
+		}
+		if e.Runner.Kind != RunnerClosed && e.Runner.Kind != RunnerWorking {
+			m["from"] = "runner"
+		}
 	}
 	r := Object{"version": int64(1), "key": "beacon:" + id + ":" + strconv.FormatInt(e.Seq, 10),
-		"type": "app.action." + e.Kind, "subject": subject, "occurred_at": timestamp(time.UnixMilli(e.At)), "metadata": m}
+		"type": recordType, "subject": subject, "occurred_at": timestamp(time.UnixMilli(e.At)), "metadata": m}
 	if len(sealed) > 0 {
 		r["sealed"] = Object{"level": "owner+agents", "replay_nonce": e.Nonce, "metadata": sealed}
 	}
