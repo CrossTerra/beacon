@@ -167,8 +167,11 @@ checkout's opencode configuration does not deny.
 12. **Services end with the app.** `tether` runs only commands compiled into it, each in its own process group.
     Quit or the app's death cancels pending restarts and stops every group and tracked descendant, including a
     detached one, and `tether` confirms that none remain. A session that `tether` could not clean up is stopped by
-    the next one before it starts anything. The [limits](tether.md#limits) say what can still escape. Services
-    run as the person: supervision is not isolation.
+     the next one before it starts anything. The [limits](tether.md#limits) say what can still escape. Services
+     run as the person: supervision is not isolation.
+     The Go service's [reaper](supervision.md) uses the same group and descendant tracking and additionally
+     survives the service's death to clean up. It keeps the instance lock through cleanup and blocks a new
+     instance until recovery can be confirmed. Linux's planned user unit adds a cgroup boundary.
 
 13. **Proposals arrive only over the authenticated local socket.** Beacon.app's proposal socket and `beacon act`
     each check the other end with the kernel's audit token before sending anything. The app admits only the code
@@ -212,7 +215,7 @@ checkout's opencode configuration does not deny.
 16. **The Go preview is separate and cannot act.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
     are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
     takes the signed route above; there is no fallback. The preview reads no keychain item or live credential,
-    starts no subprocess and makes no outbound HTTP request. Its socket trusts the kernel's user ID, not a code
+     starts only its same-binary reaper (no live jobs) and makes no outbound HTTP request. Its socket trusts the kernel's user ID, not a code
     signature. Anyone running as that user can submit, read the owner-only plaintext journal, or get a one-use
     review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
     Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The

@@ -1,5 +1,7 @@
 # Tether: services that end with the app
 
+This describes the signed Swift app. The separate Go service uses [Go supervision](supervision.md).
+
 `Beacon.app` starts its services through `tether`, a small helper in `Beacon.app/Contents/Helpers`. Nothing is
 installed separately. There is no LaunchDaemon, no administrator step and no other account. Everything runs as
 the person in their login session.

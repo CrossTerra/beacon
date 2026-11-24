@@ -1,6 +1,6 @@
 # Go approval service (13.01 read-only preview)
 
-This slice of Part 2 is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
+This is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
 separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of `beacon act`. Default
 `beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
 The preview does not read collector config, Keychain items, vaults or the Swift journal. There is no installer
@@ -79,8 +79,10 @@ An approval that did not start expires at restart or shutdown. A durable start w
 `outcome_unknown` at restart; only a read-back result can settle it. Replay does not dispatch. A supplied
 archive ID at the journal API is a lower bound for a new journal, not an import: the Go ID must sort strictly
 after it. Pending proposals survive a restart until their 24-hour deadline. The service sweeps expiries even
-without a browser or socket read, waking waiters after the expiry is durable. Ctrl-C or SIGTERM stops the service,
-closes both listeners and the socket, cancels any fixture delivery, and releases the instance lock.
+without a browser or socket read, waking waiters after the expiry is durable. The [reaper](supervision.md)
+sweeps the previous Go session under the instance lock before replay. Ctrl-C or SIGTERM stops the service,
+closes both listeners and the socket, cancels any fixture delivery, and stops supervision before releasing
+the lock. If the reaper is lost, the service stops serving and the next start must sweep again.
 
 An action frame fixes its Signal record sequence and replay nonce. Local markers and cursor changes consume
 no sequence numbers. The ordered sender projects the head of the outbox into Signal's fixed envelope, syncs
@@ -112,8 +114,8 @@ are unchanged.
 
 The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
 on Linux; the `proc_pidpath` kernel query on macOS without cgo). Neither reads arguments or environment.
-An internal hook for the future supervisor can attribute a connection to a live run using the kernel PID,
-never the request's agent or context. All CLI preview peers are unattributed. Attribution is pinned
+The Go supervisor can attribute a connection to a live run using the kernel PID, never the request's agent
+or context. The CLI preview does not launch runs, so its peers are unattributed. Attribution is pinned
 at connect time; PID reuse is a limit. `get`, `wait` and `withdraw` are scoped to the same run, or to the
 shared unattributed identity. The socket also supports `types`, `propose` (which returns `review_url` from
 the configured origin) and `open` (issues a read-only sign-in code). There is no `quit`, list or approve.

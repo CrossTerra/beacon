@@ -1,0 +1,72 @@
+# Go service supervision
+
+`beacon serve` starts a reaper from the same binary (`serve --reaper`, an internal mode with inherited
+descriptors). This is the Go replacement for the app's [tether](tether.md), not an installer or a switch to
+the Go service. The isolated review preview takes the lock and sweeps, but defines no live collector,
+watches or run handler. It reads no collector config or credentials. The signed app still uses C tether.
+
+## Startup, stop and recovery
+
+1. `serve` takes `instance.lock` in its private state directory and shares that locked file descriptor with
+   the reaper. The reaper is the sole parent of supervised processes. It holds the lock through cleanup even
+   if `serve` has been killed, so a replacement cannot race it.
+2. Under the lock, the reaper sweeps a previous `supervisor.session` before the service replays its journal
+   or binds a listener. The file is owner-only (`0600`) and contains a random session ID, not PIDs. An
+   unreadable, malformed or unresolved session prevents startup. The new session ID is synced and published
+   before any jobs start. Neither this sweep nor journal replay restarts a prior approval.
+3. Each job is its own process group, with no inherited service environment. It receives the job's explicit
+   environment plus `BEACON_SUPERVISOR=<session>:<job>`. A failed collector or watch restarts after its
+   entire tree is gone, with 1, 2, 4, 8, 16, then at most 30 seconds between attempts. Clean exits and runs
+   do not restart. A leader that exits stays unreaped until the tree is gone, reserving the group ID.
+4. `SIGTERM` or Ctrl-C makes `serve` close the lifetime pipe's sole writer. If `serve` dies, the kernel
+   closes it. EOF cancels pending starts and restarts. The reaper concurrently sends TERM to jobs' groups
+   and tracked processes, sends KILL after 15 seconds, and gives up after five more seconds if it cannot
+   confirm cleanup. Zombies are already dead, but the reaper still waits for and reaps its own leaders.
+   `serve` waits at most 23 seconds for the reaper, and reports an unconfirmed stop rather than hanging.
+5. Only confirmed cleanup removes the session file. If the reaper itself is killed, `serve` stops serving
+   and exits with an error; it cannot claim the jobs are gone. The next start does the marker sweep before
+   serving. A sweep uses process identities discovered in the current process table, never a saved numeric PID.
+
+The reaper checks the same user's process table every 100 ms while jobs are active. Group members and
+descendants of tracked processes are tracked by PID and start time, even after they detach. Cleanup also
+checks for the session's exact marker, including processes that detached and became orphaned before a scan.
+Linux reads `/proc/PID/stat` and `/proc/PID/environ`; macOS uses `kern.proc` and `KERN_PROCARGS2`, without
+cgo. Only a matching marker is retained from those environment queries. There is no new network egress.
+
+The reaper has a separate process group so launchd's cleanup of the service group does not kill it first.
+On Linux, the planned systemd user unit uses `KillMode=control-group` and `TimeoutStopSec=30`. The cgroup
+also catches processes that escaped group and marker tracking. The reaper does not treat systemd's group-wide
+TERM as a clean exit: it still waits for the lifetime pipe. Part 5 writes and installs both user service
+definitions; this part changes neither the installer nor the currently installed app.
+
+## Run handoff
+
+Trusted service code uses `Supervisor.PrepareRun` with an approved run ID and explicit command. The reaper
+installs the process group and its ownership before returning `Run.PGID()`. A trusted bootstrap waits for a
+permit on a private pipe: it has not loaded the target executable or received its environment. The handler
+can durably record start before calling `Run.Release()`. EOF, shutdown, `Run.Stop()` or five seconds
+without release cancels a prepared launch without executing the target. `Run.Wait` returns the leader's exit
+code (128 plus signal when signaled) after the tree is gone, or a cleanup/launch error. There is no retry.
+
+When supplied, the approved checkout's device and inode are checked on an open descriptor and the bootstrap
+enters that descriptor, not the path again. Optional prompt and output files are private. Run outputs are
+created exclusively; fixed job logs append. The handler, not the reaper, owns approval, durable launch
+records and construction of the command and environment. Do not pass Beacon credentials to a child.
+
+The proposal socket resolves the kernel peer PID once, at connect time. Group membership or tracked ancestry
+can identify a run; an environment marker alone cannot. If the reaper is unavailable, the socket rejects
+the connection rather than letting the peer fall back to the unattributed identity.
+
+## Limits and tests
+
+Supervision is not isolation. Without systemd's cgroup, a descendant can escape if it leaves its group and
+ancestry tracking misses it, and it removes the marker or the kernel hides its environment (as macOS does
+for platform binaries). A PID can still be reused between the final identity check and a signal. If the
+reaper is killed, its in-memory ancestry is lost; recovery needs the marker, a still-marked ancestor or a
+still-marked group leader. The Linux cgroup also ends descendants when the unit is stopped.
+
+`go test -race ./...` in the macOS and Linux CI matrix includes the supervision fixtures: a summary-only
+collector, a restarting watch, and runner trees with a TERM-ignoring child and a detached grandchild holding
+a loopback listener. They cover service stop, SIGKILL of the service or the reaper, the next start's sweep,
+pending restarts, the run handshake, socket attribution and bounded failure. They install nothing, run no
+real job, and use no Keychain.
