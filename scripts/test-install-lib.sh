@@ -159,15 +159,13 @@ kill() {
 	fi
 	builtin kill "$@"
 }
-beacon_osascript() {
+beacon_terminate_pid() {
 	echo AppleScript >> "$tmp/quit-paths"
-	printf '%s\n' "$4" >> "$tmp/quit-event"
-	if [[ $# -ne 6 || $1 != -e || $2 != 'with timeout of '* || $3 != -e ||
-		$4 != "tell application \"System Events\" to quit (first process whose unix id is $fake_pid)" ||
-		$5 != -e || $6 != 'end timeout' ]]; then
-		echo "unexpected AppleScript: $*" >&2
+	printf 'terminate %s\n' "$1" >> "$tmp/quit-event"
+	[[ "$1" == "$fake_pid" ]] || {
+		echo "unexpected terminate pid $1" >&2
 		return 2
-	fi
+	}
 	case ${FAKE_AUTOMATION:-} in
 	quit) kill -USR1 "$fake_pid" ;;
 	ack) return 0 ;;
@@ -193,6 +191,18 @@ reap_fake_app() {
 }
 
 [[ $(try_quit) == "not running" ]] || fail "quit with nothing running"
+# A same-user zombie, and a pid that vanished after it matched, are not an uncertain listing.
+python3 -c 'import os,time
+if os.fork()==0: os._exit(0)
+time.sleep(60)' &
+zparent=$!
+track_pid "$zparent"
+sleep 0.2
+beacon_pids "$app" >/dev/null || fail "a zombie made the listing uncertain"
+kill -KILL "$zparent" 2>/dev/null || true
+wait "$zparent" 2>/dev/null || true
+untrack_pid "$zparent"
+[[ $(pid_count "") == 0 ]] || fail "an empty pid list failed the count"
 expect_paths ""
 socket() { printf 'socket:%s\npeer:%s' "$cli" "$fake_pid"; }
 fake_app stubborn
@@ -244,8 +254,8 @@ stop_fake_app
 fake_app stubborn
 [[ $(FAKE_TERM_ERROR=yes FAKE_AUTOMATION=quit try_quit 2) == "quit with AppleScript" ]] || fail "the pid Apple event"
 expect_paths "$(socket)"$'\nSIGTERM\nAppleScript'
-expect_detail "Trying AppleScript to quit pid $fake_pid"
-grep -F "unix id is $fake_pid" "$tmp/quit-event" >/dev/null || fail "the Apple event did not name the verified pid"
+expect_detail "Trying to terminate pid $fake_pid"
+grep -F "terminate $fake_pid" "$tmp/quit-event" >/dev/null || fail "Quit was not sent to the verified pid"
 reap_fake_app
 
 fake_app term
@@ -309,6 +319,10 @@ done
 [[ "$(beacon_pids "$app")" == "$linked" ]] || fail "a symlink launch was not the bundle executable"
 kill -TERM "$linked"
 wait "$linked" 2>/dev/null || true
+untrack_pid "$linked"
+status=0
+beacon_started "$app" "$linked" || status=$?
+[[ "$status" -eq 1 ]] || fail "a vanished pid was uncertain ($status)"
 echo "ok quit_beacon"
 
 apple_issued "Apple Development: Winton Welsh (ABCDE12345)" || fail "Apple Development not recognised"

@@ -23,29 +23,28 @@ proc_pidpath.restype = ctypes.c_int
 uid = os.getuid()
 buf = ctypes.create_string_buffer(4096)
 try:
-    listing = subprocess.check_output(["/bin/ps", "-axww", "-o", "pid=,uid=,command="], text=True)
+    listing = subprocess.check_output(["/bin/ps", "-axww", "-o", "pid=,uid=,state=,command="], text=True)
 except (OSError, subprocess.CalledProcessError):
     sys.exit(2)
 for line in listing.splitlines():
-    parts = line.split(None, 2)
-    if len(parts) < 2 or int(parts[1]) != uid:
+    parts = line.split(None, 3)
+    if len(parts) < 3 or int(parts[1]) != uid:
         continue
     pid = int(parts[0])
+    # A zombie has no executable. "(name)" is not a candidate either. Neither is uncertainty.
+    if parts[2].startswith("Z"):
+        continue
+    command = parts[3] if len(parts) > 3 else ""
+    token = command.split()[0] if command else ""
+    if token.startswith("("):
+        continue
     n = proc_pidpath(pid, buf, len(buf))
     if n > 0:
         path = os.fsdecode(buf.value)
+    elif token.startswith("/"):
+        path = token
     else:
-        # proc_pidpath failed. The process table's path is a fallback, not a guess: if that is missing too and
-        # the process is still alive, this listing cannot say the executable is absent.
-        token = parts[2].split()[0] if len(parts) > 2 else ""
-        if token.startswith("/"):
-            path = token
-        else:
-            try:
-                subprocess.check_output(["/bin/ps", "-p", str(pid), "-o", "pid="], stderr=subprocess.DEVNULL)
-            except (OSError, subprocess.CalledProcessError):
-                continue
-            sys.exit(2)
+        continue
     try:
         st = os.stat(path)
     except FileNotFoundError:
@@ -54,11 +53,12 @@ for line in listing.splitlines():
         sys.exit(2)
     if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
         try:
-            started = subprocess.check_output(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+            started = subprocess.check_output(
+                ["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True, stderr=subprocess.DEVNULL).strip()
         except (OSError, subprocess.CalledProcessError):
-            sys.exit(2)
+            continue
         if not started:
-            sys.exit(2)
+            continue
         print(f"exe\t{pid}\t{started}")
     if bundle and "/Contents/MacOS/" in path:
         plist = os.path.join(os.path.dirname(os.path.dirname(path)), "Info.plist")
@@ -71,6 +71,16 @@ for line in listing.splitlines():
         if found == bundle:
             print(f"bundle\t{pid}")
 PY
+}
+
+# How many pids are in $1. An empty list is 0, not a failed grep.
+pid_count() {
+	local n=0 pid
+	[[ -z "$1" ]] && echo 0 && return 0
+	while read -r pid; do
+		[[ -n "$pid" ]] && n=$((n + 1))
+	done <<< "$1"
+	echo "$n"
 }
 
 # PIDs of $1's Beacon executable, one per line. Exit 2 if inspection fails: that is not "not running".
@@ -116,9 +126,13 @@ beacon_gone_until() {
 	[[ -z "$pids" ]]
 }
 
-# Kept separate so the installer fixtures never send a real Apple event.
-beacon_osascript() {
-	/usr/bin/osascript "$@"
+# Kept separate so the installer fixtures never send a real Apple event. NSRunningApplication.terminate sends Quit
+# to that pid. `tell application "System Events" to quit` quits System Events, not the named process.
+beacon_terminate_pid() {
+	local pid=$1
+	[[ "$pid" =~ ^[0-9]+$ ]] || return 2
+	# Reading `.terminate` invokes it. Calling it as a function fails: the bridge already returned the BOOL.
+	/usr/bin/osascript -l JavaScript -e "ObjC.import('AppKit'); var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier($pid); if (!app || app.isNil()) { throw new Error('no process'); } if (!app.terminate) { throw new Error('terminate refused'); }"
 }
 
 # The requirement install.sh uses for the CLI. "-" is the ad-hoc fixture signature: identifier only.
@@ -171,7 +185,7 @@ quit_beacon() {
 	# One deadline for the socket, the signal and the Apple event. Later stages use only what is left.
 	deadline=$((SECONDS + wait))
 	# Socket quit only when one process executes this binary, and the CLI checks that pid on its own connection.
-	if [[ "$(printf '%s\n' "$pids" | grep -c .)" -ne 1 ]]; then
+	if [[ "$(pid_count "$pids")" -ne 1 ]]; then
 		echo "Socket quit skipped: not exactly one process executes this Beacon, so its socket peer cannot be named." >&2
 	elif [[ ! -f "$cli" || ! -x "$cli" ]]; then
 		printf 'Socket quit skipped: no executable installed CLI at %s.\n' "$cli" >&2
@@ -210,11 +224,18 @@ quit_beacon() {
 			printf 'SIGTERM of %s failed.\n' "$pid" >&2
 		fi
 	done <<< "$pids"
-	if [[ "$signalled" -eq 1 ]] && beacon_gone_until "$app" "$deadline"; then
+	if [[ "$signalled" -eq 0 ]]; then
+		if ! pids=$(beacon_pids "$app"); then
+			return 1
+		fi
+		if [[ -z "$pids" ]]; then
+			echo "exited before SIGTERM"
+			return 0
+		fi
+	elif beacon_gone_until "$app" "$deadline"; then
 		echo "quit with SIGTERM"
 		return 0
-	fi
-	if [[ "$signalled" -eq 1 ]]; then
+	else
 		echo "SIGTERM was sent, but Beacon did not exit." >&2
 	fi
 	remain=$((deadline - SECONDS))
@@ -225,7 +246,11 @@ quit_beacon() {
 	if ! pids=$(beacon_pids "$app"); then
 		return 1
 	fi
-	if [[ "$(printf '%s\n' "$pids" | grep -c .)" -ne 1 ]]; then
+	if [[ -z "$pids" ]]; then
+		echo "exited before the Apple event"
+		return 0
+	fi
+	if [[ "$(pid_count "$pids")" -ne 1 ]]; then
 		echo "AppleScript quit skipped: not exactly one verified Beacon to address." >&2
 		return 1
 	fi
@@ -238,11 +263,9 @@ quit_beacon() {
 		echo "AppleScript quit skipped: pid $pid changed before the Apple event." >&2
 		return 1
 	fi
-	echo "Trying AppleScript to quit pid $pid; macOS may ask for Automation permission." >&2
-	# The event names that pid. A bundle-id quit can land on a different copy.
-	if reply=$(beacon_osascript -e "with timeout of $remain seconds" \
-		-e "tell application \"System Events\" to quit (first process whose unix id is $pid)" \
-		-e 'end timeout' 2>&1); then
+	echo "Trying to terminate pid $pid; macOS may ask for Automation permission." >&2
+	# NSRunningApplication.terminate sends Quit to that process. System Events' quit does not.
+	if reply=$(beacon_terminate_pid "$pid" 2>&1); then
 		if beacon_gone_until "$app" "$deadline"; then
 			echo "quit with AppleScript"
 			return 0

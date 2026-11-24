@@ -41,8 +41,9 @@ It:
    rule admits that binary even when the caller is not external, and the installer prints the reply
    (`{"status":"quitting"}` or `{"error":"invalid","field":"/op"}`). The CLI checks that its own connection's
    listener is the one verified process; if that peer cannot be named, socket quit is skipped. SIGTERM is sent only
-   to a pid whose start time still matches, so a reused pid is not signalled. A Quit Apple event, if time remains
-   in the one 30-second deadline, names that pid. It is not sent by bundle id. A failed process listing is not
+   to a pid whose start time still matches, so a reused pid is not signalled. If time remains in the one
+   30-second deadline, Quit is `NSRunningApplication.terminate()` on that pid, not a System Events quit and not a
+   bundle-id quit. A failed process listing is not
    treated as the app having exited. After the old bundle is moved aside, the installer checks again that nothing
    still runs from it and moves it back if something does.
 
