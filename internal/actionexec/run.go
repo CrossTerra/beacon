@@ -102,7 +102,7 @@ func (h *RunHandler) Resolve(ctx context.Context, p approval.Proposal) (approval
 	if err != nil {
 		return approval.Resolved{}, refusal("checkout_missing")
 	}
-	id, branch := checkoutID(pin), checkoutBranch(pin)
+	id := checkoutID(pin)
 	h.mu.Lock()
 	busy := h.claims[id] != nil
 	h.mu.Unlock()
@@ -110,7 +110,8 @@ func (h *RunHandler) Resolve(ctx context.Context, p approval.Proposal) (approval
 		_ = pin.Close()
 		return approval.Resolved{}, refusal("checkout_busy")
 	}
-	if !pin.MatchesPath() {
+	branch, err := pin.Branch()
+	if err != nil || !pin.MatchesPath() {
 		_ = pin.Close()
 		return approval.Resolved{}, refusal("checkout_changed")
 	}
@@ -195,7 +196,8 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 		return fail("supervisor_unavailable")
 	}
 	model := str(f.Params, "model")
-	if !c.pin.MatchesPath() || checkoutBranch(c.pin) != str(f.Destination, "branch") {
+	branch := str(f.Destination, "branch")
+	if current, err := c.pin.Branch(); err != nil || current != branch || !c.pin.MatchesPath() {
 		return fail("checkout_changed")
 	}
 	if !slices.Contains(h.settings.Models, model) {
@@ -204,7 +206,7 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	if !executableFile(h.settings.Opencode) {
 		return fail("opencode_missing")
 	}
-	cmd, err := h.prepare(v.RunnerID, str(f.Params, "prompt"), model, c.pin)
+	cmd, err := h.prepare(v.RunnerID, str(f.Params, "prompt"), model, branch, c.pin)
 	if err != nil {
 		return fail("launch_failed")
 	}
@@ -213,6 +215,7 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	clear(cmd.Input)
 	cmd.Input, cmd.Dir = nil, nil
 	if err != nil {
+		cmd.Output.Close()
 		switch {
 		case errors.Is(err, supervisor.ErrCheckoutChanged):
 			return fail("checkout_changed")
@@ -228,7 +231,7 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	launched := false
 	defer func() {
 		h.monitors.Add(1)
-		go h.monitor(j, c, cmd, launched)
+		go h.monitor(j, c, cmd.Output, launched)
 	}()
 	// PrepareRun registered the group but has given the child neither args nor environment.
 	// Record that attribution and consume the one-shot permit before Release can exec.
@@ -268,7 +271,7 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	return j.RecordRunner(v.ID, approval.RunnerEvent{Kind: approval.RunnerWorking}, h.now())
 }
 
-func (h *RunHandler) prepare(id, prompt, model string, pin *supervisor.Directory) (supervisor.Command, error) {
+func (h *RunHandler) prepare(id, prompt, model, branch string, pin *supervisor.Directory) (supervisor.Command, error) {
 	if err := approval.PrivateDir(h.dir); err != nil {
 		return supervisor.Command{}, err
 	}
@@ -276,8 +279,18 @@ func (h *RunHandler) prepare(id, prompt, model string, pin *supervisor.Directory
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return supervisor.Command{}, err
 	}
+	const flags = os.O_RDWR | os.O_CREATE | os.O_EXCL
+	out, err := approval.OpenPrivate(filepath.Join(dir, "output"), flags)
+	if err != nil {
+		return supervisor.Command{}, err
+	}
+	stderr, err := approval.OpenPrivate(filepath.Join(dir, "errors"), flags)
+	if err != nil {
+		out.Close()
+		return supervisor.Command{}, err
+	}
 	return supervisor.Command{Path: h.settings.Opencode, Args: []string{"run", "--standalone", "--format", "json", "--auto", "--model", model},
-		Env: h.env, Dir: pin, Input: []byte(prompt), Stdout: filepath.Join(dir, "output"), Stderr: filepath.Join(dir, "errors")}, nil
+		Env: h.env, Dir: pin, Branch: branch, Input: []byte(prompt), Output: &supervisor.OutputFiles{Stdout: out, Stderr: stderr}}, nil
 }
 
 // RecoverRunFiles deletes temporary input left by a crash. Call under instance.lock, after the
@@ -308,8 +321,9 @@ func RecoverRunFiles(state string) error {
 	return nil
 }
 
-func (h *RunHandler) monitor(j *approval.Journal, c *runClaim, cmd supervisor.Command, launched bool) {
+func (h *RunHandler) monitor(j *approval.Journal, c *runClaim, output *supervisor.OutputFiles, launched bool) {
 	defer h.monitors.Done()
+	defer output.Close()
 	r := c.run
 	watch := time.NewTicker(2 * time.Second)
 	defer watch.Stop()
@@ -318,7 +332,7 @@ func (h *RunHandler) monitor(j *approval.Journal, c *runClaim, cmd supervisor.Co
 	recordLeader := func(exit supervisor.LeaderExit) {
 		if launched && !outcomeRecorded {
 			outcomeRecorded = true
-			h.record(j, c.id, runOutcome(cmd, exit))
+			h.record(j, c.id, runOutcome(output, exit))
 		}
 	}
 	settle := func(confirmed bool) {
@@ -345,60 +359,65 @@ func (h *RunHandler) monitor(j *approval.Journal, c *runClaim, cmd supervisor.Co
 			recordLeader(exit)
 			leader = nil
 		case <-r.Done():
-			_, err := r.Wait(context.Background())
-			settle(err == nil || !launched && !errors.Is(err, supervisor.ErrUnconfirmed))
+			settle(r.CleanupConfirmed())
 			return
 		case <-h.joined:
 			// Close reached its bound. Accept a completion already received, but do not
 			// wait forever or claim cleanup when the reaper could not confirm it.
-			select {
-			case <-r.Done():
-				_, err := r.Wait(context.Background())
-				settle(err == nil || !launched && !errors.Is(err, supervisor.ErrUnconfirmed))
-			default:
-				settle(false)
-			}
+			settle(r.CleanupConfirmed())
 			return
 		case <-watch.C:
-			if launched && leader != nil && !requestedStop && outputTooLarge(cmd) {
-				requestedStop = r.StopWithReason("output_too_large") == nil
+			if launched && leader != nil && !requestedStop {
+				if _, reason := outputSizes(output); reason != "" {
+					requestedStop = r.StopWithReason(reason) == nil
+				}
 			}
 		}
 	}
 }
 
-func outputTooLarge(cmd supervisor.Command) bool {
-	var bytes int64
-	for _, path := range []string{cmd.Stdout, cmd.Stderr} {
-		if st, err := approval.CheckPrivate(path, 0o600); err == nil {
-			if st.Size() > runOutputLimit-bytes {
-				return true
-			}
-			bytes += st.Size()
-		}
+func outputSizes(output *supervisor.OutputFiles) (sizes [2]int64, reason string) {
+	if output == nil {
+		return sizes, "output_unavailable"
 	}
-	return false
+	var remaining int64 = runOutputLimit
+	for i, f := range []*os.File{output.Stdout, output.Stderr} {
+		st, err := f.Stat()
+		if err != nil || !st.Mode().IsRegular() || st.Size() < 0 {
+			return sizes, "output_unavailable"
+		}
+		if st.Size() > remaining {
+			return sizes, "output_too_large"
+		}
+		sizes[i] = st.Size()
+		remaining -= sizes[i]
+	}
+	return sizes, ""
 }
 
-func runOutcome(cmd supervisor.Command, exit supervisor.LeaderExit) approval.RunnerEvent {
+func runOutcome(output *supervisor.OutputFiles, exit supervisor.LeaderExit) approval.RunnerEvent {
 	reason := exit.Reason
 	event := approval.RunnerEvent{Kind: approval.RunnerFailed, Error: reason}
 	if reason == "stopped_at_quit" {
 		event.Text = "Beacon stopped while the run was working."
 		return event
 	}
-	if reason == "output_too_large" || outputTooLarge(cmd) {
-		return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: "output_too_large"}
+	if reason == "output_too_large" || reason == "output_unavailable" {
+		return event
 	}
-	report := readRunReport(cmd.Stdout)
+	sizes, problem := outputSizes(output)
+	if problem != "" {
+		return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: problem}
+	}
+	report := readRunReport(output.Stdout, sizes[0])
 	switch {
 	case reason != "":
 		event.Text = firstText(report.text, report.problem)
 	case exit.Code == 0:
 		// Catch a burst between ticks (or growth while the report was read). A prefix
 		// of an oversized stream cannot establish what the final message was.
-		if outputTooLarge(cmd) {
-			return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: "output_too_large"}
+		if current, problem := outputSizes(output); problem != "" || current != sizes {
+			return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: firstText(problem, "output_changed")}
 		}
 		return approval.RunnerEvent{Kind: approval.RunnerFinished, Text: firstText(report.text, "The run ended without a final message.")}
 	default:
@@ -408,7 +427,7 @@ func runOutcome(cmd supervisor.Command, exit supervisor.LeaderExit) approval.Run
 		} else if exit.Code > 128 {
 			event.Error = "signal_" + strconv.Itoa(exit.Code-128)
 		}
-		event.Text = firstText(report.problem, errorTail(cmd.Stderr), report.text)
+		event.Text = firstText(report.problem, errorTail(output.Stderr, sizes[1]), report.text)
 	}
 	return event
 }

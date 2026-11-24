@@ -46,8 +46,8 @@ func TestCheckoutBranchReadsWorktreeAndDetachedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pin.Close()
-	if got := checkoutBranch(pin); got != "none" {
-		t.Fatal(got)
+	if got, err := pin.Branch(); err != nil || got != "none" {
+		t.Fatalf("branch = %q: %v", got, err)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "worktree"), 0o700); err != nil {
 		t.Fatal(err)
@@ -55,12 +55,12 @@ func TestCheckoutBranchReadsWorktreeAndDetachedHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: worktree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range [][2]string{{"ref: refs/heads/review/part-4\n", "review/part-4"}, {strings.Repeat("a", 40), "detached:aaaaaaa"}} {
+	for _, tc := range [][2]string{{"ref: refs/heads/review/part-4\n", "review/part-4"}, {strings.Repeat("a", 40), "detached:" + strings.Repeat("a", 40)}} {
 		if err := os.WriteFile(filepath.Join(dir, "worktree", "HEAD"), []byte(tc[0]), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := checkoutBranch(pin); got != tc[1] {
-			t.Fatalf("branch = %q, want %q", got, tc[1])
+		if got, err := pin.Branch(); err != nil || got != tc[1] {
+			t.Fatalf("branch = %q, want %q: %v", got, tc[1], err)
 		}
 	}
 }
@@ -88,7 +88,7 @@ func TestCheckoutFactsStayWithTheHeldDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	setBranch("replacement")
-	if pin.MatchesPath() || checkoutBranch(pin) != "approved" {
+	if branch, err := pin.Branch(); err != nil || pin.MatchesPath() || branch != "approved" {
 		t.Fatal("the held directory followed the replacement instead of the approved branch")
 	}
 }
@@ -96,23 +96,69 @@ func TestCheckoutFactsStayWithTheHeldDirectory(t *testing.T) {
 func TestSuccessfulExitCannotReportAnOversizePrefix(t *testing.T) {
 	for _, name := range []string{"output", "errors"} {
 		t.Run(name, func(t *testing.T) {
-			dir := t.TempDir()
-			cmd := supervisor.Command{Stdout: filepath.Join(dir, "output"), Stderr: filepath.Join(dir, "errors")}
-			if err := os.WriteFile(cmd.Stdout, []byte(`{"type":"text","part":{"messageID":"m1","id":"p1","text":"Not the final report."}}`+"\n"), 0o600); err != nil {
+			files := fixtureOutputs(t)
+			if _, err := files.Stdout.WriteString(`{"type":"text","part":{"messageID":"m1","id":"p1","text":"Not the final report."}}` + "\n"); err != nil {
 				t.Fatal(err)
 			}
-			f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE, 0o600)
-			if err != nil {
+			f := files.Stdout
+			if name == "errors" {
+				f = files.Stderr
+			}
+			if err := f.Truncate(runOutputLimit + 1); err != nil {
 				t.Fatal(err)
 			}
-			if err := errors.Join(f.Truncate(runOutputLimit+1), f.Close()); err != nil {
-				t.Fatal(err)
-			}
-			event := runOutcome(cmd, supervisor.LeaderExit{Code: 0}) // no periodic output check ran
+			event := runOutcome(files, supervisor.LeaderExit{Code: 0}) // no periodic output check ran
 			if event.Kind != approval.RunnerFailed || event.Error != "output_too_large" || event.Text != "" {
 				t.Fatal("the first part of oversized output was reported as a successful result")
 			}
 		})
+	}
+}
+
+func fixtureOutputs(t *testing.T) *supervisor.OutputFiles {
+	t.Helper()
+	dir := t.TempDir()
+	open := func(name string) *os.File {
+		f, err := approval.OpenPrivate(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE|os.O_EXCL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { f.Close() })
+		return f
+	}
+	return &supervisor.OutputFiles{Stdout: open("output"), Stderr: open("errors")}
+}
+
+func TestRunOutcomeMeasuresAndReadsThePinnedOutput(t *testing.T) {
+	f := fixtureOutputs(t)
+	path := f.Stdout.Name()
+	if err := os.Rename(path, path+".original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	written, err := f.Stdout.WriteString(`{"type":"text","part":{"messageID":"m1","id":"p1","text":"The pinned report."}}` + "\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runOutcome(f, supervisor.LeaderExit{}); got.Kind != approval.RunnerFinished || got.Text != "The pinned report." {
+		t.Fatal("report followed the path instead of its pinned descriptor")
+	}
+	if at, err := f.Stdout.Seek(0, 1); err != nil || at != int64(written) {
+		t.Fatal("a report read changed the writer's offset")
+	}
+	if err := f.Stdout.Truncate(runOutputLimit + 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := runOutcome(f, supervisor.LeaderExit{}); got.Error != "output_too_large" {
+		t.Fatal("output size followed the replacement path")
+	}
+	if err := f.Stdout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := runOutcome(f, supervisor.LeaderExit{}); got.Error != "output_unavailable" {
+		t.Fatal("an unreadable output descriptor was reported as success")
 	}
 }
 

@@ -76,7 +76,7 @@ func reap(dir string) error {
 		return err
 	}
 	defer reply.Close()
-	descriptors := os.NewFile(6, "checkout receiver")
+	descriptors := os.NewFile(6, "descriptor receiver")
 	defer descriptors.Close()
 	if kind, err := unix.GetsockoptInt(6, unix.SOL_SOCKET, unix.SO_TYPE); err != nil || kind != unix.SOCK_DGRAM {
 		return ErrReaper
@@ -225,7 +225,7 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 				}
 				fixedSet = true
 			case "prepare":
-				m = e.prepareWithDirectory(r, descriptors)
+				m = e.prepareWithFiles(r, descriptors)
 				if m.Error == codeReaper {
 					return ErrReaper // cannot keep reading after losing descriptor/frame synchronization
 				}
@@ -240,7 +240,7 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 					if err := e.observeExit(j); err != nil {
 						return err
 					}
-					if r.Reason != "output_too_large" {
+					if r.Reason != "output_too_large" && r.Reason != "output_unavailable" {
 						r.Reason = "stopped"
 					}
 					j.stopRun(time.Now(), e.timing, r.Reason)
@@ -273,14 +273,20 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 	return nil
 }
 
-func (e *engine) prepareWithDirectory(r request, descriptors *os.File) message {
-	if r.Command != nil && r.Command.Dir != nil {
-		file, err := receiveDirectory(descriptors, r.Ticket)
+func (e *engine) prepareWithFiles(r request, descriptors *os.File) message {
+	if r.Command != nil {
+		defer clear(r.Command.Input)
+	}
+	if r.Command != nil && r.Command.descriptorCount() != 0 {
+		files, err := receiveCommandFiles(descriptors, r.Ticket, r.Command)
 		if err != nil {
 			return message{Error: codeReaper}
 		}
-		defer file.Close() // spawn passes its own reference to the gated bootstrap
-		r.Command.Dir.file = file
+		defer func() {
+			for _, f := range files {
+				f.Close() // the bootstrap has its own references after spawn
+			}
+		}()
 	}
 	return e.prepare(r)
 }

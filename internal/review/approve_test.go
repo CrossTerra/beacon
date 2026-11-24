@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -39,18 +41,15 @@ func TestAssertionApprovesTheFrozenBatchAndDoesNotStart(t *testing.T) {
 	wrapped, err := key.Assert("localhost", approval.LocalOrigin, assertCh, false)
 	must(t, err)
 	prf := bytes32()
+	j, err := approval.OpenJournal(dir, start, "")
+	must(t, err)
+	t.Cleanup(func() { j.Close() })
 	must(t, passkey.Finish(dir, rp, passkey.Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, passkey.Ceremony{
 		ClientDataJSON: wrapped.ClientDataJSON, AuthenticatorData: wrapped.AuthenticatorData,
 		Signature: wrapped.Signature, CredentialID: wrapped.CredentialID, PRFOutput: append([]byte(nil), prf...),
 	}, start))
-	j, err := approval.OpenJournal(dir, start, "")
-	must(t, err)
-	t.Cleanup(func() { j.Close() })
-	hash, err := passkey.VaultHash(dir)
-	must(t, err)
-	must(t, j.RecordPasskey(hash, start))
 	s := New(makeOrigin(t, approval.LocalOrigin, ""), j, func() time.Time { return start })
 	s.SetState(dir)
 	s.SetResolver(func(p approval.Proposal) (approval.Binding, error) {
@@ -149,6 +148,32 @@ func TestFreezeNonceIsBoundToTheSessionAndANewFreezeCancelsTheOld(t *testing.T) 
 	other := signIn(t, s)
 	postApproval(t, s, other, key, prf, second.Nonce, second.Challenge, http.StatusConflict)
 	postApproval(t, s, cookie, key, prf, second.Nonce, second.Challenge, http.StatusOK)
+}
+
+func TestRefreezeAndFinalApprovalCommitAreSerialized(t *testing.T) {
+	s, cookie, _, prf := registeredPreview(t)
+	defer clear(prf)
+	p := addPost(t, s)
+	first := freezeNonce(t, s, cookie, p.ID)
+	old := s.held[first.Nonce] // model an assertion already being verified
+	second := freezeNonce(t, s, cookie, p.ID)
+	current := s.held[second.Nonce]
+	commits := 0
+	s.actions.Approve = func([]approval.Frozen, []byte, []byte, []byte, io.Closer) error {
+		commits++
+		if s.sessions.mu.TryLock() {
+			s.sessions.mu.Unlock()
+			t.Fatal("refreeze could change the revision before the approval commits")
+		}
+		return nil
+	}
+	if err := s.commitApproval(old, nil); !errors.Is(err, approval.ErrStale) || commits != 0 {
+		t.Fatalf("a refrozen selection reached the commit: %v", err)
+	}
+	must(t, s.commitApproval(current, nil))
+	if commits != 1 {
+		t.Fatal("current selection was not committed")
+	}
 }
 
 type fixturePin struct{ closed int }
@@ -279,18 +304,15 @@ func registeredPreview(t *testing.T) (*Site, *http.Cookie, *webauthntest.Key, []
 	wrapped, err := key.Assert("localhost", approval.LocalOrigin, assertCh, false)
 	must(t, err)
 	prf := bytes32()
+	j, err := approval.OpenJournal(dir, start, "")
+	must(t, err)
+	t.Cleanup(func() { j.Close() })
 	must(t, passkey.Finish(dir, rp, passkey.Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, passkey.Ceremony{
 		ClientDataJSON: wrapped.ClientDataJSON, AuthenticatorData: wrapped.AuthenticatorData,
 		Signature: wrapped.Signature, CredentialID: wrapped.CredentialID, PRFOutput: append([]byte(nil), prf...),
 	}, start))
-	j, err := approval.OpenJournal(dir, start, "")
-	must(t, err)
-	t.Cleanup(func() { j.Close() })
-	hash, err := passkey.VaultHash(dir)
-	must(t, err)
-	must(t, j.RecordPasskey(hash, start))
 	s := New(makeOrigin(t, approval.LocalOrigin, ""), j, func() time.Time { return start })
 	s.SetState(dir)
 	s.SetResolver(func(p approval.Proposal) (approval.Binding, error) {

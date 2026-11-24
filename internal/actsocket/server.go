@@ -231,6 +231,9 @@ func (s *Server) handle(ctx context.Context, peer approval.PeerLabel, o approval
 		if len(o) != 1 {
 			return invalid("")
 		}
+		if peer.RunID != "" {
+			return failure("forbidden") // attributed runs cannot change global delivery state
+		}
 		if s.opts.ResumeDelivery == nil || ctx.Err() != nil {
 			return failure("unavailable")
 		}

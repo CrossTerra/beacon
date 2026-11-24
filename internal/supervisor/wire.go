@@ -80,6 +80,7 @@ type message struct {
 	RunID    string `json:",omitempty"`
 	PID      int    `json:",omitempty"`
 	Finished uint64 `json:",omitempty"`
+	Cleaned  bool   `json:",omitempty"` // the tree is confirmed gone, independently of launch outcome
 	Exited   uint64 `json:",omitempty"`
 	Exit     int    `json:",omitempty"`
 	Reason   string `json:",omitempty"`

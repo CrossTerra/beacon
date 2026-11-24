@@ -69,16 +69,17 @@ permit on a private pipe: it has not loaded the target executable or received it
 durably records the registered group and claims the permit before release. The bootstrap's readiness,
 permit write and exec-status read share the request's deadline; a late start does not grant a new timeout.
 A failed exec writes an error on a close-on-exec status pipe. Silent EOF alone could be bootstrap death.
-macOS requires a kernel exec notification; Linux corroborates EOF with a non-exiting child or a normal
-exit status the bootstrap could not return. An ambiguous death or timeout after the permit is unconfirmed.
-The reaper syncs a receipt before acknowledging an approved run's exec. Shutdown, `Run.Stop()` or five seconds
+macOS requires a kernel exec notification; Linux requires the target's executable identity and new argument
+vector, not an exit code. An unobserved image or timeout after the permit is unconfirmed.
+The reaper reveals the permit's nonce in a synced receipt only after positive exec evidence. Shutdown, `Run.Stop()` or five seconds
 without release cancels a prepared launch without executing the target. The leader's exit is reported without
 reaping it; `Run.Wait` confirms the whole tree is gone or returns a cleanup/launch error. There is no retry.
 
 When supplied, the service passes the checkout descriptor from freeze to the reaper over a private Unix
-socket pair. The bootstrap enters by descriptor and verifies the approved path still names it just before
-exec. `PWD` is the approved path; `OLDPWD` is not inherited. The approved prompt is sent to the child
-through an anonymous pipe; there is no prompt file to reopen. Run outputs are created exclusively; fixed
+socket pair. The bootstrap enters by descriptor and rechecks both the approved path and HEAD just before
+exec. `PWD` is the approved path; `OLDPWD` is not inherited. The reaper stages the complete prompt on an
+anonymous file descriptor before preparing the bootstrap. Every non-stdio descriptor is closed on exec.
+Run outputs are created exclusively and measured via the same pinned descriptors the child writes. Fixed
 job logs append. The handler, not the reaper, owns approval and construction of the command and environment.
 Do not pass Beacon credentials to a child.
 

@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"os"
@@ -12,37 +13,52 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type childEvents struct{ pid int }
+type childEvents struct {
+	pid    int
+	target os.FileInfo
+	argv   []byte
+}
 
-func watchChild(pid int) (*childEvents, error) { return &childEvents{pid}, nil }
+func watchChild(pid int, argv []string) (*childEvents, error) {
+	c := &childEvents{pid: pid}
+	if len(argv) > 0 {
+		want := []byte(strings.Join(argv, "\x00") + "\x00")
+		initial, err := os.ReadFile(c.proc("cmdline"))
+		if err == nil && len(initial) > 0 && !bytes.Equal(initial, want) {
+			c.target, _ = os.Stat(argv[0]) // let an explicit exec error take precedence over missing evidence
+			c.argv = want
+		}
+	}
+	return c, nil
+}
 
-// Read only after silent EOF on the CLOEXEC pipe. Linux sets PF_EXITING before
-// closing files on death. A non-exiting child therefore lost the writer at exec,
-// not by dying. The unreaped child still owns its PID. A very fast normal exit
-// also proves exec if the status is not one the bootstrap or its runtime can
-// return. With a signal or an ambiguous status, don't manufacture a launch.
-func (c *childEvents) confirmExec(_ time.Time) bool {
-	const pfExiting = 0x00000004 // Linux task flags in /proc/PID/stat, include/linux/sched.h
-	if b, err := os.ReadFile("/proc/" + strconv.Itoa(c.pid) + "/stat"); err == nil {
-		if i := strings.LastIndexByte(string(b), ')'); i >= 0 {
-			fields := strings.Fields(string(b[i+1:]))
-			if len(fields) > 6 {
-				flags, err := strconv.ParseUint(fields[6], 10, 32)
-				if err == nil && flags&pfExiting == 0 && fields[0] != "Z" && fields[0] != "X" {
-					return true
-				}
+func (c *childEvents) proc(name string) string { return "/proc/" + strconv.Itoa(c.pid) + "/" + name }
+
+// CLOEXEC can close the pipe before the new image's argument tables are installed.
+// Require both the target inode and the new argv, distinct from the bootstrap's.
+// The reaper still owns the PID. If the image isn't observable, no exit code by
+// itself proves what ran in it.
+func (c *childEvents) confirmExec(deadline time.Time) bool {
+	defer func() { c.target, c.argv = nil, nil }()
+	for c.target != nil && time.Now().Before(deadline) {
+		if exe, err := os.Stat(c.proc("exe")); err == nil && os.SameFile(c.target, exe) {
+			if argv, err := os.ReadFile(c.proc("cmdline")); err == nil && bytes.Equal(argv, c.argv) {
+				return true
 			}
 		}
-	}
-	if status, ok := c.exitStatus(); ok && status.Exited() {
-		switch status.ExitStatus() {
-		case bootstrapFailed, 2, 66: // refused exec, Go fatal error, race-detector failure
-			return false
-		default:
-			return true
+		if _, exited := c.exitStatus(); exited {
+			break
 		}
+		time.Sleep(min(time.Until(deadline), time.Millisecond))
 	}
 	return false
+}
+
+func markNonStdio() error {
+	if unix.CloseRange(3, 1<<32-1, unix.CLOSE_RANGE_CLOEXEC) == nil {
+		return nil
+	}
+	return markFDDirectory("/proc/self/fd")
 }
 
 func (c *childEvents) exitStatus() (unix.WaitStatus, bool) { return childExitStatus(c.pid) }

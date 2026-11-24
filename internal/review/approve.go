@@ -324,27 +324,38 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 	}
 	defer item.close()
 	defer clear(key)
+	if err := s.commitApproval(item, key); err != nil {
+		refused(w, "Approve actions", err)
+		return
+	}
+	render(w, "submitted", http.StatusOK, item.items)
+}
+
+// A new selection and a verified assertion must agree on which operation won.
+// Hold the same lock as beginSelection until the approval is durable. The handler
+// may unseal credentials here, but launches and provider writes happen off this lock.
+func (s *Site) commitApproval(item held, key []byte) error {
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	at := s.now()
+	if _, current := s.currentSelection(item.selection, at); !current || !at.Before(item.expires) {
+		return approval.ErrStale
+	}
 	batchChallenge := []byte(nil)
 	if len(item.items) > 1 {
 		batchChallenge = item.challenge
 	}
 	if s.actions.Approve != nil {
-		if err := s.actions.Approve(item.items, item.credential, batchChallenge, key, item.pin); err != nil {
-			refused(w, "Approve actions", err)
-			return
-		}
-	} else {
-		// A trusted resolver with no dispatcher can only record an approval. The live service never supplies
-		// a resolver for a missing handler.
-		j, ok := s.journal.(interface {
-			ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
-		})
-		if !ok || j.ApproveAll(item.items, item.credential, batchChallenge, s.now()) != nil {
-			http.Error(w, "approval refused", http.StatusConflict)
-			return
-		}
+		return s.actions.Approve(item.items, item.credential, batchChallenge, key, item.pin)
 	}
-	render(w, "submitted", http.StatusOK, item.items)
+	// A trusted resolver with no dispatcher can only record an approval.
+	j, ok := s.journal.(interface {
+		ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
+	})
+	if !ok {
+		return approval.ErrTransition
+	}
+	return j.ApproveAll(item.items, item.credential, batchChallenge, at)
 }
 
 func refused(w http.ResponseWriter, operation string, err error) {

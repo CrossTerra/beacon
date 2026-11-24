@@ -229,7 +229,8 @@ checkout's opencode configuration does not deny.
      `beacon setup` prints a one-time passkey code and
     refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
     a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
-    that data key. The journal records the check file's hash. A later assertion can record an approval only
+     that data key. The live journal refuses a second active enrollment and records the hash of the bytes
+     sealed by the first. A later assertion can record an approval only
      for a resolved binding, and only if the PRF output unwraps that key and it opens the same vault bytes
      the service verified against its live enrollment hash. A swapped file is a journalled reset and approves nothing. This holds even
      for `agent.run`, which has no provider write credential and never joins a batch. Write
@@ -251,9 +252,10 @@ checkout's opencode configuration does not deny.
        up to 15 minutes, and is checked every 15 seconds so one stuck read does not spend the recovery budget. Without provider config there is no resolver
        or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
        A run can launch only in an explicitly configured checkout. A descriptor stays pinned from freeze and
-       the bootstrap enters it, then refuses exec if the approved path now names a different directory. The reaper
-       registers its group before a durable one-shot permit releases the child. The exact approved prompt goes
-       through an anonymous pipe. No service environment or credential reaches the child. OpenCode can use the person's
+        the bootstrap enters it, then refuses exec if the approved directory or HEAD has changed. The reaper
+        registers its group before a durable one-shot permit releases the child. The exact approved prompt is
+        staged on an anonymous descriptor before release. No service environment, credential or unrelated
+        descriptor reaches the child. OpenCode can use the person's
        own configuration and sign-in; it is not sandboxed. Run output stays in private files. With delivery
        configured, the ordered outbox sends the capped report or failure detail sealed as `owner+agents`, marked
        as untrusted runner text. It uses a separate, origin-bound app key from the unattended vault, never a

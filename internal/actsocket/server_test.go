@@ -71,6 +71,38 @@ func fixture(t *testing.T, opts Options, lim limits, wrongUID bool) (string, *Se
 	return dir, s
 }
 
+func TestResumeDeliveryRequiresAnUnattributedSameUserPeer(t *testing.T) {
+	var resumed atomic.Int32
+	var attributed atomic.Bool
+	attributed.Store(true)
+	opts := Options{
+		Attribute: func(int) (string, error) {
+			if attributed.Load() {
+				return "run_01m6a6ft00e81840g2081040g3", nil
+			}
+			return "", nil
+		},
+		ResumeDelivery: func() { resumed.Add(1) },
+	}
+	dir, _ := fixture(t, opts, socketLimits, false)
+	op := object{"op": "resume-delivery"}
+	b, err := Call(t.Context(), dir, op, 0)
+	check(t, err)
+	if string(b) != `{"error":"forbidden"}` || resumed.Load() != 0 {
+		t.Fatal("an attributed run changed global delivery state")
+	}
+	attributed.Store(false)
+	b, err = Call(t.Context(), dir, op, 0)
+	check(t, err)
+	if string(b) != `{"queued":true}` || resumed.Load() != 1 {
+		t.Fatal("the local operator could not resume delivery")
+	}
+	other, _ := fixture(t, opts, socketLimits, true)
+	if _, err := Call(t.Context(), other, op, 0); err == nil || resumed.Load() != 1 {
+		t.Fatal("resume bypassed the socket's user check")
+	}
+}
+
 type wire struct {
 	*net.UnixConn
 	r *bufio.Reader

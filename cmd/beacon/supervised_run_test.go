@@ -51,8 +51,8 @@ func TestSupervisionPreparedRun(t *testing.T) {
 	pin, err := supervisor.PinDirectory(checkout)
 	must(t, err)
 	t.Cleanup(func() { pin.Close() })
-	c := fixtureCommand("run", dir)
-	c.Dir = pin
+	c := fixtureCommand("run", dir, "wait-for-release")
+	c.Dir, c.Branch = pin, "none"
 	c.Env = []string{"RUN_VAR=fixture-env", "BEACON_SUPERVISOR=forged", "PWD=/wrong", "OLDPWD=/wrong"}
 	c.Input = []byte("fixture-prompt")
 	c.Stdout, c.Stderr = filepath.Join(dir, "output"), filepath.Join(dir, "errors")
@@ -91,6 +91,7 @@ func TestSupervisionPreparedRun(t *testing.T) {
 	must(t, err)
 	must(t, pin.Close())
 	must(t, run.Release())
+	must(t, os.WriteFile(filepath.Join(dir, "release-seen"), nil, 0o600))
 	if code, err := waitRun(t, run); code != 3 || err != nil {
 		t.Fatalf("run result: %d %v", code, err)
 	}
@@ -118,6 +119,29 @@ func TestSupervisionPreparedRun(t *testing.T) {
 	}
 	if err := run.Release(); !errors.Is(err, supervisor.ErrStopped) {
 		t.Fatalf("released a completed launch again: %v", err)
+	}
+}
+
+func TestSupervisionRechecksWorktreeBranchAtRelease(t *testing.T) {
+	dir := previewTemp(t)
+	s := testSupervisor(t, dir, 0)
+	must(t, os.Mkdir(filepath.Join(dir, "worktree"), 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: worktree\n"), 0o600))
+	head := filepath.Join(dir, "worktree", "HEAD")
+	must(t, os.WriteFile(head, []byte("ref: refs/heads/approved\n"), 0o600))
+	pin, err := supervisor.PinDirectory(dir)
+	must(t, err)
+	defer pin.Close()
+	c := fixtureCommand("run", dir)
+	c.Dir, c.Branch = pin, "approved"
+	r, err := s.PrepareRun(runOne, c)
+	must(t, err)
+	must(t, os.WriteFile(head, []byte("ref: refs/heads/other\n"), 0o600))
+	if err := r.Release(); !errors.Is(err, supervisor.ErrCheckoutChanged) {
+		t.Fatalf("branch change after prepare was not refused: %v", err)
+	}
+	if _, err := waitRun(t, r); !errors.Is(err, supervisor.ErrCheckoutChanged) || fileText(dir, "run.pid") != "" {
+		t.Fatalf("branch change ran the target: %v", err)
 	}
 }
 
@@ -186,7 +210,7 @@ func TestSupervisionExecErrorIsLaunchFailure(t *testing.T) {
 	must(t, err)
 	defer pin.Close()
 	c := fixtureCommand("run", dir)
-	c.Dir = pin
+	c.Dir, c.Branch = pin, "none"
 	c.Path = filepath.Join(dir, "missing-binary")
 	run, err := s.PrepareRun(runOne, c)
 	must(t, err)
@@ -222,7 +246,7 @@ func TestSupervisionExecReceiptSurvivesAnUnrecordedReply(t *testing.T) {
 	must(t, err)
 	dest := filepath.Join(dir, "runs", p.RunnerID)
 	must(t, os.MkdirAll(dest, 0o700))
-	r, err := sup.PrepareRun(p.RunnerID, fixtureCommand("exit", dir))
+	r, err := sup.PrepareRun(p.RunnerID, fixtureCommand("hold", dir))
 	must(t, err)
 	token, err := j.ClaimRunDispatch(p.ID, r.PGID(), at)
 	must(t, err)
@@ -240,6 +264,24 @@ func TestSupervisionExecReceiptSurvivesAnUnrecordedReply(t *testing.T) {
 	if v.Outcome == nil || v.Outcome.ConfirmedBy != "read_back" || v.Status != "executed" || v.RunnerState != approval.RunnerClosed {
 		t.Fatal("recovery did not settle and close the confirmed run")
 	}
+}
+
+func TestSupervisionReceiptFailureDoesNotPoisonConfirmedCleanup(t *testing.T) {
+	dir := previewTemp(t)
+	s := testSupervisor(t, dir, 0)
+	// An existing directory makes receipt publication fail without touching the launch.
+	must(t, os.MkdirAll(filepath.Join(dir, "runs", runOne, "exec.receipt"), 0o700))
+	r, err := s.PrepareRun(runOne, fixtureCommand("hold", dir))
+	must(t, err)
+	if err := r.ReleaseWithReceipt(strings.Repeat("1", 32)); !errors.Is(err, supervisor.ErrUnconfirmed) {
+		t.Fatalf("release should not acknowledge an unsynced receipt: %v", err)
+	}
+	if _, err := waitRun(t, r); err != nil || !r.CleanupConfirmed() {
+		t.Fatalf("confirmed cleanup was lost with the receipt: %v", err)
+	}
+	r, err = s.PrepareRun(runOne, fixtureCommand("hold", dir))
+	must(t, err)
+	must(t, r.Stop())
 }
 
 func TestSupervisionRefusesUnconfirmedRecoveryBeforeReplay(t *testing.T) {

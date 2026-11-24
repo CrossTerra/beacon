@@ -47,8 +47,7 @@ type job struct {
 	execStatus    *os.File
 	ready         *os.File
 	events        *childEvents
-	stdin         *os.File
-	input         []byte
+	argv          []string // retained only until the exec check is armed
 	stopReason    string
 	exitReported  bool
 }
@@ -56,7 +55,6 @@ type job struct {
 func (j *job) stop(now time.Time, timing timing, failure string) {
 	if j.gate != nil {
 		j.closeGate() // no permit, even if the bootstrap has not reached the pipe read
-		j.closeInput()
 		if failure == "" {
 			failure = codeStopped
 		}
@@ -163,7 +161,7 @@ func (e *engine) release(ctx context.Context, ticket uint64, until time.Time, re
 		return message{Error: j.failure}
 	}
 	if receipt != "" && (e.recordExec == nil || e.recordExec(j.runID, j.pid, receipt) != nil) {
-		j.killAt, j.failure = time.Now(), codeRecovery
+		j.killAt = time.Now() // exec proof was lost, but cleanup still has its own outcome
 		return message{Error: codeRecovery}
 	}
 	j.started = now
@@ -423,7 +421,6 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 	delete(e.jobs, j.pid)
 	j.closeLife()
-	j.closeInput()
 	if j.events != nil {
 		j.events.close()
 	}
@@ -446,7 +443,7 @@ func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 	if err := e.reportExit(j, status); err != nil {
 		return err
 	}
-	return e.report(message{Finished: j.ticket, Exit: exitCode(status), Error: j.failure})
+	return e.report(message{Finished: j.ticket, Exit: exitCode(status), Error: j.failure, Cleaned: true})
 }
 
 func exitCode(status unix.WaitStatus) int {
@@ -488,15 +485,6 @@ func (j *job) closeLife() {
 		j.life.Close()
 		j.life = nil
 	}
-}
-
-func (j *job) closeInput() {
-	if j.stdin != nil {
-		_ = j.stdin.Close()
-		j.stdin = nil
-	}
-	clear(j.input)
-	j.input = nil
 }
 
 func (f *fixed) backoff(now time.Time) {

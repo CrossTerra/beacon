@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"os"
@@ -10,24 +12,31 @@ import (
 
 const receiptName = "exec.receipt"
 
-func execReceipt(dir, runner string, pgid int, token string) (string, string, error) {
-	if !ValidID(runner, "run") || pgid <= 1 || !replayNonce.matches(token) {
-		return "", "", Invalid("/run_permit")
+func receiptDir(dir, runner string) (string, error) {
+	if !ValidID(runner, "run") {
+		return "", Invalid("/run_permit")
 	}
 	runs := filepath.Join(dir, "runs")
 	run := filepath.Join(runs, runner)
 	for _, path := range []string{runs, run} {
 		if _, err := CheckPrivate(path, os.ModeDir|0o700); err != nil {
-			return "", "", err
+			return "", err
 		}
 	}
-	return run, runner + " " + token + " " + strconv.Itoa(pgid) + "\n", nil
+	return run, nil
+}
+
+func receiptBody(runner string, pgid int, token string) string {
+	return runner + " " + token + " " + strconv.Itoa(pgid) + "\n"
 }
 
 // PersistRunExec is only called by the reaper on positive exec evidence, before
 // acknowledging Release. The permit nonce binds this receipt to that launch.
 func PersistRunExec(dir, runner string, pgid int, token string) error {
-	run, body, err := execReceipt(dir, runner, pgid, token)
+	if pgid <= 1 || !replayNonce.matches(token) {
+		return Invalid("/run_permit")
+	}
+	run, err := receiptDir(dir, runner)
 	if err != nil {
 		return err
 	}
@@ -36,7 +45,7 @@ func PersistRunExec(dir, runner string, pgid int, token string) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if err := errors.Join(writeReceipt(f, body), f.Close()); err != nil {
+	if err := errors.Join(writeReceipt(f, receiptBody(runner, pgid, token)), f.Close()); err != nil {
 		return err
 	}
 	if err := os.Rename(f.Name(), filepath.Join(run, receiptName)); err != nil {
@@ -62,8 +71,11 @@ func writeReceipt(f *os.File, body string) error {
 	return syncJournal(f)
 }
 
-func hasRunExec(dir, runner string, pgid int, token string) bool {
-	run, want, err := execReceipt(dir, runner, pgid, token)
+func hasRunExec(dir, runner string, commitment []byte) bool {
+	if len(commitment) != sha256.Size {
+		return false // a legacy permit cannot establish exec
+	}
+	run, err := receiptDir(dir, runner)
 	if err != nil {
 		return false
 	}
@@ -72,6 +84,7 @@ func hasRunExec(dir, runner string, pgid int, token string) bool {
 		return false
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, int64(len(want)+1)))
-	return err == nil && string(b) == want
+	b, err := io.ReadAll(io.LimitReader(f, 128)) // receipts are shorter than this, including the longest pid
+	sum := sha256.Sum256(b)
+	return err == nil && len(b) < 128 && subtle.ConstantTimeCompare(sum[:], commitment) == 1
 }

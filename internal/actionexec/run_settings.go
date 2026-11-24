@@ -7,12 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/CrossTerra/beacon/internal/approval"
-	"github.com/CrossTerra/beacon/internal/supervisor"
 	"golang.org/x/sys/unix"
 )
 
@@ -82,44 +80,6 @@ func LoadRunSettings(dir string) (*RunSettings, error) {
 
 func absolutePath(s string) bool {
 	return filepath.IsAbs(s) && filepath.Clean(s) == s && len(s) <= 4096 && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
-}
-
-var (
-	gitBranch   = regexp.MustCompile(`^[\x21-\x7e]{1,255}$`)
-	detachedSHA = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
-)
-
-// Read only small regular files; do not run Git or read from an untrusted FIFO. Accept Git's
-// worktree pointer, an ordinary .git directory and a detached HEAD like the Swift resolver.
-func checkoutBranch(pin *supervisor.Directory) string {
-	git := ".git"
-	if target, ok := strings.CutPrefix(readGitLine(pin, git), "gitdir: "); ok {
-		git = strings.TrimSpace(target)
-	}
-	head := readGitLine(pin, filepath.Join(git, "HEAD"))
-	if name, ok := strings.CutPrefix(head, "ref: refs/heads/"); ok && gitBranch.MatchString(name) {
-		return name
-	}
-	if detachedSHA.MatchString(head) {
-		return "detached:" + head[:7]
-	}
-	return "none"
-}
-
-func readGitLine(pin *supervisor.Directory, path string) string {
-	f, err := pin.OpenAt(path, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_NOCTTY)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil || len(b) > 4096 {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
 }
 
 func executableFile(path string) bool {

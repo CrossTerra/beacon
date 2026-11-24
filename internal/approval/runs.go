@@ -1,6 +1,9 @@
 package approval
 
-import "time"
+import (
+	"crypto/sha256"
+	"time"
+)
 
 type RunnerKind string
 
@@ -63,7 +66,10 @@ func (j *Journal) ClaimRunDispatch(id string, pgid int, at time.Time) (string, e
 		return "", ErrTransition
 	}
 	token := nonce()
-	if err := j.commit(frame{Kind: "run_permit", ID: id, PGID: pgid, RunToken: token, At: at.UnixMilli()}); err != nil {
+	// The preimage goes only to the reaper over the private control pipe. Reading
+	// a permit from disk is not enough to synthesize its matching exec receipt.
+	commitment := sha256.Sum256([]byte(receiptBody(s.RunnerID, pgid, token)))
+	if err := j.commit(frame{Kind: "run_permit", ID: id, PGID: pgid, RunCommitment: commitment[:], At: at.UnixMilli()}); err != nil {
 		return "", err
 	}
 	return token, nil
@@ -99,7 +105,7 @@ func (j *Journal) RecoverRuns(at time.Time) error {
 			if err := j.action(frame{ID: s.ID, Kind: "failed", Result: &Result{ConfirmedBy: "read_back", Error: "not_launched"}}, at); err != nil {
 				return err
 			}
-		case s.Status == "outcome_unknown" && hasRunExec(j.dir, s.RunnerID, s.RunPGID, s.runToken):
+		case s.Status == "outcome_unknown" && hasRunExec(j.dir, s.RunnerID, s.runCommitment):
 			if err := j.action(frame{ID: s.ID, Kind: "executed", Result: &Result{ConfirmedBy: "read_back"}}, at); err != nil {
 				return err
 			}

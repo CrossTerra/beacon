@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,9 +45,10 @@ func TestSetupCodeRegistersOnePasskeyAndWrapsAVaultKey(t *testing.T) {
 	prf := bytes.Repeat([]byte{0x11}, 32)
 	if err := Finish(dir, rp, Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: false,
-	}, Ceremony{PRFOutput: prf}, now); err != ErrPRF {
+	}, Ceremony{PRFOutput: bytes.Clone(prf)}, now); err != ErrPRF {
 		t.Fatalf("missing PRF: %v", err)
 	}
+	j := noteVault(t, dir)
 	if err := Finish(dir, rp, Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, Ceremony{
@@ -69,6 +69,9 @@ func TestSetupCodeRegistersOnePasskeyAndWrapsAVaultKey(t *testing.T) {
 	}
 	info, err := approval.CheckPrivate(filepath.Join(dir, "passkeys.json"), 0o600)
 	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := Begin(dir, rp, code, now); err != ErrRegistered {
@@ -187,7 +190,7 @@ func TestOpenVaultAuthenticatesOneSnapshotAgainstLiveEnrollment(t *testing.T) {
 	}
 }
 
-func TestUnrecordedVaultIsDebrisAndAFailedRecordRollsBack(t *testing.T) {
+func TestUnrecordedVaultIsDebris(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	now := time.Unix(1_800_000_000, 0).UTC()
 	if err := approval.PrivateDir(dir); err != nil {
@@ -207,16 +210,6 @@ func TestUnrecordedVaultIsDebrisAndAFailedRecordRollsBack(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
 		t.Fatal("debris vault was kept")
 	}
-	dir, _, _, _ = register(t)
-	if err := CommitAdded(dir, now, func([]byte, time.Time) error { return errors.New("disk") }); err == nil {
-		t.Fatal("failed record was accepted")
-	}
-	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); !os.IsNotExist(err) {
-		t.Fatal("passkeys.json survived a failed record")
-	}
-	if _, err := os.Lstat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
-		t.Fatal("write vault survived a failed record")
-	}
 }
 
 func noteVault(t *testing.T, dir string) *approval.Journal {
@@ -226,13 +219,6 @@ func noteVault(t *testing.T, dir string) *approval.Journal {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { j.Close() })
-	hash, err := VaultHash(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := j.RecordPasskey(hash, time.Unix(1_800_000_000, 0).UTC()); err != nil {
-		t.Fatal(err)
-	}
 	return j
 }
 
@@ -316,6 +302,7 @@ func TestJournalResetBindsTheCodeWithoutTheMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	noteVault(t, dir)
 	if err := Finish(dir, rp, Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, Ceremony{
@@ -368,6 +355,7 @@ func TestPendingRegistrationCannotFinishAfterReset(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "register-pending.json"), pending, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	noteVault(t, dir)
 	err = Finish(dir, rp, Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, Ceremony{
@@ -382,18 +370,68 @@ func TestPendingRegistrationCannotFinishAfterReset(t *testing.T) {
 	}
 }
 
+func TestFinishRefusesASecondActiveEnrollmentEvenWithoutItsFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0).UTC()
+	code, err := Issue(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteVault(t, dir)
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	create, assert, _, err := Begin(dir, rp, code, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := key.Register(rp.ID, rp.Origin, create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := key.Assert(rp.ID, rp.Origin, assert, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(dir, "register-pending.json")
+	pending, err := os.ReadFile(pendingPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := func() error {
+		return Finish(dir, rp, Ceremony{ClientDataJSON: c.ClientDataJSON, AttestationObject: c.AttestationObject, PRFEnabled: true},
+			Ceremony{ClientDataJSON: a.ClientDataJSON, AuthenticatorData: a.AuthenticatorData, Signature: a.Signature,
+				CredentialID: a.CredentialID, PRFOutput: bytes.Repeat([]byte{0x11}, 32)}, now)
+	}
+	if err := finish(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{writeVaultName, "passkeys.json"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(pendingPath, pending, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(); err != ErrRegistered {
+		t.Fatalf("a second enrollment reached publication: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
+		t.Fatal("refused enrollment recreated the vault")
+	}
+}
+
 func TestEarlierClockDoesNotHideALaterReset(t *testing.T) {
-	dir, _, _, _ := register(t)
+	dir := filepath.Join(t.TempDir(), "state")
 	early := time.Unix(1_800_000_000, 0).UTC()
 	j, err := approval.OpenJournal(dir, early, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, err := VaultHash(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := j.RecordPasskey(hash, early.Add(time.Hour)); err != nil {
+	if err := approval.EnrollPasskey(dir, 0, early.Add(time.Hour), []byte("sealed fixture"), func([]byte) error { return nil }, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if err := j.RecordLocal("passkeys_reset", early); err != nil {
@@ -463,6 +501,7 @@ func register(t *testing.T) (string, webauthn.RelyingParty, []byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	j := noteVault(t, dir)
 	prf := bytes.Repeat([]byte{0x11}, 32)
 	if err := Finish(dir, rp, Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
@@ -470,6 +509,9 @@ func register(t *testing.T) (string, webauthn.RelyingParty, []byte, []byte) {
 		ClientDataJSON: asserted.ClientDataJSON, AuthenticatorData: asserted.AuthenticatorData,
 		Signature: asserted.Signature, CredentialID: asserted.CredentialID, PRFOutput: append([]byte(nil), prf...),
 	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return dir, rp, prf, asserted.CredentialID

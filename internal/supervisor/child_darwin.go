@@ -16,7 +16,7 @@ type childEvents struct {
 	status unix.WaitStatus
 }
 
-func watchChild(pid int) (*childEvents, error) {
+func watchChild(pid int, _ []string) (*childEvents, error) {
 	fd, err := unix.Kqueue()
 	if err != nil {
 		return nil, err
@@ -31,6 +31,8 @@ func watchChild(pid int) (*childEvents, error) {
 	}
 	return &childEvents{fd: fd}, nil
 }
+
+func markNonStdio() error { return markFDDirectory("/dev/fd") }
 
 func (c *childEvents) read(wait time.Duration) error {
 	var event [1]unix.Kevent_t

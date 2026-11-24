@@ -1,6 +1,8 @@
 package approval
 
 import (
+	"bytes"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -35,12 +37,18 @@ func TestRunPermitAndLifecycleReplay(t *testing.T) {
 		if _, err := j.ClaimRunDispatch(id, 43, t0); !errors.Is(err, ErrTransition) {
 			t.Fatalf("second permit: %v", err)
 		}
+		journal, err := os.ReadFile(filepath.Join(dir, journalName))
+		must(t, err)
+		if bytes.Contains(journal, []byte(permit)) {
+			t.Fatal("the unreleased receipt preimage entered the journal")
+		}
 		if id == lostReply || id == uncertain {
 			v, _, err := j.Get(id, t0)
 			must(t, err)
 			must(t, os.MkdirAll(filepath.Join(dir, "runs", v.RunnerID), 0o700))
 			if id == uncertain {
-				permit = nonce() // a receipt for a different permit tells us nothing
+				// Public commitment bytes are not a receipt for this run.
+				permit = hex.EncodeToString(j.states[id].runCommitment[:16])
 			}
 			must(t, PersistRunExec(dir, v.RunnerID, 42, permit))
 		}

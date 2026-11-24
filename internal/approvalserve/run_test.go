@@ -80,6 +80,10 @@ func fakeOpenCode() error {
 	if json.Unmarshal(b, &nested) != nil || !approval.ValidID(nested.ID, "apr") {
 		return errors.New("fixture child could not propose")
 	}
+	info, err := os.Stdin.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("run did not get an already staged prompt descriptor")
+	}
 	prompt, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err

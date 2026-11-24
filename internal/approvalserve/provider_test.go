@@ -59,7 +59,6 @@ func registerFixturePasskey(t *testing.T, dir string) (*webauthntest.Key, []byte
 		ClientDataJSON: b.ClientDataJSON, AuthenticatorData: b.AuthenticatorData, CredentialID: b.CredentialID,
 		Signature: b.Signature, PRFOutput: bytes.Clone(prf),
 	}, proposedAt))
-	must(t, passkey.CommitAdded(dir, proposedAt, j.RecordPasskey))
 	return key, prf
 }
 

@@ -18,15 +18,31 @@ import (
 
 // Command is built by a trusted caller after approval (or from a fixed job definition), never from
 // a socket request. It inherits no environment or open file from the service. Unset stdio goes to
-// /dev/null. A run's Input is sent over the private control channel and fed through an
-// anonymous pipe. Output files are private and exclusive for runs; fixed jobs append.
+// /dev/null. A run's Input is staged completely on an anonymous descriptor before
+// it can exec. Output files are private and exclusive for runs; fixed jobs append.
 // A fixed job instead gets a lifetime pipe: EOF means the reaper died.
 type Command struct {
 	Path           string
 	Args, Env      []string
 	Dir            *Directory
+	Branch         string `json:",omitempty"` // frozen HEAD description for Dir
 	Input          []byte `json:",omitempty"`
 	Stdout, Stderr string
+	Output         *OutputFiles `json:",omitempty"` // optional pinned outputs, instead of paths
+}
+
+// OutputFiles is passed by descriptor. Readers must use ReadAt/SectionReader,
+// not Seek: the child writes through the same open file descriptions.
+type OutputFiles struct {
+	Stdout *os.File `json:"-"`
+	Stderr *os.File `json:"-"`
+}
+
+func (o *OutputFiles) Close() {
+	if o != nil {
+		closeFile(o.Stdout)
+		closeFile(o.Stderr)
+	}
 }
 
 // Directory retains the open checkout from review to handoff. Its wire description is
@@ -63,15 +79,6 @@ func (d *Directory) Dup() (*Directory, error) {
 	return &Directory{d.Path, d.Device, d.Inode, os.NewFile(uintptr(fd), "checkout")}, nil
 }
 
-// OpenAt lets review read the Git metadata relative to the retained checkout.
-func (d *Directory) OpenAt(path string, flags int) (*os.File, error) {
-	fd, err := unix.Openat(int(d.file.Fd()), path, flags|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), "checkout metadata"), nil
-}
-
 func (d *Directory) MatchesPath() bool { return d.matches(int(d.file.Fd())) }
 
 func (d *Directory) matches(fd int) bool {
@@ -85,13 +92,14 @@ type image struct {
 	Path      string
 	Args, Env []string
 	Dir       *Directory
+	Branch    string `json:",omitempty"`
 }
 
 func (c Command) image(marker string) ([]byte, error) {
 	if !filepath.IsAbs(c.Path) || strings.ContainsRune(c.Path, 0) {
 		return nil, ErrLaunch
 	}
-	i := image{Path: c.Path, Args: append([]string{c.Path}, c.Args...), Dir: c.Dir}
+	i := image{Path: c.Path, Args: append([]string{c.Path}, c.Args...), Dir: c.Dir, Branch: c.Branch}
 	for _, arg := range i.Args {
 		if strings.ContainsRune(arg, 0) {
 			return nil, ErrLaunch
@@ -117,6 +125,9 @@ func (c Command) image(marker string) ([]byte, error) {
 // spawn starts only our trusted bootstrap as group leader. The target image, arguments and env
 // (including loader variables) do not reach it until release. EOF alone never authorizes exec.
 func spawn(self string, c Command, marker string, fixed bool) (out *job, err error) {
+	if c.Output != nil && (fixed || c.Stdout != "" || c.Stderr != "" || c.Output.Stdout == nil || c.Output.Stderr == nil) {
+		return nil, ErrLaunch
+	}
 	payload, err := c.image(marker)
 	if err != nil {
 		return nil, err
@@ -135,14 +146,13 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 	}
 	defer null.Close()
 	files := []*os.File{null, null, null}
-	var life, stdin *os.File
+	var life *os.File
 	defer func() {
 		if err != nil {
-			closeLife(life)
-			closeLife(stdin)
+			closeFile(life)
 		}
 	}()
-	if fixed || len(c.Input) != 0 {
+	if fixed {
 		// The collector treats stdin EOF as reaper death, the same way C tether does.
 		// /dev/null would be an immediate EOF and make a tethered collector exit at start.
 		readEnd, writeEnd, pipeErr := os.Pipe()
@@ -151,11 +161,17 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 		}
 		defer readEnd.Close()
 		files[0] = readEnd
-		if fixed {
-			life = writeEnd
-		} else {
-			stdin = writeEnd
+		life = writeEnd
+	} else if len(c.Input) != 0 {
+		stdin, err := stagePrompt(c.Input)
+		if err != nil {
+			return nil, ErrLaunch
 		}
+		defer stdin.Close()
+		files[0] = stdin
+	}
+	if c.Output != nil {
+		files[1], files[2] = c.Output.Stdout, c.Output.Stderr
 	}
 	output := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if fixed {
@@ -207,10 +223,11 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 	pid := p.Pid
 	// Only the reaper calls wait4, after group cleanup. Release Go's optional pidfd, not the PID.
 	p.Release()
-	return &job{pid: pid, gate: w, payload: payload, life: life, stdin: stdin, input: c.Input, execStatus: statusR, ready: readyR}, nil
+	return &job{pid: pid, gate: w, payload: payload, life: life, execStatus: statusR, ready: readyR,
+		argv: append([]string{c.Path}, c.Args...)}, nil
 }
 
-func closeLife(f *os.File) {
+func closeFile(f *os.File) {
 	if f != nil {
 		f.Close()
 	}
@@ -222,6 +239,7 @@ func (j *job) closeGate() {
 		j.gate = nil
 	}
 	j.payload = nil
+	j.argv = nil
 	if j.execStatus != nil {
 		j.execStatus.Close()
 		j.execStatus = nil
@@ -255,7 +273,8 @@ func (j *job) release(ctx context.Context, until time.Time) error {
 	if ctx.Err() != nil || !time.Now().Before(deadline) {
 		return ErrStopped
 	}
-	events, err := watchChild(j.pid)
+	events, err := watchChild(j.pid, j.argv)
+	j.argv = nil
 	if err != nil {
 		return ErrLaunch
 	}
@@ -276,17 +295,6 @@ func (j *job) release(ctx context.Context, until time.Time) error {
 	j.gate.Close()
 	j.gate = nil
 	j.payload = nil
-	if j.stdin != nil {
-		// The child may take time to read stdin. Do not block exec confirmation or
-		// truncate input to the pipe capacity. Cleanup closes the pollable writer.
-		stdin, input := j.stdin, j.input
-		j.input = nil
-		go func() {
-			defer stdin.Close()
-			defer clear(input)
-			_, _ = stdin.Write(input)
-		}()
-	}
 	return j.execResult(deadline)
 }
 
@@ -363,13 +371,20 @@ func execJob() {
 		fail(ErrLaunch)
 		return
 	}
+	if err := markNonStdio(); err != nil {
+		fail(ErrLaunch)
+		return
+	}
 	if i.Dir != nil {
-		unix.CloseOnExec(5)
-		if unix.Fchdir(5) != nil || !i.Dir.matches(5) {
+		i.Env = append(i.Env, "PWD="+i.Dir.Path)
+		if unix.Fchdir(5) != nil {
 			fail(unix.ESTALE)
 			return
 		}
-		i.Env = append(i.Env, "PWD="+i.Dir.Path)
+		if branch, err := branchAt(5); err != nil || branch != i.Branch || !i.Dir.matches(5) {
+			fail(unix.ESTALE)
+			return
+		}
 	}
 	// The status pipe is already close-on-exec. A failed exec writes a definite refusal;
 	// the reaper checks kernel evidence before accepting a silent EOF.

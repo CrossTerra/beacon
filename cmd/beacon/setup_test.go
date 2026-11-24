@@ -55,6 +55,9 @@ func TestResetPasskeysThenRegister(t *testing.T) {
 		t.Fatal(err)
 	}
 	prf := make([]byte, 32)
+	j, err := approval.OpenJournal(dir, now, "")
+	must(t, err)
+	defer j.Close()
 	if err := passkey.Finish(dir, rp, passkey.Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, passkey.Ceremony{
@@ -63,7 +66,7 @@ func TestResetPasskeysThenRegister(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	must(t, j.Close())
 	a, out, stderr := previewCLI()
 	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir, "--reset-passkeys"}); code != 0 {
 		t.Fatalf("reset exited %d: %s", code, stderr)
@@ -91,6 +94,9 @@ func TestResetPasskeysThenRegister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	j, err = approval.OpenJournal(dir, time.Now(), "")
+	must(t, err)
+	defer j.Close()
 	if err := passkey.Finish(dir, rp, passkey.Ceremony{
 		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
 	}, passkey.Ceremony{

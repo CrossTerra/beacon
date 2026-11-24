@@ -102,7 +102,7 @@ func (s *Supervisor) watch(reply *os.File) {
 				break
 			}
 			if m.Finished != 0 {
-				s.finishRun(m.Finished, m.Exit, m.err())
+				s.finishRun(m.Finished, m.Exit, m.err(), m.Cleaned)
 				continue
 			}
 			if m.Exited != 0 {
@@ -151,8 +151,8 @@ func (s *Supervisor) call(ctx context.Context, r request, wait time.Duration) (m
 	default:
 	}
 	deadline := time.Now().Add(wait)
-	if r.Op == "prepare" && r.Command != nil && r.Command.Dir != nil {
-		if err := sendDirectory(s.descriptors, r.Ticket, r.Command.Dir); err != nil {
+	if r.Op == "prepare" && r.Command != nil && r.Command.descriptorCount() != 0 {
+		if err := sendCommandFiles(s.descriptors, r.Ticket, r.Command); err != nil {
 			s.BeginShutdown()
 			return message{}, ErrReaper
 		}
@@ -239,6 +239,7 @@ type Run struct {
 	done       chan struct{}
 	exit       int
 	err        error
+	cleaned    bool // published by closing done
 	leaderDone chan struct{}
 	leader     LeaderExit // published by closing leaderDone, before cleanup is acknowledged
 }
@@ -263,7 +264,7 @@ func (s *Supervisor) PrepareRun(id string, c Command) (*Run, error) {
 	s.runsMu.Unlock()
 	m, err := s.request(request{Op: "prepare", RunID: id, Ticket: r.ticket, Command: &c})
 	if err != nil {
-		s.finishRun(r.ticket, 0, err)
+		s.finishRun(r.ticket, 0, err, false)
 		return nil, err
 	}
 	r.pgid = m.PID
@@ -283,11 +284,11 @@ func (s *Supervisor) reportExit(ticket uint64, exit LeaderExit) {
 	}
 }
 
-func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
+func (s *Supervisor) finishRun(ticket uint64, exit int, err error, cleaned bool) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()
 	if r := s.runs[ticket]; r != nil {
-		r.exit, r.err = exit, err
+		r.exit, r.err, r.cleaned = exit, err, cleaned
 		close(r.done)
 		delete(s.runs, ticket)
 	}
@@ -296,6 +297,15 @@ func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
 func (r *Run) PGID() int { return r.pgid }
 
 func (r *Run) Done() <-chan struct{} { return r.done }
+
+func (r *Run) CleanupConfirmed() bool {
+	select {
+	case <-r.done:
+		return r.cleaned
+	default:
+		return false
+	}
+}
 
 func (r *Run) LeaderDone() <-chan struct{} { return r.leaderDone }
 

@@ -9,8 +9,6 @@ import (
 	"os"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/CrossTerra/beacon/internal/approval"
 )
 
 const (
@@ -21,13 +19,8 @@ const (
 
 type runReport struct{ text, problem string }
 
-func readRunReport(path string) runReport {
-	f, err := approval.OpenPrivate(path, os.O_RDONLY)
-	if err != nil {
-		return runReport{}
-	}
-	defer f.Close()
-	return parseRunReport(io.LimitReader(f, runOutputLimit))
+func readRunReport(f *os.File, size int64) runReport {
+	return parseRunReport(io.NewSectionReader(f, 0, size))
 }
 
 func parseRunReport(src io.Reader) runReport {
@@ -124,20 +117,9 @@ func tailRunes(s string, n int) string {
 	return s[i:]
 }
 
-func errorTail(path string) string {
-	f, err := approval.OpenPrivate(path, os.O_RDONLY)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	if _, err := f.Seek(max(0, info.Size()-(64<<10)), io.SeekStart); err != nil {
-		return ""
-	}
-	b, _ := io.ReadAll(io.LimitReader(f, 64<<10))
+func errorTail(f *os.File, size int64) string {
+	start := max(0, size-(64<<10))
+	b, _ := io.ReadAll(io.NewSectionReader(f, start, size-start))
 	return tailRunes(strings.TrimSpace(strings.ToValidUTF8(string(b), "�")), 4000)
 }
 

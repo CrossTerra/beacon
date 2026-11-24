@@ -188,7 +188,17 @@ func runSupervisionFixture(role, dir string, args []string) error {
 		if err := fixturePID(dir, role); err != nil {
 			return err
 		}
+		if len(args) != 0 && args[0] == "wait-for-release" {
+			for {
+				if _, err := os.Stat(filepath.Join(dir, "release-seen")); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		return errFixtureExit
+	case "hold":
+		select {}
 	case "exit":
 		return nil
 	default:

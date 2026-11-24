@@ -6,8 +6,8 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
-	"time"
 
+	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/passkey"
 	"github.com/CrossTerra/beacon/internal/webauthn"
 )
@@ -58,17 +58,11 @@ func (s *Site) register(w http.ResponseWriter, r *http.Request) {
 		Signature: raw("signature"), CredentialID: raw("credential_id"), PRFOutput: raw("prf_output"),
 	}, s.now())
 	if err != nil {
+		if errors.Is(err, approval.ErrJournalIO) || errors.Is(err, approval.ErrJournalUnhealthy) || errors.Is(err, approval.ErrLocked) {
+			http.Error(w, "registration unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "registration refused", http.StatusUnauthorized)
-		return
-	}
-	record := func([]byte, time.Time) error { return errors.New("passkey was not recorded") }
-	if rec, ok := s.journal.(interface {
-		RecordPasskey([]byte, time.Time) error
-	}); ok {
-		record = rec.RecordPasskey
-	}
-	if err := passkey.CommitAdded(s.state, s.now(), record); err != nil {
-		http.Error(w, "registration refused", http.StatusInternalServerError)
 		return
 	}
 	render(w, "registered", http.StatusOK, nil)
