@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,10 +11,57 @@ import (
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/approval"
+	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/passkey"
 	"github.com/CrossTerra/beacon/internal/webauthn"
 	"github.com/CrossTerra/beacon/internal/webauthntest"
 )
+
+func TestSetupTailscaleThenSwitchOriginOnlyWithConsent(t *testing.T) {
+	dir := previewTemp(t)
+	a, _, stderr := previewCLI()
+	a.tailscale = func(_ context.Context, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "status --json":
+			return []byte(`{"BackendState":"Running","Self":{"DNSName":"box.tail.ts.net.","UserID":9},"User":{"9":{"LoginName":"person@example.test"}}}`), nil
+		case "serve status --json":
+			return []byte(`{"TCP":{"443":{"HTTPS":true}},"Web":{"box.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7317"}}}}}`), nil
+		}
+		return nil, errors.New("unexpected tailscale invocation")
+	}
+	setup := func(mode string, input string) int {
+		a.stdin = strings.NewReader(input)
+		return a.main(t.Context(), []string{"setup", "--state-dir", dir, "--origin", mode})
+	}
+	if setup("tailscale", "") != 0 {
+		t.Fatal(stderr)
+	}
+	if setup("localhost", "no\n") == 0 {
+		t.Fatal("switch did not require a confirmation")
+	}
+	old, err := localstate.Load(dir)
+	if err != nil || old.URL() != "https://box.tail.ts.net" {
+		t.Fatalf("the declined switch changed the origin: %v %v", old, err)
+	}
+	file := filepath.Join(dir, "unattended.kdbx")
+	info, err := os.Stat(file)
+	must(t, err)
+	if setup("localhost", "yes\n") != 0 {
+		t.Fatal(stderr)
+	}
+	next, err := localstate.Load(dir)
+	if err != nil || next.URL() != approval.LocalOrigin {
+		t.Fatalf("switch did not commit: %v %v", next, err)
+	}
+	info2, err := os.Stat(file)
+	must(t, err)
+	if !os.SameFile(info, info2) {
+		t.Fatal("switch replaced unattended vault")
+	}
+	if _, reset, err := approval.PasskeyMarks(dir); reset == 0 || err != nil {
+		t.Fatalf("switch did not journal a passkey reset: %d, %v", reset, err)
+	}
+}
 
 func TestSetupPrintsAOneUseCode(t *testing.T) {
 	dir := previewTemp(t)
@@ -24,9 +73,6 @@ func TestSetupPrintsAOneUseCode(t *testing.T) {
 	raw, err := base64.RawURLEncoding.Strict().DecodeString(printed)
 	if err != nil || len(raw) != 32 {
 		t.Fatalf("code %q: %v", printed, err)
-	}
-	if code := a.main(t.Context(), []string{"setup"}); code == 0 {
-		t.Fatal("setup without a directory was accepted")
 	}
 }
 
@@ -71,17 +117,10 @@ func TestResetPasskeysThenRegister(t *testing.T) {
 	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir, "--reset-passkeys"}); code != 0 {
 		t.Fatalf("reset exited %d: %s", code, stderr)
 	}
-	if strings.TrimSpace(out.String()) != "passkeys reset" {
-		t.Fatalf("reset output %q", out.String())
-	}
+	next := strings.TrimSpace(out.String())
 	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); !os.IsNotExist(err) {
 		t.Fatal("passkeys.json survived reset")
 	}
-	a, out, stderr = previewCLI()
-	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir}); code != 0 {
-		t.Fatalf("setup after reset exited %d: %s", code, stderr)
-	}
-	next := strings.TrimSpace(out.String())
 	createCh, assertCh, _, err = passkey.Begin(dir, rp, next, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)

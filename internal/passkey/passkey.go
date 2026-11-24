@@ -70,6 +70,14 @@ func Issue(dir string, now time.Time) (string, error) {
 		return "", err
 	}
 	defer approval.CloseInstance(dir, lock)
+	return IssueLocked(dir, now)
+}
+
+// IssueLocked lets offline setup commit settings and issue a code in the same instance-lock scope.
+func IssueLocked(dir string, now time.Time) (string, error) {
+	if !approval.HoldsInstance(dir) {
+		return "", approval.ErrLocked
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if err := clearDebris(dir); err != nil {

@@ -113,6 +113,11 @@ func newProvider(b vault.Binding, dir string, now func() time.Time, transport fu
 func (p *provider) store(read, write keychain.Secret, key []byte) error {
 	p.saving.Lock()
 	defer p.saving.Unlock()
+	if matches, err := keychain.InUnattended(p.dir, write); err != nil {
+		return refusal("credential_unavailable")
+	} else if matches {
+		return refusal("same_credential")
+	}
 	// Don't move an existing sealed credential into the unattended vault during rotation.
 	if old, err := keychain.UnsealActionWrite(p.dir, p.binding, key); err == nil {
 		defer old.Clear()
@@ -144,6 +149,10 @@ func (p *provider) Unlock(f *approval.Frozen, key []byte) (keychain.Secret, erro
 	read, err := p.read()
 	defer read.Clear()
 	if err != nil || !keychain.ActionToken(read) || write.Same(read) {
+		write.Clear()
+		return keychain.Secret{}, refusal("credential_unavailable")
+	}
+	if matches, err := keychain.InUnattended(p.dir, write); err != nil || matches {
 		write.Clear()
 		return keychain.Secret{}, refusal("credential_unavailable")
 	}

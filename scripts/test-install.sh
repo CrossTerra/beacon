@@ -1,81 +1,98 @@
 #!/bin/bash
-# Exercise scripts/install.sh --dry-run: build, ad-hoc sign and install into a temporary prefix, twice, and check the
-# result. Uses no signing identity and no keychain, and must leave $HOME's Beacon untouched. Needs a checkout with no
-# changes to tracked files; an untracked and an ignored file are added for the run, as a person's checkout may have.
+# Exercise the installer transaction with temporary homes and fake managers. No live services or credentials.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-tmp=${TMPDIR:-/tmp}
-# The physical path, as install.sh resolves it: GitHub's runners set TMPDIR with a trailing slash, and /var is a
-# symlink to /private/var.
-prefix=$(cd "$(mktemp -d "${tmp%/}/beacon-install-test.XXXXXXXX")" && pwd -P)
-# An untracked file and an ignored one (.e2e.env, only if there is none already) must not stop the install.
-untracked=".test-install-untracked.$$"
-touch "$untracked"
-made_ignored=false
-if [[ ! -e .e2e.env ]]; then
-	printf 'FIXTURE=1\n' > .e2e.env
-	made_ignored=true
-fi
-cleanup() {
-	rm -rf "$prefix"
-	rm -f "$untracked"
-	if [[ "$made_ignored" == true ]]; then rm -f .e2e.env; fi
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/beacon-install-test.XXXXXXXX")
+trap 'rm -rf "$tmp"' EXIT
+repo="$tmp/fixture"
+mkdir -p "$repo/scripts"
+cp scripts/install.sh "$repo/scripts/"
+fixture_commit() { git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.test -c commit.gpgsign=false commit -qm "$1" --allow-empty; }
+git -C "$repo" init -q
+git -C "$repo" add scripts
+fixture_commit first
+touch "$repo/untracked"
+cat > "$repo/driver" <<'SH'
+#!/bin/bash
+source "${0%/*}/scripts/install.sh"
+[[ "$HOME" == "$FIXTURE"/home-* ]] || exit 99
+uname() { if [[ $1 == '-s' ]]; then printf '%s\n' "$OS"; else echo arm64; fi; }
+id() { echo 501; }
+check_unit() { grep -q 'serve' "$1"; }
+swift_stopped() { echo 'fixture must not inspect Swift' >&2; return 99; }
+stop_service() { echo stop >> "$trace"; }
+start_service() { "$bin" version | sed -n 's/^commit:    /start /p' >> "$trace"; }
+wait_ready() { echo health >> "$trace"; [[ ${BAD_HEALTH:-} != yes ]]; }
+systemctl() { printf 'manager %s\n' "$*" >> "$trace"; }
+build_beacon() {
+	[[ ! -e "$1/untracked" && -f "$1/scripts/install.sh" ]] || return 99
+	printf 'build %s\n' "$2" >> "$trace"
+	cat > "$3" <<EOF
+#!/bin/bash
+set -euo pipefail
+if [[ \$1 == version ]]; then echo "commit:    $2"; exit; fi
+[[ \$1 == setup && \$2 == --state-dir ]]
+if [[ \$4 == --show-origin ]]; then sed -nE 's/^  "origin": "([a-z0-9.:/-]+)",?$/\1/p' "\$3/settings.json"; exit; fi
+if [[ \$4 == --check-stopped ]]; then exit; fi
+[[ \$4 == --origin ]]
+printf 'setup %s\n' "\$5" >> "\$trace"
+mkdir -p "\$3"
+origin=http://localhost:7317
+[[ \$5 == localhost ]] || origin=https://fixture.tail.ts.net
+printf '{\n  "origin": "%s"\n}\n' "\$origin" > "\$3/settings.json"
+EOF
+	chmod 755 "$3"
 }
-trap cleanup EXIT
+main "$@"
+SH
 
-fingerprint() {
-	local path=$1
-	if [[ -L "$path" ]]; then printf 'link:%s' "$(readlink "$path")"
-	elif [[ -e "$path" ]]; then stat -f 'inode:%i:%m' "$path"
-	else printf 'absent'
+export FIXTURE=$tmp
+unset BEACON_CONFIG XDG_STATE_HOME XDG_CONFIG_HOME
+test_install() {
+	export OS=$1 HOME="$tmp/home-$1" trace="$tmp/$1.trace"
+	local state unit initial now bin before f
+	mkdir "$HOME"
+	bin="$HOME/.local/bin/beacon"
+	if [[ "$OS" == Darwin ]]; then
+		state="$HOME/Library/Application Support/beacon"
+		unit="$HOME/Library/LaunchAgents/dev.beacon.serve.plist"
+	else
+		state="$HOME/.local/state/beacon"
+		unit="$HOME/.config/systemd/user/beacon.service"
 	fi
+	initial=$(git -C "$repo" rev-parse HEAD)
+	/bin/bash "$repo/driver" --origin tailscale
+	grep -Fxq "start $initial" "$trace"
+	grep -Fq "$bin" "$unit"
+	if [[ "$OS" == Darwin ]]; then grep -Fq 'dev.beacon.serve' "$unit"; else grep -Fxq 'KillMode=control-group' "$unit"; fi
+	for f in journal.log passkeys.json unattended.kdbx unattended.keyx write-vault.json; do
+		printf 'keep %s\n' "$f" > "$state/$f"
+	done
+	fixture_commit "$OS-upgrade"
+	now=$(git -C "$repo" rev-parse HEAD)
+	/bin/bash "$repo/driver" --origin tailscale
+	grep -Fxq "start $now" "$trace"
+	[[ $(grep -c '^setup ' "$trace") == 1 ]]
+	before=$(cat "$trace")
+	if /bin/bash "$repo/driver" --origin localhost; then return 1; fi
+	[[ $(cat "$trace") == "$before" ]]
+	printf '\n# tracked edit\n' >> "$repo/scripts/install.sh"
+	if /bin/bash "$repo/driver"; then return 1; fi
+	[[ $(cat "$trace") == "$before" ]]
+	git -C "$repo" show "$now:scripts/install.sh" > "$repo/scripts/install.sh"
+	fixture_commit "$OS-fail"
+	if BAD_HEALTH=yes /bin/bash "$repo/driver"; then return 1; fi
+	"$bin" version | grep -Fq "$now"
+	[[ $(tail -1 "$trace") == "start $now" ]]
+	/bin/bash "$repo/driver" --uninstall
+	/bin/bash "$repo/driver" --uninstall
+	[[ ! -e "$unit" && ! -e "$bin" ]]
+	for f in journal.log passkeys.json unattended.kdbx unattended.keyx write-vault.json; do
+		grep -Fxq "keep $f" "$state/$f"
+	done
+	[[ $(grep -c '^setup ' "$trace") == 1 ]]
 }
-before=$(fingerprint "$HOME/Applications/Beacon.app")$(fingerprint "$HOME/.local/bin/beacon")
 
-fail() {
-	echo "test-install: $*" >&2
-	exit 1
-}
-
-mkdir -p "$prefix/.local/bin"
-printf 'old cli\n' > "$prefix/.local/bin/beacon"
-/bin/bash scripts/install.sh --dry-run --prefix "$prefix" > "$prefix/first.log"
-app="$prefix/Applications/Beacon.app"
-for file in Contents/Info.plist Contents/MacOS/Beacon Contents/Helpers/beacon Contents/Helpers/tether; do
-	[[ -f "$app/$file" ]] || fail "missing $file"
-done
-for path in Contents/MacOS/Beacon Contents/Helpers/beacon Contents/Helpers/tether; do
-	[[ -x "$app/$path" ]] || fail "$path is not executable"
-done
-identifier() { /usr/bin/codesign -d --verbose=1 "$1" 2>&1 | sed -n 's/^Identifier=//p'; }
-[[ $(identifier "$app") == dev.beacon.app ]] || fail "app identifier"
-[[ $(identifier "$app/Contents/Helpers/beacon") == dev.beacon.cli ]] || fail "CLI identifier"
-[[ $(identifier "$app/Contents/Helpers/tether") == dev.beacon.tether ]] || fail "tether identifier"
-/usr/bin/codesign --verify --strict --deep "$app" || fail "the installed app does not verify"
-[[ $(readlink "$prefix/.local/bin/beacon") == "$app/Contents/Helpers/beacon" ]] || fail "beacon is not linked to the app's CLI"
-[[ $(cat "$prefix/.local/bin/beacon.pre-app") == "old cli" ]] || fail "the old CLI was not kept aside"
-"$prefix/.local/bin/beacon" version > /dev/null || fail "the linked CLI does not run"
-grep -q 'Dry run' "$prefix/first.log" || fail "no dry-run summary"
-if grep -Eqi 'untracked|ignored' "$prefix/first.log"; then fail "install.sh mentioned untracked or ignored files"; fi
-first=$(stat -f %i "$app")
-
-# Again: idempotent, and the new app replaces the old one in place.
-/bin/bash scripts/install.sh --dry-run --prefix "$prefix" > "$prefix/second.log"
-[[ $(stat -f %i "$app") != "$first" ]] || fail "the second install did not replace the app"
-/usr/bin/codesign --verify --strict --deep "$app" || fail "the replaced app does not verify"
-[[ $(readlink "$prefix/.local/bin/beacon") == "$app/Contents/Helpers/beacon" ]] || fail "the link changed"
-leftovers=$(find "$prefix/Applications" "$prefix/.local/bin" -name '.*.new.*' -o -name '.*.old.*')
-[[ -z "$leftovers" ]] || fail "left behind: $leftovers"
-
-after=$(fingerprint "$HOME/Applications/Beacon.app")$(fingerprint "$HOME/.local/bin/beacon")
-[[ "$before" == "$after" ]] || fail "the dry run changed \$HOME"
-
-# Neither file reached the build.
-for name in "$untracked" .e2e.env; do
-	[[ -z $(find "$app" -name "$name") ]] || fail "$name reached the app"
-done
-
-# A real install refuses to run without a terminal, and --prefix without --dry-run.
-if /bin/bash scripts/install.sh < /dev/null > /dev/null 2>&1; then fail "a real install ran without a terminal"; fi
-if /bin/bash scripts/install.sh --prefix "$prefix" > /dev/null 2>&1; then fail "--prefix was accepted for a real install"; fi
-echo "install.sh dry run: built, ad-hoc signed, installed and replaced under a temporary prefix"
+test_install Darwin
+test_install Linux
+echo "ok temporary launchd and systemd installs, upgrades, rollback and uninstall"

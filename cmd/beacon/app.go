@@ -28,6 +28,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/lease"
 	"github.com/CrossTerra/beacon/internal/limited"
+	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/project"
@@ -52,12 +53,14 @@ var (
 
 // app is the CLI with its outside world passed in, so tests run it in-process.
 type app struct {
-	stdin     io.Reader
-	stdout    io.Writer
-	stderr    io.Writer
-	keychain  func() (keychain.Store, error)
-	transport func(allowed []string) http.RoundTripper
-	now       func() time.Time
+	stdin      io.Reader
+	stdout     io.Writer
+	stderr     io.Writer
+	keychain   func() (keychain.Store, error)
+	vaultDir   string
+	legacyRead func(context.Context, string) (keychain.Secret, error) // fixture seam for explicit import
+	transport  func(allowed []string) http.RoundTripper
+	now        func() time.Time
 
 	// configureClient, when set, adjusts the Signal client (tests shorten its backoff).
 	configureClient func(*signal.Client)
@@ -75,10 +78,9 @@ type app struct {
 	agentsDir func() (string, error)
 	launchctl launcher
 	identify  func(context.Context, string) (service.Identity, error)
-	// actSettingsFile replaces ~/Library/Application Support/beacon/act.json. Tests set it.
-	actSettingsFile string
 	// approvalListeners replaces the review port with ephemeral loopback listeners in tests.
 	approvalListeners func() ([]net.Listener, error)
+	tailscale         localstate.TailCommand // fixture seam
 	// appSettingsFile replaces ~/Library/Application Support/beacon/app/settings.json. Tests set it.
 	appSettingsFile string
 	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
@@ -180,7 +182,11 @@ func (a *app) main(ctx context.Context, args []string) int {
 	case "open":
 		err = a.cmdOpen(ctx, rest)
 	case "setup":
-		err = a.cmdSetup(rest)
+		err = a.cmdSetup(ctx, rest)
+	case "migrate-swift":
+		err = a.cmdMigrateSwift(ctx, rest)
+	case "vault":
+		err = a.cmdVault(ctx, rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "spike-passkey":
@@ -342,7 +348,7 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if _, err := config.Parse(data); err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -370,8 +376,8 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if err := store.Set(cfg.KeychainAccount(), secret); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Wrote %s\nRules: %s\nState: %s\nSignal key stored in the keychain as %s/%s\nMode: dry-run. Set mode: send in the config to start sending.\n",
-		path, cfg.RulesPath(), cfg.StatePath(), keychain.Service, cfg.KeychainAccount())
+	fmt.Fprintf(a.stdout, "Wrote %s\nRules: %s\nState: %s\nSignal key stored in the unattended vault (%s)\nMode: dry-run. Set mode: send in the config to start sending.\n",
+		path, cfg.RulesPath(), cfg.StatePath(), cfg.KeychainAccount())
 	return nil
 }
 
@@ -448,7 +454,7 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, true)
 	if err != nil {
 		return err
 	}
@@ -490,7 +496,7 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 	if err := store.Set(e.cfg.KeychainAccount(), secret); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Signal key replaced in the keychain as %s/%s\n", keychain.Service, e.cfg.KeychainAccount())
+	fmt.Fprintf(a.stdout, "Signal key replaced in the unattended vault (%s)\n", e.cfg.KeychainAccount())
 	if me.Handle != "" {
 		h := me.Handle
 		if !strings.HasPrefix(h, "@") && !strings.HasPrefix(h, "act_") {
@@ -544,10 +550,14 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
 	bodies := fs.Bool("bodies", false, "print each decided item's body (the default for a dry run with item details)")
-	summary := fs.Bool("summary", false, "print pass summaries only (used by tether)")
+	summary := fs.Bool("summary", false, "print pass summaries only (used by supervision)")
+	vaultDir := fs.String("vault-dir", a.vaultDir, "service state directory for the unattended vault")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	original := a.vaultDir
+	a.vaultDir = *vaultDir
+	defer func() { a.vaultDir = original }()
 	log := logs.New(a.stderr)
 	interrupt := ctx
 	if a.interrupt != nil {
@@ -662,9 +672,9 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, false)
 	if err != nil {
-		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
+		return fail(logs.ReasonKeychain, "the unattended vault is not available")
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
@@ -1346,9 +1356,9 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	defer ob.Close()
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, false)
 	if err != nil {
-		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
+		return fail(logs.ReasonKeychain, "the unattended vault is not available")
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
@@ -1481,7 +1491,7 @@ func (a *app) cmdEgress(args []string) error {
 		if *cfgPath != "" || fs.NArg() != 0 {
 			return errors.New("egress --state-dir does not take collector config or positional arguments")
 		}
-		dir, err := reviewStateDir(*state)
+		dir, err := localstate.Dir(*state, false)
 		if err != nil {
 			return err
 		}

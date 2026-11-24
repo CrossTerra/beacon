@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/egress"
-	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
@@ -18,10 +17,9 @@ func main() {
 	if code, helper := supervisor.HelperExit(os.Args[1:]); helper {
 		os.Exit(code)
 	}
-	if len(os.Args) >= 2 && os.Args[1] == "run" && os.Getenv("BEACON_TETHERED") == "1" {
+	if len(os.Args) >= 2 && os.Args[1] == "run" && os.Getenv("BEACON_SUPERVISED") == "1" {
 		go func() {
-			// Tether holds the only writer and never writes. EOF means tether died. On Quit
-			// and app crash, tether still sends SIGTERM first and allows a grace period.
+			// The reaper holds the only writer and never writes. EOF means the reaper died.
 			var unexpected [1]byte
 			_, _ = os.Stdin.Read(unexpected[:])
 			os.Exit(1)
@@ -48,7 +46,6 @@ func main() {
 		stdin:     os.Stdin,
 		stdout:    os.Stdout,
 		stderr:    os.Stderr,
-		keychain:  keychain.NewSystem,
 		transport: egress.Transport,
 		now:       time.Now,
 		interrupt: interrupt,

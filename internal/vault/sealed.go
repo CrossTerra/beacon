@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,15 @@ func sealedName(service string) string {
 		return "write-" + service + ".sealed"
 	}
 	return ""
+}
+
+func RemoveWriteCredentials(dir string) error {
+	for _, service := range []string{"github", "slack"} {
+		if err := os.Remove(filepath.Join(dir, sealedName(service))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return approval.FlushDirectory(dir)
 }
 
 // StoreSealed writes only an authenticated ciphertext. The write-vault key-check file is not modified.

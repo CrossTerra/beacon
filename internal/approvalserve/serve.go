@@ -13,18 +13,21 @@ import (
 	"github.com/CrossTerra/beacon/internal/actionexec"
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
+	"github.com/CrossTerra/beacon/internal/cutover"
 	"github.com/CrossTerra/beacon/internal/review"
 	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 type Options struct {
-	StateDir string
-	Origin   approval.Origin
-	Now      func() time.Time
+	StateDir      string
+	AfterJournal  string // D16: a completed archive's journal id, never imported
+	ArchiveSignal *cutover.SignalActor
+	Origin        approval.Origin
+	Now           func() time.Time
 	// ConnectRecords can replace the configured delivery connection in tests.
 	ConnectRecords approval.ConnectRecords
-	// The CLI always supplies supervision, but no live jobs in the preview. Library tests may
-	// leave it nil. ConnectJobs hands the supervisor to trusted service code, never to a request.
+	// The CLI supplies supervision for the collector and configured runs. Library tests may leave it nil.
+	// ConnectJobs hands the supervisor to trusted service code, never to a request.
 	Supervision *supervisor.Options
 	ConnectJobs func(*supervisor.Supervisor) error
 	// Test seam for ephemeral loopback listeners. The CLI uses both fixed D4 addresses.
@@ -63,7 +66,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 			return err
 		}
 	}
-	j, err := approval.OpenJournalBeforeReplay(opts.StateDir, opts.Now(), "", startup)
+	j, err := approval.OpenJournalBeforeReplay(opts.StateDir, opts.Now(), opts.AfterJournal, startup)
 	defer func() {
 		err = errors.Join(err, closeReaper())
 		if j != nil {
@@ -100,6 +103,10 @@ func Run(ctx context.Context, opts Options) (err error) {
 	configured, err := actionexec.LoadSettings(opts.StateDir)
 	if err != nil {
 		return err
+	}
+	if old, next := opts.ArchiveSignal, configured.Signal; old != nil && next != nil &&
+		(old.Actor != next.Actor || old.Origin != next.Origin || old.Person != next.Person) {
+		return errors.New("Signal setup must use the same approval-app actor and person as the Swift archive")
 	}
 	providers, err := actionexec.New(configured, opts.StateDir, opts.Now, opts.ProviderTransport)
 	if err != nil {
