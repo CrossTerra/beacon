@@ -241,16 +241,92 @@ func TestResetCodeMustFollowTheJournalReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	j.Close()
-	if _, err := Issue(dir, now); err != ErrRegistered {
-		t.Fatalf("code issued at the reset instant: %v", err)
-	}
-	later := now.Add(time.Second)
-	code, err := Issue(dir, later)
+	// The reset is already later in the journal, even though the clock has not moved.
+	code, err := Issue(dir, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := Begin(dir, rp, code, later); err != nil {
+	if _, _, _, err := Begin(dir, rp, code, now); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPendingRegistrationCannotFinishAfterReset(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0).UTC()
+	code, err := Issue(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	createCh, assertCh, _, err := Begin(dir, rp, code, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := os.ReadFile(filepath.Join(dir, "register-pending.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := key.Register("localhost", approval.LocalOrigin, createCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asserted, err := key.Assert("localhost", approval.LocalOrigin, assertCh, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := approval.OpenJournal(dir, now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Reset(dir, now, j.RecordLocal); err != nil {
+		t.Fatal(err)
+	}
+	j.Close()
+	if _, err := os.Lstat(filepath.Join(dir, "register-pending.json")); !os.IsNotExist(err) {
+		t.Fatal("reset left the pending registration")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "register-pending.json"), pending, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = Finish(dir, rp, Ceremony{
+		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
+	}, Ceremony{
+		ClientDataJSON: asserted.ClientDataJSON, AuthenticatorData: asserted.AuthenticatorData,
+		Signature: asserted.Signature, CredentialID: asserted.CredentialID, PRFOutput: bytes.Repeat([]byte{0x11}, 32),
+	}, now)
+	if err != ErrRegistered {
+		t.Fatalf("finished a ceremony from before the reset: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
+		t.Fatal("refused finish still published a vault")
+	}
+}
+
+func TestEarlierClockDoesNotHideALaterReset(t *testing.T) {
+	dir, _, _, _ := register(t)
+	early := time.Unix(1_800_000_000, 0).UTC()
+	j, err := approval.OpenJournal(dir, early, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := VaultHash(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordPasskey(hash, early.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordLocal("passkeys_reset", early); err != nil {
+		t.Fatal(err)
+	}
+	j.Close()
+	if _, active, err := approval.PasskeyVault(dir); err != nil || active {
+		t.Fatalf("active %v %v", active, err)
 	}
 }
 

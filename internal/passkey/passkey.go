@@ -74,14 +74,11 @@ func Issue(dir string, now time.Time) (string, error) {
 	if err := clearDebris(dir); err != nil {
 		return "", err
 	}
-	reset, block, err := priorPasskeys(dir)
+	resetIndex, block, err := priorPasskeys(dir)
 	if err != nil {
 		return "", err
 	}
-	if block && reset.IsZero() {
-		return "", ErrRegistered
-	}
-	if block && !now.After(reset) {
+	if block && resetIndex == 0 {
 		return "", ErrRegistered
 	}
 	raw := make([]byte, tokenBytes)
@@ -89,10 +86,7 @@ func Issue(dir string, now time.Time) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256(raw)
-	code := codeFile{Hash: sum[:], Expires: now.Add(codeLife).UTC(), IssuedAt: now.UTC()}
-	if block {
-		code.ResetAt = reset.UnixMilli()
-	}
+	code := codeFile{Hash: sum[:], Expires: now.Add(codeLife).UTC(), IssuedAt: now.UTC(), ResetIndex: resetIndex}
 	body, err := json.Marshal(code)
 	if err != nil {
 		return "", err
@@ -129,7 +123,7 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, nil, nil, err
 	}
-	reset, block, err := priorPasskeys(dir)
+	resetIndex, block, err := priorPasskeys(dir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -141,10 +135,10 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	if subtle.ConstantTimeCompare(sum[:], stored.Hash) != 1 || !now.Before(stored.Expires) || len(stored.Hash) != sha256.Size {
 		return nil, nil, nil, ErrSetup
 	}
-	if block && (reset.IsZero() || stored.ResetAt != reset.UnixMilli() || !stored.IssuedAt.After(reset)) {
+	if block && (resetIndex == 0 || stored.ResetIndex != resetIndex) {
 		return nil, nil, nil, ErrRegistered
 	}
-	if !block && stored.ResetAt != 0 {
+	if !block && stored.ResetIndex != 0 {
 		return nil, nil, nil, ErrSetup
 	}
 	create, assert, salt = make([]byte, tokenBytes), make([]byte, tokenBytes), make([]byte, prfBytes)
@@ -158,7 +152,8 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 		return nil, nil, nil, err
 	}
 	body, err := json.Marshal(pendingFile{
-		Origin: rp.Origin, RPID: rp.ID, Create: create, Assert: assert, Salt: salt, Expires: now.Add(pendingLife).UTC(),
+		Origin: rp.Origin, RPID: rp.ID, Create: create, Assert: assert, Salt: salt,
+		ResetIndex: resetIndex, Expires: now.Add(pendingLife).UTC(),
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -196,6 +191,14 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err := json.NewDecoder(f).Decode(&pending); err != nil || pending.Origin != rp.Origin || pending.RPID != rp.ID ||
 		!now.Before(pending.Expires) {
 		return ErrPending
+	}
+	_, resetIndex, err := approval.PasskeyMarks(dir)
+	if err != nil {
+		return err
+	}
+	if pending.ResetIndex != resetIndex {
+		os.Remove(filepath.Join(dir, "register-pending.json"))
+		return ErrRegistered
 	}
 	reg, err := webauthn.VerifyRegistration(webauthn.RelyingParty{ID: rp.ID, Origin: rp.Origin}, pending.Create, create.ClientDataJSON, create.AttestationObject)
 	if err != nil {
@@ -473,6 +476,9 @@ func Reset(dir string, at time.Time, record func(string, time.Time) error) error
 	if err := os.Remove(filepath.Join(dir, writeVaultName)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := os.Remove(filepath.Join(dir, "register-pending.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 
@@ -483,7 +489,7 @@ func clearDebris(dir string) error {
 		return err
 	}
 	added, _, err := approval.PasskeyMarks(dir)
-	if err != nil || !added.IsZero() {
+	if err != nil || added != 0 {
 		return err
 	}
 	if err := os.Remove(filepath.Join(dir, writeVaultName)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -492,28 +498,28 @@ func clearDebris(dir string) error {
 	return nil
 }
 
-func priorPasskeys(dir string) (reset time.Time, block bool, err error) {
-	added, reset, err := approval.PasskeyMarks(dir)
+func priorPasskeys(dir string) (resetIndex int, block bool, err error) {
+	addedIndex, resetIndex, err := approval.PasskeyMarks(dir)
 	if err != nil {
-		return time.Time{}, false, err
+		return 0, false, err
 	}
 	_, vaultErr := os.Lstat(filepath.Join(dir, writeVaultName))
 	vault := vaultErr == nil
 	if vaultErr != nil && !errors.Is(vaultErr, os.ErrNotExist) {
-		return time.Time{}, false, vaultErr
+		return 0, false, vaultErr
 	}
 	_, markerErr := os.Lstat(filepath.Join(dir, resetMarker))
 	marker := markerErr == nil
 	if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
-		return time.Time{}, false, markerErr
+		return 0, false, markerErr
 	}
-	if !vault && !marker && added.IsZero() {
-		return time.Time{}, false, nil
+	if !vault && !marker && addedIndex == 0 {
+		return 0, false, nil
 	}
-	if !vault && !reset.IsZero() && reset.After(added) {
-		return reset, true, nil
+	if !vault && resetIndex > addedIndex {
+		return resetIndex, true, nil
 	}
-	return time.Time{}, true, nil
+	return 0, true, nil
 }
 
 func claimCode(dir string) (codeFile, error) {
@@ -550,10 +556,10 @@ func withInstance(dir string) (func(), error) {
 }
 
 type codeFile struct {
-	Hash     []byte    `json:"hash"`
-	Expires  time.Time `json:"expires"`
-	IssuedAt time.Time `json:"issued_at"`
-	ResetAt  int64     `json:"reset_at,omitempty"`
+	Hash       []byte    `json:"hash"`
+	Expires    time.Time `json:"expires"`
+	IssuedAt   time.Time `json:"issued_at"`
+	ResetIndex int       `json:"reset_index,omitempty"`
 }
 
 type vaultFile struct {
@@ -563,12 +569,13 @@ type vaultFile struct {
 }
 
 type pendingFile struct {
-	Origin  string    `json:"origin"`
-	RPID    string    `json:"rp_id"`
-	Create  []byte    `json:"create_challenge"`
-	Assert  []byte    `json:"assert_challenge"`
-	Salt    []byte    `json:"prf_salt"`
-	Expires time.Time `json:"expires"`
+	Origin     string    `json:"origin"`
+	RPID       string    `json:"rp_id"`
+	Create     []byte    `json:"create_challenge"`
+	Assert     []byte    `json:"assert_challenge"`
+	Salt       []byte    `json:"prf_salt"`
+	ResetIndex int       `json:"reset_index,omitempty"`
+	Expires    time.Time `json:"expires"`
 }
 
 type storeFile struct {

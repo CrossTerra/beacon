@@ -673,25 +673,27 @@ func batchCommitted(parts []frame, marker frame) bool {
 	return true
 }
 
-// PasskeyMarks reports the latest local passkey_added and passkeys_reset times in the journal.
+// PasskeyMarks reports the journal position of the latest passkey_added and passkeys_reset.
+// Position is the frame's place in the file, starting at 1. Zero means that kind is absent.
 // A missing journal is a first registration, not an error.
-func PasskeyMarks(dir string) (added, reset time.Time, err error) {
+func PasskeyMarks(dir string) (addedIndex, resetIndex int, err error) {
 	st, err := scanPasskeys(dir)
-	return st.added, st.reset, err
+	return st.addedIndex, st.resetIndex, err
 }
 
 // PasskeyVault is the SHA-256 recorded on the latest passkey_added that no later passkeys_reset superseded.
+// Later means a higher frame index, not a later wall-clock time.
 func PasskeyVault(dir string) (hash []byte, active bool, err error) {
 	st, err := scanPasskeys(dir)
-	if err != nil || st.added.IsZero() || !st.reset.IsZero() && !st.added.After(st.reset) || len(st.hash) != 32 {
+	if err != nil || st.addedIndex == 0 || st.resetIndex > st.addedIndex || len(st.hash) != 32 {
 		return nil, false, err
 	}
 	return append([]byte(nil), st.hash...), true, nil
 }
 
 type passkeyScan struct {
-	added, reset time.Time
-	hash         []byte
+	addedIndex, resetIndex int
+	hash                   []byte
 }
 
 func scanPasskeys(dir string) (passkeyScan, error) {
@@ -708,6 +710,7 @@ func scanPasskeys(dir string) (passkeyScan, error) {
 	if _, _, err := readFrame(r); err != nil {
 		return st, err
 	}
+	index := 0
 	for {
 		e, _, err := readFrame(r)
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -716,16 +719,12 @@ func scanPasskeys(dir string) (passkeyScan, error) {
 		if err != nil {
 			return passkeyScan{}, err
 		}
-		at := time.UnixMilli(e.At).UTC()
+		index++
 		switch e.Kind {
 		case "passkey_added":
-			if st.added.IsZero() || !at.Before(st.added) {
-				st.added, st.hash = at, append([]byte(nil), e.VaultHash...)
-			}
+			st.addedIndex, st.hash = index, append([]byte(nil), e.VaultHash...)
 		case "passkeys_reset":
-			if st.reset.IsZero() || at.After(st.reset) {
-				st.reset = at
-			}
+			st.resetIndex = index
 		}
 	}
 }

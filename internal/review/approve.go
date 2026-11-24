@@ -199,7 +199,7 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 	}
 	keyBytes, err := passkey.OpenVault(s.state, id, raw("prf_output"), s.origin.URL())
 	if errors.Is(err, passkey.ErrReset) {
-		http.Error(w, "passkey reset", http.StatusConflict)
+		http.Error(w, "stop beacon serve and run beacon setup --reset-passkeys", http.StatusConflict)
 		return
 	}
 	if err != nil {
