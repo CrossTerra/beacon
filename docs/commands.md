@@ -353,7 +353,9 @@ beacon egress --state-dir DIR
 ```
 
 `serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
-SIGTERM to stop it. `--origin` defaults to `http://localhost:7317`. With an existing private Tailscale Serve
+SIGTERM to stop it. Its [reaper](supervision.md) sweeps any previous Go session before it opens the listeners;
+this preview does not start a collector, watches or agent runs. `--origin` defaults to `http://localhost:7317`.
+With an existing private Tailscale Serve
 proxy, set `--origin https://MACHINE.TAILNET.ts.net` (substitute the exact lowercase name) and
 `--tailscale-login LOGIN` to the one expected `Tailscale-User-Login`. `serve` does not configure or verify
 that proxy. Use localhost when you do not have one.

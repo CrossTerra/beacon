@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/review"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 type Options struct {
@@ -21,8 +23,10 @@ type Options struct {
 	Now      func() time.Time
 	// Only tests supply a Signal connection. The CLI does not have a credential source.
 	ConnectRecords approval.ConnectRecords
-	// The future supervisor can supply run attribution. Nil means all peers are unattributed.
-	Attribute func(pid int) string
+	// The CLI always supplies supervision, but no live jobs in the preview. Library tests may
+	// leave it nil. ConnectJobs hands the supervisor to trusted service code, never to a request.
+	Supervision *supervisor.Options
+	ConnectJobs func(*supervisor.Supervisor) error
 	// Test seam for ephemeral loopback listeners. The CLI uses both fixed D4 addresses.
 	ListenReview func() ([]net.Listener, error)
 	// ProviderTransport is a test seam. Production uses a guarded TLS transport, without proxy or redirects.
@@ -42,11 +46,30 @@ func Run(ctx context.Context, opts Options) (err error) {
 	if opts.ListenReview == nil {
 		opts.ListenReview = review.ListenLoopback
 	}
-	j, err := approval.OpenJournal(opts.StateDir, opts.Now(), "")
+	var sup *supervisor.Supervisor
+	var startup func(*os.File) error
+	if opts.Supervision != nil {
+		startup = func(lock *os.File) error {
+			var err error
+			sup, err = supervisor.Open(ctx, opts.StateDir, lock, *opts.Supervision)
+			return err
+		}
+	}
+	j, err := approval.OpenJournalBeforeReplay(opts.StateDir, opts.Now(), "", startup)
+	defer func() {
+		if sup != nil {
+			err = errors.Join(err, sup.Close())
+		}
+		if j != nil {
+			err = errors.Join(err, j.Close())
+		}
+	}()
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, j.Close()) }()
+	if ctx.Err() != nil {
+		return nil
+	}
 	configured, err := actionexec.LoadSettings(opts.StateDir)
 	if err != nil {
 		return err
@@ -54,6 +77,13 @@ func Run(ctx context.Context, opts Options) (err error) {
 	providers, err := actionexec.New(configured, opts.StateDir, opts.Now, opts.ProviderTransport)
 	if err != nil {
 		return err
+	}
+	var attribute func(int) (string, error)
+	var reaperDone <-chan struct{}
+	if sup != nil {
+		attribute, reaperDone = sup.Attribute, sup.Done()
+		stopJobs := context.AfterFunc(ctx, sup.BeginShutdown)
+		defer stopJobs()
 	}
 	// The parent requests shutdown. Mark the journal stopping before closing listeners or canceling work.
 	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -78,9 +108,20 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
-		Attribute: opts.Attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
+		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
 	if err != nil {
 		return err
+	}
+	defer socket.Close()
+	if sup != nil {
+		if err := sup.StartFixed(opts.Supervision.Jobs); err != nil {
+			return err
+		}
+		if opts.ConnectJobs != nil {
+			if err := opts.ConnectJobs(sup); err != nil {
+				return err
+			}
+		}
 	}
 
 	httpd := desk.Server()
@@ -116,6 +157,10 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	select {
 	case <-ctx.Done():
+	case <-reaperDone:
+		if ctx.Err() == nil {
+			err = supervisor.ErrReaper
+		}
 	case err = <-dispatchFailed:
 	case err = <-exits:
 		if err == nil {
@@ -123,6 +168,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 		}
 	}
 
+	if sup != nil {
+		sup.BeginShutdown()
+	}
 	err = errors.Join(err, j.Shutdown(opts.Now()))
 	cancel()
 	err = errors.Join(err, socket.Close())

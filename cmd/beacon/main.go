@@ -11,9 +11,13 @@ import (
 
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 func main() {
+	if code, helper := supervisor.HelperExit(os.Args[1:]); helper {
+		os.Exit(code)
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "run" && os.Getenv("BEACON_TETHERED") == "1" {
 		go func() {
 			// Tether holds the only writer and never writes. EOF means tether died. On Quit

@@ -104,7 +104,18 @@ func OpenJournal(dir string, at time.Time, after string) (*Journal, error) {
 	return openJournal(dir, at, after, journalHooks{newID, nonce, syncJournal})
 }
 
+// OpenJournalBeforeReplay runs startup while holding instance.lock, before reading or creating
+// the journal. The reaper duplicates the locked descriptor, so a crash cannot let two instances
+// clean up or start processes at the same time. Startup must not close or unlock the descriptor.
+func OpenJournalBeforeReplay(dir string, at time.Time, after string, startup func(*os.File) error) (*Journal, error) {
+	return openJournalWithStartup(dir, at, after, journalHooks{newID, nonce, syncJournal}, startup)
+}
+
 func openJournal(dir string, at time.Time, after string, hooks journalHooks) (*Journal, error) {
+	return openJournalWithStartup(dir, at, after, hooks, nil)
+}
+
+func openJournalWithStartup(dir string, at time.Time, after string, hooks journalHooks, startup func(*os.File) error) (*Journal, error) {
 	if after != "" && !ValidID(after, "jrn") {
 		return nil, ErrJournalAge
 	}
@@ -114,6 +125,12 @@ func openJournal(dir string, at time.Time, after string, hooks journalHooks) (*J
 	lock, err := LockInstance(dir)
 	if err != nil {
 		return nil, err
+	}
+	if startup != nil {
+		if err := startup(lock); err != nil {
+			CloseInstance(dir, lock)
+			return nil, err
+		}
 	}
 	j := &Journal{dir: filepath.Clean(dir), lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
 		changed: make(chan struct{}), hooks: hooks}

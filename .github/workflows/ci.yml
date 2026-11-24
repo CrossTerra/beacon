@@ -25,7 +25,7 @@ jobs:
           go-version-file: go.mod
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
-      - name: Gates
+      - name: Gates (including Go supervision fixtures)
         run: |
           gopath=$(go env GOPATH)
           export PATH="$gopath/bin:$PATH"

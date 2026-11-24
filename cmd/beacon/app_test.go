@@ -25,6 +25,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/rules"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 const token = "sig_TOKEN_must_never_be_logged"
@@ -108,6 +109,12 @@ func TestRunErrorsNameNoKeysOrPatterns(t *testing.T) {
 // TestMain doubles as a helper process: with BEACON_TEST_HELPER set, the test binary runs `beacon run --once` and
 // stops at the point the variable names, so a test can kill Beacon at an exact step and restart it.
 func TestMain(m *testing.M) {
+	if code, helper := supervisor.HelperExit(os.Args[1:]); helper {
+		os.Exit(code)
+	}
+	if len(os.Args) > 2 && os.Args[1] == "--supervision-fixture" {
+		os.Exit(supervisionFixture(os.Args[2:]))
+	}
 	if mode := os.Getenv("BEACON_TEST_HELPER"); mode != "" {
 		os.Exit(helper(mode, os.Getenv("BEACON_TEST_CONFIG")))
 	}
