@@ -52,13 +52,15 @@ public final class ProposalServer: @unchecked Sendable {
     private let enabledLock = NSLock()
     private var enabledTypes: [ActionType]
     private let attribution: RunAttribution?
-    /// `quit`: the exact admitted identity of the bundled CLI, and what quitting does. The peer must also be
-    /// positively identified as external; meeting the requirement alone is not enough.
-    public var quit: (client: AdmittedClient, action: @Sendable () -> Void)? {
+    /// `quit`: the admitted identity of the bundled CLI, that CLI's path in the running app, and what quitting does.
+    /// A peer at another path must be positively external. The app's own installer CLI may quit without that
+    /// classification: the installer, and a run that executes that exact binary, are the same user who can already
+    /// signal the process.
+    public var quit: (client: AdmittedClient, executable: String, action: @Sendable () -> Void)? {
         get { enabledLock.withLock { quitter } }
         set { enabledLock.withLock { quitter = newValue } }
     }
-    private var quitter: (client: AdmittedClient, action: @Sendable () -> Void)?
+    private var quitter: (client: AdmittedClient, executable: String, action: @Sendable () -> Void)?
     /// The types `types` lists and `propose` accepts. The app changes it when an account is added or removed.
     public var enabled: [ActionType] {
         get { enabledLock.withLock { enabledTypes } }
@@ -250,6 +252,20 @@ public final class ProposalServer: @unchecked Sendable {
         connection.resume()
     }
 
+    /// The kernel's path for the peer, not its argv. Symlinks are resolved so the bundle path and SecCodeCopyPath agree.
+    static func sameExecutable(_ actual: String?, _ expected: String) -> Bool {
+        guard let actual, !expected.isEmpty else { return false }
+        func norm(_ path: String) -> String {
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        return norm(actual) == norm(expected)
+    }
+
+    private func isExternal(_ connection: Connection) -> Bool {
+        guard attribution != nil, let peer = authorizedPeer(connection), case .external = peer else { return false }
+        return true
+    }
+
     /// Recheck the attribution for each request and before completing an asynchronous one. A socket that changes
     /// groups or outlasts a sweep cannot gain a different identity without reconnecting.
     private func authorizedPeer(_ connection: Connection) -> RunAttribution.Peer? {
@@ -279,8 +295,10 @@ public final class ProposalServer: @unchecked Sendable {
         case "propose":
             propose(request, on: connection, at: date)
         case "quit":
-            guard let quit, quit.client == connection.client, attribution != nil,
-                  let peer = authorizedPeer(connection), case .external = peer else {
+            // The refusal is `invalid /op`, not a distinct code: a run, an escaped descendant, an unclassified
+            // peer, and a connection from before the sweep all get that reply. The running app's own CLI does not.
+            guard let quit, quit.client == connection.client,
+                  Self.sameExecutable(connection.executable, quit.executable) || isExternal(connection) else {
                 return connection.reply(ProposalServer.invalid("/op"))
             }
             guard request.count == 1 else { return connection.reply(ProposalServer.invalid("")) }

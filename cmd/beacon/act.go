@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,6 +209,14 @@ func actCall(ctx context.Context, settings actSettings, frame []byte, timeout ti
 	}
 	if err := peer.Check(unix, settings.Requirement); err != nil {
 		return nil, err
+	}
+	// BEACON_ACT_PID names the instance this connection must be talking to. Checked on this connection, before
+	// any request byte, so a probe on a different connection cannot stand in for it.
+	if want := os.Getenv("BEACON_ACT_PID"); want != "" {
+		got, err := listenerPID(unix)
+		if err != nil || strconv.Itoa(got) != want {
+			return nil, fmt.Errorf("the proposal socket's listener is pid %d, not %s", got, want)
+		}
 	}
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err

@@ -309,9 +309,9 @@ struct ProposalServerTests {
         let quits = Locked(0)
         // The name alone is not the identity.
         h.server.quit = (client: .init(name: "beacon-act", requirement: "identifier \"dev.beacon.other\""),
-                         action: { quits.withLock { $0 += 1 } })
+                         executable: "", action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit"])) == .object(["error": "invalid", "field": "/op"]))
-        h.server.quit = (client: clientIdentity, action: { quits.withLock { $0 += 1 } })
+        h.server.quit = (client: clientIdentity, executable: "", action: { quits.withLock { $0 += 1 } })
         #expect(client.call(.object(["op": "quit", "now": .bool(true)]))?["error"] == "invalid")
         #expect(quits.withLock { $0 } == 0)
         #expect(client.call(.object(["op": "quit"])) == .object(["status": "quitting"]))
@@ -324,7 +324,8 @@ struct ProposalServerTests {
         let processes = TestProcesses(), attribution = processes.attribution
         let h = try Harness(attribution: attribution)
         let quits = Locked(0)
-        h.server.quit = (client: .init(name: "beacon-act", requirement: selfRequirement()), action: { quits.withLock { $0 += 1 } })
+        h.server.quit = (client: .init(name: "beacon-act", requirement: selfRequirement()), executable: "",
+                         action: { quits.withLock { $0 += 1 } })
         let quit: JSON = .object(["op": "quit"])
         let denied: JSON = .object(["error": "invalid", "field": "/op"])
         let beforeSweep = try h.connect()
@@ -352,6 +353,36 @@ struct ProposalServerTests {
         #expect(attribution.peer(of: getpid()) == .unknown)
         #expect(try h.connect().call(quit) == denied)
         #expect(h.queue.sync { quits.withLock { $0 } } == 1)
+    }
+
+    /// The refusal the installer used to discard. A caller that is not external gets `invalid /op` and nothing quits,
+    /// including before the sweep. The running app's own CLI is the exception: its kernel path may quit anyway.
+    @Test func theRunningAppsCLICanQuitWhenTheCallerIsNotExternal() throws {
+        let admitted = TestProcesses()
+        let found = try Harness(enabled: [.githubMerge], attribution: admitted.attribution)
+        try #require(admitted.attribution.completeSweep())
+        let stored = try #require(try found.connect().call(mergeProposal()))
+        let id = try #require(stored["id"]?.stringValue)
+        let installer = try #require(found.queue.sync { found.book.proposal(id, at: found.clock.now)?.clientPath })
+
+        let blocked = TestProcesses()
+        let h = try Harness(attribution: blocked.attribution)
+        let quits = Locked(0)
+        let identity = AdmittedClient(name: "beacon-act", requirement: selfRequirement())
+        let denied: JSON = .object(["error": "invalid", "field": "/op"])
+        h.server.quit = (client: identity, executable: installer + ".new", action: { quits.withLock { $0 += 1 } })
+        #expect(try h.connect().call(.object(["op": "quit"])) == denied, "a staged CLI is not the running app's CLI")
+        h.server.quit = (client: identity, executable: installer, action: { quits.withLock { $0 += 1 } })
+        #expect(try h.connect().call(.object(["op": "quit"])) == .object(["status": "quitting"]))
+        #expect(h.queue.sync { quits.withLock { $0 } } == 1)
+
+        blocked.attribution.add(leader: 11, runner: "run_01m7x1v080ec1r60r30c1g60r3")
+        blocked.set(group: 11)
+        #expect(blocked.attribution.peer(of: getpid()) == .run("run_01m7x1v080ec1r60r30c1g60r3"))
+        #expect(try h.connect().call(.object(["op": "quit"])) == .object(["status": "quitting"]))
+        h.server.quit = (client: identity, executable: installer + ".new", action: { quits.withLock { $0 += 1 } })
+        #expect(try h.connect().call(.object(["op": "quit"])) == denied, "a run using another path still cannot quit")
+        #expect(h.queue.sync { quits.withLock { $0 } } == 2)
     }
 
     @Test func refusesAnUnadmittedPeerWithoutReading() throws {

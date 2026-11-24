@@ -25,9 +25,8 @@ final class TetherSession: RunLauncher {
     }
 
     private let fd: Int32
-    private let source: any DispatchSourceRead
+    private let reader: TetherLeaseReader
     private let event: (Event) -> Void
-    private var line: [UInt8]?
     private var stopping = false
 
     static func open(event: @escaping (Event) -> Void) -> TetherSession? {
@@ -51,13 +50,22 @@ final class TetherSession: RunLauncher {
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         self.fd = fd
         self.event = event
-        source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
-        source.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.receive() }
+        let box = TetherSessionBox()
+        // A separate close-on-exec fd. The reader's cancel closes that dup, not this writer, so a reused fd
+        // number cannot be closed under a send or shutdown still in flight.
+        let readFd = dup(fd)
+        precondition(readFd >= 0)
+        _ = fcntl(readFd, F_SETFD, FD_CLOEXEC)
+        reader = TetherLeaseReader(fd: readFd) { event in
+            RunLoop.main.perform(inModes: [.default, .common, .modalPanel]) {
+                MainActor.assumeIsolated { box.session?.event(event) }
+            }
         }
-        source.setCancelHandler { close(fd) }
-        source.activate()
+        box.session = self
+        reader.start()
     }
+
+    deinit { close(fd) }
 
     /// The longest Quit waits for confirmation: tether's grace period plus its give-up margin, and a little more.
     static let stopTimeout: TimeInterval = 15 + 5 + 3
@@ -96,7 +104,29 @@ final class TetherSession: RunLauncher {
         return true
     }
 
-    private func receive() {
+}
+
+/// Holds the session until `init` has finished, so the reader's first event can find it.
+private final class TetherSessionBox: @unchecked Sendable {
+    weak var session: TetherSession?
+}
+
+/// Reads the supervisor lease off the main queue and delivers each event on the main run loop.
+private final class TetherLeaseReader: @unchecked Sendable {
+    private let source: DispatchSourceRead
+    private let deliver: @Sendable (TetherSession.Event) -> Void
+    private var line: [UInt8]?
+
+    init(fd: Int32, deliver: @escaping @Sendable (TetherSession.Event) -> Void) {
+        self.deliver = deliver
+        source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: DispatchQueue(label: "dev.beacon.tether.read"))
+        source.setCancelHandler { close(fd) }
+        source.setEventHandler { [weak self] in self?.receive(fd) }
+    }
+
+    func start() { source.activate() }
+
+    private func receive(_ fd: Int32) {
         var byte: UInt8 = 0
         while true {
             let size = recv(fd, &byte, 1, MSG_DONTWAIT)
@@ -113,11 +143,11 @@ final class TetherSession: RunLauncher {
             }
             switch byte {
             case UInt8(ascii: "#"): line = []
-            case UInt8(ascii: "A"): event(.active)
-            case UInt8(ascii: "L"): event(.legacyCollectorInstalled)
-            case UInt8(ascii: "R"): event(.collectorRunning)
-            case UInt8(ascii: "W"): event(.collectorRestarting)
-            case UInt8(ascii: "X"): event(.collectorExited)
+            case UInt8(ascii: "A"): deliver(.active)
+            case UInt8(ascii: "L"): deliver(.legacyCollectorInstalled)
+            case UInt8(ascii: "R"): deliver(.collectorRunning)
+            case UInt8(ascii: "W"): deliver(.collectorRestarting)
+            case UInt8(ascii: "X"): deliver(.collectorExited)
             default: return end(byte)
             }
         }
@@ -126,9 +156,9 @@ final class TetherSession: RunLauncher {
     private func end(_ byte: UInt8?) {
         source.cancel()
         if byte == UInt8(ascii: "B") {
-            event(.busy)
+            deliver(.busy)
         } else {
-            event(.stopped(verified: byte == UInt8(ascii: "S")))
+            deliver(.stopped(verified: byte == UInt8(ascii: "S")))
         }
     }
 
@@ -137,11 +167,11 @@ final class TetherSession: RunLauncher {
         guard words.count >= 2 else { return }
         let id = words[1], value = words.count > 2 ? Int32(words[2]) : nil
         switch (words[0], value) {
-        case ("prepared", let pid?): event(.runPrepared(id: id, pid: pid))
-        case ("started", let pid?): event(.runStarted(id: id, pid: pid))
-        case ("failed", let code?): event(.runNotStarted(id: id, errno: code))
-        case ("exited", let status?): event(.runExited(id: id, status: status))
-        case ("gone", _): event(.runGone(id: id))
+        case ("prepared", let pid?): deliver(.runPrepared(id: id, pid: pid))
+        case ("started", let pid?): deliver(.runStarted(id: id, pid: pid))
+        case ("failed", let code?): deliver(.runNotStarted(id: id, errno: code))
+        case ("exited", let status?): deliver(.runExited(id: id, status: status))
+        case ("gone", _): deliver(.runGone(id: id))
         default: break
         }
     }

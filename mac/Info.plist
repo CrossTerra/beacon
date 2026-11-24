@@ -16,5 +16,7 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>BeaconDeferredQuit</key>
+	<true/>
 </dict>
 </plist>

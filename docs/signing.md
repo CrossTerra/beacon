@@ -27,10 +27,35 @@ It:
    private key; choose **Always Allow**;
 4. verifies each signature against its requirement, before and after installing;
 5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It asks
-    through the app's socket with the new CLI (`beacon act quit`, restricted to the bundled CLI's verified external
-    peers), then, if it cannot quit through the socket, with SIGTERM. Neither needs permission to control another app.
-    It waits up to 30 seconds for each and stops if Beacon is still running. It then replaces
-    `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;
+   the CLI inside the installed `~/Applications/Beacon.app`, after `codesign --verify` shows it is `dev.beacon.cli`
+   signed by this install's certificate. It never runs the staged helper. The running app's socket admits only the
+   CLI requirement it stored at launch, and a newly signed helper cannot change that check.
+
+   **An installed build from before this fix must be quit from its menu once.** Socket quit and SIGTERM both used
+   to call terminate from the main queue, and with tether alive that deadlocks: the app answers and does not exit.
+   `install.sh` reads `BeaconDeferredQuit` in the installed app's Info.plist. If it is missing, it does not try the
+   socket or SIGTERM. It tells you to quit from the menu and run it again. After that one menu quit, later upgrades
+   can quit the running app themselves.
+
+   **Same certificate.** The installed CLI meets the running app's requirement. An app that already has this quit
+   rule admits that binary even when the caller is not external, and the installer prints the reply
+   (`{"status":"quitting"}` or `{"error":"invalid","field":"/op"}`). The CLI checks that its own connection's
+   listener is the one verified process; if that peer cannot be named, socket quit is skipped. SIGTERM is sent only
+   to a pid whose start time still matches, so a reused pid is not signalled. If time remains in the one
+   30-second deadline, Quit is `NSRunningApplication.terminate()` on that pid, not a System Events quit and not a
+   bundle-id quit. A failed process listing is not
+   treated as the app having exited. After the old bundle is moved aside, the installer checks again that nothing
+   still runs from it and moves it back if something does.
+
+   **A different certificate.** The installer skips the old CLI: its certificate is not the one this install is
+   signing with, so `codesign --verify -R` fails and the helper is not executed. The staged helper is not run
+   either; the running app's stored requirement would refuse it anyway. Quit is then the signal and the Apple
+   event above, or the menu if this is still a build from before deferred quit. After the new app launches it
+   admits the new CLI. `act.json` still names the previous app requirement, so a certificate change still needs
+   that file removed before the new build will listen
+   ([changing the certificate](#changing-the-certificate)).
+
+   It then replaces `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;
 6. points `~/.local/bin/beacon` at the app's CLI, so `beacon` and `beacon act` on your PATH are the app's. A plain
    file there from an older install is kept as `beacon.pre-app`;
 7. removes the old collector LaunchAgent (`dev.beacon.agent`) if it is installed, with `beacon service uninstall`:
