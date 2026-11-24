@@ -40,9 +40,14 @@ beacon_osascript() {
 # Fall back to SIGTERM and finally AppleScript. $2 is how long to wait for exit after each request (Quit itself
 # waits at most 23 seconds for services). Print the outcome on stdout and why a path failed on stderr.
 quit_beacon() {
-	local app=$1 cli="$1/Contents/Helpers/beacon" wait=${2:-30} pids reply term_status=0
+	local app="$1" cli="$1/Contents/Helpers/beacon" wait="${2:-30}" bundle_id="${3:-dev.beacon.app}"
+	local pids reply term_status=0
 	# Only this bundle's executable is signaled, even if the caller exported another BEACON_APP_PATH.
 	local BEACON_APP_PATH=$app
+	if [[ -n "${BEACON_INSTALL_TEST:-}" && "$app" == "$HOME/Applications/Beacon.app" ]]; then
+		echo "refusing to quit the installed Beacon.app from a test" >&2
+		return 1
+	fi
 	pids=$(beacon_pids)
 	if [[ -z "$pids" ]]; then
 		echo "not running"
@@ -85,7 +90,7 @@ quit_beacon() {
 	echo "Trying AppleScript to quit Beacon; macOS may ask for Automation permission." >&2
 	# Check again inside the script so a late exit does not turn the quit event into a launch.
 	if reply=$(beacon_osascript -e "with timeout of $wait seconds" \
-		-e 'if application id "dev.beacon.app" is running then quit app id "dev.beacon.app"' \
+		-e "if application id \"$bundle_id\" is running then quit app id \"$bundle_id\"" \
 		-e 'end timeout' 2>&1); then
 		if beacon_gone_within "$wait"; then
 			echo "quit with AppleScript"

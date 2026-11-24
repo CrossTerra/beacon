@@ -26,10 +26,12 @@ fail() {
 	exit 1
 }
 
-# A stand-in whose executable path is exactly Beacon.app/Contents/MacOS/Beacon. A copy at another path, and a
-# process that only mentions that path, must not count.
+# A private bundle. Never the installed app, and never its bundle id: a missed stub must not quit that app.
 app="$tmp/Test Applications/Beacon.app"
 export BEACON_APP_PATH="$app"
+export BEACON_INSTALL_TEST=1
+bundle_id="test.beacon.install-lib"
+[[ "$app" != "$HOME/Applications/Beacon.app" && "$bundle_id" != dev.beacon.app ]] || fail "fixture targets the installed app"
 exe="$app/Contents/MacOS/Beacon"
 mkdir -p "${exe%/*}"
 # A binary we compile, not a copy of /bin/bash: a platform binary copied off its path is killed.
@@ -101,7 +103,7 @@ kill() {
 beacon_osascript() {
 	echo AppleScript >> "$tmp/quit-paths"
 	if [[ $# -ne 6 || $1 != -e || $2 != 'with timeout of '* || $3 != -e ||
-		$4 != 'if application id "dev.beacon.app" is running then quit app id "dev.beacon.app"' ||
+		$4 != "if application id \"$bundle_id\" is running then quit app id \"$bundle_id\"" ||
 		$5 != -e || $6 != 'end timeout' ]]; then
 		echo "unexpected AppleScript: $*" >&2
 		return 2
@@ -114,7 +116,7 @@ beacon_osascript() {
 }
 try_quit() {
 	: > "$tmp/quit-paths"
-	FAKE_PID="$fake_pid" quit_beacon "$app" "${1:-2}" 2> "$tmp/quit-details"
+	FAKE_PID="$fake_pid" quit_beacon "$app" "${1:-2}" "$bundle_id" 2> "$tmp/quit-details"
 }
 expect_paths() {
 	local seen
