@@ -119,6 +119,9 @@ func (a Action) ParamsSchema() Object {
 	return Object{"type": "object", "additionalProperties": false, "required": required, "properties": props}
 }
 
+// CheckParams also validates a snapshot read back from disk before a handler builds API paths from it.
+func (a Action) CheckParams(o Object) error { return validate(o, "/params", paramsSchemas[a]) }
+
 func validate(v any, path string, fields map[string]field) error {
 	o, ok := v.(Object)
 	if !ok || fields == nil || o == nil {
@@ -248,6 +251,19 @@ type Binding struct {
 	Account     string `json:"account"`
 	Destination Object `json:"destination"`
 }
+
+// Resolved is a binding verified by a handler and the local-only facts shown beside it.
+// Only the binding enters the approval hash; display labels never enter a Signal record.
+type Resolved struct {
+	Binding
+	AccountLabel, DestinationLabel string
+	Facts                          Object
+}
+
+// Refusal carries a fixed reason code and optional display-only detail chosen by a handler.
+type Refusal struct{ Code, Detail string }
+
+func (r Refusal) Error() string { return r.Code }
 
 type Frozen struct {
 	Binding

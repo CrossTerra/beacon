@@ -20,6 +20,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/actionexec"
 	"github.com/CrossTerra/beacon/internal/config"
 	"github.com/CrossTerra/beacon/internal/coverage"
 	"github.com/CrossTerra/beacon/internal/cursor"
@@ -114,7 +115,7 @@ Commands:
   status        print the last pass; --coverage adds how well each source is being read
   service       uninstall, status or logs of the retired per-user collector job
   act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
-  serve         run the read-only Go approval preview in a separate --state-dir
+  serve         run the Go approval service in a separate --state-dir
   open          print a one-time browser sign-in link for that --state-dir
   setup         print a one-time passkey setup code for that --state-dir
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
@@ -1472,8 +1473,23 @@ func (a *app) cmdCursor(args []string) error {
 
 func (a *app) cmdEgress(args []string) error {
 	fs, cfgPath := a.flags("egress")
+	state := fs.String("state-dir", "", "list provider egress for this Go approval service instead")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *state != "" {
+		if *cfgPath != "" || fs.NArg() != 0 {
+			return errors.New("egress --state-dir does not take collector config or positional arguments")
+		}
+		dir, err := reviewStateDir(*state)
+		if err != nil {
+			return err
+		}
+		settings, err := actionexec.LoadSettings(dir)
+		if err != nil {
+			return err
+		}
+		return a.printEgress(settings.Hosts())
 	}
 	e, err := a.load(*cfgPath)
 	if err != nil {
@@ -1483,8 +1499,12 @@ func (a *app) cmdEgress(args []string) error {
 	if err != nil {
 		return err
 	}
+	return a.printEgress(append(e.egress(), app...))
+}
+
+func (a *app) printEgress(hosts []egress.Host) error {
 	tw := tabwriter.NewWriter(a.stdout, 0, 4, 2, ' ', 0)
-	for _, h := range egress.Sorted(append(e.egress(), app...)) {
+	for _, h := range egress.Sorted(hosts) {
 		fmt.Fprintf(tw, "%s\t%s\n", h.Address, h.Purpose)
 	}
 	return tw.Flush()

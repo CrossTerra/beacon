@@ -53,13 +53,17 @@ type frame struct {
 // View is a detached snapshot of a proposal and any previously committed approval.
 type View struct {
 	Proposal
-	Frozen *Frozen
+	Frozen               *Frozen
+	StartedAt, UnknownAt time.Time
+	Outcome              *Result
+	asserted             bool
 }
 
 type proposalState struct {
 	View
 	order      int
 	approvedAt time.Time
+	dispatched bool // process-local; replay never dispatches a started action
 }
 
 // Journal owns the service's instance lock. It never dispatches an action. A failed append/sync poisons the
@@ -165,6 +169,10 @@ func (j *Journal) load(path string, at time.Time, after string) error {
 			return ErrCorrupt
 		}
 		if e.Kind == "approved" && len(e.BatchChallenge) > 0 {
+			s := j.states[e.ID]
+			if len(batch) == 10 || s == nil || s.Type != Merge && s.Type != Post {
+				return ErrCorrupt
+			}
 			if len(batch) == 0 {
 				batchAt = offset
 			}
@@ -364,6 +372,10 @@ func (s *proposalState) snapshot() View {
 		cp.Params, cp.Destination = maps.Clone(cp.Params), maps.Clone(cp.Destination)
 		v.Frozen = &cp
 	}
+	if v.Outcome != nil {
+		r := *v.Outcome
+		v.Outcome = &r
+	}
 	return v
 }
 
@@ -470,6 +482,9 @@ func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte
 			return err
 		}
 		p := j.states[f.ID].Proposal
+		if len(items) > 1 && p.Type != Merge && p.Type != Post {
+			return ErrTransition
+		}
 		selected := ""
 		if p.Type == Run {
 			selected = text(f.Params, "model")
@@ -529,22 +544,73 @@ func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte
 // Start commits the no-retry barrier before the handler may perform a write. Once started, a process
 // crash leaves the outcome unknown; recovery cannot issue a second Start.
 func (j *Journal) Start(id string, at time.Time) (Frozen, error) {
+	v, err := j.start(id, at, false)
+	if err != nil {
+		return Frozen{}, err
+	}
+	return *v.Frozen, nil
+}
+
+// StartAsserted consumes a durably committed passkey approval for one handler, not a frozen preview.
+// Only the assertion route calls the dispatcher; the credential ID in the approval is a further check.
+func (j *Journal) StartAsserted(id string, at time.Time) (View, error) {
+	return j.start(id, at, true)
+}
+
+func (j *Journal) start(id string, at time.Time, asserted bool) (View, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopping {
-		return Frozen{}, ErrStopping
+		return View{}, ErrStopping
 	}
 	if err := j.require(id, "approved", at); err != nil {
-		return Frozen{}, err
+		return View{}, err
 	}
 	s := j.states[id]
-	if at.Before(s.approvedAt) {
-		return Frozen{}, ErrTransition
+	if at.Before(s.approvedAt) || asserted && !s.asserted {
+		return View{}, ErrTransition
 	}
 	if err := j.transition(id, "started", "", at); err != nil {
-		return Frozen{}, err
+		return View{}, err
 	}
-	return *s.snapshot().Frozen, nil
+	return s.snapshot(), nil
+}
+
+// MayDispatch checks whether the action can begin its final reads.
+func (j *Journal) MayDispatch(id string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.dispatchable(j.states[id])
+}
+
+// ClaimDispatch is the one-shot barrier at the write, after final reads. It never holds the journal
+// lock across a provider call. The durable start already prevents a replay after process death.
+func (j *Journal) ClaimDispatch(id string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	s := j.states[id]
+	if !j.dispatchable(s) {
+		return false
+	}
+	s.dispatched = true
+	return true
+}
+
+func (j *Journal) dispatchable(s *proposalState) bool {
+	return j.healthy() && !j.stopping && s != nil && s.Status == "started" && s.asserted && !s.dispatched
+}
+
+// Unknowns is a read-only recovery queue. It cannot produce a start.
+func (j *Journal) Unknowns() []View {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var out []View
+	for _, s := range j.order {
+		if s.Status == "outcome_unknown" {
+			out = append(out, s.snapshot())
+		}
+	}
+	return out
 }
 
 func (j *Journal) Unknown(id, reason string, at time.Time) error {
@@ -662,7 +728,7 @@ func (j *Journal) fold(e frame) bool {
 }
 
 func batchCommitted(parts []frame, marker frame) bool {
-	if len(parts) < 2 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
+	if len(parts) < 2 || len(parts) > 10 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
 		return false
 	}
 	for i, part := range parts {
@@ -736,17 +802,30 @@ func foldTransition(s *proposalState, e frame) bool {
 			return false
 		}
 		s.Frozen, s.approvedAt = e.Frozen, time.UnixMilli(e.At)
+		s.asserted = len(e.CredentialID) != 0
 		return true
 	case "withdrawn", "declined":
 		return s.Status == "pending"
 	case "expired":
 		return s.Status == "pending" || s.Status == "approved"
 	case "started":
-		return s.Status == "approved"
+		if s.Status != "approved" {
+			return false
+		}
+		s.StartedAt = time.UnixMilli(e.At)
+		return true
 	case "outcome_unknown":
-		return s.Status == "started"
+		if s.Status != "started" {
+			return false
+		}
+		s.UnknownAt = time.UnixMilli(e.At)
+		return true
 	case "executed", "failed":
-		return e.Result != nil && (s.Status == "started" || s.Status == "outcome_unknown" && e.Result.ConfirmedBy == "read_back")
+		if e.Result == nil || !(s.Status == "started" || s.Status == "outcome_unknown" && e.Result.ConfirmedBy == "read_back") {
+			return false
+		}
+		s.Outcome = e.Result
+		return true
 	}
 	return false
 }

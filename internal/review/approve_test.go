@@ -1,6 +1,7 @@
 package review
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -15,6 +16,14 @@ import (
 	"github.com/CrossTerra/beacon/internal/webauthn"
 	"github.com/CrossTerra/beacon/internal/webauthntest"
 )
+
+// A trusted binding with no execution wiring is still recorded-only.
+func (s *Site) SetResolver(fn func(approval.Proposal) (approval.Binding, error)) {
+	s.SetActions(Actions{Resolve: func(_ context.Context, p approval.Proposal) (approval.Resolved, error) {
+		b, err := fn(p)
+		return approval.Resolved{Binding: b}, err
+	}})
+}
 
 func TestAssertionApprovesTheFrozenBatchAndDoesNotStart(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
@@ -59,20 +68,22 @@ func TestAssertionApprovesTheFrozenBatchAndDoesNotStart(t *testing.T) {
 	}
 	cookie := signIn(t, s)
 	form := url.Values{"csrf": {s.sessions.active[cookie.Value].csrf}}
-	for _, id := range ids {
-		form.Add("id", id)
-	}
+	form["id"] = []string{ids[1], ids[0]} // Form order cannot change the order shown on the desk.
 	r := s.request("POST", "/freeze", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("Origin", s.origin.URL())
 	r.AddCookie(cookie)
 	w := request(s, r)
 	expectStatus(t, w, http.StatusOK)
-	var opts struct{ Challenge, Nonce string }
-	raw := w.Body.String()
-	raw = raw[strings.Index(raw, `id="ceremony">`)+len(`id="ceremony">`):]
-	raw = raw[:strings.Index(raw, "</script>")]
-	must(t, json.Unmarshal([]byte(raw), &opts))
+	page := w.Body.String()
+	if i, k := strings.Index(page, ids[0]), strings.Index(page, ids[1]); i < 0 || k <= i {
+		t.Fatal("freeze did not keep the pending list's order")
+	}
+	opts := ceremonyOptions(t, page)
+	item := s.held[opts.Nonce]
+	if len(item.items) != 2 || item.items[0].ID != ids[0] || item.items[1].ID != ids[1] {
+		t.Fatal("assertion order differed from display order")
+	}
 	challenge, err := base64.RawURLEncoding.DecodeString(opts.Challenge)
 	must(t, err)
 	asserted, err := key.Assert("localhost", approval.LocalOrigin, challenge, false)
@@ -201,6 +212,19 @@ func TestApprovalStoresANonZeroSignCount(t *testing.T) {
 
 type ceremonyOpts struct{ Challenge, Nonce string }
 
+func ceremonyOptions(t *testing.T, page string) ceremonyOpts {
+	t.Helper()
+	const sep = `id="ceremony">`
+	_, raw, ok := strings.Cut(page, sep)
+	if !ok {
+		t.Fatal("missing ceremony")
+	}
+	raw, _, _ = strings.Cut(raw, "</script>")
+	var opts ceremonyOpts
+	must(t, json.Unmarshal([]byte(raw), &opts))
+	return opts
+}
+
 func registeredPreview(t *testing.T) (*Site, *http.Cookie, *webauthntest.Key, []byte) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
@@ -257,12 +281,7 @@ func freezeNonce(t *testing.T, s *Site, cookie *http.Cookie, id string) ceremony
 	r.AddCookie(cookie)
 	w := request(s, r)
 	expectStatus(t, w, http.StatusOK)
-	var opts ceremonyOpts
-	raw := w.Body.String()
-	raw = raw[strings.Index(raw, `id="ceremony">`)+len(`id="ceremony">`):]
-	raw = raw[:strings.Index(raw, "</script>")]
-	must(t, json.Unmarshal([]byte(raw), &opts))
-	return opts
+	return ceremonyOptions(t, w.Body.String())
 }
 
 func postApproval(t *testing.T, s *Site, cookie *http.Cookie, key *webauthntest.Key, prf []byte, nonce, challengeB64 string, status int) {

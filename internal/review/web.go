@@ -1,4 +1,4 @@
-// Package review serves read-only approval pages on the service's canonical loopback origin.
+// Package review serves approval pages on the service's canonical loopback origin.
 package review
 
 import (
@@ -34,7 +34,7 @@ type Site struct {
 	origin   approval.Origin
 	journal  proposals
 	state    string
-	resolve  func(approval.Proposal) (approval.Binding, error)
+	actions  Actions
 	now      func() time.Time
 	sessions sessions
 	held     map[string]held
@@ -54,9 +54,6 @@ func (s *Site) IssueOpen() (string, bool) { return s.sessions.issue(s.now()) }
 
 // SetState is the preview directory that holds the setup code and passkeys.
 func (s *Site) SetState(dir string) { s.state = dir }
-
-// SetResolver supplies a checked account binding. The preview leaves it nil: it does not invent one.
-func (s *Site) SetResolver(fn func(approval.Proposal) (approval.Binding, error)) { s.resolve = fn }
 
 const tailLogin = "Tailscale-User-Login"
 
@@ -80,14 +77,6 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request refused", http.StatusForbidden)
 		return
 	}
-	if r.Method == http.MethodPost && (r.URL.Path == "/freeze" || r.URL.Path == "/approve") {
-		if !s.allowForm(w, r) {
-			http.Error(w, "form refused", http.StatusForbidden)
-			return
-		}
-		s.decide(w, r)
-		return
-	}
 	if r.Method == http.MethodPost && (r.URL.Path == "/passkeys/new" || r.URL.Path == "/passkeys") {
 		if !s.allowOrigin(r) {
 			http.Error(w, "form refused", http.StatusForbidden)
@@ -96,9 +85,25 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.register(w, r)
 		return
 	}
-	if r.Method == http.MethodPost && !s.allowForm(w, r) {
-		http.Error(w, "form refused", http.StatusForbidden)
-		return
+	if r.Method == http.MethodPost {
+		if !s.allowForm(w, r) {
+			http.Error(w, "form refused", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/freeze":
+			s.freeze(w, r)
+			return
+		case "/approve":
+			s.consume(w, r)
+			return
+		case "/read-back":
+			s.readBack(w, r)
+			return
+		case "/settings/begin", "/settings/save":
+			s.changeCredentials(w, r)
+			return
+		}
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		methodNotAllowed(w, "GET, HEAD")
@@ -138,20 +143,24 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	at := s.now()
-	if _, ok := s.sessions.lookup(r, s.origin, at); !ok {
+	sess, ok := s.sessions.lookup(r, s.origin, at)
+	if !ok {
 		render(w, "sign-in", http.StatusUnauthorized, nil)
 		return
 	}
-	if r.URL.Path == "/" {
-		pending, err := s.journal.Pending(at)
-		if err != nil {
-			http.Error(w, "journal unavailable", http.StatusServiceUnavailable)
+	switch r.URL.Path {
+	case "/":
+		s.pendingPage(w, sess, at)
+		return
+	case "/settings":
+		if len(s.actions.Targets) == 0 {
+			http.NotFound(w, r)
 			return
 		}
-		render(w, "pending", http.StatusOK, pending)
+		s.settingsPage(w, sess, false)
 		return
 	}
-	s.detail(w, r, at)
+	s.detail(w, r, sess, at)
 }
 
 func (s *Site) headers(h http.Header) {
@@ -175,7 +184,6 @@ func (s *Site) allowOrigin(r *http.Request) bool {
 }
 
 // A present Origin must match exactly; Fetch Metadata is a fallback only for an absent Origin.
-// This is a check, not a mutation route: no POST is handled in this slice.
 func (s *Site) allowForm(w http.ResponseWriter, r *http.Request) bool {
 	if origin := r.Header.Values("Origin"); len(origin) != 0 {
 		if len(origin) != 1 || origin[0] != s.origin.URL() {

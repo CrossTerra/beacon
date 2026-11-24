@@ -17,12 +17,12 @@ type field struct{ Key, Value string }
 
 type detail struct {
 	approval.View
-	Fields, Destination []field
-	Exact               string
-	ShowFrozen          bool
+	Fields, Destination          []field
+	Exact, CSRF                  string
+	ShowFrozen, Review, ReadBack bool
 }
 
-func (s *Site) detail(w http.ResponseWriter, r *http.Request, at time.Time) {
+func (s *Site) detail(w http.ResponseWriter, r *http.Request, sess session, at time.Time) {
 	ref, ok := strings.CutPrefix(r.URL.Path, "/p/")
 	id, extra, more := strings.Cut(ref, "/")
 	if !ok || !approval.ValidID(id, "apr") || more && extra != "frozen" {
@@ -38,7 +38,8 @@ func (s *Site) detail(w http.ResponseWriter, r *http.Request, at time.Time) {
 		http.Error(w, "journal unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	model := detail{View: v, ShowFrozen: more}
+	model := detail{View: v, ShowFrozen: more, CSRF: sess.csrf, Review: v.Status == "pending" && s.supports(v.Type),
+		ReadBack: v.Status == "outcome_unknown" && s.actions.ReadBack != nil && s.supports(v.Type)}
 	params := v.Params
 	if more {
 		params = v.Frozen.Params
