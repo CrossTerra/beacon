@@ -18,23 +18,25 @@ var (
 	ErrCheckoutChanged = errors.New("approved checkout changed before launch")
 	ErrPrepareTimeout  = errors.New("prepared launch was not released in time")
 	ErrBusy            = errors.New("run already live or the live run limit was reached")
+	errUnreadablePeer  = errors.New("peer process could not be read")
 )
 
 const (
-	maxFrame     = 1 << 20 // maximum local control/gate frame in bytes, not including the newline
-	wireTimeout  = 2 * time.Second
-	gracePeriod  = 15 * time.Second
-	killWait     = 5 * time.Second
-	prepareWait  = 5 * time.Second
-	reaperSlack  = 3 * time.Second
-	unconfirmed  = 4 // helper exit status, distinct from an unexpected death or protocol error
-	codeStopped  = "stopped"
-	codeLaunch   = "launch"
-	codeCheckout = "checkout_changed"
-	codeTimeout  = "launch_timeout"
-	codeBusy     = "busy"
-	codeSession  = "session"
-	codeRecovery = "unconfirmed"
+	maxFrame      = 1 << 20 // maximum local control/gate frame in bytes, not including the newline
+	wireTimeout   = 2 * time.Second
+	gracePeriod   = 15 * time.Second
+	killWait      = 5 * time.Second
+	prepareWait   = 5 * time.Second
+	reaperSlack   = 3 * time.Second
+	unconfirmed   = 4 // helper exit status, distinct from an unexpected death or protocol error
+	codeStopped   = "stopped"
+	codeLaunch    = "launch"
+	codeCheckout  = "checkout_changed"
+	codeTimeout   = "launch_timeout"
+	codeBusy      = "busy"
+	codeSession   = "session"
+	codeRecovery  = "unconfirmed"
+	codeAttribute = "attribute"
 )
 
 type Options struct {

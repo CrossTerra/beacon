@@ -90,8 +90,19 @@ func runSupervisionFixture(role, dir string, args []string) error {
 		if err := fixturePID(dir, role); err != nil {
 			return err
 		}
-		<-ctx.Done()
-		return fixtureWrite(dir, "collector-term", "TERM")
+		// The reaper owns the only writer. EOF means it died; TERM is the graceful stop.
+		eof := make(chan struct{})
+		go func() {
+			var b [1]byte
+			_, _ = os.Stdin.Read(b[:])
+			close(eof)
+		}()
+		select {
+		case <-ctx.Done():
+			return fixtureWrite(dir, "collector-term", "TERM")
+		case <-eof:
+			return fixtureWrite(dir, "collector-eof", "EOF")
+		}
 	case "watch", "leaky-watch":
 		p := filepath.Join(dir, "watch-first.pid")
 		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
@@ -292,7 +303,7 @@ type supervisedService struct {
 	err            error
 }
 
-func startSupervised(t *testing.T, root, generation, mode string) *supervisedService {
+func beginSupervised(t *testing.T, root, generation, mode string) *supervisedService {
 	t.Helper()
 	state := filepath.Join(root, "state")
 	dir := filepath.Join(root, generation)
@@ -325,34 +336,40 @@ func startSupervised(t *testing.T, root, generation, mode string) *supervisedSer
 			t.Logf("fixture %s log: %s", generation, fileText(dir, "fixture.log"))
 		}
 	})
+	return s
+}
+
+func startSupervised(t *testing.T, root, generation, mode string) *supervisedService {
+	t.Helper()
+	s := beginSupervised(t, root, generation, mode)
 	untilFixture(t, "service readiness", func() bool {
 		select {
 		case <-s.done:
-			t.Fatalf("service exited during startup: %v: %s", s.err, fileText(dir, "fixture.log"))
+			t.Fatalf("service exited during startup: %v: %s", s.err, fileText(s.dir, "fixture.log"))
 		default:
 		}
-		s.addr = fileText(dir, "ready")
+		s.addr = fileText(s.dir, "ready")
 		return s.addr != ""
 	})
 	untilFixture(t, "collector, watch and detached listener", func() bool {
-		s.detached = fileText(dir, "detached.addr")
-		return fileText(dir, "collector.pid") != "" && fileText(dir, "watch-first.pid") != "" && s.detached != "" && listenAlive(s.detached)
+		s.detached = fileText(s.dir, "detached.addr")
+		return fileText(s.dir, "collector.pid") != "" && fileText(s.dir, "watch-first.pid") != "" && s.detached != "" && listenAlive(s.detached)
 	})
 	// Find the only direct child of the service in its own group. The job leaders belong to it.
 	b, err := exec.Command("ps", "-axo", "pid=,ppid=,pgid=").Output()
 	must(t, err)
 	for _, row := range strings.Split(string(b), "\n") {
 		f := strings.Fields(row)
-		if len(f) == 3 && f[0] == f[2] && f[1] == strconv.Itoa(c.Process.Pid) {
+		if len(f) == 3 && f[0] == f[2] && f[1] == strconv.Itoa(s.cmd.Process.Pid) {
 			s.reaper, _ = strconv.Atoi(f[0])
 			break
 		}
 	}
-	if s.reaper <= 1 || s.reaper == c.Process.Pid {
+	if s.reaper <= 1 || s.reaper == s.cmd.Process.Pid {
 		t.Fatal("reaper does not have its own process group")
 	}
 	for _, name := range []string{"collector", "tree"} {
-		pid, err := strconv.Atoi(fileText(dir, name+".pid"))
+		pid, err := strconv.Atoi(fileText(s.dir, name+".pid"))
 		must(t, err)
 		pgid, err := unix.Getpgid(pid)
 		if err != nil || pgid != pid {
@@ -483,11 +500,16 @@ func TestSupervisionReaperSIGKILLAndNextStartSweep(t *testing.T) {
 	root := previewTemp(t)
 	first := startSupervised(t, root, "first", "normal")
 	old := fileText(first.state, "supervisor.session")
-	if len(old) != 32 {
+	if !strings.Contains(old, `"token"`) {
 		t.Fatal("no crash recovery marker")
 	}
 	must(t, unix.Kill(first.reaper, unix.SIGKILL))
 	first.wait(t, false) // no leader left to supervise: serving stops, but the marker remains
+	untilFixture(t, "collector exits on reaper death", func() bool {
+		pid := fileText(first.dir, "collector.pid")
+		// A killed reaper cannot reap. A zombie is gone; Docker's init may not collect it.
+		return fileText(first.dir, "collector-eof") == "EOF" && pid != "" && !hasLiveFixture(t, []string{pid})
+	})
 	if listenAlive(first.addr) || !listenAlive(first.detached) || fileText(first.state, "supervisor.session") != old {
 		t.Fatal("the killed reaper did not leave an isolated, recoverable session")
 	}
@@ -499,6 +521,30 @@ func TestSupervisionReaperSIGKILLAndNextStartSweep(t *testing.T) {
 	second.wait(t, true)
 	assertSupervisedGone(t, second)
 	assertNoSession(t, second.state)
+}
+
+func TestSupervisionSweepFinishesIfServiceDies(t *testing.T) {
+	root := previewTemp(t)
+	first := startSupervised(t, root, "first", "normal")
+	detached := first.detached
+	treePID, err := strconv.Atoi(fileText(first.dir, "tree.pid"))
+	must(t, err)
+	must(t, unix.Kill(first.reaper, unix.SIGKILL))
+	first.wait(t, false)
+	if !listenAlive(detached) {
+		t.Fatal("detached listener died with the reaper")
+	}
+	second := beginSupervised(t, root, "second", "normal")
+	untilFixture(t, "sweep has started TERM", func() bool {
+		return !hasLiveFixture(t, []string{strconv.Itoa(treePID)})
+	})
+	if !listenAlive(detached) {
+		t.Fatal("detached listener died before the recovering service was killed")
+	}
+	must(t, unix.Kill(second.cmd.Process.Pid, unix.SIGKILL))
+	untilFixture(t, "sweep finished KILL after the service died", func() bool {
+		return !listenAlive(detached)
+	})
 }
 
 func TestSupervisionSocketAttribution(t *testing.T) {

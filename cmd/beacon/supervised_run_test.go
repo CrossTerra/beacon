@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -75,7 +76,11 @@ func TestSupervisionPreparedRun(t *testing.T) {
 	if got := fileText(dir, "output"); got != moved+" "+checkout+" fixture-prompt fixture-env\n" {
 		t.Fatalf("wrong run cwd, environment or input: %q", got)
 	}
-	if got := fileText(dir, "errors"); !strings.HasPrefix(got, "oldpwd= marker="+fileText(dir, "supervisor.session")+":") || strings.Contains(got, "forged") {
+	var session struct {
+		Token string `json:"token"`
+	}
+	must(t, json.Unmarshal([]byte(fileText(dir, "supervisor.session")), &session))
+	if got := fileText(dir, "errors"); session.Token == "" || !strings.HasPrefix(got, "oldpwd= marker="+session.Token+":") || strings.Contains(got, "forged") {
 		t.Fatalf("wrong run marker or OLDPWD: %q", got)
 	}
 	for _, path := range []string{c.Stdout, c.Stderr} {
@@ -151,6 +156,21 @@ func TestSupervisionStopOneOfTwoRuns(t *testing.T) {
 	must(t, s.Close())
 	if listenAlive(fileText(dirB, "detached.addr")) {
 		t.Fatal("parallel run survived shutdown")
+	}
+}
+
+func TestSupervisionExecErrorIsLaunchFailure(t *testing.T) {
+	dir := previewTemp(t)
+	s := testSupervisor(t, dir, 0)
+	pin, err := supervisor.PinDirectory(dir)
+	must(t, err)
+	c := fixtureCommand("run", dir)
+	c.Dir = &pin
+	c.Path = filepath.Join(dir, "missing-binary")
+	run, err := s.PrepareRun(runOne, c)
+	must(t, err)
+	if err := run.Release(); !errors.Is(err, supervisor.ErrLaunch) {
+		t.Fatalf("exec failure reported as success: %v", err)
 	}
 }
 

@@ -1,10 +1,12 @@
 package supervisor
 
 import (
+	"encoding/binary"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -35,8 +37,9 @@ func lookupProcess(pid int) (process, bool) {
 		return process{}, false
 	}
 	defer f.Close()
-	var st unix.Stat_t
-	if unix.Fstat(int(f.Fd()), &st) != nil || st.Uid != uint32(os.Getuid()) {
+	// stat can be root-owned for a non-dumpable process of this user. The UID in
+	// status is the credential; a failed lookup is not treated as death.
+	if !sameUser(pid) {
 		return process{}, false
 	}
 	b, err := io.ReadAll(f)
@@ -74,6 +77,62 @@ func markerOf(pid int, prefix string) uint64 {
 		return 0
 	}
 	return findMarker(b, prefix)
+}
+
+func sameUser(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return false
+	}
+	uid, ok := statusUID(string(b))
+	return ok && uid == uint32(os.Getuid())
+}
+
+func statusUID(status string) (uint32, bool) {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "Uid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, false
+		}
+		u, err := strconv.ParseUint(fields[1], 10, 32)
+		return uint32(u), err == nil
+	}
+	return 0, false
+}
+
+// leaderDead is true only when the process table or a non-reaping wait shows the leader has
+// exited. A failed /proc lookup is not death: a non-dumpable process can hide its stat file.
+func leaderDead(pid int, table processTable) bool {
+	if p, ok := table[pid]; ok {
+		return p.zombie
+	}
+	return confirmedExit(pid)
+}
+
+func confirmedExit(pid int) bool {
+	// WNOWAIT is not named for Linux in x/sys v0.34. 0x01000000 is the generic value.
+	const wnohang, wexited, wnowait = 0x1, 0x4, 0x01000000
+	buf := make([]byte, 128+8)
+	ptr := unsafe.Pointer((uintptr(unsafe.Pointer(&buf[0])) + 7) &^ 7)
+	info := (*unix.Siginfo)(ptr)
+	err := unix.Waitid(unix.P_PID, pid, info, wexited|wnohang|wnowait, nil)
+	if err != nil {
+		return false // ECHILD is not a confirmed exit, and must not release the group
+	}
+	return siginfoPID(info) == int32(pid)
+}
+
+func siginfoPID(info *unix.Siginfo) int32 {
+	// The wait union's first field is si_pid. 64-bit Linux aligns it to 16; 32-bit starts at 12.
+	off := 12
+	if unsafe.Sizeof(uintptr(0)) == 8 {
+		off = 16
+	}
+	b := unsafe.Slice((*byte)(unsafe.Pointer(info)), off+4)
+	return int32(binary.NativeEndian.Uint32(b[off : off+4]))
 }
 
 func deviceBits(st unix.Stat_t) uint64 { return st.Dev }

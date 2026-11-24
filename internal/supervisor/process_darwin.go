@@ -91,4 +91,9 @@ func darwinEnv(b []byte) []byte {
 	return tail
 }
 
+func leaderDead(pid int, table processTable) bool {
+	p, ok := table[pid]
+	return !ok || p.zombie
+}
+
 func deviceBits(st unix.Stat_t) uint64 { return uint64(uint32(st.Dev)) }

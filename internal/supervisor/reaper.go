@@ -78,7 +78,7 @@ func reap(dir string) error {
 		return err
 	}
 	defer reply.Close()
-	return reaperLoop(dir, life, os.Stdin, reply)
+	return reaperLoop(dir, lock, life, os.Stdin, reply)
 }
 
 func checkLock(dir string, lock *os.File) error {
@@ -96,7 +96,7 @@ func checkLock(dir string, lock *os.File) error {
 	return nil
 }
 
-func reaperLoop(dir string, life, input, reply *os.File) error {
+func reaperLoop(dir string, lock, life, input, reply *os.File) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	lifeFD := int32(life.Fd())
@@ -154,11 +154,9 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 		}
 		t = r.Periods.timing()
 	}
-	old, err := oldSession(dir)
-	if err == nil && old != "" {
-		err = newEngine("", old, t, nil).drain(ctx)
-	}
-	if err != nil {
+	// Finish the bounded sweep even if the recovering service dies during TERM grace.
+	// Service liveness is checked before a new session is opened, not before KILL.
+	if err := sweepPrevious(dir, lock, t); err != nil {
 		_ = emit(message{Error: codeRecovery})
 		return err
 	}
@@ -169,7 +167,7 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 	if err != nil {
 		return ErrReaper
 	}
-	prefix, err := newSession(dir)
+	prefix, err := newSession(dir, lock)
 	if err != nil {
 		_ = emit(message{Error: codeSession})
 		return err
@@ -186,6 +184,16 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 		}
 	}
 	return errors.Join(err, clearSession(dir))
+}
+
+// sweepPrevious drains a prior session to its own deadline. It does not take the service
+// lifetime: cancelling that context must not abandon TERM before KILL.
+func sweepPrevious(dir string, lock *os.File, t timing) error {
+	old, err := oldSession(dir, lock)
+	if err != nil || old == "" {
+		return err
+	}
+	return newEngine("", old, t, nil).drain(context.Background())
 }
 
 func (e *engine) serve(ctx context.Context, requests <-chan request, live func() bool) error {
@@ -220,7 +228,11 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 					j.stop(time.Now(), e.timing, "")
 				}
 			case "attribute":
-				m.RunID = e.attribute(r.PID)
+				id, attrErr := e.attribute(r.PID)
+				m.RunID = id
+				if attrErr != nil {
+					m.Error = codeAttribute
+				}
 			default:
 				return ErrReaper
 			}

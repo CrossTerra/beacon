@@ -171,7 +171,8 @@ checkout's opencode configuration does not deny.
      run as the person: supervision is not isolation.
      The Go service's [reaper](supervision.md) uses the same group and descendant tracking and additionally
      survives the service's death to clean up. It keeps the instance lock through cleanup and blocks a new
-     instance until recovery can be confirmed. Linux's planned user unit adds a cgroup boundary.
+     instance until recovery can be confirmed. The session ID is bound to that directory and lock, so a
+     copied state directory cannot sweep the original jobs. Linux's planned user unit adds a cgroup boundary.
 
 13. **Proposals arrive only over the authenticated local socket.** Beacon.app's proposal socket and `beacon act`
     each check the other end with the kernel's audit token before sending anything. The app admits only the code

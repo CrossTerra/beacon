@@ -41,6 +41,11 @@ type job struct {
 	failure       string
 	killAt        time.Time // nonzero means cleaning
 	termGroup     bool
+	exitSeen      bool // leader exit observed; the next census may release the group
+	holdRelease   bool
+	reported      bool
+	life          *os.File // fixed-job stdin writer; closed when the reaper releases the job
+	execStatus    *os.File
 }
 
 func (j *job) stop(now time.Time, timing timing, failure string) {
@@ -141,27 +146,37 @@ func (e *engine) release(ctx context.Context, ticket uint64) message {
 	return message{}
 }
 
-func (e *engine) attribute(pid int) string {
+func (e *engine) attribute(pid int) (string, error) {
 	// Use the current identity rather than a socket label or a stale PID in the tracker. A new
 	// connection can arrive before the next tick, including from a child of a tracked parent.
+	// An unreadable or vanished peer is not verified non-membership: the socket must reject it.
 	for range 128 {
 		p, ok := lookupProcess(pid)
-		if !ok || p.zombie || pid == os.Getpid() {
-			break
+		if !ok {
+			return "", errUnreadablePeer
+		}
+		if p.zombie || pid == os.Getpid() {
+			return "", nil
 		}
 		if j := e.group(p); j != nil {
-			return j.runID
+			return j.runID, nil
 		}
 		if m, ok := e.tracked[pid]; ok && m.proof && m.proc.birth == p.birth {
-			return m.job.runID
+			return m.job.runID, nil
+		}
+		if p.parent <= 1 {
+			return "", nil
 		}
 		parent, ok := lookupProcess(p.parent)
+		// The peer itself was read and is not in a supervised group. An ancestor the
+		// table will not show (another user's process, or one that has gone) ends the
+		// walk; that is not an unread peer.
 		if !ok || parent.birth > p.birth || parent.pid == pid {
-			break
+			return "", nil
 		}
 		pid = parent.pid
 	}
-	return ""
+	return "", errUnreadablePeer
 }
 
 func (e *engine) group(p process) *job {
@@ -305,10 +320,18 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 		return false, nil // not an empty snapshot; no confirmation and no new starts
 	}
 	for _, j := range e.jobs {
-		if !j.killAt.IsZero() {
+		if !leaderDead(j.pid, table) {
+			if j.killAt.IsZero() {
+				j.exitSeen = false
+			}
 			continue
 		}
-		if p, ok := table[j.pid]; !ok || p.zombie {
+		if !j.exitSeen {
+			// The child that the exiting leader just forked may not be in this census yet.
+			j.exitSeen = true
+			j.holdRelease = true
+		}
+		if j.killAt.IsZero() {
 			j.stop(now, e.timing, "")
 		}
 	}
@@ -320,6 +343,10 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 			continue
 		}
 		if j.live == 0 {
+			if j.holdRelease {
+				j.holdRelease = false
+				continue
+			}
 			var status unix.WaitStatus
 			if pid, err := unix.Wait4(j.pid, &status, unix.WNOHANG, nil); err == nil && pid == j.pid {
 				if err := e.finished(j, status, now); err != nil && !sweep {
@@ -337,6 +364,7 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 
 func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 	delete(e.jobs, j.pid)
+	j.closeLife()
 	if f := j.fixed; f != nil {
 		f.job = nil
 		if status.Exited() && status.ExitStatus() == 0 && j.failure == "" {
@@ -350,6 +378,9 @@ func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 		return nil
 	}
 	delete(e.runs, j.ticket)
+	if j.reported || e.emit == nil {
+		return nil
+	}
 	code := status.ExitStatus()
 	if status.Signaled() {
 		code = 128 + int(status.Signal())
@@ -362,6 +393,43 @@ func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 		return err
 	}
 	return nil
+}
+
+func (e *engine) orphanWork() bool {
+	if !e.orphans.killAt.IsZero() {
+		return true
+	}
+	for _, m := range e.tracked {
+		if m.job == &e.orphans {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *engine) reportExpired(now time.Time) bool {
+	gaveUp := false
+	for _, j := range e.jobs {
+		if j.ticket == 0 || j.reported || j.killAt.IsZero() || now.Before(j.killAt.Add(e.timing.killWait)) {
+			continue
+		}
+		j.reported = true
+		gaveUp = true
+		if j.failure == "" {
+			j.failure = codeRecovery
+		}
+		if e.emit != nil {
+			_ = e.emit(message{Finished: j.ticket, Error: j.failure})
+		}
+	}
+	return gaveUp
+}
+
+func (j *job) closeLife() {
+	if j.life != nil {
+		j.life.Close()
+		j.life = nil
+	}
 }
 
 func (f *fixed) backoff(now time.Time) {
@@ -397,13 +465,40 @@ func (e *engine) startFixed(ctx context.Context, live func() bool) {
 
 // drain stops all groups concurrently. On startup there are no owned groups to signal by PGID;
 // only the previous session's marker and ancestry are trusted (never numeric IDs from disk).
+// A job that already used its give-up deadline is reported immediately. The rest keep the
+// deadline they already have; drain does not grant another full grace.
 func (e *engine) drain(ctx context.Context) error {
 	now := time.Now()
-	deadline := now.Add(e.timing.grace + e.timing.killWait)
+	gaveUp := e.reportExpired(now)
 	for _, j := range e.jobs {
-		j.stop(now, e.timing, "")
+		if j.killAt.IsZero() {
+			j.stop(now, e.timing, "")
+		}
 	}
-	e.orphans.stop(now, e.timing, "")
+	// A startup sweep has no owned groups. Arm the orphan bucket so markers found in the
+	// first census are signaled. An already-expired run does not get that grace added:
+	// its report has already been sent, and an empty orphan record must not delay it.
+	if e.orphans.killAt.IsZero() && (!gaveUp || len(e.jobs) == 0 || e.orphanWork()) {
+		e.orphans.stop(now, e.timing, "")
+	}
+	deadline := now
+	consider := func(j *job) {
+		if j.killAt.IsZero() {
+			return
+		}
+		if end := j.killAt.Add(e.timing.killWait); end.After(deadline) {
+			deadline = end
+		}
+	}
+	for _, j := range e.jobs {
+		consider(j)
+	}
+	if !gaveUp || len(e.jobs) == 0 || e.orphanWork() {
+		consider(&e.orphans)
+	}
+	if gaveUp && !deadline.After(now) {
+		return ErrUnconfirmed
+	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	for {
@@ -411,6 +506,9 @@ func (e *engine) drain(ctx context.Context) error {
 			return ErrUnconfirmed
 		}
 		if fresh, _ := e.refresh(true); fresh && len(e.jobs) == 0 && e.orphans.live == 0 {
+			if gaveUp {
+				return ErrUnconfirmed
+			}
 			return nil
 		}
 		select {

@@ -2,7 +2,9 @@ package supervisor
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 // Command is built by a trusted caller after approval (or from a fixed job definition), never from
 // a socket request. It inherits no environment or open file from the service. Unset stdio goes to
 // /dev/null; supplied paths name private files. Fixed jobs append, and runs create output exclusively.
+// A fixed job's standard input is a reaper-owned pipe, not Command.Stdin: EOF means the reaper died.
 type Command struct {
 	Path                  string
 	Args, Env             []string
@@ -94,7 +97,7 @@ func (c Command) image(marker string) ([]byte, error) {
 
 // spawn starts only our trusted bootstrap as group leader. The target image, arguments and env
 // (including loader variables) do not reach it until release. EOF alone never authorizes exec.
-func spawn(self string, c Command, marker string, fixed bool) (*job, error) {
+func spawn(self string, c Command, marker string, fixed bool) (out *job, err error) {
 	payload, err := c.image(marker)
 	if err != nil {
 		return nil, err
@@ -118,12 +121,29 @@ func spawn(self string, c Command, marker string, fixed bool) (*job, error) {
 	}
 	defer null.Close()
 	files := []*os.File{null, null, null}
+	var life *os.File
+	defer func() {
+		if err != nil {
+			closeLife(life)
+		}
+	}()
+	if fixed {
+		// The collector treats stdin EOF as reaper death, the same way C tether does.
+		// /dev/null would be an immediate EOF and make a tethered collector exit at start.
+		readEnd, writeEnd, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			return nil, ErrLaunch
+		}
+		defer readEnd.Close()
+		files[0] = readEnd
+		life = writeEnd
+	}
 	output := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if fixed {
 		output = os.O_WRONLY | os.O_CREATE | os.O_APPEND
 	}
 	for i, path := range []string{c.Stdin, c.Stdout, c.Stderr} {
-		if path == "" {
+		if path == "" || (fixed && i == 0) {
 			continue
 		}
 		if !filepath.IsAbs(path) {
@@ -140,32 +160,49 @@ func spawn(self string, c Command, marker string, fixed bool) (*job, error) {
 		defer f.Close()
 		files[i] = f
 	}
-	r, w, err := os.Pipe()
-	if err != nil {
+	r, w, pipeErr := os.Pipe()
+	if pipeErr != nil {
 		return nil, ErrLaunch
 	}
 	defer r.Close()
-	files = append(files, r) // fd 3: gate
+	statusR, statusW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		w.Close()
+		return nil, ErrLaunch
+	}
+	defer statusW.Close()
+	files = append(files, r, statusW) // fd 3: gate, fd 4: exec-status writer
 	if dir != nil {
-		files = append(files, dir) // fd 4: pinned directory
+		files = append(files, dir) // fd 5: pinned directory
 	}
 	p, err := os.StartProcess(self, []string{self, "serve", "--exec-job"}, &os.ProcAttr{
 		Files: files, Env: []string{marker}, Sys: &syscall.SysProcAttr{Setpgid: true},
 	})
 	if err != nil {
 		w.Close()
+		statusR.Close()
 		return nil, ErrLaunch
 	}
 	pid := p.Pid
 	// Only the reaper calls wait4, after group cleanup. Release Go's optional pidfd, not the PID.
 	p.Release()
-	return &job{pid: pid, gate: w, payload: payload}, nil
+	return &job{pid: pid, gate: w, payload: payload, life: life, execStatus: statusR}, nil
+}
+
+func closeLife(f *os.File) {
+	if f != nil {
+		f.Close()
+	}
 }
 
 func (j *job) closeGate() {
 	if j.gate != nil {
 		j.gate.Close()
 		j.gate, j.payload = nil, nil
+	}
+	if j.execStatus != nil {
+		j.execStatus.Close()
+		j.execStatus = nil
 	}
 }
 
@@ -185,30 +222,65 @@ func (j *job) release(ctx context.Context) error {
 	if _, err := j.gate.Write(append(j.payload, '\n')); err != nil {
 		return ErrLaunch
 	}
-	return nil
+	// The bootstrap reads until EOF. Close the permit before waiting for exec, or it
+	// never reaches the status pipe.
+	j.gate.Close()
+	j.gate = nil
+	return j.execResult()
+}
+
+func (j *job) execResult() error {
+	if j.execStatus == nil {
+		return ErrLaunch
+	}
+	if err := j.execStatus.SetReadDeadline(time.Now().Add(wireTimeout)); err != nil {
+		return ErrLaunch
+	}
+	var buf [4]byte
+	n, err := io.ReadFull(j.execStatus, buf[:])
+	if n == 0 && errors.Is(err, io.EOF) {
+		return nil // successful exec closed the close-on-exec writer
+	}
+	return ErrLaunch
 }
 
 func execJob() error {
+	status := os.NewFile(4, "exec status")
+	if status == nil {
+		return ErrLaunch
+	}
+	fail := func(err error) error {
+		var code uint32 = 1
+		if errno, ok := err.(syscall.Errno); ok && errno != 0 {
+			code = uint32(errno)
+		}
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], code)
+		_, _ = status.Write(buf[:])
+		status.Close()
+		return err
+	}
 	gate, err := inheritedPipe(3, "job gate")
 	if err != nil {
-		return ErrLaunch
+		return fail(ErrLaunch)
 	}
 	b, err := io.ReadAll(io.LimitReader(gate, maxFrame+2))
 	gate.Close()
 	if err != nil || len(b) == 0 || len(b) > maxFrame+1 || b[len(b)-1] != '\n' {
-		return ErrStopped
+		return fail(ErrStopped)
 	}
 	var i image
 	if json.Unmarshal(b, &i) != nil || !filepath.IsAbs(i.Path) || len(i.Args) == 0 {
-		return ErrLaunch
+		return fail(ErrLaunch)
 	}
 	if i.Chdir {
-		err := unix.Fchdir(4)
-		unix.Close(4)
+		err := unix.Fchdir(5)
+		unix.Close(5)
 		if err != nil {
-			return ErrLaunch
+			return fail(ErrLaunch)
 		}
 	}
-	_ = unix.Exec(i.Path, i.Args, i.Env)
-	return ErrLaunch
+	// A successful exec closes this fd. The reaper then reads EOF rather than an error code.
+	unix.CloseOnExec(4)
+	return fail(unix.Exec(i.Path, i.Args, i.Env))
 }
