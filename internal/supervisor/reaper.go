@@ -1,0 +1,224 @@
+package supervisor
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"time"
+
+	"github.com/CrossTerra/beacon/internal/approval"
+	"golang.org/x/sys/unix"
+)
+
+// HelperExit is called before the CLI (and by test binaries) to enter one of two private exec modes.
+// They require the appropriate inherited descriptors, not the person's config or environment.
+func HelperExit(args []string) (int, bool) {
+	if len(args) < 2 || args[0] != "serve" {
+		return 0, false
+	}
+	switch args[1] {
+	case "--reaper":
+		if len(args) != 3 || os.Geteuid() == 0 {
+			return 2, true
+		}
+		if err := reap(args[2]); err != nil {
+			if errors.Is(err, ErrUnconfirmed) {
+				return unconfirmed, true
+			}
+			return 1, true
+		}
+		return 0, true
+	case "--exec-job":
+		if len(args) != 2 || os.Geteuid() == 0 {
+			return 2, true
+		}
+		if err := execJob(); err != nil {
+			return 126, true
+		}
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+func reap(dir string) error {
+	// launchd can clean the service's group, not this one. systemd sends TERM to the entire
+	// cgroup; the reaper stays alive for the pipe's EOF in either case. Catch (don't ignore) these
+	// signals so that exec resets their dispositions for the actual jobs. In particular a broken
+	// reply pipe must never SIGPIPE the reaper before it has stopped the groups.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, unix.SIGTERM, unix.SIGINT, unix.SIGPIPE)
+	defer signal.Stop(signals)
+	if unix.Getpgrp() != os.Getpid() || !filepath.IsAbs(dir) {
+		return ErrReaper
+	}
+	lock := os.NewFile(3, "instance lock")
+	defer lock.Close()
+	unix.CloseOnExec(3)
+	if err := checkLock(dir, lock); err != nil {
+		return err
+	}
+	life, err := inheritedPipe(4, "lifetime pipe")
+	if err != nil {
+		return err
+	}
+	defer life.Close()
+	if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeNamedPipe == 0 {
+		return ErrReaper
+	}
+	// Inherited pipes are blocking by default. Make a pollable reply fd for write deadlines.
+	if unix.SetNonblock(5, true) != nil {
+		return ErrReaper
+	}
+	reply, err := inheritedPipe(5, "reply pipe")
+	if err != nil {
+		return err
+	}
+	defer reply.Close()
+	return reaperLoop(dir, life, os.Stdin, reply)
+}
+
+func checkLock(dir string, lock *os.File) error {
+	if _, err := approval.CheckPrivate(dir, os.ModeDir|0o700); err != nil {
+		return ErrReaper
+	}
+	expected, err := approval.CheckPrivate(filepath.Join(dir, "instance.lock"), 0o600)
+	if err != nil {
+		return ErrReaper
+	}
+	actual, err := lock.Stat()
+	if err != nil || !os.SameFile(expected, actual) || unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB) != nil {
+		return ErrReaper
+	}
+	return nil
+}
+
+func reaperLoop(dir string, life, input, reply *os.File) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		var b [1]byte
+		_, _ = life.Read(b[:]) // never a byte written; EOF is independent of pending commands
+		cancel()
+	}()
+	requests := make(chan request)
+	go func() {
+		defer cancel()
+		s := wireScanner(input)
+		for s.Scan() {
+			var r request
+			if json.Unmarshal(s.Bytes(), &r) != nil {
+				return
+			}
+			select {
+			case requests <- r:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	emit := func(m message) error {
+		b, _ := json.Marshal(m) // only simple values, never errors or spec strings
+		return wireWrite(reply, b, time.Now().Add(wireTimeout))
+	}
+	var t timing
+	select {
+	case <-ctx.Done():
+		return nil // no commands accepted and no new session created
+	case r := <-requests:
+		if r.Op != "open" || r.Periods == nil {
+			return ErrReaper
+		}
+		t = r.Periods.timing()
+	}
+	old, err := oldSession(dir)
+	if err == nil && old != "" {
+		err = newEngine("", old, t, nil).drain(ctx)
+	}
+	if err != nil {
+		_ = emit(message{Error: codeRecovery})
+		return err
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ErrReaper
+	}
+	prefix, err := newSession(dir)
+	if err != nil {
+		_ = emit(message{Error: codeSession})
+		return err
+	}
+	e := newEngine(self, prefix, t, emit)
+	if err := emit(message{}); err == nil {
+		err = e.serve(ctx, requests)
+	} else {
+		err = ErrReaper
+	}
+	if e.nextTag != 0 {
+		if drainErr := e.drain(context.Background()); drainErr != nil {
+			return drainErr // marker stays on disk for the next start
+		}
+	}
+	return errors.Join(err, clearSession(dir))
+}
+
+func (e *engine) serve(ctx context.Context, requests <-chan request) error {
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	fixedSet := false
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return nil
+		case r := <-requests:
+			if ctx.Err() != nil {
+				return nil
+			}
+			var m message
+			switch r.Op {
+			case "fixed":
+				if fixedSet || len(r.Jobs) > maxFixed {
+					m.Error = codeLaunch
+					break
+				}
+				for _, j := range r.Jobs {
+					e.fixed = append(e.fixed, &fixed{command: j.Command})
+				}
+				fixedSet = true
+			case "prepare":
+				m = e.prepare(r)
+			case "release":
+				m = e.release(ctx, r.Ticket)
+			case "stop":
+				if j := e.runs[r.Ticket]; j != nil {
+					j.stop(time.Now(), e.timing, "")
+				}
+			case "attribute":
+				m.RunID = e.attribute(r.PID)
+			default:
+				return ErrReaper
+			}
+			if err := e.emit(m); err != nil {
+				return ErrReaper
+			}
+		case <-ticker.C:
+			if len(e.jobs) == 0 && len(e.fixed) == 0 {
+				continue
+			}
+			fresh, err := e.refresh(false)
+			if err != nil {
+				return err
+			}
+			if fresh {
+				e.startFixed(ctx)
+			}
+		}
+	}
+	return nil
+}
