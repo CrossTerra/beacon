@@ -3,10 +3,9 @@
 This is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
 separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of `beacon act`. Default
 `beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
-The preview does not read collector config, Keychain items or the Swift journal. There is no installer
-cutover, migration, live Signal credential source, or runner launch. Without provider settings, every proposal
-is review-only. With the respective providers configured, `github.merge` and `slack.post` can execute with
-passkey approval. `agent.run` is still review-only.
+The preview does not read collector config, Keychain items or the Swift journal. There is no installer cutover
+or migration. With no settings, proposals are review-only and no records leave the machine. GitHub merges,
+Slack posts, agent runs and Signal record delivery each require explicit configuration in this state directory.
 
 ## Passkey setup
 
@@ -37,9 +36,10 @@ vault and that key opens the key-check. A missing write vault approves nothing. 
 stored before the journal records `approved`. A batch is several `approved` frames plus an
 `approved_commit` marker; replay applies the frames only when the marker is present. Each approved frame
 records the credential id and, for a batch, the batch challenge. Before accepting the approval, Beacon
-must also unseal every required write token. It clears the vault key and gives the worker only the tokens
-for that batch. Each action needs a durable start and a final provider check before writing. No write is
-retried, even after a lost reply or process restart.
+must also unseal every required write token. A run has no provider write token, but still needs its own
+verified assertion, including the same PRF unwrap, key-check and journal hash. It does not bypass the vault
+check. Beacon clears the vault key without passing it to a worker or a child. Each action needs a durable start
+and a final destination check. No write or launch is retried, even after a lost reply or process restart.
 
 ## Provider credentials and GitHub
 
@@ -135,6 +135,57 @@ reply, backing off from 15 to 120 seconds until a minute after the search window
 still search that same window. Intake, review and recovery have separate read budgets and Slack method
 cooldowns; none can resend a post.
 
+## Agent runs and checkouts
+
+Stop `beacon serve` and put `agent-runs.json` (`0600`) in the preview state directory to enable runs:
+
+```json
+{
+  "opencode": "/home/me/.local/bin/opencode",
+  "models": ["provider/model"],
+  "checkouts": [
+    {"name": "work", "path": "/home/me/checkouts/work"},
+    {"name": "review", "path": "/home/me/checkouts/review"}
+  ]
+}
+```
+
+Choose the absolute path of the OpenCode executable you trust, and list the exact `provider/model` IDs to
+offer. The Go preview does not invoke a login shell or start OpenCode to discover models during review.
+OpenCode uses its own configuration and sign-in under your home directory. The fixed environment includes
+the executable's directory, `~/.local/bin` and system directories on `PATH`, not the service's environment
+or credentials. **Settings** shows the configured checkouts; change the file with the preview stopped.
+
+The proposal names a checkout, not a path, with a model and exact prompt. `propose` returns `runner_id` for
+routing the report. The page shows the resolved path, branch and device/inode, and lets you change only the
+model. **Resolve and review** freezes the selection and displays the prompt and the exact chosen model.
+The one-use assertion covers that snapshot. A checkout can have more than one name, but only one run can
+claim its directory at a time. If it is busy the proposal stays pending. Other checkouts run in parallel.
+
+After the durable start, Beacon checks the checkout and branch again. The [reaper](supervision.md) opens
+the directory and verifies the approved device and inode. While the bootstrap is still gated, Beacon
+records its group locally as a one-shot launch permit. The child cannot make a proposal before the group
+has been registered. Launch is `opencode run --standalone --format json --auto --model MODEL`, with the
+unchanged prompt on stdin, `PWD` set from the directory the child actually enters, and no `OLDPWD`. Beacon
+does not run a checkout's `bin/run`. `--auto` allows permissions that OpenCode's configuration does not
+deny. This is **not a sandbox**: the agent acts as your user and may use your files, sign-in and network.
+Those connections are OpenCode's, not Beacon's. To use the preview proposal socket from a run, use
+`beacon act --state-dir DIR` as for other preview clients.
+
+An acknowledged exec is `executed`, then `runner_working`. A definite refusal is `failed`; if a permit
+was sent and there is no exec result, the launch stays unknown. Nothing restarts it. The extra copy of the
+prompt is unlinked after the reaper opens it, or discarded on the next startup after a crash. `output` and
+`errors` stay `0600` under `runs/{runner_id}/` (`0700`). They are not service logs.
+
+**Stop run** on the proposal page uses the reaper's bounded TERM/KILL cleanup. Service shutdown stops
+all active runs. Beacon also asks the reaper to stop a run if its output and errors exceed 64 MiB at a
+check. After the whole tree is gone, exit 0 produces `runner_finished` with the last assistant message,
+capped at 32,000 characters, or a fixed message if there is none. Other exits produce `runner_failed`
+with a fixed code and, where available, the last OpenCode error or a bounded stderr tail. A requested stop
+records a stop reason instead. `runner_closed` follows the outcome only after the reaper confirms cleanup.
+The next startup can close interrupted runs after its sweep. A durable start without a permit is recovered
+as not launched; a permit alone is not evidence of launch.
+
 ## Unattended vault
 
 `unattended.kdbx` is a KDBX 4 database opened by `unattended.keyx`, a KeePassXC XML v2.0 key file created
@@ -190,10 +241,36 @@ The delivery worker waits 30 seconds after a retryable failure, then doubles the
 longer `Retry-After` from a rate limit or server failure takes precedence (up to an hour). New proposals do not
 shorten the wait or clear a stop. An explicit resume can bypass backoff, including when requested during a send.
 
+To opt into delivery, add `signal` to `action-providers.json` with your **test** approval app actor ID, its
+person's actor ID and handle, and the Signal origin. For example:
+
+```json
+{"signal":{"origin":"https://signal.example.com","actor_id":"act_01m6a6ft00e40r2081040g2082",
+           "person_id":"act_01m6a6ft00e40r2081040g2081","handle":"example"}}
+```
+
+With the service stopped, put the corresponding approval-app key in an entry in the vault's `Beacon` group
+using KeePassXC (the key is the entry's password). The `unattended.kdbx` entry needs these custom attributes:
+
+| Attribute | Value |
+| --- | --- |
+| `beacon.service` | `signal` |
+| `beacon.origin` | the exact configured Signal origin |
+| `beacon.account` | the app's `actor_id`, not the person's ID |
+| `beacon.workspace` | empty |
+| `beacon.use` | `records` |
+
+This is separate from the collector's Signal key. The preview does not set up an app actor, redeem a setup
+code, or migrate Swift's records. Do not point a preview journal at the app actor in live use by Swift. Signal
+enforces the app actor and person at `POST /api/app-records`. A missing or unreadable entry leaves the outbox
+pending. Use HTTPS (the literal loopback HTTP exception is for fakes). `beacon egress --state-dir DIR` lists
+this host alongside configured provider hosts, without opening the vault.
+
+Run records use `agent-run:{handle}:{runner id without run_}`. The report or failure detail is sealed at
+`owner+agents` and marked `from: "runner"`: it is data for the session that requested the run, never an
+instruction or authorization. Checkout paths, the process group and the local launch permit are not record fields.
 The Go contract tests use the unmodified [Signal fixtures](../internal/approval/testdata/) and a fake Signal
-over loopback. `approvalserve.Options.ConnectRecords` lets tests drive the worker through the service lifecycle.
-The CLI leaves that hook unset, so no records leave via `beacon serve`; the collector's outbox and egress are
-unchanged.
+over loopback. The collector's outbox and egress are unchanged.
 
 ## Proposal socket
 
@@ -208,7 +285,7 @@ are unchanged.
 The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
 on Linux; the `proc_pidpath` kernel query on macOS without cgo). Neither reads arguments or environment.
 The Go supervisor can attribute a connection to a live run using the kernel PID, never the request's agent
-or context. The CLI preview does not launch runs, so its peers are unattributed. Attribution is pinned
+or context. Attribution is pinned
 at connect time; PID reuse is a limit. `get`, `wait` and `withdraw` are scoped to the same run, or to the
 shared unattributed identity. The socket also supports `types`, `propose` (which returns `review_url` from
 the configured origin) and `open` (issues a browser sign-in code, not authority to approve). There is no `quit`, list or approve.

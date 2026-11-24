@@ -354,14 +354,14 @@ beacon egress --state-dir DIR
 
 `serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
 SIGTERM to stop it. Its [reaper](supervision.md) sweeps any previous Go session before it opens the listeners;
-this preview does not start a collector, watches or agent runs. `--origin` defaults to `http://localhost:7317`.
+it starts no collector or watches. `--origin` defaults to `http://localhost:7317`.
 With an existing private Tailscale Serve
 proxy, set `--origin https://MACHINE.TAILNET.ts.net` (substitute the exact lowercase name) and
 `--tailscale-login LOGIN` to the one expected `Tailscale-User-Login`. `serve` does not configure or verify
 that proxy. Use localhost when you do not have one.
 
 `act` requires `--state-dir DIR` **before** the operation to select the Go socket. It uses the same request
-shape and adds `review_url` to `propose` replies. Go `act` has no `quit`, and a failed Go connection never
+shape and adds `review_url` to `propose` replies (`runner_id` too for `agent.run`). Go `act` has no `quit`, and a failed Go connection never
 tries the signed route. `open` prints (but does not launch) a two-minute, one-use link for a browser
 session. Open it privately, then follow the `review_url` or use the pending list. The link cannot approve a write.
 Restart clears all sign-in
@@ -373,10 +373,11 @@ passkey reset and removes the passkey list and write vault; the service must be 
 
 The default is review-only. To enable [GitHub merges](go-approvals.md#provider-credentials-and-github) or
 [Slack posts](go-approvals.md#slack-posts), configure `action-providers.json` and save separate read and
-write credentials through **Provider credentials** with a passkey. `egress --state-dir DIR` lists the
-configured GitHub API origin and/or `slack.com:443`; it does not read credentials or collector config.
-Proposal parameters and reasons remain plaintext in the private journal. There is no login keychain access,
-live Signal delivery or runner launch.
+write credentials through **Provider credentials** with a passkey. To enable [agent runs](go-approvals.md#agent-runs-and-checkouts),
+configure `agent-runs.json`. Each run needs its own passkey assertion. [Signal record delivery](go-approvals.md#journal-and-record-delivery)
+is also opt-in. `egress --state-dir DIR` lists the configured GitHub, Slack and Signal hosts; it reads no credentials
+or collector config. Proposal parameters and reasons remain plaintext in the private journal. The Go preview
+does not use the login Keychain.
 
 ## `beacon keychain list`
 
