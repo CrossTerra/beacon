@@ -74,9 +74,12 @@ after Beacon's own merge. The Swift app fails that incomplete case as `merged_ot
 does not, so it cannot record a false failure for its own write. An open PR settles as `not_merged` only
 after two eligible reads at least a minute apart, both at least a minute after the outcome became unknown.
 Automatic read-back keeps that one-minute cadence until then, then doubles the wait up to 15 minutes, so
-a read that never settles does not spend the recovery budget every minute. The confirming open read is
-due one minute after the first open observation. **Read again** uses the same budget, is not delayed by
-backoff, and does not count toward it; it cannot resend a merge. A start that stops or is cancelled
+a read that never settles does not spend the recovery budget every minute. The sweep asks each handler
+every 15 seconds, so a slow read does not add another minute of wait. The confirming open read is due
+one minute after the first open observation, measured when that read finishes. A later `merged: true`
+answer, even without a SHA, discards open samples and cannot become `not_merged`. A read the recovery
+quota refuses does not count as an attempt and is tried first on the next pass. **Read again** uses the
+same budget, is not delayed by backoff, and does not count toward it; it cannot resend a merge. A start that stops or is cancelled
 before the write is claimed fails as `stopped` (`pre_dispatch`) when the journal can still record. A
 journal that had already failed is left unchanged. If appending that stop record fails, shutdown reports
 the failure instead of success.

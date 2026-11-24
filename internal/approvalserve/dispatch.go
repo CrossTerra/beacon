@@ -19,6 +19,9 @@ type dispatcher struct {
 	handlers map[approval.Action]actionexec.Handler
 	inFlight sync.Mutex // one confirmed batch or settings change at a time
 	failed   chan error
+	// retryFirst are ids whose last automatic read was refused by the recovery quota. They are
+	// served before older unknowns on the next pass so a full budget cannot starve them.
+	retryFirst []string
 }
 
 func newDispatcher(ctx context.Context, j *approval.Journal, now func() time.Time, handlers map[approval.Action]actionexec.Handler) *dispatcher {
@@ -158,33 +161,15 @@ func (d *dispatcher) readBack(ctx context.Context, v approval.View) error {
 }
 
 func (d *dispatcher) recover() error {
-	const tick = 15 * time.Second
+	return d.recoverEvery(15 * time.Second)
+}
+
+func (d *dispatcher) recoverEvery(tick time.Duration) error {
 	t := time.NewTicker(tick)
 	defer t.Stop()
-	var lastMerge time.Time
 	for d.ctx.Err() == nil {
-		at := time.Now()
-		mergeDue := at.Sub(lastMerge) >= time.Minute
-		if mergeDue {
-			lastMerge = at
-		}
-		for _, v := range d.j.Unknowns() {
-			if d.ctx.Err() != nil {
-				return nil
-			}
-			// Merges are considered at most once a minute. Due backs off further after the
-			// settlement window, so one stuck merge does not spend the recovery budget continuously.
-			if v.Type == approval.Merge && !mergeDue {
-				continue
-			}
-			if h, ok := d.handlers[v.Type].(actionexec.ReadBack); ok && h.Due(v) {
-				if n, ok := h.(interface{ NoteAutomatic(string) }); ok {
-					n.NoteAutomatic(v.ID)
-				}
-				if err := h.Reconcile(d.ctx, d.j, v.ID); err != nil {
-					return err
-				}
-			}
+		if err := d.recoverPass(); err != nil {
+			return err
 		}
 		select {
 		case <-d.ctx.Done():
@@ -192,6 +177,62 @@ func (d *dispatcher) recover() error {
 		}
 	}
 	return nil
+}
+
+func (d *dispatcher) recoverPass() error {
+	pending := prioritize(d.j.Unknowns(), d.retryFirst)
+	d.retryFirst = nil
+	var denied []string
+	for _, v := range pending {
+		if d.ctx.Err() != nil {
+			return nil
+		}
+		h, ok := d.handlers[v.Type].(actionexec.ReadBack)
+		if !ok || !h.Due(v) {
+			continue
+		}
+		var err error
+		if auto, ok := h.(interface {
+			Recover(context.Context, *approval.Journal, string) error
+		}); ok {
+			err = auto.Recover(d.ctx, d.j, v.ID)
+		} else {
+			err = h.Reconcile(d.ctx, d.j, v.ID)
+		}
+		if errors.Is(err, actionexec.ErrRecoveryQuota) {
+			denied = append(denied, v.ID)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	d.retryFirst = denied
+	return nil
+}
+
+func prioritize(pending []approval.View, first []string) []approval.View {
+	if len(first) == 0 || len(pending) < 2 {
+		return pending
+	}
+	rank := make(map[string]int, len(first))
+	for i, id := range first {
+		rank[id] = i
+	}
+	out := make([]approval.View, 0, len(pending))
+	for _, id := range first {
+		for _, v := range pending {
+			if v.ID == id {
+				out = append(out, v)
+			}
+		}
+	}
+	for _, v := range pending {
+		if _, ok := rank[v.ID]; !ok {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func (d *dispatcher) wait() error {

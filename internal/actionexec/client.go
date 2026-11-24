@@ -27,6 +27,15 @@ const (
 
 func refusal(code string) approval.Refusal { return approval.Refusal{Code: code} }
 
+// ErrRecoveryQuota means an automatic read-back did not obtain a metered GET. The sweep retries that
+// item first next pass and must not treat it as a service failure.
+var ErrRecoveryQuota = errors.New("recovery read quota")
+
+func quotaDenied(err error) bool {
+	var r approval.Refusal
+	return errors.As(err, &r) && r.Code == "busy"
+}
+
 // oneLine bounds display-only provider labels. The review template also reveals controls and escapes HTML.
 func oneLine(s string, maxRunes int) string {
 	s = strings.TrimSpace(strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(s))

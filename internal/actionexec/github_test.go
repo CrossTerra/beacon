@@ -73,6 +73,8 @@ type fakeGitHub struct {
 	statusPages                                  [][]map[string]string
 	afterPull                                    func(*fakeGitHub)
 	interrupt                                    func(*http.Request) error
+	lag                                          time.Duration
+	advance                                      func(time.Duration)
 }
 
 func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
@@ -130,6 +132,10 @@ func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
 		})
 		if f.afterPull != nil {
 			f.afterPull(f)
+		}
+		if f.lag != 0 && f.advance != nil {
+			f.advance(f.lag)
+			f.lag = 0
 		}
 		return a, nil
 	case "GET " + fixtureRepo + "/pulls/140/reviews":
@@ -522,8 +528,7 @@ func TestIncompleteMergeAttributionStaysUnknown(t *testing.T) {
 			v := m.start()
 			requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
 			tc.set(m.f)
-			m.h.NoteAutomatic(v.ID)
-			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+			requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 			m.want("outcome_unknown", "", "", 0)
 			m.at = m.at.Add(time.Second)
 			if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
@@ -538,8 +543,7 @@ func TestMergeReadAgainIsNotDelayedByBackoff(t *testing.T) {
 	v := m.start()
 	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
 	m.f.failUser = true
-	m.h.NoteAutomatic(v.ID)
-	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 	m.at = m.at.Add(time.Second)
 	if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
 		t.Fatal("automatic read-back did not wait")
@@ -563,8 +567,7 @@ func TestStuckMergeBacksOffSoAnotherUnknownCanRead(t *testing.T) {
 		m.at = start.Add(time.Duration(minute) * time.Minute)
 		if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
 			got = append(got, minute)
-			m.h.NoteAutomatic(v.ID)
-			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+			requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 		}
 	}
 	want := []int{0, 1, 3, 7, 15, 30, 45, 60}
@@ -709,8 +712,7 @@ func TestReadAgainDoesNotDelayTheConfirmingOpenRead(t *testing.T) {
 	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
 	m.f.mergedBy = 0
 	start := m.at
-	m.h.NoteAutomatic(v.ID)
-	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 	for range 8 {
 		m.at = m.at.Add(time.Second)
 		requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
@@ -724,17 +726,107 @@ func TestReadAgainDoesNotDelayTheConfirmingOpenRead(t *testing.T) {
 	if !m.h.Due(mustView(t, m.j, v.ID, m.at)) {
 		t.Fatal("early Read again delayed the first eligible open read")
 	}
-	m.h.NoteAutomatic(v.ID)
-	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 	m.want("outcome_unknown", "", "", 0)
 	m.at = start.Add(2 * mergeSettle)
 	if !m.h.Due(mustView(t, m.j, v.ID, m.at)) {
 		t.Fatal("confirming open read was not due one minute after the first")
 	}
-	m.h.NoteAutomatic(v.ID)
-	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
 	m.want("failed", "read_back", "not_merged", 0)
 	if _, ok := m.h.readBacks.get(v.ID); ok {
 		t.Fatal("settled merge kept its backoff entry")
 	}
+}
+
+func TestMergedObservationBlocksALaterNotMerged(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	start := m.at
+	m.f.merged, m.f.mergedBy = false, 0
+	m.at = start.Add(mergeSettle)
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID)) // eligible open sample
+	m.f.merged, m.f.blankSHA, m.f.mergedBy = true, true, 0
+	m.at = start.Add(mergeSettle + 30*time.Second)
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID)) // merged, no SHA
+	m.want("outcome_unknown", "", "", 0)
+	m.f.merged, m.f.state, m.f.blankSHA = false, "open", false
+	m.at = start.Add(3 * mergeSettle)
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID)) // stale open must not win
+	m.want("outcome_unknown", "", "", 0)
+	m.f.merged, m.f.state, m.f.mergedBy = true, "closed", 123
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
+	m.want("executed", "read_back", "", 0)
+}
+
+func TestAutomaticReadDoesNotMarkWhileManualOwnsTheID(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	m.f.interrupt = func(r *http.Request) error {
+		if !strings.Contains(r.URL.Path, "/pulls/") {
+			return nil
+		}
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- m.h.Reconcile(t.Context(), m.j, v.ID) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual read did not reach GitHub")
+	}
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
+	if _, ok := m.h.readBacks.get(v.ID); ok {
+		t.Fatal("automatic attempt recorded while a manual read held the id")
+	}
+	close(release)
+	select {
+	case err := <-done:
+		requireOK(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual read did not finish")
+	}
+}
+
+func TestConfirmingReadIncludesGETLatencyAndDoesNotWaitAnotherMinute(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	start := m.at
+	m.f.mergedBy = 0
+	m.f.lag = 8 * time.Second
+	m.f.advance = func(d time.Duration) { m.at = m.at.Add(d) }
+	m.at = start.Add(mergeSettle)
+	requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
+	sample := m.at
+	if sample.Sub(start.Add(mergeSettle)) != 8*time.Second {
+		t.Fatalf("open sample ignored GET latency: %s", sample.Sub(start))
+	}
+	var confirmed bool
+	for step := 15 * time.Second; step <= 90*time.Second; step += 15 * time.Second {
+		m.at = sample.Add(step)
+		if !m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+			continue
+		}
+		requireOK(t, m.h.Recover(t.Context(), m.j, v.ID))
+		confirmed = true
+		if step > 75*time.Second {
+			t.Fatalf("confirmation waited %s after the sample; a minute gate would do this", step)
+		}
+		break
+	}
+	if !confirmed {
+		t.Fatal("15-second sweeps never confirmed the open pull request")
+	}
+	m.want("failed", "read_back", "not_merged", 0)
 }

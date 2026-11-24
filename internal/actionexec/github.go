@@ -2,6 +2,7 @@ package actionexec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -24,6 +25,7 @@ type mergeHandler struct {
 	user      int64
 	openMu    sync.Mutex
 	firstOpen map[string]time.Time
+	sawMerged map[string]bool // a merged:true read, even without a SHA; blocks a later not_merged
 	readBacks mergeReadBacks
 }
 
@@ -308,8 +310,10 @@ func (h *mergeHandler) Run(ctx context.Context, j *approval.Journal, v approval.
 	if err := j.Unknown(v.ID, reason, h.now()); err != nil {
 		return err
 	}
-	h.NoteAutomatic(v.ID)
-	return h.Reconcile(ctx, j, v.ID)
+	if err := h.reconcile(ctx, j, v.ID, true); err != nil && !errors.Is(err, ErrRecoveryQuota) {
+		return err
+	}
+	return nil
 }
 
 func mergeSnapshot(f *approval.Frozen) (pinnedMerge, int64, error) {
@@ -372,10 +376,10 @@ func (h *mergeHandler) merged(j *approval.Journal, id, sha, by string) error {
 	return j.SetResult(id, r, h.now())
 }
 
-// NoteAutomatic records one automatic recovery attempt. Read again must not call it: those clicks
-// are not part of the backoff count.
-func (h *mergeHandler) NoteAutomatic(id string) {
-	h.readBacks.mark(id, h.now())
+// Recover is the automatic read-back. The attempt is recorded only after this call owns the id and
+// a metered GET is not refused, so a manual read or a quota denial cannot advance the backoff.
+func (h *mergeHandler) Recover(ctx context.Context, j *approval.Journal, id string) error {
+	return h.reconcile(ctx, j, id, true)
 }
 
 func (h *mergeHandler) Due(v approval.View) bool {
@@ -406,9 +410,16 @@ func (h *mergeHandler) openFirst(id string) (time.Time, bool) {
 }
 
 func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id string) error {
+	if err := h.reconcile(ctx, j, id, false); err != nil && !errors.Is(err, ErrRecoveryQuota) {
+		return err
+	}
+	return nil
+}
+
+func (h *mergeHandler) reconcile(ctx context.Context, j *approval.Journal, id string, automatic bool) error {
 	v, done, ok := h.readView(ctx, j, id, approval.Merge)
 	if !ok {
-		return nil
+		return nil // settled, or a manual read already owns the id
 	}
 	defer done()
 	m, repoID, err := mergeSnapshot(v.Frozen)
@@ -417,7 +428,7 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 	}
 	leave, err := h.recovery.enter()
 	if err != nil {
-		return nil
+		return h.quota(automatic, err)
 	}
 	defer leave()
 	ctx, cancel := context.WithTimeout(ctx, readDeadline)
@@ -429,13 +440,24 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 	defer read.Clear()
 	api := githubAPI{h.provider, read, h.recovery}
 	if _, err := h.identify(ctx, api); err != nil {
+		if quotaDenied(err) {
+			return h.quota(automatic, err)
+		}
+		h.noteAttempt(id, automatic)
 		return nil
 	}
 	p, err := api.pull(ctx, m)
+	if quotaDenied(err) {
+		return h.quota(automatic, err)
+	}
+	h.noteAttempt(id, automatic)
 	if err != nil || !p.sameRepo(m, repoID) {
 		return nil
 	}
 	if *p.Merged {
+		// Keep this observation even when the actor or SHA is still missing. A later open read must
+		// not use an older open sample to decide the pull request was never merged.
+		h.noteMerged(id)
 		// A different actor, head, or base is not this approval. A missing actor or merge SHA can
 		// still be Beacon's own merge before GitHub finishes attributing it; Swift fails that case.
 		conflict := p.Head.SHA != m.head || p.Base.Ref != m.base || (p.MergedBy.ID > 0 && p.MergedBy.ID != h.user)
@@ -447,9 +469,25 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 		}
 		return nil
 	}
+	if h.mergedSeen(id) {
+		return nil
+	}
 	at := h.now()
 	if p.State != "open" || !v.UnknownAt.IsZero() && at.Sub(v.UnknownAt) >= mergeSettle && h.openSettled(id, at) {
 		return h.settled(id, h.fail(j, id, "read_back", refusal("not_merged")))
+	}
+	return nil
+}
+
+func (h *mergeHandler) noteAttempt(id string, automatic bool) {
+	if automatic {
+		h.readBacks.mark(id, h.now())
+	}
+}
+
+func (h *mergeHandler) quota(automatic bool, err error) error {
+	if automatic && quotaDenied(err) {
+		return ErrRecoveryQuota
 	}
 	return nil
 }
@@ -477,8 +515,25 @@ func (h *mergeHandler) openSettled(id string, at time.Time) bool {
 	return at.Sub(first) >= mergeSettle
 }
 
+func (h *mergeHandler) noteMerged(id string) {
+	h.openMu.Lock()
+	defer h.openMu.Unlock()
+	if h.sawMerged == nil {
+		h.sawMerged = make(map[string]bool)
+	}
+	h.sawMerged[id] = true
+	delete(h.firstOpen, id)
+}
+
+func (h *mergeHandler) mergedSeen(id string) bool {
+	h.openMu.Lock()
+	defer h.openMu.Unlock()
+	return h.sawMerged[id]
+}
+
 func (h *mergeHandler) forgetOpen(id string) {
 	h.openMu.Lock()
 	defer h.openMu.Unlock()
 	delete(h.firstOpen, id)
+	delete(h.sawMerged, id)
 }

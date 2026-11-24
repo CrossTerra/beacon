@@ -236,8 +236,9 @@ checkout's opencode configuration does not deny.
       action fails as `stopped` rather than becoming an unknown write. A journal that had already failed is not
       rewritten. A failed append of that stop record fails shutdown. A lost reply permits only read-back with
       the unattended token. A merged pull request with a different actor, head, or base fails as
-      `merged_otherwise`. Incomplete attribution stays unknown. Automatic merge read-back backs off after the
-      settlement window, up to 15 minutes, so one stuck read does not spend the recovery budget every minute. Without provider config there is no resolver
+      `merged_otherwise`. Incomplete attribution stays unknown, and a pull request already seen merged is
+      never later recorded as not merged. Automatic merge read-back backs off after the settlement window,
+      up to 15 minutes, and is checked every 15 seconds so one stuck read does not spend the recovery budget. Without provider config there is no resolver
       or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
       See [Go approvals](go-approvals.md).
 
