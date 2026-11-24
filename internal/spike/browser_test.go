@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/runtime"
@@ -20,6 +23,7 @@ import (
 // TestBrowser drives headless Chrome's virtual authenticator through register
 // and assert with PRF, a credential without PRF, and a wrong origin.
 func TestBrowser(t *testing.T) {
+	lockReviewPort(t)
 	lns, err := Listen()
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +198,22 @@ func waitReady() chromedp.Action {
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
+	})
+}
+
+func lockReviewPort(t *testing.T) {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "beacon-test-7317.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		f.Close()
 	})
 }
 

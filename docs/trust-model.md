@@ -217,7 +217,16 @@ checkout's opencode configuration does not deny.
     review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
     Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
     login header does not identify local processes; cookies can be received by another port on the same host.
-    The pages have no action, approval or settings routes. See [Go approvals](go-approvals.md).
+    The pages have no approval or settings routes. `beacon setup` prints a one-time passkey code and
+    refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
+    a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
+    that data key. The journal records the check file's hash. A later assertion can record an approval only
+    for a resolved binding, and only if the PRF output unwraps that key, the key opens the check, and the
+    file still matches the journal. A swapped file is a journalled reset and approves nothing. Write
+    credentials are sealed under the real data key, so a swapped vault cannot execute; a handler must fail
+    closed when it cannot unseal. The preview
+    supplies no resolver and starts no handler, so a live page does not freeze or dispatch. See
+    [Go approvals](go-approvals.md).
 
 ## Known limits
 

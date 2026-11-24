@@ -2,6 +2,7 @@ package approval
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"io"
 	"maps"
@@ -13,6 +14,9 @@ import (
 	"sync"
 	"time"
 )
+
+// liveJournals lets a passkey check record a reset while this process already holds the journal.
+var liveJournals sync.Map
 
 var (
 	ErrNotFound   = errors.New("proposal not found")
@@ -28,18 +32,22 @@ const startWindow = 10 * time.Minute
 // frame is the v1 disk schema. An action entry commits its sequence and replay nonce in the same frame.
 // Its proposal/transition is the record recipe; the outbox later commits the wire bytes before sending.
 type frame struct {
-	Kind      string    `json:"kind"`
-	ID        string    `json:"id,omitempty"`
-	Seq       int64     `json:"seq,omitempty"`
-	At        int64     `json:"at,omitempty"` // Unix milliseconds
-	Nonce     string    `json:"nonce,omitempty"`
-	Proposal  *Proposal `json:"proposal,omitempty"`
-	Frozen    *Frozen   `json:"frozen,omitempty"`
-	Result    *Result   `json:"result,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	Note      string    `json:"note,omitempty"`
-	Bytes     []byte    `json:"bytes,omitempty"`
-	Ambiguous bool      `json:"ambiguous,omitempty"`
+	Kind           string    `json:"kind"`
+	ID             string    `json:"id,omitempty"`
+	Seq            int64     `json:"seq,omitempty"`
+	At             int64     `json:"at,omitempty"` // Unix milliseconds
+	Nonce          string    `json:"nonce,omitempty"`
+	Proposal       *Proposal `json:"proposal,omitempty"`
+	Frozen         *Frozen   `json:"frozen,omitempty"`
+	Result         *Result   `json:"result,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Note           string    `json:"note,omitempty"`
+	Bytes          []byte    `json:"bytes,omitempty"`
+	Ambiguous      bool      `json:"ambiguous,omitempty"`
+	CredentialID   []byte    `json:"credential_id,omitempty"`
+	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
+	Batch          []string  `json:"batch,omitempty"`
+	VaultHash      []byte    `json:"vault_hash,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -58,6 +66,7 @@ type proposalState struct {
 // instance: durability is then unknown and nothing may act on its in-memory view until replay.
 type Journal struct {
 	mu         sync.Mutex
+	dir        string
 	file, lock *os.File
 	id         string
 	states     map[string]*proposalState
@@ -97,12 +106,13 @@ func openJournal(dir string, at time.Time, after string, hooks journalHooks) (*J
 	if err != nil {
 		return nil, err
 	}
-	j := &Journal{lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
+	j := &Journal{dir: filepath.Clean(dir), lock: lock, states: make(map[string]*proposalState), active: make(map[string]*proposalState),
 		changed: make(chan struct{}), hooks: hooks}
 	if err := j.load(filepath.Join(dir, journalName), at, after); err != nil {
 		j.Close()
 		return nil, err
 	}
+	liveJournals.Store(j.dir, j)
 	return j, nil
 }
 
@@ -131,24 +141,59 @@ func (j *Journal) load(path string, at time.Time, after string) error {
 	if j.id <= after {
 		return ErrJournalAge
 	}
+	var batch []frame
+	batchAt := offset
 	for {
 		e, size, err := readFrame(r)
-		if err == io.EOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			// A torn final frame, or approved frames with no commit marker, is not a decision.
+			cut := offset
+			if len(batch) > 0 {
+				cut = batchAt
+			}
+			if err == io.ErrUnexpectedEOF || len(batch) > 0 {
+				if err := f.Truncate(cut); err != nil {
+					return err
+				}
+				if err := j.hooks.sync(f); err != nil {
+					return err
+				}
+			}
 			break
 		}
-		if err == io.ErrUnexpectedEOF {
-			if err := f.Truncate(offset); err != nil {
-				return err
-			}
-			if err := j.hooks.sync(f); err != nil {
-				return err
-			}
-			break
+		if err != nil {
+			return ErrCorrupt
 		}
-		if err != nil || !j.fold(e) {
+		if e.Kind == "approved" && len(e.BatchChallenge) > 0 {
+			if len(batch) == 0 {
+				batchAt = offset
+			}
+			batch = append(batch, e)
+			offset += size
+			continue
+		}
+		if e.Kind == "approved_commit" {
+			if !batchCommitted(batch, e) {
+				return ErrCorrupt
+			}
+			for _, part := range batch {
+				if !j.fold(part) {
+					return ErrCorrupt
+				}
+			}
+			batch = nil
+			offset += size
+			batchAt = offset
+			continue
+		}
+		if len(batch) > 0 {
+			return ErrCorrupt
+		}
+		if !j.fold(e) {
 			return ErrCorrupt
 		}
 		offset += size
+		batchAt = offset
 	}
 	// An unacknowledged attempt may have reached Signal before the process died.
 	if j.delivery.inFlight {
@@ -174,6 +219,7 @@ func (j *Journal) ID() string { return j.id }
 func (j *Journal) Close() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	liveJournals.Delete(j.dir)
 	if j.lock == nil {
 		return nil
 	}
@@ -182,7 +228,7 @@ func (j *Journal) Close() error {
 		err = j.file.Close()
 		j.file = nil
 	}
-	err = errors.Join(err, j.lock.Close())
+	err = errors.Join(err, CloseInstance(j.dir, j.lock))
 	j.lock = nil
 	j.notify()
 	return err
@@ -229,12 +275,33 @@ func (j *Journal) transition(id, kind, reason string, at time.Time) error {
 
 // RecordLocal writes a local audit marker without allocating a record sequence. It takes no credential or payload.
 func (j *Journal) RecordLocal(kind string, at time.Time) error {
+	return j.recordLocal(kind, "", nil, at)
+}
+
+// RecordPasskey records the SHA-256 of write-vault.json. OpenVault refuses a different file.
+func (j *Journal) RecordPasskey(hash []byte, at time.Time) error {
+	if len(hash) != 32 {
+		return Invalid("/vault_hash")
+	}
+	return j.recordLocal("passkey_added", "", append([]byte(nil), hash...), at)
+}
+
+func (j *Journal) recordLocal(kind, reason string, hash []byte, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if !localKind(kind) {
 		return Invalid("/kind")
 	}
-	return j.commit(frame{Kind: kind, At: at.UnixMilli()})
+	return j.commit(frame{Kind: kind, At: at.UnixMilli(), Reason: reason, VaultHash: hash})
+}
+
+// NoteVaultMismatch records a visible passkey reset while this process holds the journal.
+func NoteVaultMismatch(dir string, at time.Time) error {
+	v, ok := liveJournals.Load(filepath.Clean(dir))
+	if !ok {
+		return ErrLocked
+	}
+	return v.(*Journal).recordLocal("passkeys_reset", "vault_mismatch", nil, at)
 }
 
 func localKind(kind string) bool {
@@ -375,26 +442,88 @@ func (j *Journal) Decline(id, note string, at time.Time) error {
 }
 
 // Approve persists an already-authorized decision. The caller MUST verify the person's assertion over f
-// before calling. This is not exposed over HTTP or the proposal socket.
+// before calling. This is not exposed over the proposal socket.
 func (j *Journal) Approve(f Frozen, at time.Time) error {
+	return j.ApproveAll([]Frozen{f}, nil, nil, at)
+}
+
+// ApproveAll commits every frozen approval or none of them. A batch is several approved frames plus a
+// commit marker; replay applies the frames only when that marker is present. credentialID is recorded on
+// each approved frame. batchChallenge is recorded only for a batch.
+func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopping {
 		return ErrStopping
 	}
-	if err := j.require(f.ID, "pending", at); err != nil {
-		return err
+	if len(items) == 0 || len(items) > 10 {
+		return ErrTransition
 	}
-	p := j.states[f.ID].Proposal
-	selected := ""
-	if p.Type == Run {
-		selected = text(f.Params, "model")
+	seen := map[string]bool{}
+	frames := make([]frame, 0, len(items))
+	for _, f := range items {
+		if seen[f.ID] {
+			return ErrTransition
+		}
+		seen[f.ID] = true
+		if err := j.require(f.ID, "pending", at); err != nil {
+			return err
+		}
+		p := j.states[f.ID].Proposal
+		selected := ""
+		if p.Type == Run {
+			selected = text(f.Params, "model")
+		}
+		bound, err := Freeze(p, f.Binding, selected)
+		if err != nil || !reflect.DeepEqual(f, bound) || at.Before(p.ProposedAt) {
+			return ErrStale
+		}
+		part := frame{ID: f.ID, Kind: "approved", Frozen: &bound, CredentialID: append([]byte(nil), credentialID...)}
+		if len(items) > 1 {
+			part.BatchChallenge = append([]byte(nil), batchChallenge...)
+		}
+		frames = append(frames, part)
 	}
-	bound, err := Freeze(p, f.Binding, selected)
-	if err != nil || !reflect.DeepEqual(f, bound) || at.Before(p.ProposedAt) {
-		return ErrStale
+	if len(items) > 1 && len(batchChallenge) == 0 {
+		return ErrTransition
 	}
-	return j.action(frame{ID: f.ID, Kind: "approved", Frozen: &bound}, at)
+	if !j.healthy() {
+		return ErrJournalIO
+	}
+	for i := range frames {
+		frames[i].Seq, frames[i].Nonce, frames[i].At = j.lastSeq+int64(i)+1, j.hooks.nonce(), at.UnixMilli()
+		if appendFrame(j.file, frames[i]) != nil {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	if len(frames) > 1 {
+		ids := make([]string, len(frames))
+		for i := range frames {
+			ids[i] = frames[i].ID
+		}
+		marker := frame{Kind: "approved_commit", CredentialID: append([]byte(nil), credentialID...), BatchChallenge: append([]byte(nil), batchChallenge...), Batch: ids}
+		if appendFrame(j.file, marker) != nil {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	if j.hooks.sync(j.file) != nil {
+		j.failed = true
+		j.notify()
+		return ErrJournalIO
+	}
+	for i := range frames {
+		if !j.fold(frames[i]) {
+			j.failed = true
+			j.notify()
+			return ErrJournalIO
+		}
+	}
+	j.notify()
+	return nil
 }
 
 // Start commits the no-retry barrier before the handler may perform a write. Once started, a process
@@ -530,6 +659,74 @@ func (j *Journal) fold(e frame) bool {
 	j.lastSeq++
 	j.queue = append(j.queue, &e)
 	return true
+}
+
+func batchCommitted(parts []frame, marker frame) bool {
+	if len(parts) < 2 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
+		return false
+	}
+	for i, part := range parts {
+		if marker.Batch[i] != part.ID || !bytes.Equal(part.BatchChallenge, marker.BatchChallenge) || !bytes.Equal(part.CredentialID, marker.CredentialID) {
+			return false
+		}
+	}
+	return true
+}
+
+// PasskeyMarks reports the journal position of the latest passkey_added and passkeys_reset.
+// Position is the frame's place in the file, starting at 1. Zero means that kind is absent.
+// A missing journal is a first registration, not an error.
+func PasskeyMarks(dir string) (addedIndex, resetIndex int, err error) {
+	st, err := scanPasskeys(dir)
+	return st.addedIndex, st.resetIndex, err
+}
+
+// PasskeyVault is the SHA-256 recorded on the latest passkey_added that no later passkeys_reset superseded.
+// Later means a higher frame index, not a later wall-clock time.
+func PasskeyVault(dir string) (hash []byte, active bool, err error) {
+	st, err := scanPasskeys(dir)
+	if err != nil || st.addedIndex == 0 || st.resetIndex > st.addedIndex || len(st.hash) != 32 {
+		return nil, false, err
+	}
+	return append([]byte(nil), st.hash...), true, nil
+}
+
+type passkeyScan struct {
+	addedIndex, resetIndex int
+	hash                   []byte
+}
+
+func scanPasskeys(dir string) (passkeyScan, error) {
+	var st passkeyScan
+	f, err := OpenPrivate(filepath.Join(dir, journalName), os.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return st, nil
+	}
+	if err != nil {
+		return st, err
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
+	if _, _, err := readFrame(r); err != nil {
+		return st, err
+	}
+	index := 0
+	for {
+		e, _, err := readFrame(r)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return st, nil
+		}
+		if err != nil {
+			return passkeyScan{}, err
+		}
+		index++
+		switch e.Kind {
+		case "passkey_added":
+			st.addedIndex, st.hash = index, append([]byte(nil), e.VaultHash...)
+		case "passkeys_reset":
+			st.resetIndex = index
+		}
+	}
 }
 
 func foldTransition(s *proposalState, e frame) bool {

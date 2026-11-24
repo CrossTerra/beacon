@@ -80,6 +80,14 @@ func cookieName(o approval.Origin) string {
 	return "beacon_" + approval.ReviewPort
 }
 
+func sessionID(r *http.Request, o approval.Origin) string {
+	cookies := r.CookiesNamed(cookieName(o))
+	if len(cookies) != 1 || len(cookies[0].Value) != base64.RawURLEncoding.EncodedLen(tokenBytes) {
+		return ""
+	}
+	return cookies[0].Value
+}
+
 func (s *sessions) lookup(r *http.Request, o approval.Origin, at time.Time) (session, bool) {
 	cookies := r.CookiesNamed(cookieName(o))
 	if len(cookies) != 1 || len(cookies[0].Value) != base64.RawURLEncoding.EncodedLen(tokenBytes) {

@@ -46,10 +46,13 @@ func site(t *testing.T, tailnet bool, now func() time.Time) (*Site, *approval.Jo
 	if tailnet {
 		o = makeOrigin(t, tailOrigin, login)
 	}
-	j, err := approval.OpenJournal(filepath.Join(t.TempDir(), "state"), now(), "")
+	dir := filepath.Join(t.TempDir(), "state")
+	j, err := approval.OpenJournal(dir, now(), "")
 	must(t, err)
 	t.Cleanup(func() { must(t, j.Close()) })
-	return New(o, j, now), j
+	s := New(o, j, now)
+	s.SetState(dir)
+	return s, j
 }
 
 func (s *Site) request(method, path string, body io.Reader) *http.Request {
@@ -106,6 +109,7 @@ func securityHeaders(t *testing.T, w *httptest.ResponseRecorder, secure bool) {
 	if h.Get("Cache-Control") != "no-store" || h.Get("X-Content-Type-Options") != "nosniff" ||
 		h.Get("Referrer-Policy") != "no-referrer" || !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
 		!strings.Contains(h.Get("Content-Security-Policy"), "default-src 'none'") ||
+		!strings.Contains(h.Get("Content-Security-Policy"), "connect-src 'self'") ||
 		(h.Get("Strict-Transport-Security") != "") != secure || h.Get("Access-Control-Allow-Origin") != "" {
 		t.Fatal("unexpected security headers", h)
 	}
@@ -287,8 +291,8 @@ func TestPostChecksOriginAndCSRFButDoesNotHandleAMutation(t *testing.T) {
 			session           bool
 			status            int
 		}{
-			{[]string{canonical}, "", "csrf=" + csrf, "/approve", true, 405},
-			{nil, "same-origin", "csrf=" + csrf, "/freeze", true, 405},
+			{[]string{canonical}, "", "csrf=" + csrf, "/decline", true, 405},
+			{nil, "same-origin", "csrf=" + csrf, "/freeze", true, 409},
 			{nil, "", "csrf=" + csrf, "/freeze", true, 403},
 			{nil, "same-site", "csrf=" + csrf, "/freeze", true, 403},
 			{[]string{""}, "same-origin", "csrf=" + csrf, "/freeze", true, 403},

@@ -116,11 +116,12 @@ Commands:
   act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
   serve         run the read-only Go approval preview in a separate --state-dir
   open          print a one-time browser sign-in link for that --state-dir
+  setup         print a one-time passkey setup code for that --state-dir
   keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
   version       print the version, commit and build flags
   spike-passkey serve the passkey PRF spike on localhost:7317 (13.01 part 1)
 
-Every command but version, act, keychain repair, spike-passkey, serve and open takes --config PATH (default:
+Every command but version, act, keychain repair, spike-passkey, serve, open and setup takes --config PATH (default:
 $BEACON_CONFIG, else the user config directory).
 `
 
@@ -177,6 +178,8 @@ func (a *app) main(ctx context.Context, args []string) int {
 		err = a.cmdServe(ctx, rest)
 	case "open":
 		err = a.cmdOpen(ctx, rest)
+	case "setup":
+		err = a.cmdSetup(rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "spike-passkey":

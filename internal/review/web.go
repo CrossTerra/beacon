@@ -17,7 +17,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/approval"
 )
 
-//go:embed templates/*.html static/beacon.css
+//go:embed templates/*.html static/beacon.css static/passkey.js
 var assets embed.FS
 
 var pages = template.Must(template.New("review").Funcs(template.FuncMap{
@@ -33,8 +33,11 @@ type proposals interface {
 type Site struct {
 	origin   approval.Origin
 	journal  proposals
+	state    string
+	resolve  func(approval.Proposal) (approval.Binding, error)
 	now      func() time.Time
 	sessions sessions
+	held     map[string]held
 }
 
 func New(origin approval.Origin, j proposals, now func() time.Time) *Site {
@@ -48,6 +51,12 @@ func New(origin approval.Origin, j proposals, now func() time.Time) *Site {
 
 // IssueOpen is called only by the admitted Unix socket, not by any HTTP route.
 func (s *Site) IssueOpen() (string, bool) { return s.sessions.issue(s.now()) }
+
+// SetState is the preview directory that holds the setup code and passkeys.
+func (s *Site) SetState(dir string) { s.state = dir }
+
+// SetResolver supplies a checked account binding. The preview leaves it nil: it does not invent one.
+func (s *Site) SetResolver(fn func(approval.Proposal) (approval.Binding, error)) { s.resolve = fn }
 
 const tailLogin = "Tailscale-User-Login"
 
@@ -71,6 +80,22 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request refused", http.StatusForbidden)
 		return
 	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/freeze" || r.URL.Path == "/approve") {
+		if !s.allowForm(w, r) {
+			http.Error(w, "form refused", http.StatusForbidden)
+			return
+		}
+		s.decide(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/passkeys/new" || r.URL.Path == "/passkeys") {
+		if !s.allowOrigin(r) {
+			http.Error(w, "form refused", http.StatusForbidden)
+			return
+		}
+		s.register(w, r)
+		return
+	}
 	if r.Method == http.MethodPost && !s.allowForm(w, r) {
 		http.Error(w, "form refused", http.StatusForbidden)
 		return
@@ -80,6 +105,15 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/static/passkey.js":
+		b, err := assets.ReadFile("static/passkey.js")
+		if err != nil {
+			http.Error(w, "script unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Write(b)
+		return
 	case "/static/beacon.css":
 		b, err := assets.ReadFile("static/beacon.css")
 		if err != nil {
@@ -91,6 +125,9 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/sign-in":
 		render(w, "sign-in", http.StatusOK, nil)
+		return
+	case "/passkeys/new":
+		render(w, "register", http.StatusOK, nil)
 		return
 	case "/open":
 		if r.Method != http.MethodGet {
@@ -118,7 +155,7 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Site) headers(h http.Header) {
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
@@ -130,6 +167,11 @@ func (s *Site) headers(h http.Header) {
 func methodNotAllowed(w http.ResponseWriter, allow string) {
 	w.Header().Set("Allow", allow)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Site) allowOrigin(r *http.Request) bool {
+	origin := r.Header.Values("Origin")
+	return len(origin) == 1 && origin[0] == s.origin.URL()
 }
 
 // A present Origin must match exactly; Fetch Metadata is a fallback only for an absent Origin.

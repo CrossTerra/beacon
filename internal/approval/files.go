@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -55,6 +56,10 @@ func OpenPrivate(path string, flags int) (*os.File, error) {
 	return f, nil
 }
 
+// heldLocks records instance locks this process already owns. A second flock in this process fails, so
+// in-process registration must notice the journal's lock instead of taking another.
+var heldLocks sync.Map
+
 // LockInstance holds the same lock future offline setup and migration commands must take. Do not remove the
 // lock file: doing so would allow different processes to lock different inodes at the same path.
 func LockInstance(dir string) (*os.File, error) {
@@ -72,5 +77,25 @@ func LockInstance(dir string) (*os.File, error) {
 		}
 		return nil, err
 	}
+	heldLocks.Store(filepath.Clean(dir), f)
 	return f, nil
 }
+
+// HoldsInstance reports whether this process already owns the instance lock.
+func HoldsInstance(dir string) bool {
+	_, ok := heldLocks.Load(filepath.Clean(dir))
+	return ok
+}
+
+// CloseInstance releases this process's record of the lock and the lock itself.
+func CloseInstance(dir string, f *os.File) error {
+	if f == nil {
+		return nil
+	}
+	heldLocks.Delete(filepath.Clean(dir))
+	return f.Close()
+}
+
+// DropHeld forgets this process's record of the lock without unlocking.
+// A test uses it to simulate another process holding instance.lock.
+func DropHeld(dir string) { heldLocks.Delete(filepath.Clean(dir)) }
