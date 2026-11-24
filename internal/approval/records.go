@@ -49,8 +49,7 @@ func (r Result) check(action Action) error {
 func timestamp(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 // record projects a journal entry into Signal's fixed envelope. Local-only data (including the OS label and
-// caller-supplied context) never crosses this boundary. Slack stays on the person's own subject while there
-// is no trusted intake lookup.
+// caller-supplied context and display-only names) never crosses this boundary.
 func record(id string, e *frame, s *proposalState, who SignalIdentity) ([]byte, error) {
 	if !ValidID(who.Person, "act") {
 		return nil, Invalid("/metadata/person")
@@ -62,6 +61,12 @@ func record(id string, e *frame, s *proposalState, who SignalIdentity) ([]byte, 
 	case Merge:
 		if n, ok := s.Params["number"].(int64); ok {
 			subject = "github:pr:" + text(s.Params, "repo") + "#" + strconv.FormatInt(n, 10)
+		}
+	case Post:
+		if s.Slack != nil {
+			if public := s.Slack.publicSubject(s.Params); public != "" {
+				subject = public
+			}
 		}
 	case Run:
 		if actorHandle.matches(who.Handle) && ValidID(s.RunnerID, "run") {

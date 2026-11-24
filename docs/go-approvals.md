@@ -1,20 +1,19 @@
-# Go approval service (13.01 read-only preview)
+# Go approval service (13.01 preview)
 
-This slice of Part 2 is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
+This is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
 separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of `beacon act`. Default
 `beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
-The preview does not read collector config, Keychain items, vaults or the Swift journal. There is no installer
-cutover, migration, live Signal credential source, provider lookup, provider write or runner launch. The three
-schemas (`github.merge`, `slack.post`, `agent.run`) are for review only. There is no approve or decline
-control, batch decision, or notification. `beacon setup` prints a one-time passkey code for that directory. `/passkeys/new` takes the code
-and registers one passkey. The PRF output is not stored. Approval is not on the page yet.
+The preview does not read collector config, Keychain items or the Swift journal. There is no installer
+cutover, migration, live Signal credential source, or runner launch. Without provider settings, every proposal
+is review-only. With the respective providers configured, `github.merge` and `slack.post` can execute with
+passkey approval. `agent.run` is still review-only.
 
 ## Passkey setup
 
 `beacon setup --state-dir DIR` prints a 10-minute, one-use code and does not store the code. It holds the
 instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
 ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
-The output is not written. A second passkey is refused until a later assertion-gated path exists. There is
+The output is not written. A second passkey is refused until a later assertion-gated path exists.
 `/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
 takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
 The first registration writes `write-vault.json`, a key-check sealed under the new data key. Its SHA-256
@@ -30,17 +29,111 @@ stopped) opens the journal and records `passkeys_reset`. A later setup code is b
 position in the journal, not to the clock, including when the reset marker file is missing. A ceremony started before the reset cannot finish. A vault
 left behind with no `passkey_added` is failed-registration debris and is removed.
 
-A signed-in browser can freeze a proposal only when a resolver supplies the account binding. This preview
-does not set one, so the page does not freeze a live proposal and does not invent an account. When a
-binding is supplied, one assertion covers that frozen hash, or a batch of at most 10 merges or posts.
+A signed-in browser can freeze a proposal only when a handler resolves its account and destination. One
+assertion covers that frozen hash, or a batch of at most 10 merges or posts in their pending-list order.
 An `agent.run` cannot join a batch. The freeze nonce belongs to that browser session; a new freeze
 cancels the session's earlier nonce. The assertion is refused unless its PRF output unwraps the write
 vault and that key opens the key-check. A missing write vault approves nothing. The new sign count is
 stored before the journal records `approved`. A batch is several `approved` frames plus an
 `approved_commit` marker; replay applies the frames only when the marker is present. Each approved frame
-records the credential id and, for a batch, the batch challenge. `approvalserve.Dispatch` is the only
-path to a handler. It is nil: `github.merge`, `slack.post`, and `agent.run` exist in Swift, not in Go,
-so nothing is started or sent.
+records the credential id and, for a batch, the batch challenge. Before accepting the approval, Beacon
+must also unseal every required write token. It clears the vault key and gives the worker only the tokens
+for that batch. Each action needs a durable start and a final provider check before writing. No write is
+retried, even after a lost reply or process restart.
+
+## Provider credentials and GitHub
+
+Put `action-providers.json` (`0600`) in the private state directory before starting `beacon serve`. For example:
+
+```json
+{"github":{"origin":"https://api.github.com","user_id":123456}}
+```
+
+Use your numeric GitHub user ID. Only the configured HTTPS API origin is contacted; there are no redirects
+or environment proxies. `beacon egress --state-dir DIR` reports these hosts without loading credentials.
+After registering a passkey, sign in with `beacon open --state-dir DIR` and go to **Provider credentials**.
+Save two distinct tokens for that user with a separate settings assertion. The service verifies both
+against `GET /user`, refusing bots and a different account. Choose a least-privilege read token (repo
+metadata, pull requests, checks, commit statuses and the available rules) and grant merge permission only
+to the write token. Identity validation does not establish that a GitHub token is read-only.
+
+The read token goes in `unattended.kdbx`. The write token goes in `write-github.sealed`, authenticated with
+the provider, origin and account under the passkey vault's data key. They cannot be the same credential.
+After a passkey reset, register again and re-save the write credential; the earlier ciphertext cannot open
+under the new key. The unattended read vault is not reset.
+
+The preview reads the PR, reviews, rules and checks with the read token. Every reported check and every
+visible required check must pass; only the latest run for each check name and app counts. The frozen view
+names the approved head. After approval the write token is used for final reads, including one last PR
+read, and at most one `PUT` with the exact approved method and head SHA. The provider alone enforces
+branch rules at the write. A lost or ambiguous reply is read back with the unattended token. Success
+requires the approved repository, base, head, this user, and a merge SHA. A merged pull request with a
+different actor, head, or base fails as `merged_otherwise` and is not read again. A merge that matches
+this account, head, and base but has no actor or merge SHA stays unknown: GitHub can omit the SHA briefly
+after Beacon's own merge. The Swift app fails that incomplete case as `merged_otherwise`; the Go preview
+does not, so it cannot record a false failure for its own write. An open PR settles as `not_merged` only
+after two eligible reads at least a minute apart, both at least a minute after the outcome became unknown.
+Automatic read-back keeps that one-minute cadence until then, then doubles the wait up to 15 minutes, so
+a read that never settles does not spend the recovery budget every minute. The sweep asks each handler
+every 15 seconds, so a slow read does not add another minute of wait. The confirming open read is due
+one minute after the first open observation, measured when that read finishes. A later `merged: true`
+answer, even without a SHA, discards open samples and cannot become `not_merged`. A read the recovery
+quota refuses does not count as an attempt and is tried first on the next pass. **Read again** uses the
+same budget, is not delayed by backoff, and does not count toward it; it cannot resend a merge. A start that stops or is cancelled
+before the write is claimed fails as `stopped` (`pre_dispatch`) when the journal can still record. A
+journal that had already failed is left unchanged. If appending that stop record fails, shutdown reports
+the failure instead of success.
+
+## Slack posts
+
+Set the Slack workspace and user IDs in `action-providers.json`, alongside or instead of `github`:
+
+```json
+{"slack":{"workspace":"T0123456789","user_id":"U0123456789"}}
+```
+
+Slack's origin is fixed at `https://slack.com`. In [Slack apps](https://api.slack.com/apps), use **OAuth &
+Permissions → User Token Scopes** to obtain two distinct, non-rotating **User OAuth Tokens** (`xoxp-…`)
+for this user in this workspace. Use separate app grants so the unattended token has only these scopes:
+
+- `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`
+- `channels:history`, `groups:history`, `im:history`, `mpim:history`
+- Optionally `metadata.message:read` for read-back, if the workspace requires it
+
+The write token needs the required reads plus `chat:write`. Use **Provider credentials → Set slack tokens**
+with a separate settings assertion. Beacon checks each token's user and workspace with `auth.test` and
+its grants with `X-OAuth-Scopes` before saving. The write token is sealed in `write-slack.sealed` under
+the passkey vault key, bound to Slack's origin, user and workspace. The read token goes in `unattended.kdbx`.
+
+Propose with `{ workspace, channel, thread_ts, text }`; use `thread_ts: null` for a top-level post. When Slack
+is configured, intake must verify the workspace and conversation visibility with the read token, or the
+socket refuses the proposal. A verified public channel uses `slack:<channel>:<root ts>` for a reply, or
+`slack:<channel>:<YYYY-MM-DD>` for the proposal's local day for a top-level post. Private channels, DMs and
+group DMs stay on the person's Signal subject. This does not change after intake, and the proposer cannot
+choose the record subject. With no Slack configuration, proposals stay review-only on the person's subject.
+After enabling Slack, resubmit a pending proposal that had no verified intake.
+
+Review rechecks the account, workspace, visibility, archive state, membership and (for a reply) the exact
+thread root. Conversation names and the root's first line are for display only. A failed name lookup shows
+`unknown channel <id>`. The preview has no live links. It flags broadcast and group mentions and opens
+**Exact Slack mrkdwn** by default for special mentions. **Show exact parameters** includes the verbatim
+text and destination IDs. Drafts over 4,000 UTF-16 code units cannot be approved.
+
+After approval and durable start, Beacon repeats the checks with the unsealed write token and makes at
+most one `chat.postMessage` with the frozen text and unfurls off. The start's operation UUID goes in both
+`client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. The provider alone
+enforces permissions at the write. A definite refusal is terminal; a `429` respects `Retry-After` but never
+retries the post. Stopping or cancelling before that post is claimed fails as `stopped` (`pre_dispatch`)
+when the journal can still record, so restart does not treat an unsent draft as a lost reply. A journal
+that had already failed is left unchanged. If appending that stop record fails, shutdown reports the failure.
+
+A lost or unclear reply triggers only read-back with the unattended token. It searches up to four pages of 15
+messages in the approved conversation or thread, from one minute before to at most five minutes after the
+original start. It confirms only one unambiguous match for the UUID, exact text, user, destination and time.
+Missing or conflicting evidence stays `outcome_unknown`. Automatic read-back runs at startup and after a lost
+reply, backing off from 15 to 120 seconds until a minute after the search window ends. **Read again** can
+still search that same window. Intake, review and recovery have separate read budgets and Slack method
+cooldowns; none can resend a post.
 
 ## Unattended vault
 
@@ -80,7 +173,7 @@ An approval that did not start expires at restart or shutdown. A durable start w
 archive ID at the journal API is a lower bound for a new journal, not an import: the Go ID must sort strictly
 after it. Pending proposals survive a restart until their 24-hour deadline. The service sweeps expiries even
 without a browser or socket read, waking waiters after the expiry is durable. Ctrl-C or SIGTERM stops the service,
-closes both listeners and the socket, cancels any fixture delivery, and releases the instance lock.
+closes both listeners and the socket, cancels provider work and any fixture delivery, and releases the instance lock.
 
 An action frame fixes its Signal record sequence and replay nonce. Local markers and cursor changes consume
 no sequence numbers. The ordered sender projects the head of the outbox into Signal's fixed envelope, syncs
@@ -116,12 +209,16 @@ An internal hook for the future supervisor can attribute a connection to a live 
 never the request's agent or context. All CLI preview peers are unattributed. Attribution is pinned
 at connect time; PID reuse is a limit. `get`, `wait` and `withdraw` are scoped to the same run, or to the
 shared unattributed identity. The socket also supports `types`, `propose` (which returns `review_url` from
-the configured origin) and `open` (issues a read-only sign-in code). There is no `quit`, list or approve.
+the configured origin) and `open` (issues a browser sign-in code, not authority to approve). There is no `quit`, list or approve.
 
 Limits from Swift are retained: newline-delimited JSON at most 256 KiB per frame, 32 connections, 16 waits
 of up to 300 seconds, 20 pending and 60 proposals per hour per identity, and 40 pending overall. Hourly
 counters are in memory. Partial frames and idle connections time out. A disconnected waiter frees its slot
-without waiting for a journal change. This slice has no preflight or provider calls to budget.
+without waiting for a journal change. Slack intake has a four-second deadline, with at most two lookups in
+flight, 120 reads per hour overall and 30 per hour per identity. Verified intake identity and user/group names
+can be reused for ten minutes. Provider preflight reads are capped at two batches of reads in flight and 120
+requests per hour, including pages. Final checks have their own budget, and recovery has a separate 60-read
+hourly budget per provider.
 
 ## Browser review
 
@@ -141,10 +238,11 @@ on another port of the same host can receive one if the signed-in browser visits
 all codes and sessions.
 
 Only a signed-in browser sees the pending list and proposal detail. If the journal already holds a
-frozen snapshot for a proposal, its frozen parameters and resolved binding have a separate detail view. The
-preview cannot create one through the CLI or the browser.
-No web request can freeze, approve, decline, dispatch or change settings. POSTs require the canonical
-`Origin` (or `Sec-Fetch-Site: same-origin` if absent), a session and its form CSRF token, and there are
-no POST handlers. The embedded HTML and CSS need no scripts or external resources. Templates escape
+frozen snapshot for a proposal, its frozen parameters and resolved binding have a separate detail view.
+Use **Resolve and review** to freeze a supported proposal, or select up to 10 supported writes on the pending
+page. Approval, token settings and registration require the embedded passkey script. The other pages need
+no scripts or external resources. Apart from passkey registration (which needs the setup code and exact
+origin), POSTs require the canonical `Origin` (or `Sec-Fetch-Site: same-origin` if absent), a session and its
+form CSRF token. The session alone cannot execute a write or save credentials. Templates escape
 proposer content and make invisible formatting visible without changing the stored bytes. Responses are
 not cached or frameable, and the service does not log requests, codes or proposal text.

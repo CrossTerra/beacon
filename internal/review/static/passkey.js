@@ -26,12 +26,16 @@ function run() {
   var button = document.getElementById("ceremony-go");
   if (!el || !form || !button) return;
   var opts = JSON.parse(el.textContent);
+  form.addEventListener("submit", function (event) { event.preventDefault(); });
   button.addEventListener("click", function () {
-    var op = opts.kind === "approve" ? approve(opts) : register(opts);
+    if (!form.reportValidity()) return;
+    button.disabled = true;
+    var op = opts.kind === "assert" ? approve(opts) : register(opts);
     op.then(function (fields) {
       Object.keys(fields).forEach(function (name) { setField(form, name, fields[name]); });
       var params = new URLSearchParams(new FormData(form));
-      fetch(form.getAttribute("action"), {
+      form.reset();
+      return fetch(form.getAttribute("action"), {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": location.origin },
         body: params.toString(),
@@ -40,8 +44,8 @@ function run() {
         document.open();
         document.write(html);
         document.close();
-      }).catch(show);
-    }).catch(show);
+      });
+    }).catch(function (err) { button.disabled = false; show(err); });
   });
 }
 

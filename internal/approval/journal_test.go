@@ -265,6 +265,31 @@ func TestWriteFailureIsNeverAuthority(t *testing.T) {
 	status(t, reopened, p.ID, t0, "outcome_unknown")
 }
 
+func TestFailUnclaimedDistinguishesAFreshWriteFailure(t *testing.T) {
+	dir := scratch(t)
+	fail := false
+	j, err := openJournal(dir, t0, "", journalHooks{newID, nonce, func(f *os.File) error {
+		if fail {
+			return os.ErrInvalid
+		}
+		return syncJournal(f)
+	}})
+	must(t, err)
+	t.Cleanup(func() { j.Close() })
+	p := put(t, j, mergeRequest())
+	must(t, j.Approve(freeze(t, p, ""), t0))
+	_, err = j.Start(p.ID, t0)
+	must(t, err)
+	fail = true
+	stopped := Result{ConfirmedBy: "pre_dispatch", Error: "stopped"}
+	if err := j.FailUnclaimed(p.ID, stopped, t0); !errors.Is(err, ErrJournalIO) {
+		t.Fatalf("fresh sync failure = %v, want journal I/O", err)
+	}
+	if err := j.FailUnclaimed(p.ID, stopped, t0); !errors.Is(err, ErrJournalUnhealthy) {
+		t.Fatalf("later call = %v, want already unhealthy", err)
+	}
+}
+
 func TestPrivateFilesAndInstanceLock(t *testing.T) {
 	dir := scratch(t)
 	j := open(t, dir, t0)

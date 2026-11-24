@@ -33,25 +33,97 @@
 {{end}}
 
 {{define "ceremony"}}
-{{template "head" "Register passkey"}}
-<h1>Register a passkey</h1>
+{{template "head" .Title}}
+<nav><a href="/">Pending proposals</a></nav>
+<h1>{{.Title}}</h1>
+{{if .Cards}}<p>Beacon will act on these exact parameters, in the order shown. It checks the destination again before each write.</p>{{end}}
+{{range .Cards}}
+<section>
+  <h2>{{action .Type}}</h2>
+  <p><code>{{.ID}}</code></p>
+  <dl>
+    <dt>Account</dt><dd><bdi>{{visible .AccountLabel}}</bdi> <code>{{.Account}}</code></dd>
+    <dt>Origin</dt><dd>{{if .Origin}}<code>{{.Origin}}</code>{{else}}Local machine{{end}}</dd>
+    {{if .DestinationLabel}}<dt>Destination</dt><dd><bdi>{{visible .DestinationLabel}}</bdi></dd>{{end}}
+  </dl>
+  {{template "fields" .Facts}}
+  {{if .SlackPreview}}
+  {{template "slack-preview" .SlackPreview}}
+  <details><summary>Show exact parameters</summary>
+    <h3>Bound destination</h3>
+    {{template "fields" .Destination}}
+    <pre><bdi>{{visible .Exact}}</bdi></pre>
+  </details>
+  {{else}}
+  <h3>Bound destination</h3>
+  {{template "fields" .Destination}}
+  <h3>Parameters</h3>
+  {{template "fields" .Fields}}
+  <details><summary>Show exact parameters</summary><pre><bdi>{{visible .Exact}}</bdi></pre></details>
+  {{end}}
+</section>
+{{end}}
+{{if .Target}}
+<p><bdi>{{.Target.Service}}</bdi> · <code>{{.Target.Origin}}</code> · <code>{{.Target.Account}}</code>{{if .Target.Workspace}} · <code>{{.Target.Workspace}}</code>{{end}}</p>
+<p>Use two different tokens for the account above: one limited to reads, and a separate one allowed to write. Beacon checks both accounts before saving either token.</p>
+{{if eq .Target.Service "slack"}}<p>Use Slack User OAuth Tokens (<code>xoxp-…</code>) and only the read scopes for the unattended token. The write token also needs <code>chat:write</code>.</p>{{end}}
+{{end}}
 <noscript><p>Turn scripts on. The passkey API is only reachable from script.</p></noscript>
 <p id="ceremony-error"></p>
 <form id="ceremony-form" method="post" action="{{.Action}}">
+{{if .Target}}
+<p><label>Read token <input type="password" name="read_token" autocomplete="off" required maxlength="2048"></label></p>
+<p><label>Write token <input type="password" name="write_token" autocomplete="off" required maxlength="2048"></label></p>
+{{end}}
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <input type="hidden" name="nonce" value="">
 <input type="hidden" name="credential_id" value="">
 <input type="hidden" name="create_client_data" value="">
 <input type="hidden" name="assert_client_data" value="">
+<input type="hidden" name="client_data_json" value="">
 <input type="hidden" name="attestation_object" value="">
 <input type="hidden" name="prf_enabled" value="">
 <input type="hidden" name="authenticator_data" value="">
 <input type="hidden" name="signature" value="">
 <input type="hidden" name="prf_output" value="">
-<button type="button" id="ceremony-go">Register passkey</button>
+<button type="button" id="ceremony-go">{{.Button}}</button>
 </form>
 <script type="application/json" id="ceremony">{{.JSON}}</script>
 <script src="/static/passkey.js"></script>
+{{template "end"}}
+{{end}}
+
+{{define "settings"}}
+{{template "head" "Provider credentials"}}
+<nav><a href="/">Pending proposals</a></nav>
+<h1>Provider credentials</h1>
+{{if .Saved}}<p>Credentials saved.</p>{{end}}
+<p>Origins and account IDs are set in the service's <code>action-providers.json</code>. This page cannot change them.</p>
+{{range .Targets}}
+<form method="post" action="/settings/begin">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <input type="hidden" name="service" value="{{.Service}}">
+  <p><code>{{.Origin}}</code> · <code>{{.Account}}</code>{{if .Workspace}} · <code>{{.Workspace}}</code>{{end}}</p>
+  <button type="submit">Set {{.Service}} tokens</button>
+</form>
+{{end}}
+{{template "end"}}
+{{end}}
+
+{{define "refused"}}
+{{template "head" "Request refused"}}
+<nav><a href="/">Pending proposals</a></nav>
+<h1>{{.Operation}}</h1>
+<p>Refused: <code>{{visible .Code}}</code>{{if .Detail}} · <bdi>{{visible .Detail}}</bdi>{{end}}.</p>
+{{template "end"}}
+{{end}}
+
+{{define "submitted"}}
+{{template "head" "Approval recorded"}}
+<nav><a href="/">Pending proposals</a></nav>
+<h1>Approval recorded</h1>
+<p>Open a proposal to see its current outcome. Approval does not mean the provider accepted the write.</p>
+<ol>{{range .}}<li><a href="/p/{{.ID}}">{{.ID}}</a></li>{{end}}</ol>
 {{template "end"}}
 {{end}}
 
@@ -66,14 +138,21 @@
 {{define "pending"}}
 {{template "head" "Pending proposals"}}
 <h1>Pending proposals</h1>
-<p>These pages do not dispatch an action. Approval is recorded only after a passkey assertion, and only when an account binding has been resolved. This preview does not resolve an account, so it does not freeze or approve.</p>
+{{if .Settings}}<nav><a href="/settings">Provider credentials</a> · <a href="/passkeys/new">Register passkey</a></nav>{{end}}
+{{if .Live}}<p>Review the resolved destination and exact parameters before approving with a passkey.</p>{{else}}<p>This service has no provider handler configured. It cannot dispatch an action.</p>{{end}}
+{{if .Batch}}<form method="post" action="/freeze"><input type="hidden" name="csrf" value="{{.CSRF}}">{{end}}
 <ol>
-{{range .}}
-  <li><a href="/p/{{.ID}}">{{action .Type}}</a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>
+{{range .Rows}}
+  <li>{{if and .Review (ne .Type "agent.run")}}<label><input type="checkbox" name="id" value="{{.ID}}"> Select</label> · {{end}}<a href="/p/{{.ID}}"><bdi>{{visible (proposalTitle .Proposal)}}</bdi></a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>
 {{else}}
   <li>No pending proposals.</li>
 {{end}}
 </ol>
+{{if .Batch}}<button type="submit">Review selected actions (up to 10)</button></form>{{end}}
+{{if .Unknown}}
+<h2>Unknown outcomes</h2>
+<ul>{{range .Unknown}}<li><a href="/p/{{.ID}}">{{action .Type}} · {{.ID}}</a></li>{{end}}</ul>
+{{end}}
 {{template "end"}}
 {{end}}
 
@@ -83,11 +162,33 @@
 </dl>
 {{end}}
 
+{{define "slack-preview"}}
+<h3>Slack message preview</h3>
+{{if .Special}}<p><strong>Slack special mentions:</strong> broadcasts and user-group mentions can notify other people. Review the exact source.</p>{{end}}
+<pre><bdi>{{visible .Plain}}</bdi></pre>
+{{if or .Special (ne .Plain .Source)}}
+<details{{if .Special}} open{{end}}><summary>Exact Slack mrkdwn</summary><pre><bdi>{{visible .Source}}</bdi></pre></details>
+{{end}}
+{{end}}
+
 {{define "proposal"}}
 {{template "head" (action .Type)}}
 <nav><a href="/">Pending proposals</a></nav>
-<h1>{{action .Type}}</h1>
+<h1><bdi>{{visible (proposalTitle .Proposal)}}</bdi></h1>
 <p><code>{{.ID}}</code> · {{visible .Status}} (version {{.Version}})</p>
+{{with .Outcome}}
+<p>Confirmed by <code>{{.ConfirmedBy}}</code>{{if .Error}} · <code>{{.Error}}</code>{{end}}{{if .Native}} · <code>{{.Native}}</code>{{end}}.</p>
+{{if .Text}}<p><bdi>{{visible .Text}}</bdi></p>{{end}}
+{{if .Evidence}}<p><bdi>{{visible .Evidence}}</bdi></p>{{end}}
+{{end}}
+{{if eq .Status "outcome_unknown"}}<p>The provider may have acted. Beacon will not resend the write.</p>{{end}}
+{{if .ReadBack}}
+<form method="post" action="/read-back">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="id" value="{{.ID}}">
+  <button type="submit">Read again</button>
+</form>
+{{end}}
 {{if .ShowFrozen}}
   <h2>Recorded frozen snapshot</h2>
   <p>This snapshot was recorded at proposal version {{.Frozen.Version}}. This is not an approval control.</p>
@@ -105,6 +206,8 @@
   <p>Proposed {{shownTime .ProposedAt}}; expires {{shownTime .ExpiresAt}}.</p>
   {{if .Frozen}}
     <p><a href="/p/{{.ID}}/frozen">View recorded frozen snapshot</a></p>
+  {{else if .Slack}}
+    <p>Beacon verified this Slack destination at intake and will check it again before approval.</p>
   {{else}}
     <p>These are the proposer's parameters. Beacon has not checked an account or resolved the destination.</p>
   {{end}}
@@ -121,10 +224,19 @@
   <pre><bdi>{{visible .Reason}}</bdi></pre>
 {{end}}
 <h2>Parameters</h2>
+{{if .SlackPreview}}{{template "slack-preview" .SlackPreview}}{{else}}
 {{template "fields" .Fields}}
+{{end}}
 <details>
   <summary>Show exact parameters</summary>
   <pre><bdi>{{visible .Exact}}</bdi></pre>
 </details>
+{{if .Review}}
+<form method="post" action="/freeze">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="id" value="{{.ID}}">
+  <button type="submit">Resolve and review</button>
+</form>
+{{end}}
 {{template "end"}}
 {{end}}

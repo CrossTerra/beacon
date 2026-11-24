@@ -348,6 +348,7 @@ beacon act --state-dir DIR wait ID [--after VERSION] [--timeout SECONDS]
 beacon act --state-dir DIR withdraw ID
 beacon open --state-dir DIR
 beacon setup --state-dir DIR [--reset-passkeys]
+beacon egress --state-dir DIR
 ```
 
 `serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
@@ -358,17 +359,21 @@ that proxy. Use localhost when you do not have one.
 
 `act` requires `--state-dir DIR` **before** the operation to select the Go socket. It uses the same request
 shape and adds `review_url` to `propose` replies. Go `act` has no `quit`, and a failed Go connection never
-tries the signed route. `open` prints (but does not launch) a two-minute, one-use link for a read-only browser
-session. Open it privately, then follow the `review_url` or use the pending list. Restart clears all sign-in
+tries the signed route. `open` prints (but does not launch) a two-minute, one-use link for a browser
+session. Open it privately, then follow the `review_url` or use the pending list. The link cannot approve a write.
+Restart clears all sign-in
 codes and sessions, not unexpired proposals.
 
 `setup` prints a 10-minute, one-use passkey code. It refuses while `serve` holds the directory. The code is
 not stored. With `serve` running, open `/passkeys/new` and enter the code. `--reset-passkeys` records a
 passkey reset and removes the passkey list and write vault; the service must be stopped. See [Go approvals](go-approvals.md#passkey-setup).
 
-All three action types are review-only here. Use synthetic proposals: their parameters and reasons remain
-in the local journal as plaintext. There is no keychain access or live Signal delivery, and no way to approve,
-post, merge or run a job through this preview. See [Go approvals](go-approvals.md) for the trust boundary.
+The default is review-only. To enable [GitHub merges](go-approvals.md#provider-credentials-and-github) or
+[Slack posts](go-approvals.md#slack-posts), configure `action-providers.json` and save separate read and
+write credentials through **Provider credentials** with a passkey. `egress --state-dir DIR` lists the
+configured GitHub API origin and/or `slack.com:443`; it does not read credentials or collector config.
+Proposal parameters and reasons remain plaintext in the private journal. There is no login keychain access,
+live Signal delivery or runner launch.
 
 ## `beacon keychain list`
 
