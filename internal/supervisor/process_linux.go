@@ -135,4 +135,11 @@ func siginfoPID(info *unix.Siginfo) int32 {
 	return int32(binary.NativeEndian.Uint32(b[off : off+4]))
 }
 
+func processGone(pid int, birth uint64) bool {
+	if p, ok := lookupProcess(pid); ok {
+		return p.zombie || p.birth != birth
+	}
+	return confirmedExit(pid)
+}
+
 func deviceBits(st unix.Stat_t) uint64 { return st.Dev }

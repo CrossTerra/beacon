@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,32 @@ func TestSessionBoundToDirectoryAndLock(t *testing.T) {
 	}
 	if again, err := oldSession(dir, lock); err != nil || again != prefix {
 		t.Fatalf("original session changed after the copy was refused: %q %v", again, err)
+	}
+}
+
+func TestSessionRejectsTrailingAndOversizeToken(t *testing.T) {
+	dir := t.TempDir()
+	lock := testLock(t, dir)
+	if _, err := newSession(dir, lock); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, sessionFile)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append([]byte{}, body...), '}'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldSession(dir, lock); !errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("trailing delimiter was accepted: %v", err)
+	}
+	over := `{"token":"` + strings.Repeat("ab", 40) + `","lock_dev":1,"lock_ino":1,"dir_dev":1,"dir_ino":1}`
+	if err := os.WriteFile(path, []byte(over), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldSession(dir, lock); !errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("oversize token was accepted: %v", err)
 	}
 }
 

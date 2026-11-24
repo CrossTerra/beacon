@@ -83,26 +83,22 @@ func runSupervisionFixture(role, dir string, args []string) error {
 	case "collector":
 		ctx, stop := signal.NotifyContext(context.Background(), unix.SIGTERM)
 		defer stop()
-		if os.Getenv("BEACON_FIXTURE_PARENT_ONLY") != "" || os.Getenv("HOME") != dir || os.Getenv("BEACON_SUPERVISOR") == "" {
+		if os.Getenv("BEACON_FIXTURE_PARENT_ONLY") != "" || os.Getenv("HOME") != dir || os.Getenv("BEACON_SUPERVISOR") == "" || os.Getenv("BEACON_TETHERED") != "1" {
 			return errors.New("wrong collector environment")
 		}
 		fmt.Println("Items: 0 send")
 		if err := fixturePID(dir, role); err != nil {
 			return err
 		}
-		// The reaper owns the only writer. EOF means it died; TERM is the graceful stop.
-		eof := make(chan struct{})
+		// Same guard as main: BEACON_TETHERED=1, and EOF on stdin means the reaper died.
 		go func() {
-			var b [1]byte
-			_, _ = os.Stdin.Read(b[:])
-			close(eof)
+			var unexpected [1]byte
+			_, _ = os.Stdin.Read(unexpected[:])
+			_ = fixtureWrite(dir, "collector-eof", "EOF")
+			os.Exit(1)
 		}()
-		select {
-		case <-ctx.Done():
-			return fixtureWrite(dir, "collector-term", "TERM")
-		case <-eof:
-			return fixtureWrite(dir, "collector-eof", "EOF")
-		}
+		<-ctx.Done()
+		return fixtureWrite(dir, "collector-term", "TERM")
 	case "watch", "leaky-watch":
 		p := filepath.Join(dir, "watch-first.pid")
 		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
@@ -219,7 +215,7 @@ func supervisionService(dir, state, mode string) error {
 		return err
 	}
 	collector := fixtureCommand("collector", dir)
-	collector.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "LANG=C"}
+	collector.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "LANG=C", "BEACON_TETHERED=1"}
 	collector.Stdout = filepath.Join(dir, "collector.log")
 	watch := "watch"
 	if mode == "leaky-watch" {

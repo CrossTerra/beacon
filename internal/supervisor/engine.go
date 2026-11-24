@@ -41,8 +41,7 @@ type job struct {
 	failure       string
 	killAt        time.Time // nonzero means cleaning
 	termGroup     bool
-	exitSeen      bool // leader exit observed; the next census may release the group
-	holdRelease   bool
+	exitSeen      bool // a previous census confirmed the leader had exited
 	reported      bool
 	life          *os.File // fixed-job stdin writer; closed when the reaper releases the job
 	execStatus    *os.File
@@ -155,7 +154,10 @@ func (e *engine) attribute(pid int) (string, error) {
 		if !ok {
 			return "", errUnreadablePeer
 		}
-		if p.zombie || pid == os.Getpid() {
+		if p.zombie {
+			return "", errUnreadablePeer // a dead peer is not the unattributed identity
+		}
+		if pid == os.Getpid() {
 			return "", nil
 		}
 		if j := e.group(p); j != nil {
@@ -189,11 +191,15 @@ func (e *engine) group(p process) *job {
 func (e *engine) track(table processTable, sweep bool) {
 	for pid, m := range e.tracked {
 		p, ok := table[pid]
-		if !ok || p.zombie || p.birth != m.proc.birth {
-			delete(e.tracked, pid)
-		} else {
+		if ok && !p.zombie && p.birth == m.proc.birth {
 			m.proc = p
 			e.tracked[pid] = m
+			continue
+		}
+		// A failed /proc status read omits a live process. Keep the last identity until
+		// death or reuse is confirmed; an unconfirmed member blocks cleanup until the deadline.
+		if processGone(pid, m.proc.birth) {
+			delete(e.tracked, pid)
 		}
 	}
 	for pid, p := range table {
@@ -319,18 +325,18 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 		}
 		return false, nil // not an empty snapshot; no confirmation and no new starts
 	}
+	confirmed := make(map[int]bool, len(e.jobs))
 	for _, j := range e.jobs {
+		confirmed[j.pid] = j.exitSeen
 		if !leaderDead(j.pid, table) {
 			if j.killAt.IsZero() {
 				j.exitSeen = false
 			}
 			continue
 		}
-		if !j.exitSeen {
-			// The child that the exiting leader just forked may not be in this census yet.
-			j.exitSeen = true
-			j.holdRelease = true
-		}
+		// Remember the exit for the next census. Reaping in this one can miss the child
+		// the leader forked as it exited, or reap an exit that happened after waitid.
+		j.exitSeen = true
 		if j.killAt.IsZero() {
 			j.stop(now, e.timing, "")
 		}
@@ -343,9 +349,8 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 			continue
 		}
 		if j.live == 0 {
-			if j.holdRelease {
-				j.holdRelease = false
-				continue
+			if !confirmed[j.pid] {
+				continue // this census has not yet confirmed the exit
 			}
 			var status unix.WaitStatus
 			if pid, err := unix.Wait4(j.pid, &status, unix.WNOHANG, nil); err == nil && pid == j.pid {
@@ -418,8 +423,11 @@ func (e *engine) reportExpired(now time.Time) bool {
 		if j.failure == "" {
 			j.failure = codeRecovery
 		}
-		if e.emit != nil {
-			_ = e.emit(message{Finished: j.ticket, Error: j.failure})
+		if e.emit == nil {
+			continue
+		}
+		if err := e.emit(message{Finished: j.ticket, Error: j.failure}); err != nil {
+			e.emit = nil // one failed reply write; do not keep notifying on a dead pipe
 		}
 	}
 	return gaveUp
@@ -501,15 +509,27 @@ func (e *engine) drain(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	empty := 0
 	for {
+		if e.reportExpired(time.Now()) {
+			gaveUp = true
+		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {
 			return ErrUnconfirmed
 		}
-		if fresh, _ := e.refresh(true); fresh && len(e.jobs) == 0 && e.orphans.live == 0 {
-			if gaveUp {
-				return ErrUnconfirmed
+		// One empty census can miss a child that has not appeared yet. Replace the session
+		// only after a second fresh census is also empty. Any expiry keeps the marker.
+		fresh, _ := e.refresh(true)
+		if fresh && len(e.jobs) == 0 && e.orphans.live == 0 {
+			empty++
+			if empty >= 2 {
+				if gaveUp {
+					return ErrUnconfirmed
+				}
+				return nil
 			}
-			return nil
+		} else {
+			empty = 0
 		}
 		select {
 		case <-ctx.Done():

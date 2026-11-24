@@ -96,4 +96,9 @@ func leaderDead(pid int, table processTable) bool {
 	return !ok || p.zombie
 }
 
+func processGone(pid int, birth uint64) bool {
+	p, ok := lookupProcess(pid)
+	return !ok || p.zombie || p.birth != birth
+}
+
 func deviceBits(st unix.Stat_t) uint64 { return uint64(uint32(st.Dev)) }

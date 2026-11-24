@@ -15,12 +15,14 @@ watches or run handler. It reads no collector config or credentials. The signed 
    and inode of that state directory and of `instance.lock`, not PIDs. A copy of the directory has a different
    lock, so it is not a session this process may sweep: startup stops rather than signaling the original jobs.
    An unreadable, malformed, unbound or unresolved session prevents startup. The sweep runs to its own TERM
-   and KILL deadlines even if the recovering service dies; the reaper checks that the service is still alive
-   before publishing a new session. The new session ID is synced and published before any jobs start. Neither
-   this sweep nor journal replay restarts a prior approval.
+   and KILL deadlines even if the recovering service dies. It replaces the session only after two fresh
+   censuses find nothing, and keeps the marker if any run expires during the drain. The reaper checks that
+   the service is still alive before publishing a new session. The new session ID is synced and published
+   before any jobs start. Neither this sweep nor journal replay restarts a prior approval.
 3. Each job is its own process group, with no inherited service environment. It receives the job's explicit
    environment plus `BEACON_SUPERVISOR=<session>:<job>`. A fixed job's standard input is a pipe whose only
-   writer is the reaper, as C tether does for the collector. That writer closes if the reaper dies, so a
+   writer is the reaper, as C tether does for the collector. The collector command sets `BEACON_TETHERED=1`
+   and exits on stdin EOF, the same guard as `beacon run`. That writer closes if the reaper dies, so a
    tethered collector exits on EOF instead of surviving the reaper or exiting at once on `/dev/null`.
    `Command.Stdin` is not used for a fixed job. A failed collector or watch restarts after its entire tree
    is gone, with 1, 2, 4, 8, 16, then at most 30 seconds between attempts. Clean exits and runs do not
@@ -43,7 +45,9 @@ descendants of tracked processes are tracked by PID and start time, even after t
 checks for the session's exact marker, including processes that detached and became orphaned before a scan.
 Linux reads `/proc/PID/stat` and `/proc/PID/environ`, and the process UID from `/proc/PID/status`, so a
 non-dumpable process of this user is not dropped because `stat` is root-owned. A missing table entry is not
-leader death: exit is confirmed with `waitid` `WNOWAIT`, which does not reap. macOS uses `kern.proc` and
+leader death: exit is confirmed with `waitid` `WNOWAIT`, which does not reap. An already-tracked process
+that disappears from the table stays pending until death or PID reuse is confirmed; otherwise cleanup fails
+at its deadline. The reaper does not reap a leader until a previous census confirmed the exit. macOS uses `kern.proc` and
 `KERN_PROCARGS2`, without cgo. Only a matching marker is retained from those environment queries. There is
 no new network egress.
 
@@ -58,8 +62,9 @@ definitions; this part changes neither the installer nor the currently installed
 Trusted service code uses `Supervisor.PrepareRun` with an approved run ID and explicit command. The reaper
 installs the process group and its ownership before returning `Run.PGID()`. A trusted bootstrap waits for a
 permit on a private pipe: it has not loaded the target executable or received its environment. The handler
-can durably record start before calling `Run.Release()`. Release waits for the bootstrap's exec. A failed
-exec is reported on a close-on-exec status pipe as a launch error, not as a successful start followed by
+can durably record start before calling `Run.Release()`. Release waits for the bootstrap's exec. The
+permit write and the exec-status read share one deadline, inside the caller's timeout. A failed exec is
+reported on a close-on-exec status pipe as a launch error, not as a successful start followed by
 exit 126. EOF, shutdown, `Run.Stop()` or five seconds without release cancels a prepared launch without
 executing the target. `Run.Wait` returns the leader's exit code (128 plus signal when signaled) after the
 tree is gone, or a cleanup/launch error. There is no retry.
@@ -71,7 +76,7 @@ records and construction of the command and environment. Do not pass Beacon cred
 
 The proposal socket resolves the kernel peer PID once, at connect time. Group membership or tracked ancestry
 can identify a run; an environment marker alone cannot. An empty run ID means the peer was read and is not
-in a supervised group. An unreadable or vanished peer is rejected, not treated as that empty result. If the
+in a supervised group. An unreadable, vanished or zombie peer is rejected, not treated as that empty result. If the
 reaper is unavailable, the socket rejects the connection rather than letting the peer fall back to the
 unattributed identity.
 

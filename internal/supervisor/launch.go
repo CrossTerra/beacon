@@ -198,8 +198,9 @@ func closeLife(f *os.File) {
 func (j *job) closeGate() {
 	if j.gate != nil {
 		j.gate.Close()
-		j.gate, j.payload = nil, nil
+		j.gate = nil
 	}
+	j.payload = nil
 	if j.execStatus != nil {
 		j.execStatus.Close()
 		j.execStatus = nil
@@ -211,7 +212,13 @@ func (j *job) release(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return ErrStopped
 	}
-	if err := j.gate.SetWriteDeadline(time.Now().Add(wireTimeout)); err != nil {
+	// One deadline for the permit and the exec result. The service waits wireTimeout+poll,
+	// so finishing inside wireTimeout leaves a poll of slack. A caller deadline is tighter.
+	deadline := releaseDeadline(ctx, time.Now())
+	if !time.Now().Before(deadline) {
+		return ErrLaunch
+	}
+	if err := j.gate.SetWriteDeadline(deadline); err != nil {
 		return ErrLaunch
 	}
 	// An interrupted write cannot be confused with a complete permit. The bootstrap requires
@@ -223,17 +230,28 @@ func (j *job) release(ctx context.Context) error {
 		return ErrLaunch
 	}
 	// The bootstrap reads until EOF. Close the permit before waiting for exec, or it
-	// never reaches the status pipe.
+	// never reaches the status pipe. Drop the permit bytes either way.
 	j.gate.Close()
 	j.gate = nil
-	return j.execResult()
+	j.payload = nil
+	return j.execResult(deadline)
 }
 
-func (j *job) execResult() error {
-	if j.execStatus == nil {
+func releaseDeadline(ctx context.Context, now time.Time) time.Time {
+	deadline := now.Add(wireTimeout)
+	if d, ok := ctx.Deadline(); ok {
+		if earlier := d.Add(-poll); earlier.Before(deadline) {
+			deadline = earlier
+		}
+	}
+	return deadline
+}
+
+func (j *job) execResult(deadline time.Time) error {
+	if j.execStatus == nil || !time.Now().Before(deadline) {
 		return ErrLaunch
 	}
-	if err := j.execStatus.SetReadDeadline(time.Now().Add(wireTimeout)); err != nil {
+	if err := j.execStatus.SetReadDeadline(deadline); err != nil {
 		return ErrLaunch
 	}
 	var buf [4]byte

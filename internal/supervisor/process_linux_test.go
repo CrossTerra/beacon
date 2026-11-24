@@ -3,6 +3,7 @@
 package supervisor
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -65,6 +66,38 @@ func TestMissingTableEntryDoesNotKillLiveChild(t *testing.T) {
 	}
 	if len(signals) != 0 || !e.jobs[p.Pid].killAt.IsZero() {
 		t.Fatalf("lookup failure stopped a live child: signals=%v killAt=%v", signals, e.jobs[p.Pid].killAt)
+	}
+}
+
+func TestUnreadableTrackedProcessStaysPending(t *testing.T) {
+	p, err := os.StartProcess("/bin/sleep", []string{"sleep", "30"}, &os.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Kill(p.Pid, unix.SIGKILL)
+		var status unix.WaitStatus
+		_, _ = unix.Wait4(p.Pid, &status, 0, nil)
+	})
+	live, ok := lookupProcess(p.Pid)
+	if !ok {
+		t.Fatal("could not read the child")
+	}
+	e := newEngine("", sessionPrefix("fixture"), timing{grace: time.Second, killWait: time.Millisecond}, nil)
+	e.signal = func(int, unix.Signal) {}
+	e.list = func() (processTable, error) { return processTable{}, nil }
+	leader := 1_000_000_200
+	e.jobs[leader] = &job{pid: leader, tag: 1, killAt: time.Now()}
+	e.tracked[p.Pid] = member{proc: live, job: e.jobs[leader]}
+	if _, err := e.refresh(false); err != nil {
+		t.Fatal(err)
+	}
+	if e.tracked[p.Pid].job == nil {
+		t.Fatal("dropped a tracked process omitted from the table")
+	}
+	e.jobs[leader].killAt = time.Now().Add(-time.Hour)
+	if _, err := e.refresh(false); !errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("unconfirmed member did not fail at the deadline: %v", err)
 	}
 }
 

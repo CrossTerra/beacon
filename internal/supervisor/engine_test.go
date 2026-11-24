@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"slices"
 	"testing"
 	"time"
@@ -93,6 +94,76 @@ func TestDrainReportsExpiredRunImmediately(t *testing.T) {
 	}
 }
 
+func TestSweepRequiresTwoEmptyCensuses(t *testing.T) {
+	var n int
+	e := newEngine("", sessionPrefix("fixture"), timing{grace: time.Second, killWait: time.Second}, nil)
+	e.signal = func(int, unix.Signal) {}
+	e.list = func() (processTable, error) {
+		n++
+		return processTable{}, nil
+	}
+	if err := e.drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n < 2 {
+		t.Fatalf("confirmed cleanup after %d empty census", n)
+	}
+}
+
+func TestDrainKeepsMarkerWhenRunExpiresMidSweep(t *testing.T) {
+	const pid = 1_000_000_009
+	var reported []message
+	e := newEngine("", sessionPrefix("fixture"), timing{grace: time.Second, killWait: 20 * time.Millisecond}, func(m message) error {
+		reported = append(reported, m)
+		return nil
+	})
+	e.signal = func(int, unix.Signal) {}
+	start := time.Now()
+	e.jobs[pid] = &job{pid: pid, tag: 1, ticket: 9, killAt: start.Add(40 * time.Millisecond)}
+	e.runs[9] = e.jobs[pid]
+	e.list = func() (processTable, error) {
+		if time.Since(start) < 250*time.Millisecond {
+			return processTable{pid: {pid: pid, group: pid}}, nil
+		}
+		return processTable{}, nil
+	}
+	if err := e.drain(context.Background()); !errors.Is(err, ErrUnconfirmed) {
+		t.Fatalf("cleared the marker after a run expired during drain: %v", err)
+	}
+	if len(reported) != 1 || reported[0].Finished != 9 || reported[0].Error != codeRecovery {
+		t.Fatalf("expiry during drain: %+v", reported)
+	}
+}
+
+func TestExpiryStopsAfterReplyFailure(t *testing.T) {
+	var n int
+	e := newEngine("", sessionPrefix("fixture"), timing{grace: time.Second, killWait: time.Millisecond}, func(message) error {
+		n++
+		return errors.New("reply pipe")
+	})
+	past := time.Now().Add(-time.Hour)
+	for _, ticket := range []uint64{1, 2} {
+		pid := int(ticket) + 1_000_000_100
+		e.jobs[pid] = &job{pid: pid, tag: ticket, ticket: ticket, killAt: past}
+	}
+	if !e.reportExpired(time.Now()) || n != 1 || e.emit != nil {
+		t.Fatalf("kept notifying after a reply failure: n=%d emit=%v", n, e.emit != nil)
+	}
+}
+
+func TestReleaseDeadlineLeavesCallerSlack(t *testing.T) {
+	now := time.Now()
+	if got := releaseDeadline(context.Background(), now); !got.Equal(now.Add(wireTimeout)) {
+		t.Fatalf("default deadline: %s", got.Sub(now))
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(50*time.Millisecond))
+	defer cancel()
+	got := releaseDeadline(ctx, now)
+	if !got.Before(now.Add(50*time.Millisecond)) || got.After(now.Add(50*time.Millisecond-poll)) {
+		t.Fatalf("deadline did not leave a poll of slack: %s", got.Sub(now))
+	}
+}
+
 func TestLeaderExitWaitsForFreshCensus(t *testing.T) {
 	const leader, child = 1_000_000_003, 1_000_000_004
 	var census int
@@ -135,6 +206,31 @@ func TestAttributeRejectsUnreadablePeer(t *testing.T) {
 	if id, err := e.attribute(1 << 30); err == nil || id != "" {
 		t.Fatalf("vanished pid was accepted: %q %v", id, err)
 	}
+}
+
+func TestAttributeRejectsZombie(t *testing.T) {
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := os.StartProcess(truePath, []string{"true"}, &os.ProcAttr{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var status unix.WaitStatus
+		_, _ = unix.Wait4(p.Pid, &status, 0, nil)
+	})
+	e := newEngine("", sessionPrefix("fixture"), timing{}, nil)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		id, err := e.attribute(p.Pid)
+		if err != nil && id == "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("zombie or exited peer was accepted as unattributed")
 }
 
 func TestMarkerMatchesOnlyTheSessionAndEntry(t *testing.T) {

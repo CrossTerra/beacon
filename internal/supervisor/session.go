@@ -42,16 +42,24 @@ func oldSession(dir string, lock *os.File) (string, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var rec sessionRecord
-	if dec.Decode(&rec) != nil || dec.More() || !sessionToken(rec.Token) || rec.matches(dir, lock) != nil {
+	if dec.Decode(&rec) != nil || !sessionToken(rec.Token) || rec.matches(dir, lock) != nil {
+		return "", ErrUnconfirmed
+	}
+	if _, err := dec.Token(); err != io.EOF { // stray delimiter or a second value
 		return "", ErrUnconfirmed
 	}
 	return sessionPrefix(rec.Token), nil
 }
 
 func sessionToken(token string) bool {
+	if len(token) != 32 {
+		return false
+	}
 	var raw [16]byte
-	n, err := hex.Decode(raw[:], []byte(token))
-	return n == len(raw) && err == nil && hex.EncodeToString(raw[:]) == token
+	if _, err := hex.Decode(raw[:], []byte(token)); err != nil {
+		return false
+	}
+	return hex.EncodeToString(raw[:]) == token
 }
 
 func sessionPrefix(token string) string { return markerKey + "=" + token + ":" }
