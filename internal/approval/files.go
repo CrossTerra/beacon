@@ -56,6 +56,41 @@ func OpenPrivate(path string, flags int) (*os.File, error) {
 	return f, nil
 }
 
+// WritePrivate replaces an owner-only data file by rename and flushes the containing directory.
+// Callers serialize writers. It doesn't accept an existing symlink, special file or wider permissions.
+func WritePrivate(path string, body []byte) error {
+	if _, err := CheckPrivate(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".write-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := errors.Join(syncJournal(f), f.Close()); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return FlushDirectory(dir)
+}
+
+func FlushDirectory(dir string) error {
+	parent, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	_, err = syncParent(parent)
+	return err
+}
+
 // heldLocks records instance locks this process already owns. A second flock in this process fails, so
 // in-process registration must notice the journal's lock instead of taking another.
 var heldLocks sync.Map
