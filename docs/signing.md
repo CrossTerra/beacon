@@ -26,15 +26,30 @@ It:
    `identifier "dev.beacon.cli" and certificate leaf = H"<SHA-1>"`. `codesign` may ask once to use the identity's
    private key; choose **Always Allow**;
 4. verifies each signature against its requirement, before and after installing;
-5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It runs
-   `act quit` with the CLI inside the installed `~/Applications/Beacon.app`, not the staged replacement. The running
-   app admits that binary even when it cannot classify the caller as external; a caller it refuses gets
-   `{"error":"invalid","field":"/op"}`, and a signature it does not admit is disconnected with no reply. The
-   installer prints that reply. If the app does not exit, it sends SIGTERM to the pid whose executable is exactly
-   `Beacon.app/Contents/MacOS/Beacon`, then `osascript` quits `dev.beacon.app` by bundle id. macOS may ask once for
-   Automation permission. Each step gets 30 seconds. It reports which one worked, or why each failed, and stops
-   without replacing the app if it is still running. It then replaces `~/Applications/Beacon.app`, moving the old
-   copy aside first and back if the move fails;
+5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It asks
+   the CLI inside the installed `~/Applications/Beacon.app`, after `codesign --verify` shows it is `dev.beacon.cli`
+   signed by this install's certificate. It never runs the staged helper. The running app's socket admits only the
+   CLI requirement it stored at launch, and a newly signed helper cannot change that check.
+
+   **Same certificate.** The installed CLI meets the running app's requirement. An app that already has this quit
+   rule admits that binary even when the caller is not external, and prints the reply (`{"status":"quitting"}` or
+   `{"error":"invalid","field":"/op"}`). An older app still has the external-caller rule, so the same CLI can be
+   refused with `invalid /op`. The installer prints that reply. It then sends SIGTERM only to a pid it has just
+   checked still executes that bundle's binary (device and inode, so a symlink or a relative launch still matches,
+   and a reused pid is not signalled). If exactly one process has bundle id `dev.beacon.app`, it sends one Quit
+   Apple event to that id; macOS may ask once for Automation permission. Two copies make that event ambiguous, so
+   it is skipped and the message says so. Socket, signal and Apple event share one 30-second deadline. A failed
+   process listing is not treated as the app having exited, and the listing is repeated immediately before the old
+   bundle is moved. If Beacon is still running, the install stops and the new bundle is not put in its place.
+
+   **A different certificate.** The staged helper is signed by the new certificate. The running app's stored
+   requirement names the old one. The installer does not run that helper; nothing it could say would make the old
+   app admit it. It runs the installed CLI, which the old app can admit, and otherwise uses the signal and Apple
+   event above. After the new app launches it admits the new CLI. `act.json` still names the previous app
+   requirement, so a certificate change still needs that file removed before the new build will listen
+   ([changing the certificate](#changing-the-certificate)).
+
+   It then replaces `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;
 6. points `~/.local/bin/beacon` at the app's CLI, so `beacon` and `beacon act` on your PATH are the app's. A plain
    file there from an older install is kept as `beacon.pre-app`;
 7. removes the old collector LaunchAgent (`dev.beacon.agent`) if it is installed, with `beacon service uninstall`:

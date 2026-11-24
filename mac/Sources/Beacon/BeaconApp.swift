@@ -2,6 +2,30 @@ import AppKit
 import BeaconCore
 import SwiftUI
 
+/// `NSApp.terminate` from a main-queue callback nests `.terminateLater` inside that callback. The main queue is
+/// serial, so tether's acknowledgement and the quit timeout never run: the app has answered quit and does not exit.
+/// Ask the run loop, and deliver the timeout the same way. `scripts/test-quit-deadlock.sh` reproduces both shapes.
+enum AppTermination {
+    static func request() {
+        RunLoop.main.perform(inModes: [.default, .common, .modalPanel]) {
+            MainActor.assumeIsolated { NSApp.terminate(nil) }
+        }
+    }
+
+    static func schedule(after delay: TimeInterval, _ body: @escaping @MainActor () -> Void) -> DispatchSourceTimer {
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + delay)
+        timer.setEventHandler {
+            timer.cancel()
+            RunLoop.main.perform(inModes: [.default, .common, .modalPanel]) {
+                MainActor.assumeIsolated(body)
+            }
+        }
+        timer.activate()
+        return timer
+    }
+}
+
 @main
 struct BeaconApp: App {
     @NSApplicationDelegateAdaptor(BeaconDelegate.self) private var delegate
@@ -96,6 +120,7 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var collectorHeldBack = false
     private var countTimer: Timer?
     private var terminate: (any DispatchSourceSignal)?
+    private var quitTimeout: DispatchSourceTimer?
 
     private lazy var approvalsWindow: NSWindow = {
         let window = NSWindow(contentViewController: NSHostingController(rootView: ApprovalsView(service: approvals) { [weak self] in
@@ -114,7 +139,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         // approvals without a start expire, instead of the process just ending.
         signal(SIGTERM, SIG_IGN)
         let terminate = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-        terminate.setEventHandler { NSApp.terminate(nil) }
+        // Not NSApp.terminate here: that nests .terminateLater inside this callback, and the main queue then
+        // never runs tether's acknowledgement or the quit timeout.
+        terminate.setEventHandler { AppTermination.request() }
         terminate.activate()
         self.terminate = terminate
         // The journal's recovery expires every earlier approval without a start before anything is shown.
@@ -198,6 +225,8 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     private func finishServices() {
+        quitTimeout?.cancel()
+        quitTimeout = nil
         services = nil
         if awaitingQuit {
             awaitingQuit = false
@@ -225,8 +254,9 @@ final class BeaconDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         awaitingQuit = true
         servicesStatus = "Stopping services…"
         services.stop()
-        // Quit never hangs: tether gives up on its own, and this covers a helper that stops responding.
-        DispatchQueue.main.asyncAfter(deadline: .now() + TetherSession.stopTimeout) { [weak self] in
+        // Not DispatchQueue.main: .terminateLater's modal loop does not drain that queue when terminate was
+        // entered from a main-queue callback. This timer runs off the main queue and replies on the run loop.
+        quitTimeout = AppTermination.schedule(after: TetherSession.stopTimeout) { [weak self] in
             guard let self, self.awaitingQuit else { return }
             self.servicesStatus = "Services stopped without confirmation"
             self.finishServices()

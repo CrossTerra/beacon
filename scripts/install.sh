@@ -149,14 +149,28 @@ new="$apps/.Beacon.app.new.$$"
 /usr/bin/ditto "$bundle" "$new"
 verify "$new"
 
-if [[ "$dry_run" != true && -n "$(beacon_pids)" ]]; then
-	# The installed CLI, then SIGTERM to that bundle's executable, then a Quit Apple event. The reply is printed.
-	say "Quitting the running Beacon…"
-	if ! how=$(quit_beacon "$app" 30); then
+if [[ "$dry_run" != true ]]; then
+	# $app is explicit: an inherited BEACON_APP_PATH must not hide this app, and a failed listing is not "not running".
+	if ! running=$(beacon_pids "$app"); then
+		echo "Could not inspect $app. Nothing was replaced." >&2
+		exit 1
+	fi
+	if [[ -n "$running" ]]; then
+		say "Quitting the running Beacon…"
+		if ! how=$(quit_beacon "$app" 30 dev.beacon.app "$cert"); then
+			echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
+			exit 1
+		fi
+		step "Quit the running Beacon ($how)"
+	fi
+	if ! running=$(beacon_pids "$app"); then
+		echo "Could not confirm $app had quit. Nothing was replaced." >&2
+		exit 1
+	fi
+	if [[ -n "$running" ]]; then
 		echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
 		exit 1
 	fi
-	step "Quit the running Beacon ($how)"
 fi
 old=
 if [[ -e "$app" || -L "$app" ]]; then
