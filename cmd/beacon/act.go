@@ -18,7 +18,6 @@ import (
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/peer"
-	"golang.org/x/sys/unix"
 )
 
 const actUsage = `usage: beacon act types
@@ -230,19 +229,4 @@ func actCall(ctx context.Context, settings actSettings, frame []byte, timeout ti
 		return nil, errors.New("the app closed the connection without a reply")
 	}
 	return bytes.TrimSuffix(line, []byte("\n")), nil
-}
-
-func listenerPID(conn *net.UnixConn) (int, error) {
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		return 0, err
-	}
-	var pid int
-	var opErr error
-	if err := raw.Control(func(fd uintptr) {
-		pid, opErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
-	}); err != nil {
-		return 0, err
-	}
-	return pid, opErr
 }
