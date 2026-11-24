@@ -16,11 +16,12 @@ The output is not written. A second passkey is refused until a later assertion-g
 `/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
 takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
 The first registration checks the reset position and absence of an active enrollment under the live journal
-lock. It writes `write-vault.json`, a key-check sealed under the new data key, and commits the SHA-256 of
-those bytes on the `passkey_added` frame without reopening the path. The service reads the vault once per assertion: the
-bytes it hashes against the live journal's enrollment are the bytes it decrypts. A later reset clears
-that enrollment, ordered by journal position, not the clock. It records an active enrollment's hash
-mismatch as `passkeys_reset` (`vault_mismatch`). The page then says to stop
+lock. It writes `passkeys.json` and `write-vault.json` (a key-check sealed under the new data key) and commits
+the vault's SHA-256 on the `passkey_added` frame without reopening the path. The pending ceremony is removed
+after that commit; if publishing the files fails, it can be retried before it expires. The service reads the
+vault once per assertion: the bytes it hashes against the live journal's enrollment are the bytes it decrypts.
+A later reset clears that enrollment, ordered by journal position, not the clock. The service records a
+hash mismatch for an active enrollment as `passkeys_reset` (`vault_mismatch`). The page then says to stop
 `beacon serve` and run `beacon setup --reset-passkeys`; the files stay until that command removes them.
 A same-user process can still replace both files and the check. The real backstop is
 that write credentials are sealed under the real data key, so a swapped vault approves nothing that can

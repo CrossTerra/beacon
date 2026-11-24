@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -421,6 +422,67 @@ func TestFinishRefusesASecondActiveEnrollmentEvenWithoutItsFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
 		t.Fatal("refused enrollment recreated the vault")
+	}
+}
+
+func TestFinishCanRetryAfterPublishFails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0).UTC()
+	code, err := Issue(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noteVault(t, dir)
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	create, assert, _, err := Begin(dir, rp, code, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := key.Register(rp.ID, rp.Origin, create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := key.Assert(rp.ID, rp.Origin, assert, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := func() error {
+		return Finish(dir, rp, Ceremony{ClientDataJSON: c.ClientDataJSON, AttestationObject: c.AttestationObject, PRFEnabled: true},
+			Ceremony{ClientDataJSON: a.ClientDataJSON, AuthenticatorData: a.AuthenticatorData, Signature: a.Signature,
+				CredentialID: a.CredentialID, PRFOutput: bytes.Repeat([]byte{0x11}, 32)}, now)
+	}
+
+	// Occupy the second publication's destination so the vault has to roll back.
+	credentials := filepath.Join(dir, "passkeys.json")
+	if err := os.WriteFile(credentials, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(); !errors.Is(err, ErrRegistered) {
+		t.Fatalf("expected publication to fail: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, writeVaultName)); !os.IsNotExist(err) {
+		t.Fatalf("failed publication left a vault: %v", err)
+	}
+	if _, active, err := approval.PasskeyVault(dir); err != nil || active {
+		t.Fatalf("failed publication committed an enrollment: active=%v, err=%v", active, err)
+	}
+	if err := os.Remove(credentials); err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(); err != nil {
+		t.Fatalf("could not retry the pending ceremony: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "register-pending.json")); !os.IsNotExist(err) {
+		t.Fatalf("successful enrollment did not remove the pending file: %v", err)
+	}
+	vaultKey, err := OpenVault(dir, a.CredentialID, bytes.Repeat([]byte{0x11}, 32), rp.Origin)
+	defer clear(vaultKey)
+	if err != nil || len(vaultKey) != keyBytes {
+		t.Fatalf("retry did not enroll a usable passkey: %v", err)
 	}
 }
 

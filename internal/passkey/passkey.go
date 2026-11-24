@@ -215,9 +215,6 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 		return err
 	}
 	err = approval.EnrollPasskey(dir, pending.ResetIndex, now, vault, func(sealed []byte) error {
-		if err := os.Remove(pendingPath); err != nil {
-			return err
-		}
 		if err := publishNew(dir, writeVaultName, sealed); err != nil {
 			return err
 		}
@@ -229,10 +226,14 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 		return errors.Join(os.Remove(filepath.Join(dir, "passkeys.json")), os.Remove(filepath.Join(dir, writeVaultName)), syncDir(dir))
 	})
 	if errors.Is(err, approval.ErrTransition) {
-		_ = os.Remove(pendingPath)
 		return ErrRegistered
 	}
-	return err
+	if err != nil {
+		return err // leave the ceremony available if publication failed
+	}
+	// Enrollment is already durable. The journal prevents reuse even if cleanup fails.
+	_ = os.Remove(pendingPath)
+	return nil
 }
 
 func readVault(dir string) ([]byte, error) {
