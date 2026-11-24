@@ -87,6 +87,10 @@ extension Proposal {
         status = .pending
         version = 1
     }
+
+    /// The Slack destination in the person's words, resolved at intake. Nil for other actions, or a journal written
+    /// before names were stored.
+    public var slackWords: String? { slackPlacement?.words }
 }
 
 public enum BookError: Error, Equatable, Sendable {

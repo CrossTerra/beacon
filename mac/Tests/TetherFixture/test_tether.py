@@ -104,7 +104,8 @@ class Session:
         directory.mkdir(parents=True)
         (directory / "prompt").write_text(prompt)
         argv = [self.fixture, "runner", str(state)]
-        env = ["PATH=/usr/bin:/bin", "RUN_VAR=from-the-app", "BEACON_SUPERVISOR=forged", *extra_env]
+        env = ["PATH=/usr/bin:/bin", "RUN_VAR=from-the-app", "PWD=/not-the-checkout", "OLDPWD=/older",
+               "BEACON_SUPERVISOR=forged", *extra_env]
         try:
             identity = identity if identity is not None else pinned_identity(pin or cwd)
         except FileNotFoundError:
@@ -309,6 +310,8 @@ def runner_runs_and_reports(fixture, state):
     assert session.until("#gone") == ["#gone", "run_a1"]
     output = (state / "runs" / "run_a1" / "output").read_text()
     assert f"cwd={checkout.resolve()}" in output or f"cwd={checkout}" in output, output
+    assert f"pwd={checkout.resolve()}" in output or f"pwd={checkout}" in output, output
+    assert "oldpwd=\n" in output and "/not-the-checkout" not in output, output
     assert "prompt=exit 3" in output and "run_var=from-the-app" in output
     # tether's own marker for this run, not the one the launch file tried to set.
     marker = next(line for line in output.splitlines() if line.startswith("marker="))

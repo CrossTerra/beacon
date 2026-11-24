@@ -3,7 +3,9 @@ import Foundation
 /// Fixed reasons only: neither Slack's error text nor a message is part of a refusal.
 public enum SlackRefusal: Error, Equatable, Sendable {
     case notConfigured, notAUser, accountMismatch, workspaceMismatch, destinationChanged
-    case archived, notMember, channelNotFound, threadNotFound, visibilityUnknown, missingScope
+    case archived, notMember, channelNotFound, threadNotFound, visibilityUnknown
+    /// `needed` is the scope Slack named, or the scopes Settings found missing. Nil when Slack did not name one.
+    case missingScope(String?)
     case rejected, unavailable, busy, messageTooLong, shuttingDown, metadataRefused
     case rateLimited(Int)
 
@@ -42,7 +44,13 @@ public enum SlackRefusal: Error, Equatable, Sendable {
         case .channelNotFound: "Slack could not find the conversation."
         case .threadNotFound: "Slack could not find the parent message."
         case .visibilityUnknown: "Slack did not confirm the conversation’s visibility."
-        case .missingScope: "The token lacks a Slack scope. Check the scopes listed in Settings."
+        case .missingScope(let needed):
+            if let needed, !needed.isEmpty {
+                needed.contains(", ") ? "The token lacks Slack scopes: \(needed)."
+                    : "The token lacks the Slack scope \(needed)."
+            } else {
+                "The token lacks a Slack scope. Check the scopes listed in Settings."
+            }
         case .rejected: "Slack refused the request."
         case .unavailable: "Slack could not be read."
         case .busy: "Beacon has reached its preflight read limit. Try again later."
@@ -54,29 +62,90 @@ public enum SlackRefusal: Error, Equatable, Sendable {
     }
 }
 
+/// The user scopes a Slack approval token must hold. History is included: a reply's preview and a lost post's
+/// read-back use it. Names are the scope tokens Slack uses, not a secret.
+enum SlackScopes {
+    static let required = [
+        "chat:write",
+        "channels:read", "groups:read", "im:read", "mpim:read", "users:read",
+        "channels:history", "groups:history", "im:history", "mpim:history",
+    ]
+
+    /// A comma-separated scope list, or nil when it is not one. Slack's free text never reaches the journal.
+    static func shown(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !parts.isEmpty, parts.allSatisfy({ Field.matches($0, "[a-z][a-z0-9_:-]{0,63}") }) else { return nil }
+        return parts.joined(separator: ", ")
+    }
+
+    static func missing(from header: String) -> [String] {
+        let have = Set(header.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+        return required.filter { !have.contains($0) }
+    }
+}
+
 enum SlackVisibility: String, Sendable {
     case `public` = "Public channel"
     case `private` = "Private channel"
     case dm = "DM"
     case groupDM = "Group DM"
+
+    /// The word the window shows. The raw value stays the journal's, so an old placement still decodes.
+    var word: String {
+        switch self {
+        case .public: "public"
+        case .private: "private"
+        case .dm: "DM"
+        case .groupDM: "group DM"
+        }
+    }
+}
+
+/// A name safe to put in the window: one line, controls made visible, and not so long it crowds out the ids below.
+enum SlackDisplay {
+    static func unknown(_ id: String) -> String { "unknown channel \(id)" }
+
+    static func shown(_ raw: String, limit: Int = 80) -> String? {
+        let flat = raw.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
+        let text = visibleText(flat).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let scalars = text.unicodeScalars
+        if scalars.count <= limit { return text }
+        return String(String.UnicodeScalarView(scalars.prefix(limit)))
+    }
+}
+
+/// The approval window's name for a Slack post. The raw ids stay under Show exact parameters.
+public func slackApprovalTitle(words: String?, channel: String) -> String {
+    "Post in Slack \(words ?? SlackDisplay.unknown(channel))"
 }
 
 /// Obtained by the authenticated Slack lookup before journaling; never from the proposal frame.
 public struct SlackPlacement: Equatable, Sendable {
     let account: String
     let visibility: SlackVisibility
+    /// People's words for the window (`#general · public · Fixture Workspace`). Local only: not a record field,
+    /// not part of a hash, and not checked as the destination.
+    let words: String?
 
-    var json: JSON { .object(["account": .string(account), "visibility": .string(visibility.rawValue)]) }
+    var json: JSON {
+        var fields: [String: JSON] = ["account": .string(account), "visibility": .string(visibility.rawValue)]
+        if let words { fields["words"] = .string(words) }
+        return .object(fields)
+    }
 
-    init(account: String, visibility: SlackVisibility) {
+    init(account: String, visibility: SlackVisibility, words: String? = nil) {
         self.account = account
         self.visibility = visibility
+        self.words = words
     }
 
     init?(_ json: JSON?) {
         guard let account = json?["account"]?.stringValue, let value = json?["visibility"]?.stringValue,
               let visibility = SlackVisibility(rawValue: value) else { return nil }
-        self.init(account: account, visibility: visibility)
+        let words = json?["words"]?.stringValue
+        self.init(account: account, visibility: visibility, words: words.flatMap { $0.isEmpty ? nil : $0 })
     }
 }
 
@@ -267,12 +336,18 @@ struct SlackAPI: Sendable {
     }
 
     func identity() async throws -> SlackIdentity {
-        let identity = try await get(SlackIdentity.self, .auth)
+        try await account().identity
+    }
+
+    /// `auth.test`, plus the `X-OAuth-Scopes` header when Slack sent one.
+    func account() async throws -> (identity: SlackIdentity, scopes: String?) {
+        let (body, response) = try await fetch(.auth)
+        let identity = try decode(SlackIdentity.self, from: body)
         guard identity.bot_id == nil, Field.matches(identity.user_id, "[UW][A-Z0-9]{0,31}") else { throw SlackRefusal.notAUser }
         guard Field.matches(identity.team_id, Field.slackID), !identity.team.isEmpty, !identity.user.isEmpty else {
             throw SlackRefusal.unavailable
         }
-        return identity
+        return (identity, response.value(forHTTPHeaderField: "X-OAuth-Scopes"))
     }
 
     func conversation(_ channel: String) async throws -> SlackConversation {
@@ -299,6 +374,15 @@ struct SlackAPI: Sendable {
             cursor = next
         }
         throw SlackRefusal.unavailable
+    }
+
+    /// One page of members, for naming a group direct message. Membership is still `requireMember`.
+    func memberIDs(_ channel: String) async throws -> [String] {
+        struct Members: Decodable { let members: [String] }
+        guard Field.matches(channel, Field.slackID) else { throw SlackRefusal.unavailable }
+        return try await get(Members.self, .members, [
+            .init(name: "channel", value: channel), .init(name: "limit", value: "200"),
+        ]).members
     }
 
     func userName(_ id: String) async throws -> String {
@@ -383,7 +467,7 @@ struct SlackAPI: Sendable {
         guard envelope.ok else {
             // Slack documents that internal_error/fatal_error can follow a successful side effect. Only known
             // pre-write refusals are a definite failure; arbitrary provider strings never go into the journal.
-            return Self.refusal(envelope.error).map(PostReply.refused) ?? .ambiguous("reply_unclear")
+            return Self.refusal(envelope).map(PostReply.refused) ?? .ambiguous("reply_unclear")
         }
         struct Posted: Decodable { let channel: String; let ts: String; let message: SlackMessage? }
         guard (200..<300).contains(response.status),
@@ -400,19 +484,27 @@ struct SlackAPI: Sendable {
 
     func canPost() throws { try rates.check(.post, workspace: workspace, purpose: .preflight, at: now()) }
 
-    private struct Envelope: Decodable { let ok: Bool; let error: String? }
+    private struct Envelope: Decodable { let ok: Bool; let error: String?; let needed: String? }
 
-    private func get<T: Decodable>(_ type: T.Type, _ method: Method, _ query: [URLQueryItem] = []) async throws -> T {
+    private func fetch(_ method: Method, _ query: [URLQueryItem] = []) async throws -> (Data, HTTPURLResponse) {
         try rates.check(method, workspace: workspace, purpose: purpose, at: now())
         try await meter?()
         try Task.checkCancellation()
         let response = try await client.send("GET", "/api/\(method.rawValue)", query: query)
         if let limit = rateLimit(method, response) { throw limit }
         if response.status == 401 || response.status == 403 { throw SlackRefusal.rejected }
-        guard (200..<300).contains(response.status),
-              let envelope = try? JSONDecoder().decode(Envelope.self, from: response.body) else { throw SlackRefusal.unavailable }
-        guard envelope.ok else { throw Self.refusal(envelope.error) ?? SlackRefusal.unavailable }
-        guard let result = try? JSONDecoder().decode(type, from: response.body) else { throw SlackRefusal.unavailable }
+        guard (200..<300).contains(response.status) else { throw SlackRefusal.unavailable }
+        return (response.body, response.response)
+    }
+
+    private func get<T: Decodable>(_ type: T.Type, _ method: Method, _ query: [URLQueryItem] = []) async throws -> T {
+        try decode(type, from: try await fetch(method, query).0)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, from body: Data) throws -> T {
+        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: body) else { throw SlackRefusal.unavailable }
+        guard envelope.ok else { throw Self.refusal(envelope) ?? SlackRefusal.unavailable }
+        guard let result = try? JSONDecoder().decode(type, from: body) else { throw SlackRefusal.unavailable }
         return result
     }
 
@@ -424,13 +516,18 @@ struct SlackAPI: Sendable {
 
     /// Slack's documented refusals that are checked before anything is written. Any other error, `internal_error`,
     /// `fatal_error` and `request_timeout` among them, may follow a write and stays ambiguous.
+    private static func refusal(_ envelope: Envelope) -> SlackRefusal? {
+        if envelope.error == "missing_scope" { return .missingScope(SlackScopes.shown(envelope.needed)) }
+        return refusal(envelope.error)
+    }
+
     static func refusal(_ error: String?) -> SlackRefusal? {
         switch error {
         case "is_archived", "channel_is_archived": .archived
         case "channel_not_found": .channelNotFound
         case "thread_not_found", "cannot_reply_to_message": .threadNotFound
         case "not_in_channel": .notMember
-        case "missing_scope": .missingScope
+        case "missing_scope": .missingScope(nil)
         case "msg_too_long", "msg_blocks_too_long": .messageTooLong
         case "metadata_must_be_sent_from_app", "invalid_metadata_format", "invalid_metadata_schema", "metadata_too_large":
             .metadataRefused

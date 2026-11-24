@@ -186,8 +186,9 @@ session that ignores SIGTERM and holds a loopback listener. The tests check that
 - a run stays suspended until the ack for its own id; timeout and Quit before acknowledgement kill it without
   running it or leaving a `started` mark;
 - a run starts in its directory with its prompt on standard input, the app's environment and `tether`'s own
-  marker (a marker in the launch file is dropped); `started` holds its pid; its exit code and its end are
-  reported, its output and errors are kept `0600`, and the same run cannot start twice;
+  marker (a marker in the launch file is dropped). `PWD` is that directory and `OLDPWD` is not passed. `started`
+  holds its pid; its exit code and its end are reported, its output and errors are kept `0600`, and the same run
+  cannot start twice;
 - a directory swapped in at the run's path after the app pinned it is refused with `ESTALE`, and nothing starts;
 - a signed device decimal is not that directory's pin; the unsigned bits of its device still start the run;
 - 300 runs one after another all start in one session: only live runs count against the limit;

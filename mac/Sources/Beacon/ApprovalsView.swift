@@ -65,7 +65,8 @@ private struct DeskView: View {
         let token = desk.frozen?.approval.id == proposal.id ? desk.frozen?.token : nil
         return ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text(summary(proposal)).font(.title3)
+                Text(summary(proposal, fresh: desk.frozen?.approval.id == proposal.id ? desk.frozen?.resolved : nil))
+                    .font(.title3)
                 Text("Status: \(proposal.status.rawValue) · expires \(proposal.expiresAt.formatted())")
                     .font(.caption).foregroundStyle(.secondary)
                 if let outcome = desk.outcome(of: proposal) {
@@ -140,6 +141,11 @@ private struct DeskView: View {
                             row("Account", approval.account)
                             row("Destination", approval.destination.canonical)
                             row("Approval hash", approval.approvedHash)
+                        }
+                        if proposal.type == .slackPost {
+                            if let id = params["workspace"]?.stringValue { row("Workspace id", id) }
+                            if let id = params["channel"]?.stringValue { row("Channel id", id) }
+                            if let id = params["thread_ts"]?.stringValue { row("Thread", id) }
                         }
                         Text(visibleText((desk.frozen?.approval.id == proposal.id ? desk.frozen!.approval.params : proposal.params).canonical))
                             .font(.caption.monospaced()).textSelection(.enabled)
@@ -219,14 +225,19 @@ private struct SettingsButton: View {
     }
 }
 
-/// The action named in Beacon's own words.
-func summary(_ proposal: Proposal) -> String {
+/// The action named in Beacon's own words. A Slack post uses the names resolved at intake, or the frozen view's
+/// fresh names once Approve can be enabled. The raw ids stay under Show exact parameters.
+func summary(_ proposal: Proposal, fresh: ResolvedAction? = nil) -> String {
     let p = proposal.params
     switch proposal.type {
     case .githubMerge:
         return "Merge \(p["repo"]?.stringValue ?? "") #\(p["number"]?.intValue ?? 0) into \(p["base"]?.stringValue ?? "") (\(p["method"]?.stringValue ?? ""))"
     case .slackPost:
-        return "Post in Slack \(p["channel"]?.stringValue ?? "")" + (p["thread_ts"]?.stringValue.map { " thread \($0)" } ?? "")
+        if let fresh, let conversation = fresh.destinationLabel, let visibility = fresh.facts["Visibility"],
+           let workspace = fresh.facts["Workspace"] {
+            return slackApprovalTitle(words: "\(conversation) · \(visibility) · \(workspace)", channel: "")
+        }
+        return slackApprovalTitle(words: proposal.slackWords, channel: p["channel"]?.stringValue ?? "")
     case .agentRun:
         return "Run opencode in \(p["checkout"]?.stringValue ?? "") with \(p["model"]?.stringValue ?? "")"
     }

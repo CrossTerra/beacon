@@ -202,7 +202,13 @@ checkout's opencode configuration does not deny.
      another post. Without one message carrying the operation UUID (as `beacon_post` metadata or `client_msg_id`),
      with exact text, the approved user and destination in the bounded time window, the outcome stays unknown.
      Intake lookups, window preflights and read-back each have their own read budget and their own 429 deadlines,
-     so a proposer cannot spend the window's reads.
+     so a proposer cannot spend the window's reads. The window's names (the workspace from `auth.test`, a channel's
+     name, a direct message's other person, a group direct message's members) are display. They are resolved at
+     intake, cached for ten minutes, and kept in the local journal. They are not a record field, not part of a hash,
+     and not sent to Signal. A failed name lookup is shown as `unknown channel <id>` and does not change visibility,
+     membership, or whether the proposal can be approved. The raw ids stay under Show exact parameters. A missing
+     Slack scope is a scope name (`chat:write`), recorded in the result and shown in the window; the token and
+     Slack's `provided` list are not. Saving the token checks `X-OAuth-Scopes` against the scopes Beacon needs.
 16. **The Go preview is separate and cannot act.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
     are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
     takes the signed route above; there is no fallback. The preview reads no keychain item or live credential,
@@ -260,10 +266,10 @@ checkout's opencode configuration does not deny.
   [api.slack.com/apps](https://api.slack.com/apps).
 - **Slack approval checks are snapshots.** Visibility, membership, permissions and the root can change after
   the final read; Slack alone enforces its rules when it accepts a post. A channel made private after intake keeps
-  the original public proposal record (sensitive fields are sealed). Slack can rewrite text, or keep neither the
-  operation metadata nor `client_msg_id`; whether a user token's post keeps either has not been verified against
-  live Slack. A missing reply may then stay unknown even when the message was posted. Intake reuses a verified
-  `auth.test` for ten minutes; the window and the write always read it afresh.
+  the original public proposal record (sensitive fields are sealed). Slack can rewrite text. A user-token post to
+  the person's own DM on 23 Nov 2026 kept both the operation metadata and `client_msg_id` (read back with
+  `include_all_metadata=true`). A later post that keeps neither still leaves a missing reply unknown. Intake reuses
+  a verified `auth.test` for ten minutes; the window and the write always read it afresh.
 - **Slack is read by search and by watermark.** Search indexes with a delay, which the 15-minute lookback covers;
   mentions are searched over 7 days, which also finds one an edit added. A quiet followed thread or group direct
   message is read every 15 minutes, so a message there can arrive that late; a deletion is checked every 15 minutes,

@@ -236,8 +236,13 @@ public final class RunHandler: ObservableObject, ActionResolver {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         let argv = [context.opencode, "run", "--standalone", "--format", "json", "--auto", "--model", model]
-        let environment = context.environment.filter { !LoginEnvironment.excluded($0.key) && !$0.key.contains("\0") }
-            .map { "\($0.key)=\($0.value)" }.sorted()
+        // The login snapshot's PWD is not this checkout. opencode run has no directory flag (a positional path
+        // would be the message), and a shell that trusts $PWD would run outside the directory tether enters.
+        var values = context.environment.filter {
+            !LoginEnvironment.excluded($0.key) && !$0.key.contains("\0") && $0.key != "OLDPWD"
+        }
+        values["PWD"] = path
+        let environment = values.map { "\($0.key)=\($0.value)" }.sorted()
         let fields = [path, pin, String(argv.count)] + argv + environment
         guard fields.allSatisfy({ !$0.contains("\0") }) else { throw Invalid(field: "/launch") }
         var launch = Data()

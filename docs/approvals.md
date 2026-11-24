@@ -80,11 +80,12 @@ its connection after 10 seconds, and an idle connection after 60. Errors are `{ 
 `{ error: "invalid", field }`: `invalid_frame`, `frame_too_large`, `type_disabled`, `busy`, `not_found`,
 `not_pending`, `unavailable`. A Slack proposal does a bounded account and channel lookup before it can be
 recorded. If Slack does not confirm the workspace, account and visibility, no proposal is stored; a rate limit
-returns `busy`. Intake has its own budget per client identity: two lookups at once and 30 Slack reads an hour,
-reusing a verified `auth.test` for ten minutes, so a proposer cannot spend the window's reads. Window preflights
-share two slots and 120 provider reads per hour across GitHub and Slack, including pages and _Read again_. Slack
-read-back has a third budget ([Slack posts](#slack-posts)). At a limit Beacon returns `busy` rather than starting
-another read.
+on that lookup returns `busy`. A name that cannot be read does not block the proposal. Intake has its own budget
+per client identity: two lookups at once and 30 Slack reads an hour, reusing a verified `auth.test` for ten
+minutes and caching the names it shows for ten minutes, so a proposer cannot spend the window's reads. Window
+preflights share two slots and 120 provider reads per hour across GitHub and Slack, including pages and _Read
+again_. Slack read-back has a third budget ([Slack posts](#slack-posts)). At a limit Beacon returns `busy`
+rather than starting another read.
 
 A pending proposal expires after 24 hours.
 
@@ -366,8 +367,11 @@ the person, with their files, sessions and credentials.
 once per launch (`$SHELL -l -i -c`, bounded to ten seconds, in its own process group) and passes the variables it
 prints, so `PATH` and anything their profile exports, tokens included, reach the run. Nothing comes from Beacon's
 own environment or vault: no GitHub token, Signal key or other credential Beacon holds is passed, and variables
-starting with `BEACON_` are dropped. opencode uses its own sign-in for the model. tether adds only its
-`BEACON_SUPERVISOR` marker.
+starting with `BEACON_` are dropped. `PWD` is set to the checkout and `OLDPWD` is not passed: the login
+snapshot's `PWD` is not that directory, and a shell that trusts `$PWD` would otherwise run outside it.
+`opencode run` has no directory flag; a path passed to it would be the message, so the prompt stays on standard
+input. opencode uses its own sign-in for the model. tether adds only its
+`BEACON_SUPERVISOR` marker, and sets `PWD` to the directory it enters.
 
 **The report.** When opencode exits, Beacon reads its JSON events: the report is the text of the last assistant
 message (a part opencode completes after the session goes idle is joined to the one before), capped at 32,000
@@ -412,7 +416,10 @@ your workspace (an admin may need to approve it). Copy the **User OAuth Token** 
 → Slack** and save it. Use a non-rotating user token; Beacon does not refresh tokens. This is separate from the
 collector's read credential and authorizes posting as you, not as a bot.
 
-Beacon calls `auth.test` and shows the workspace and user names and ids it returned. To switch to a different
+Beacon calls `auth.test` and shows the workspace and user names and ids it returned. It also reads
+`X-OAuth-Scopes` and refuses to save a token missing one of the scopes above, naming each missing one. A
+`missing_scope` answer later records the scope Slack named (`needed`) in the result, which the window shows; it
+does not record Slack's `provided` list. To switch to a different
 workspace or user, remove the saved account first. Only the vault holds the token, bound to `https://slack.com`,
 the workspace id and `slack:user:{id}`. `settings.json` holds only the ids and names. The token is never printed,
 logged, put in an action record or passed to a child process.
@@ -420,10 +427,17 @@ logged, put in an action record or passed to a child process.
 **Before approval.** The schema is `{ workspace, channel, thread_ts, text }`, with `thread_ts: null` for a
 top-level post. Beacon verifies the saved user and workspace, checks the conversation's visibility, archive state
 and membership, and for a reply confirms that `thread_ts` is a root in that conversation. Unverified destinations
-cannot be approved. The window shows the workspace, user, channel name and id, visibility, the root's first line,
-and a noninteractive plain preview. **Exact Slack mrkdwn** (when the preview differs) and **Show exact parameters**
-show what is frozen. Slack renders mentions and other Slack-specific formatting itself; the preview does not fetch
-or open links. A broadcast is marked as one, not shown as plain text: `<!here>` previews as
+cannot be approved. The window and the frozen view show the workspace name (`auth.test`'s `team`, the name
+`team.info` returns), who posts, and the conversation in words: `#name` for a channel, `DM with <real name>` for a
+direct message (`users.info`; `DM with yourself` when it is the person's own), and `Group DM with <names>` for a
+group direct message (`conversations.members`, then `users.info`). Visibility is `public`, `private`, `DM` or
+`group DM`. Names are resolved at intake and cached for ten minutes. If a name cannot be read, the window says
+`unknown channel <id>` rather than hiding the destination. The raw workspace, channel and thread ids stay under
+**Show exact parameters**, with the root's first line and a noninteractive plain preview above it. **Exact Slack
+mrkdwn** (when the preview differs) and **Show exact parameters** show what is frozen. The names are local display:
+not a record field, not part of a hash, and not sent to Signal. Slack renders mentions and other Slack-specific
+formatting itself; the preview does not fetch or open links. A broadcast is marked as one, not shown as plain
+text: `<!here>` previews as
 **[@here — notifies everyone present]**, and `<!channel>`, `<!everyone>` and a user group (`<!subteam^…>`) likewise.
 When the text holds any `<!…>`, the exact mrkdwn is open from the start. To avoid Slack splitting longer messages,
 Beacon refuses drafts over 4,000 UTF-16 code units.
@@ -453,11 +467,14 @@ minute after the search window closes; after that, once at each relaunch and whe
 again_ on the unknown outcome. Its reads have their own budget (two at once, 60 an hour), and a `429` met while
 reading back blocks only read-back, not a new proposal's preflight or intake.
 
-**Not yet checked against live Slack.** Slack documents `metadata_must_be_sent_from_app` for `chat.postMessage`, and
-does not document `client_msg_id` there; which of the two a user token's post keeps is unverified. If Slack refuses
-the metadata, the post fails as `metadata_refused` and nothing is written. If it keeps neither id, a lost reply stays
-unknown (it is never sent again). The TLS fake covers each case and that a dropped reply causes only one wire POST.
-The handler is not a live Bosun cutover.
+**Checked against live Slack (23 Nov 2026).** A user-token (`xoxp`) post to the person's own DM,
+`D08Q5C2G98W` / `1795468960.789859`, was read back with `conversations.history` and `include_all_metadata=true`.
+Both identifiers were intact: `client_msg_id`, and metadata
+`{ "event_type": "beacon_post", "event_payload": { "op": "<uuid>" } }`. Slack still documents
+`metadata_must_be_sent_from_app` for a token that may not post metadata; that refusal fails the post as
+`metadata_refused` and nothing is written. If a later post keeps neither id, a lost reply stays unknown and is
+never sent again. The TLS fake covers each case and that a dropped reply causes only one wire POST. The handler
+is not a live Bosun cutover.
 
 The app sends these requests only to `https://slack.com`; `beacon egress` lists it for the saved account. Intake
 lookups have a four-second deadline, so `beacon act propose` answers within its ten seconds. The window, the final
