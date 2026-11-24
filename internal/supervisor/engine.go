@@ -127,7 +127,7 @@ func (e *engine) prepare(r request) message {
 	return message{PID: j.pid}
 }
 
-func (e *engine) release(ctx context.Context, ticket uint64) message {
+func (e *engine) release(ctx context.Context, ticket uint64, until time.Time) message {
 	j := e.runs[ticket]
 	now := time.Now()
 	if j == nil || j.gate == nil || !j.killAt.IsZero() {
@@ -137,7 +137,7 @@ func (e *engine) release(ctx context.Context, ticket uint64) message {
 		j.stop(now, e.timing, codeTimeout)
 		return message{Error: codeTimeout}
 	}
-	if err := j.release(ctx); err != nil {
+	if err := j.release(ctx, until); err != nil {
 		j.killAt, j.failure = now, codeLaunch
 		return message{Error: codeLaunch}
 	}
@@ -463,7 +463,7 @@ func (e *engine) startFixed(ctx context.Context, live func() bool) {
 		if !live() {
 			return // still gated; drain will kill it without an exec permit
 		}
-		if err := j.release(ctx); err != nil {
+		if err := j.release(ctx, time.Time{}); err != nil {
 			j.killAt, j.failure = now, codeLaunch
 		} else {
 			j.started = now

@@ -245,8 +245,15 @@ func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
 func (r *Run) PGID() int { return r.pgid }
 
 func (r *Run) Release() error {
-	_, err := r.s.request(request{Op: "release", Ticket: r.ticket})
+	// The wait is wireTimeout+poll. The reaper is told to finish a poll sooner, so the
+	// exec read cannot outlast this request and the reply is still observable.
+	req, wait := releaseRequest(r.ticket, time.Now())
+	_, err := r.s.call(context.Background(), req, wait)
 	return err
+}
+
+func releaseRequest(ticket uint64, now time.Time) (request, time.Duration) {
+	return request{Op: "release", Ticket: ticket, Until: now.Add(wireTimeout).UnixNano()}, wireTimeout + poll
 }
 
 func (r *Run) Stop() error {

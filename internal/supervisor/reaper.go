@@ -222,7 +222,11 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 			case "prepare":
 				m = e.prepare(r)
 			case "release":
-				m = e.release(ctx, r.Ticket)
+				var until time.Time
+				if r.Until != 0 {
+					until = time.Unix(0, r.Until)
+				}
+				m = e.release(ctx, r.Ticket, until)
 			case "stop":
 				if j := e.runs[r.Ticket]; j != nil {
 					j.stop(time.Now(), e.timing, "")

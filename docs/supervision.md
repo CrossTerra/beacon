@@ -63,7 +63,8 @@ Trusted service code uses `Supervisor.PrepareRun` with an approved run ID and ex
 installs the process group and its ownership before returning `Run.PGID()`. A trusted bootstrap waits for a
 permit on a private pipe: it has not loaded the target executable or received its environment. The handler
 can durably record start before calling `Run.Release()`. Release waits for the bootstrap's exec. The
-permit write and the exec-status read share one deadline, inside the caller's timeout. A failed exec is
+permit write and the exec-status read share the request's deadline, a poll inside that wait, and a
+late start does not grant a new timeout. A failed exec is
 reported on a close-on-exec status pipe as a launch error, not as a successful start followed by
 exit 126. EOF, shutdown, `Run.Stop()` or five seconds without release cancels a prepared launch without
 executing the target. `Run.Wait` returns the leader's exit code (128 plus signal when signaled) after the

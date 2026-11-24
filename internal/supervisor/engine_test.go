@@ -151,16 +151,22 @@ func TestExpiryStopsAfterReplyFailure(t *testing.T) {
 	}
 }
 
-func TestReleaseDeadlineLeavesCallerSlack(t *testing.T) {
+func TestReleaseDeadlineStaysInsideRequestWait(t *testing.T) {
 	now := time.Now()
-	if got := releaseDeadline(context.Background(), now); !got.Equal(now.Add(wireTimeout)) {
-		t.Fatalf("default deadline: %s", got.Sub(now))
+	req, wait := releaseRequest(1, now)
+	until := time.Unix(0, req.Until)
+	if !until.Before(now.Add(wait)) {
+		t.Fatal("exec deadline is not inside the request wait")
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), now.Add(50*time.Millisecond))
-	defer cancel()
-	got := releaseDeadline(ctx, now)
-	if !got.Before(now.Add(50*time.Millisecond)) || got.After(now.Add(50*time.Millisecond-poll)) {
-		t.Fatalf("deadline did not leave a poll of slack: %s", got.Sub(now))
+	if got := releaseDeadline(now, until); got.After(until) || !got.Before(now.Add(wait)) {
+		t.Fatalf("reaper deadline exceeds the request timeout: %s", got.Sub(now))
+	}
+	// A delayed start must not grant a fresh wireTimeout past the caller.
+	if got := releaseDeadline(now.Add(wireTimeout), until); got.After(until) {
+		t.Fatalf("late release extended past the request: %s", got.Sub(until))
+	}
+	if got := releaseDeadline(now, time.Time{}); !got.Equal(now.Add(wireTimeout)) {
+		t.Fatalf("unbounded release: %s", got.Sub(now))
 	}
 }
 

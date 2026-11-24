@@ -207,14 +207,14 @@ func (j *job) closeGate() {
 	}
 }
 
-func (j *job) release(ctx context.Context) error {
+func (j *job) release(ctx context.Context, until time.Time) error {
 	defer j.closeGate()
 	if err := ctx.Err(); err != nil {
 		return ErrStopped
 	}
-	// One deadline for the permit and the exec result. The service waits wireTimeout+poll,
-	// so finishing inside wireTimeout leaves a poll of slack. A caller deadline is tighter.
-	deadline := releaseDeadline(ctx, time.Now())
+	// One deadline for the permit and the exec result. A release request carries the
+	// service's deadline, a poll inside its wait. Do not start a fresh timeout past that.
+	deadline := releaseDeadline(time.Now(), until)
 	if !time.Now().Before(deadline) {
 		return ErrLaunch
 	}
@@ -237,12 +237,13 @@ func (j *job) release(ctx context.Context) error {
 	return j.execResult(deadline)
 }
 
-func releaseDeadline(ctx context.Context, now time.Time) time.Time {
+// until is the caller's absolute deadline. Zero means no caller is waiting. The result is
+// never later than wireTimeout from now, and never later than until, so a delayed start
+// cannot extend the exec read past the request timeout.
+func releaseDeadline(now, until time.Time) time.Time {
 	deadline := now.Add(wireTimeout)
-	if d, ok := ctx.Deadline(); ok {
-		if earlier := d.Add(-poll); earlier.Before(deadline) {
-			deadline = earlier
-		}
+	if !until.IsZero() && until.Before(deadline) {
+		deadline = until
 	}
 	return deadline
 }

@@ -68,6 +68,7 @@ type request struct {
 	Command *Command   `json:",omitempty"`
 	Jobs    []FixedJob `json:",omitempty"`
 	Periods *periods   `json:",omitempty"`
+	Until   int64      `json:",omitempty"` // absolute unix nanos; release must finish by then
 }
 
 type message struct {
