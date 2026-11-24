@@ -72,6 +72,7 @@ type fakeGitHub struct {
 	runs                                         []githubRun
 	statusPages                                  [][]map[string]string
 	afterPull                                    func(*fakeGitHub)
+	interrupt                                    func(*http.Request) error
 }
 
 func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
@@ -82,6 +83,11 @@ func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
 	write := r.Header.Get("Authorization") == "Bearer fixture-write"
 	if !write && r.Header.Get("Authorization") != "Bearer fixture-read" {
 		f.t.Error("missing fixture token")
+	}
+	if f.interrupt != nil {
+		if err := f.interrupt(r); err != nil {
+			return nil, err
+		}
 	}
 	if f.down {
 		return nil, io.ErrUnexpectedEOF
@@ -484,8 +490,10 @@ func TestMergeReadBackFailsUnlessThisUserMergedWithACommit(t *testing.T) {
 		name string
 		set  func(*fakeGitHub)
 	}{
-		{"missing actor", func(f *fakeGitHub) { f.merged, f.state, f.mergedBy = true, "closed", 0 }},
-		{"blank sha", func(f *fakeGitHub) { f.merged, f.state, f.blankSHA, f.mergedBy = true, "closed", true, 123 }},
+		{"different head", func(f *fakeGitHub) {
+			f.merged, f.state, f.head, f.mergedBy = true, "closed", strings.Repeat("b", 40), 123
+		}},
+		{"different actor", func(f *fakeGitHub) { f.merged, f.state, f.mergedBy = true, "closed", 77 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := mergeTest(t)
@@ -494,6 +502,33 @@ func TestMergeReadBackFailsUnlessThisUserMergedWithACommit(t *testing.T) {
 			tc.set(m.f)
 			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
 			m.want("failed", "read_back", "merged_otherwise", 0)
+			if _, ok := m.h.readBacks.get(v.ID); ok {
+				t.Fatal("terminal result left an automatic backoff entry")
+			}
+		})
+	}
+}
+
+func TestIncompleteMergeAttributionStaysUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*fakeGitHub)
+	}{
+		{"missing actor", func(f *fakeGitHub) { f.merged, f.state, f.mergedBy = true, "closed", 0 }},
+		{"blank sha", func(f *fakeGitHub) { f.merged, f.state, f.blankSHA, f.mergedBy = true, "closed", true, 123 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := mergeTest(t)
+			v := m.start()
+			requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+			tc.set(m.f)
+			m.h.NoteAutomatic(v.ID)
+			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+			m.want("outcome_unknown", "", "", 0)
+			m.at = m.at.Add(time.Second)
+			if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+				t.Fatal("incomplete attribution was not backed off")
+			}
 		})
 	}
 }
@@ -503,6 +538,7 @@ func TestMergeReadAgainIsNotDelayedByBackoff(t *testing.T) {
 	v := m.start()
 	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
 	m.f.failUser = true
+	m.h.NoteAutomatic(v.ID)
 	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
 	m.at = m.at.Add(time.Second)
 	if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
@@ -527,6 +563,7 @@ func TestStuckMergeBacksOffSoAnotherUnknownCanRead(t *testing.T) {
 		m.at = start.Add(time.Duration(minute) * time.Minute)
 		if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
 			got = append(got, minute)
+			m.h.NoteAutomatic(v.ID)
 			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
 		}
 	}
@@ -626,4 +663,78 @@ func runToken(t *testing.T, m *mergeFixture, v approval.View, ctx context.Contex
 	requireOK(t, err)
 	defer token.Clear()
 	requireOK(t, m.h.Run(ctx, m.j, v, token))
+}
+
+func TestInterruptedFinalReadStopsInsteadOfRefusing(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered := make(chan struct{})
+	m.f.interrupt = func(r *http.Request) error {
+		if r.Method != http.MethodGet {
+			return nil
+		}
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-r.Context().Done()
+		return r.Context().Err()
+	}
+	token, err := m.h.Unlock(v.Frozen, make([]byte, 32))
+	requireOK(t, err)
+	defer token.Clear()
+	done := make(chan error, 1)
+	go func() { done <- m.h.Run(ctx, m.j, v, token) }()
+	select {
+	case <-entered:
+		cancel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("final read did not start")
+	}
+	select {
+	case err := <-done:
+		requireOK(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupted read did not finish")
+	}
+	m.want("failed", "pre_dispatch", "stopped", 0)
+}
+
+func TestReadAgainDoesNotDelayTheConfirmingOpenRead(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	m.f.mergedBy = 0
+	start := m.at
+	m.h.NoteAutomatic(v.ID)
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	for range 8 {
+		m.at = m.at.Add(time.Second)
+		requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	}
+	m.want("outcome_unknown", "", "", 0)
+	m.at = start.Add(30 * time.Second)
+	if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+		t.Fatal("early Read again made the automatic schedule due early")
+	}
+	m.at = start.Add(mergeSettle)
+	if !m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+		t.Fatal("early Read again delayed the first eligible open read")
+	}
+	m.h.NoteAutomatic(v.ID)
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	m.want("outcome_unknown", "", "", 0)
+	m.at = start.Add(2 * mergeSettle)
+	if !m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+		t.Fatal("confirming open read was not due one minute after the first")
+	}
+	m.h.NoteAutomatic(v.ID)
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	m.want("failed", "read_back", "not_merged", 0)
+	if _, ok := m.h.readBacks.get(v.ID); ok {
+		t.Fatal("settled merge kept its backoff entry")
+	}
 }

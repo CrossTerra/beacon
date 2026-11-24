@@ -67,14 +67,19 @@ visible required check must pass; only the latest run for each check name and ap
 names the approved head. After approval the write token is used for final reads, including one last PR
 read, and at most one `PUT` with the exact approved method and head SHA. The provider alone enforces
 branch rules at the write. A lost or ambiguous reply is read back with the unattended token. Success
-requires the approved repository, base, head, this user, and a merge SHA. A merged pull request that is
-not clearly that merge fails as `merged_otherwise` and is not read again. An open PR settles as
-`not_merged` only after two eligible reads at least a minute apart, both at least a minute after the
-outcome became unknown. Automatic read-back keeps that one-minute cadence until then, then doubles the
-wait up to 15 minutes, so a read that never settles does not spend the recovery budget every minute.
-**Read again** uses the same budget and is not delayed by that backoff; it cannot resend a merge. A start
-that stops or is cancelled before the write is claimed fails as `stopped` (`pre_dispatch`) when the
-journal can still record. An unhealthy journal is left unchanged.
+requires the approved repository, base, head, this user, and a merge SHA. A merged pull request with a
+different actor, head, or base fails as `merged_otherwise` and is not read again. A merge that matches
+this account, head, and base but has no actor or merge SHA stays unknown: GitHub can omit the SHA briefly
+after Beacon's own merge. The Swift app fails that incomplete case as `merged_otherwise`; the Go preview
+does not, so it cannot record a false failure for its own write. An open PR settles as `not_merged` only
+after two eligible reads at least a minute apart, both at least a minute after the outcome became unknown.
+Automatic read-back keeps that one-minute cadence until then, then doubles the wait up to 15 minutes, so
+a read that never settles does not spend the recovery budget every minute. The confirming open read is
+due one minute after the first open observation. **Read again** uses the same budget, is not delayed by
+backoff, and does not count toward it; it cannot resend a merge. A start that stops or is cancelled
+before the write is claimed fails as `stopped` (`pre_dispatch`) when the journal can still record. A
+journal that had already failed is left unchanged. If appending that stop record fails, shutdown reports
+the failure instead of success.
 
 ## Slack posts
 
@@ -116,8 +121,8 @@ most one `chat.postMessage` with the frozen text and unfurls off. The start's op
 `client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. The provider alone
 enforces permissions at the write. A definite refusal is terminal; a `429` respects `Retry-After` but never
 retries the post. Stopping or cancelling before that post is claimed fails as `stopped` (`pre_dispatch`)
-when the journal can still record, so restart does not treat an unsent draft as a lost reply. An unhealthy
-journal is left unchanged.
+when the journal can still record, so restart does not treat an unsent draft as a lost reply. A journal
+that had already failed is left unchanged. If appending that stop record fails, shutdown reports the failure.
 
 A lost or unclear reply triggers only read-back with the unattended token. It searches up to four pages of 15
 messages in the approved conversation or thread, from one minute before to at most five minutes after the

@@ -216,11 +216,11 @@ func (a answer) decode(out any) error {
 	return nil
 }
 
-// stopBeforeDispatch records that no write was claimed. An unhealthy journal stays untouched, matching
-// the previous restart path, so a torn file is not asked to take another frame.
+// stopBeforeDispatch records that no write was claimed. A journal that had already failed stays untouched.
+// A sync that fails while appending this record is returned, so shutdown cannot report success without it.
 func stopBeforeDispatch(j *approval.Journal, id string, at time.Time) error {
 	err := j.FailUnclaimed(id, approval.Result{ConfirmedBy: "pre_dispatch", Error: "stopped"}, at)
-	if errors.Is(err, approval.ErrJournalIO) {
+	if errors.Is(err, approval.ErrJournalUnhealthy) {
 		return approval.ErrTransition
 	}
 	return err

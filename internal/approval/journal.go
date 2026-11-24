@@ -25,6 +25,9 @@ var (
 	ErrStopping   = errors.New("approval journal is shutting down")
 	ErrJournalAge = errors.New("journal must sort after the archived journal")
 	ErrJournalIO  = errors.New("approval journal write was not confirmed; restart to recover")
+	// ErrJournalUnhealthy means the journal had already failed before this call. A write that fails
+	// while appending is ErrJournalIO, not this error.
+	ErrJournalUnhealthy = errors.New("approval journal is already unhealthy")
 )
 
 const startWindow = 10 * time.Minute
@@ -629,7 +632,7 @@ func (j *Journal) FailUnclaimed(id string, result Result, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if !j.healthy() {
-		return ErrJournalIO
+		return ErrJournalUnhealthy
 	}
 	s := j.states[id]
 	if s == nil || s.Status != "started" || s.dispatched {

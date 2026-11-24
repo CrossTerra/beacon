@@ -56,11 +56,17 @@ type fakeSlack struct {
 	retryAfter                              string
 	redirect                                bool
 	hook                                    func(*http.Request)
+	interrupt                               func(*http.Request) error
 }
 
 func (f *fakeSlack) handle(r *http.Request) (*http.Response, error) {
 	if f.hook != nil {
 		f.hook(r)
+	}
+	if f.interrupt != nil {
+		if err := f.interrupt(r); err != nil {
+			return nil, err
+		}
 	}
 	if r.URL.Scheme+"://"+r.URL.Host != slackOrigin || !strings.HasPrefix(r.URL.Path, "/api/") {
 		f.t.Error("contacted a host other than the configured Slack API")
@@ -799,6 +805,46 @@ func TestSlackAbortBeforeClaimDoesNotLookLikeALostPost(t *testing.T) {
 		s.want(v.ID, "failed", "pre_dispatch", "stopped")
 		if len(s.f.posts) != 0 {
 			t.Fatal("stopping start posted")
+		}
+	})
+	t.Run("interrupted final read", func(t *testing.T) {
+		s := slackTest(t)
+		v := s.start(s.propose(requestPost(fixtureChannel, fixtureRoot), ""))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		entered := make(chan struct{})
+		s.f.interrupt = func(r *http.Request) error {
+			if r.Header.Get("Authorization") != "Bearer "+slackPostToken || r.Method != http.MethodGet {
+				return nil
+			}
+			select {
+			case <-entered:
+			default:
+				close(entered)
+			}
+			<-r.Context().Done()
+			return r.Context().Err()
+		}
+		write, err := s.h.Unlock(v.Frozen, make([]byte, 32))
+		requireOK(t, err)
+		defer write.Clear()
+		done := make(chan error, 1)
+		go func() { done <- s.h.Run(ctx, s.j, v, write) }()
+		select {
+		case <-entered:
+			cancel()
+		case <-time.After(2 * time.Second):
+			t.Fatal("final read did not start")
+		}
+		select {
+		case err := <-done:
+			requireOK(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("interrupted read did not finish")
+		}
+		s.want(v.ID, "failed", "pre_dispatch", "stopped")
+		if len(s.f.posts) != 0 {
+			t.Fatal("interrupted start posted")
 		}
 	})
 	t.Run("unhealthy journal", func(t *testing.T) {

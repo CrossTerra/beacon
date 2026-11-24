@@ -216,10 +216,13 @@ func (h *postHandler) Run(ctx context.Context, j *approval.Journal, v approval.V
 	if err == nil {
 		err = a.canPost()
 	}
+	if ctx.Err() != nil {
+		return stopBeforeDispatch(j, v.ID, h.now())
+	}
 	if err != nil {
 		return h.failPost(j, v.ID, "pre_dispatch", err)
 	}
-	if ctx.Err() != nil || !j.ClaimDispatch(v.ID) {
+	if !j.ClaimDispatch(v.ID) {
 		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	reply := a.post(ctx, d, h.user, v.SlackOperation)

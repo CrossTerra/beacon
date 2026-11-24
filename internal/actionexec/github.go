@@ -58,6 +58,12 @@ func (r *mergeReadBacks) get(id string) (mergeAttempt, bool) {
 	return a, ok
 }
 
+func (r *mergeReadBacks) forget(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.attempts, id)
+}
+
 func mergeReadBackDelay(count int) time.Duration {
 	shift := min(max(count-1, 0), 4)
 	d := time.Minute << shift
@@ -269,10 +275,15 @@ func (h *mergeHandler) Run(ctx context.Context, j *approval.Journal, v approval.
 	if err == nil {
 		err = h.finalReads(ctx, api, m, repoID)
 	}
+	// A cancelled parent aborts before the write. The GET's own error is only a provider refusal
+	// when this request is still running.
+	if ctx.Err() != nil {
+		return stopBeforeDispatch(j, v.ID, h.now())
+	}
 	if err != nil {
 		return h.fail(j, v.ID, "pre_dispatch", err)
 	}
-	if ctx.Err() != nil || !j.ClaimDispatch(v.ID) {
+	if !j.ClaimDispatch(v.ID) {
 		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	a, err := h.call(ctx, write, nil, http.MethodPut, m.pullPath()+"/merge", nil,
@@ -297,6 +308,7 @@ func (h *mergeHandler) Run(ctx context.Context, j *approval.Journal, v approval.
 	if err := j.Unknown(v.ID, reason, h.now()); err != nil {
 		return err
 	}
+	h.NoteAutomatic(v.ID)
 	return h.Reconcile(ctx, j, v.ID)
 }
 
@@ -360,20 +372,37 @@ func (h *mergeHandler) merged(j *approval.Journal, id, sha, by string) error {
 	return j.SetResult(id, r, h.now())
 }
 
+// NoteAutomatic records one automatic recovery attempt. Read again must not call it: those clicks
+// are not part of the backoff count.
+func (h *mergeHandler) NoteAutomatic(id string) {
+	h.readBacks.mark(id, h.now())
+}
+
 func (h *mergeHandler) Due(v approval.View) bool {
 	if v.Status != "outcome_unknown" || !h.bound(v.Frozen) {
 		return false
 	}
+	at := h.now()
 	a, seen := h.readBacks.get(v.ID)
+	// The second open observation is due a minute after the first, even if backoff would wait longer.
+	if first, ok := h.openFirst(v.ID); ok && at.Sub(first) >= mergeSettle && (!seen || a.last.Before(first.Add(mergeSettle))) {
+		return true
+	}
 	if !seen {
 		return true // one read after launch, even long after the reply was lost
 	}
-	at := h.now()
 	delay := time.Minute
 	if !v.UnknownAt.IsZero() && at.Sub(v.UnknownAt) >= mergeSettle {
 		delay = mergeReadBackDelay(a.count)
 	}
 	return at.Sub(a.last) >= delay
+}
+
+func (h *mergeHandler) openFirst(id string) (time.Time, bool) {
+	h.openMu.Lock()
+	defer h.openMu.Unlock()
+	first, ok := h.firstOpen[id]
+	return first, ok
 }
 
 func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id string) error {
@@ -386,7 +415,6 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 	if err != nil {
 		return nil
 	}
-	h.readBacks.mark(id, h.now())
 	leave, err := h.recovery.enter()
 	if err != nil {
 		return nil
@@ -408,19 +436,30 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 		return nil
 	}
 	if *p.Merged {
-		h.forgetOpen(id)
-		// A missing actor, a different actor, or a merge without a commit SHA is not this approval.
-		// Leaving it unknown would read it again every minute and spend the shared recovery budget.
-		if p.MergedBy.ID == h.user && p.Head.SHA == m.head && p.Base.Ref == m.base && sha40.MatchString(p.MergeCommit) {
-			return h.merged(j, id, p.MergeCommit, "read_back")
+		// A different actor, head, or base is not this approval. A missing actor or merge SHA can
+		// still be Beacon's own merge before GitHub finishes attributing it; Swift fails that case.
+		conflict := p.Head.SHA != m.head || p.Base.Ref != m.base || (p.MergedBy.ID > 0 && p.MergedBy.ID != h.user)
+		if conflict {
+			return h.settled(id, h.fail(j, id, "read_back", refusal("merged_otherwise")))
 		}
-		return h.fail(j, id, "read_back", refusal("merged_otherwise"))
+		if p.MergedBy.ID == h.user && sha40.MatchString(p.MergeCommit) {
+			return h.settled(id, h.merged(j, id, p.MergeCommit, "read_back"))
+		}
+		return nil
 	}
 	at := h.now()
 	if p.State != "open" || !v.UnknownAt.IsZero() && at.Sub(v.UnknownAt) >= mergeSettle && h.openSettled(id, at) {
-		h.forgetOpen(id)
-		return h.fail(j, id, "read_back", refusal("not_merged"))
+		return h.settled(id, h.fail(j, id, "read_back", refusal("not_merged")))
 	}
+	return nil
+}
+
+func (h *mergeHandler) settled(id string, err error) error {
+	if err != nil {
+		return err
+	}
+	h.forgetOpen(id)
+	h.readBacks.forget(id)
 	return nil
 }
 

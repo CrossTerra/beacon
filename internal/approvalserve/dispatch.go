@@ -142,7 +142,8 @@ func (d *dispatcher) dispatch(work []readyAction) error {
 		case err != nil:
 			return err
 		}
-		if err := action.h.Run(d.ctx, d.j, v, action.token); err != nil && d.ctx.Err() == nil && !errors.Is(err, approval.ErrTransition) {
+		if err := action.h.Run(d.ctx, d.j, v, action.token); err != nil &&
+			(errors.Is(err, approval.ErrJournalIO) || d.ctx.Err() == nil && !errors.Is(err, approval.ErrTransition)) {
 			return err
 		}
 	}
@@ -177,6 +178,9 @@ func (d *dispatcher) recover() error {
 				continue
 			}
 			if h, ok := d.handlers[v.Type].(actionexec.ReadBack); ok && h.Due(v) {
+				if n, ok := h.(interface{ NoteAutomatic(string) }); ok {
+					n.NoteAutomatic(v.ID)
+				}
 				if err := h.Reconcile(d.ctx, d.j, v.ID); err != nil {
 					return err
 				}

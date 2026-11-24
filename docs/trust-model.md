@@ -233,9 +233,10 @@ checkout's opencode configuration does not deny.
       ten, in display order), and every write token in the batch must unseal before any approval is recorded.
       Each write requires a durable start, fresh provider checks with that token, and a one-shot dispatch claim.
       If the service stops or the request is cancelled before that claim, and the journal can still record, the
-      action fails as `stopped` rather than becoming an unknown write. An unhealthy journal is not rewritten.
-      A lost reply permits only read-back with the unattended token. A merged pull request that is not clearly
-      this account's approved merge fails as `merged_otherwise`. Automatic merge read-back backs off after the
+      action fails as `stopped` rather than becoming an unknown write. A journal that had already failed is not
+      rewritten. A failed append of that stop record fails shutdown. A lost reply permits only read-back with
+      the unattended token. A merged pull request with a different actor, head, or base fails as
+      `merged_otherwise`. Incomplete attribution stays unknown. Automatic merge read-back backs off after the
       settlement window, up to 15 minutes, so one stuck read does not spend the recovery budget every minute. Without provider config there is no resolver
       or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
       See [Go approvals](go-approvals.md).
