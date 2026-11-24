@@ -2,6 +2,7 @@ package actionexec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -58,18 +59,19 @@ const (
 )
 
 type fakeGitHub struct {
-	t                                           *testing.T
-	requests, pulls, puts                       int
-	state, base, head, mergeableState, userType string
-	merged, down, lose, redirect, repeatPages   bool
-	mergeable                                   *bool
-	status                                      int
-	user, writeUser, mergedBy, repoID           int64
-	rule, classic                               []string
-	reviews                                     []any
-	runs                                        []githubRun
-	statusPages                                 [][]map[string]string
-	afterPull                                   func(*fakeGitHub)
+	t                                            *testing.T
+	requests, pulls, puts, userCalls, otherPulls int
+	state, base, head, mergeableState, userType  string
+	merged, down, lose, redirect, repeatPages    bool
+	failUser, blankSHA                           bool
+	mergeable                                    *bool
+	status                                       int
+	user, writeUser, mergedBy, repoID            int64
+	rule, classic                                []string
+	reviews                                      []any
+	runs                                         []githubRun
+	statusPages                                  [][]map[string]string
+	afterPull                                    func(*fakeGitHub)
 }
 
 func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
@@ -86,6 +88,10 @@ func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
 	}
 	switch r.Method + " " + r.URL.Path {
 	case "GET /user":
+		f.userCalls++
+		if f.failUser && !write {
+			return jsonReply(500, nil), nil
+		}
 		if f.redirect {
 			a := jsonReply(302, nil)
 			a.Header.Set("Location", "https://other.fixture.test/user")
@@ -96,11 +102,23 @@ func (f *fakeGitHub) handle(r *http.Request) (*http.Response, error) {
 			id = f.writeUser
 		}
 		return jsonReply(200, githubUser{ID: id, Login: "fixture-login", Type: f.userType}), nil
+	case "GET " + fixtureRepo + "/pulls/141":
+		f.otherPulls++
+		return jsonReply(200, map[string]any{
+			"state": "closed", "merged": true, "mergeable": true, "mergeable_state": "unknown",
+			"title": "Other fixture", "merge_commit_sha": fixtureSHA, "merged_by": githubUser{ID: f.user},
+			"base": map[string]any{"ref": "main", "repo": map[string]any{"id": f.repoID, "full_name": "CrossTerra/signal"}},
+			"head": map[string]any{"sha": fixtureHead},
+		}), nil
 	case "GET " + fixtureRepo + "/pulls/140":
 		f.pulls++
+		sha := fixtureSHA
+		if f.blankSHA {
+			sha = ""
+		}
 		a := jsonReply(200, map[string]any{
 			"state": f.state, "merged": f.merged, "mergeable": f.mergeable, "mergeable_state": f.mergeableState,
-			"title": "Fixture title", "merge_commit_sha": fixtureSHA, "merged_by": githubUser{ID: f.mergedBy},
+			"title": "Fixture title", "merge_commit_sha": sha, "merged_by": githubUser{ID: f.mergedBy},
 			"base": map[string]any{"ref": f.base, "repo": map[string]any{"id": f.repoID, "full_name": "CrossTerra/signal"}},
 			"head": map[string]any{"sha": f.head},
 		})
@@ -450,4 +468,162 @@ func TestMergeReadBoundsAndNoRedirect(t *testing.T) {
 	if _, err := m.h.Resolve(t.Context(), m.p); err == nil || m.f.requests != before+1 {
 		t.Fatal("a dot path was accepted", err)
 	}
+}
+
+func TestMergePreviewNamesTheApprovedHead(t *testing.T) {
+	m := mergeTest(t)
+	r, err := m.h.Resolve(t.Context(), m.p)
+	requireOK(t, err)
+	if r.Facts["Head"] != fixtureHead {
+		t.Fatalf("head fact = %v", r.Facts["Head"])
+	}
+}
+
+func TestMergeReadBackFailsUnlessThisUserMergedWithACommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*fakeGitHub)
+	}{
+		{"missing actor", func(f *fakeGitHub) { f.merged, f.state, f.mergedBy = true, "closed", 0 }},
+		{"blank sha", func(f *fakeGitHub) { f.merged, f.state, f.blankSHA, f.mergedBy = true, "closed", true, 123 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := mergeTest(t)
+			v := m.start()
+			requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+			tc.set(m.f)
+			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+			m.want("failed", "read_back", "merged_otherwise", 0)
+		})
+	}
+}
+
+func TestMergeReadAgainIsNotDelayedByBackoff(t *testing.T) {
+	m := mergeTest(t)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	m.f.failUser = true
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	m.at = m.at.Add(time.Second)
+	if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+		t.Fatal("automatic read-back did not wait")
+	}
+	before := m.f.userCalls
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+	if m.f.userCalls != before+1 {
+		t.Fatal("Read again waited for automatic backoff")
+	}
+}
+
+func TestStuckMergeBacksOffSoAnotherUnknownCanRead(t *testing.T) {
+	m := mergeTest(t)
+	m.h.recovery = newBudget(60, 2)
+	v := m.start()
+	requireOK(t, m.j.Unknown(v.ID, "reply_lost", m.at))
+	m.f.failUser = true
+	start, before := m.at, m.f.userCalls
+	var got []int
+	for minute := 0; minute <= 60; minute++ {
+		m.at = start.Add(time.Duration(minute) * time.Minute)
+		if m.h.Due(mustView(t, m.j, v.ID, m.at)) {
+			got = append(got, minute)
+			requireOK(t, m.h.Reconcile(t.Context(), m.j, v.ID))
+		}
+	}
+	want := []int{0, 1, 3, 7, 15, 30, 45, 60}
+	if len(got) != len(want) {
+		t.Fatalf("read-back minutes %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("read-back minutes %v, want %v", got, want)
+		}
+	}
+	if m.f.userCalls-before != len(want) {
+		t.Fatalf("identity checks = %d, want %d", m.f.userCalls-before, len(want))
+	}
+	other := m.unknownNumber(141)
+	m.f.failUser = false
+	requireOK(t, m.h.Reconcile(t.Context(), m.j, other))
+	if m.f.otherPulls != 1 {
+		t.Fatal("second unknown merge was not read; the stuck merge starved recovery")
+	}
+	gotView := mustView(t, m.j, other, m.at)
+	if gotView.Status != "executed" || gotView.Outcome == nil || gotView.Outcome.ConfirmedBy != "read_back" {
+		t.Fatalf("second merge did not settle: %s %+v", gotView.Status, gotView.Outcome)
+	}
+}
+
+func (m *mergeFixture) unknownNumber(number int64) string {
+	m.t.Helper()
+	p, err := m.j.Add(approval.Request{Type: approval.Merge, Agent: "fixture", Reason: "Other fixture merge.", Params: approval.Object{
+		"repo": "CrossTerra/signal", "number": number, "base": "main", "head": fixtureHead, "method": "squash",
+	}}, approval.PeerLabel{}, m.at)
+	requireOK(m.t, err)
+	f, err := approval.Freeze(p, approval.Binding{Origin: githubHost, Account: "github:user:123", Destination: approval.Object{
+		"repository_id": int64(456), "pr": number, "base": "main",
+	}}, "")
+	requireOK(m.t, err)
+	requireOK(m.t, m.j.ApproveAll([]approval.Frozen{f}, []byte("fixture-credential"), nil, m.at))
+	_, err = m.j.StartAsserted(p.ID, m.at)
+	requireOK(m.t, err)
+	requireOK(m.t, m.j.Unknown(p.ID, "reply_lost", m.at))
+	return p.ID
+}
+
+func mustView(t *testing.T, j *approval.Journal, id string, at time.Time) approval.View {
+	t.Helper()
+	v, _, err := j.Get(id, at)
+	requireOK(t, err)
+	return v
+}
+
+func TestMergeAbortBeforeClaimDoesNotLookLikeALostWrite(t *testing.T) {
+	t.Run("cancelled after final reads", func(t *testing.T) {
+		m := mergeTest(t)
+		v := m.start()
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		m.f.afterPull = func(f *fakeGitHub) {
+			if f.pulls == 3 {
+				cancel()
+			}
+		}
+		runToken(t, m, v, ctx)
+		m.want("failed", "pre_dispatch", "stopped", 0)
+	})
+	t.Run("stopping before reads", func(t *testing.T) {
+		m := mergeTest(t)
+		v := m.start()
+		requireOK(t, m.j.Shutdown(m.at))
+		runToken(t, m, v, t.Context())
+		m.want("failed", "pre_dispatch", "stopped", 0)
+	})
+	t.Run("unhealthy journal", func(t *testing.T) {
+		m := mergeTest(t)
+		v := m.start()
+		dir := m.h.dir
+		requireOK(t, m.j.Close())
+		token, err := m.h.Unlock(v.Frozen, make([]byte, 32))
+		requireOK(t, err)
+		defer token.Clear()
+		if err := m.h.Run(t.Context(), m.j, v, token); !errors.Is(err, approval.ErrTransition) {
+			t.Fatal(err)
+		}
+		j, err := approval.OpenJournal(dir, m.at, "")
+		requireOK(t, err)
+		defer j.Close()
+		got := mustView(t, j, v.ID, m.at)
+		if got.Status != "outcome_unknown" || got.Outcome != nil {
+			t.Fatal("unhealthy abort recorded a result or lost the start", got.Status)
+		}
+	})
+}
+
+func runToken(t *testing.T, m *mergeFixture, v approval.View, ctx context.Context) {
+	t.Helper()
+	token, err := m.h.Unlock(v.Frozen, make([]byte, 32))
+	requireOK(t, err)
+	defer token.Clear()
+	requireOK(t, m.h.Run(ctx, m.j, v, token))
 }

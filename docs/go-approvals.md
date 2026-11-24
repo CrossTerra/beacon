@@ -63,13 +63,18 @@ After a passkey reset, register again and re-save the write credential; the earl
 under the new key. The unattended read vault is not reset.
 
 The preview reads the PR, reviews, rules and checks with the read token. Every reported check and every
-visible required check must pass; only the latest run for each check name and app counts. After approval
-the write token is used for final reads, including one last PR read, and at most one `PUT` with the exact
-approved method and head SHA. The provider alone enforces branch rules at the write. A lost or ambiguous
-reply is read back with the unattended token. Success requires the approved repository, base, head and user
-and a merge SHA. An open PR settles as `not_merged` only after two eligible reads at least a minute apart,
-both at least a minute after the outcome became unknown. **Read again** uses the same bounded read-back
-budget as automatic recovery; it cannot resend a merge.
+visible required check must pass; only the latest run for each check name and app counts. The frozen view
+names the approved head. After approval the write token is used for final reads, including one last PR
+read, and at most one `PUT` with the exact approved method and head SHA. The provider alone enforces
+branch rules at the write. A lost or ambiguous reply is read back with the unattended token. Success
+requires the approved repository, base, head, this user, and a merge SHA. A merged pull request that is
+not clearly that merge fails as `merged_otherwise` and is not read again. An open PR settles as
+`not_merged` only after two eligible reads at least a minute apart, both at least a minute after the
+outcome became unknown. Automatic read-back keeps that one-minute cadence until then, then doubles the
+wait up to 15 minutes, so a read that never settles does not spend the recovery budget every minute.
+**Read again** uses the same budget and is not delayed by that backoff; it cannot resend a merge. A start
+that stops or is cancelled before the write is claimed fails as `stopped` (`pre_dispatch`) when the
+journal can still record. An unhealthy journal is left unchanged.
 
 ## Slack posts
 
@@ -110,7 +115,9 @@ After approval and durable start, Beacon repeats the checks with the unsealed wr
 most one `chat.postMessage` with the frozen text and unfurls off. The start's operation UUID goes in both
 `client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. The provider alone
 enforces permissions at the write. A definite refusal is terminal; a `429` respects `Retry-After` but never
-retries the post.
+retries the post. Stopping or cancelling before that post is claimed fails as `stopped` (`pre_dispatch`)
+when the journal can still record, so restart does not treat an unsent draft as a lost reply. An unhealthy
+journal is left unchanged.
 
 A lost or unclear reply triggers only read-back with the unattended token. It searches up to four pages of 15
 messages in the approved conversation or thread, from one minute before to at most five minutes after the

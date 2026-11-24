@@ -24,6 +24,47 @@ type mergeHandler struct {
 	user      int64
 	openMu    sync.Mutex
 	firstOpen map[string]time.Time
+	readBacks mergeReadBacks
+}
+
+const mergeReadBackMax = 15 * time.Minute
+
+type mergeAttempt struct {
+	last  time.Time
+	count int
+}
+
+// Automatic recovery keeps the one-minute cadence until settle, then doubles up to 15 minutes.
+// Read again calls Reconcile directly and is not delayed by this.
+type mergeReadBacks struct {
+	mu       sync.Mutex
+	attempts map[string]mergeAttempt
+}
+
+func (r *mergeReadBacks) mark(id string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.attempts == nil {
+		r.attempts = make(map[string]mergeAttempt)
+	}
+	n := min(r.attempts[id].count+1, 8)
+	r.attempts[id] = mergeAttempt{at, n}
+}
+
+func (r *mergeReadBacks) get(id string) (mergeAttempt, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.attempts[id]
+	return a, ok
+}
+
+func mergeReadBackDelay(count int) time.Duration {
+	shift := min(max(count-1, 0), 4)
+	d := time.Minute << shift
+	if d > mergeReadBackMax {
+		return mergeReadBackMax
+	}
+	return d
 }
 
 type pinnedMerge struct {
@@ -180,7 +221,7 @@ func (h *mergeHandler) precheck(ctx context.Context, api githubAPI, m pinnedMerg
 		Destination: approval.Object{"repository_id": p.Base.Repo.ID, "pr": m.number, "base": m.base}},
 		AccountLabel: oneLine(user.Login, 80), DestinationLabel: fmt.Sprintf("%s · #%d · %s", m.base, m.number, name),
 		Facts: approval.Object{"Title": oneLine(p.Title, 256), "Mergeable": p.MergeableState,
-			"Reviews": "no changes requested", "Checks": report.summary()}}, nil
+			"Reviews": "no changes requested", "Checks": report.summary(), "Head": m.head}}, nil
 }
 
 func (h *mergeHandler) Resolve(ctx context.Context, p approval.Proposal) (approval.Resolved, error) {
@@ -221,7 +262,7 @@ func (h *mergeHandler) save(ctx context.Context, read, write keychain.Secret, ke
 
 func (h *mergeHandler) Run(ctx context.Context, j *approval.Journal, v approval.View, write keychain.Secret) error {
 	if !j.MayDispatch(v.ID) {
-		return approval.ErrTransition
+		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	m, repoID, err := mergeSnapshot(v.Frozen)
 	api := githubAPI{h.provider, write, h.final}
@@ -232,7 +273,7 @@ func (h *mergeHandler) Run(ctx context.Context, j *approval.Journal, v approval.
 		return h.fail(j, v.ID, "pre_dispatch", err)
 	}
 	if ctx.Err() != nil || !j.ClaimDispatch(v.ID) {
-		return approval.ErrTransition
+		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	a, err := h.call(ctx, write, nil, http.MethodPut, m.pullPath()+"/merge", nil,
 		map[string]string{"sha": m.head, "merge_method": m.method})
@@ -320,7 +361,19 @@ func (h *mergeHandler) merged(j *approval.Journal, id, sha, by string) error {
 }
 
 func (h *mergeHandler) Due(v approval.View) bool {
-	return v.Frozen != nil && v.Frozen.Origin == h.binding.Origin && v.Frozen.Account == h.binding.Account
+	if v.Status != "outcome_unknown" || !h.bound(v.Frozen) {
+		return false
+	}
+	a, seen := h.readBacks.get(v.ID)
+	if !seen {
+		return true // one read after launch, even long after the reply was lost
+	}
+	at := h.now()
+	delay := time.Minute
+	if !v.UnknownAt.IsZero() && at.Sub(v.UnknownAt) >= mergeSettle {
+		delay = mergeReadBackDelay(a.count)
+	}
+	return at.Sub(a.last) >= delay
 }
 
 func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id string) error {
@@ -333,6 +386,7 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 	if err != nil {
 		return nil
 	}
+	h.readBacks.mark(id, h.now())
 	leave, err := h.recovery.enter()
 	if err != nil {
 		return nil
@@ -355,13 +409,12 @@ func (h *mergeHandler) Reconcile(ctx context.Context, j *approval.Journal, id st
 	}
 	if *p.Merged {
 		h.forgetOpen(id)
-		if p.Head.SHA != m.head || p.Base.Ref != m.base || p.MergedBy.ID > 0 && p.MergedBy.ID != h.user {
-			return h.fail(j, id, "read_back", refusal("merged_otherwise"))
-		}
-		if p.MergedBy.ID == h.user && sha40.MatchString(p.MergeCommit) {
+		// A missing actor, a different actor, or a merge without a commit SHA is not this approval.
+		// Leaving it unknown would read it again every minute and spend the shared recovery budget.
+		if p.MergedBy.ID == h.user && p.Head.SHA == m.head && p.Base.Ref == m.base && sha40.MatchString(p.MergeCommit) {
 			return h.merged(j, id, p.MergeCommit, "read_back")
 		}
-		return nil
+		return h.fail(j, id, "read_back", refusal("merged_otherwise"))
 	}
 	at := h.now()
 	if p.State != "open" || !v.UnknownAt.IsZero() && at.Sub(v.UnknownAt) >= mergeSettle && h.openSettled(id, at) {

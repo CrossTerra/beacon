@@ -171,6 +171,8 @@ func (d *dispatcher) recover() error {
 			if d.ctx.Err() != nil {
 				return nil
 			}
+			// Merges are considered at most once a minute. Due backs off further after the
+			// settlement window, so one stuck merge does not spend the recovery budget continuously.
 			if v.Type == approval.Merge && !mergeDue {
 				continue
 			}

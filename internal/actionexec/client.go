@@ -216,6 +216,16 @@ func (a answer) decode(out any) error {
 	return nil
 }
 
+// stopBeforeDispatch records that no write was claimed. An unhealthy journal stays untouched, matching
+// the previous restart path, so a torn file is not asked to take another frame.
+func stopBeforeDispatch(j *approval.Journal, id string, at time.Time) error {
+	err := j.FailUnclaimed(id, approval.Result{ConfirmedBy: "pre_dispatch", Error: "stopped"}, at)
+	if errors.Is(err, approval.ErrJournalIO) {
+		return approval.ErrTransition
+	}
+	return err
+}
+
 func (p *provider) fail(j *approval.Journal, id, by string, err error) error {
 	r := approval.Refusal{Code: "unavailable"}
 	_ = errors.As(err, &r)

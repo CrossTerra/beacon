@@ -1,6 +1,7 @@
 package actionexec
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -54,9 +55,13 @@ type fakeSlack struct {
 	rateBackOnly                            bool
 	retryAfter                              string
 	redirect                                bool
+	hook                                    func(*http.Request)
 }
 
 func (f *fakeSlack) handle(r *http.Request) (*http.Response, error) {
+	if f.hook != nil {
+		f.hook(r)
+	}
 	if r.URL.Scheme+"://"+r.URL.Host != slackOrigin || !strings.HasPrefix(r.URL.Path, "/api/") {
 		f.t.Error("contacted a host other than the configured Slack API")
 		return jsonReply(500, nil), nil
@@ -761,4 +766,59 @@ func TestSlackRecoveryOfDurableStartNeverDispatches(t *testing.T) {
 	if callCount(s.f.calls, slackPost) != 1 {
 		t.Fatal("write was replayed")
 	}
+}
+
+func TestSlackAbortBeforeClaimDoesNotLookLikeALostPost(t *testing.T) {
+	t.Run("cancelled after final reads", func(t *testing.T) {
+		s := slackTest(t)
+		v := s.start(s.propose(requestPost(fixtureChannel, fixtureRoot), ""))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		s.f.hook = func(r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/conversations.replies") && r.URL.Query().Get("oldest") == "" {
+				cancel()
+			}
+		}
+		write, err := s.h.Unlock(v.Frozen, make([]byte, 32))
+		requireOK(t, err)
+		defer write.Clear()
+		requireOK(t, s.h.Run(ctx, s.j, v, write))
+		s.want(v.ID, "failed", "pre_dispatch", "stopped")
+		if len(s.f.posts) != 0 {
+			t.Fatal("cancelled start posted")
+		}
+	})
+	t.Run("stopping before reads", func(t *testing.T) {
+		s := slackTest(t)
+		v := s.start(s.propose(requestPost(fixtureChannel, fixtureRoot), ""))
+		requireOK(t, s.j.Shutdown(s.at))
+		write, err := s.h.Unlock(v.Frozen, make([]byte, 32))
+		requireOK(t, err)
+		defer write.Clear()
+		requireOK(t, s.h.Run(t.Context(), s.j, v, write))
+		s.want(v.ID, "failed", "pre_dispatch", "stopped")
+		if len(s.f.posts) != 0 {
+			t.Fatal("stopping start posted")
+		}
+	})
+	t.Run("unhealthy journal", func(t *testing.T) {
+		s := slackTest(t)
+		v := s.start(s.propose(requestPost(fixtureChannel, fixtureRoot), ""))
+		dir := s.h.dir
+		requireOK(t, s.j.Close())
+		write, err := s.h.Unlock(v.Frozen, make([]byte, 32))
+		requireOK(t, err)
+		defer write.Clear()
+		if err := s.h.Run(t.Context(), s.j, v, write); !errors.Is(err, approval.ErrTransition) {
+			t.Fatal(err)
+		}
+		j, err := approval.OpenJournal(dir, s.at, "")
+		requireOK(t, err)
+		defer j.Close()
+		got, _, err := j.Get(v.ID, s.at)
+		requireOK(t, err)
+		if got.Status != "outcome_unknown" || got.Outcome != nil {
+			t.Fatal("unhealthy abort recorded a result or lost the start", got.Status)
+		}
+	})
 }

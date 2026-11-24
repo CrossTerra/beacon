@@ -622,6 +622,25 @@ func (j *Journal) ClaimDispatch(id string) bool {
 	return true
 }
 
+// FailUnclaimed records a definite failure for a start that has not claimed its write. An unhealthy
+// journal is left unchanged so restart can still recover it. A claimed write is also left unchanged:
+// the provider may already have accepted it.
+func (j *Journal) FailUnclaimed(id string, result Result, at time.Time) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.healthy() {
+		return ErrJournalIO
+	}
+	s := j.states[id]
+	if s == nil || s.Status != "started" || s.dispatched {
+		return ErrTransition
+	}
+	if err := result.check(s.Type); err != nil {
+		return err
+	}
+	return j.action(frame{ID: id, Kind: "failed", Result: &result}, at)
+}
+
 func (j *Journal) dispatchable(s *proposalState) bool {
 	return j.healthy() && !j.stopping && s != nil && s.Status == "started" && s.asserted && !s.dispatched
 }

@@ -206,7 +206,7 @@ func (h *postHandler) finalCheck(ctx context.Context, a slackAPI, d slackDraft, 
 
 func (h *postHandler) Run(ctx context.Context, j *approval.Journal, v approval.View, write keychain.Secret) error {
 	if !j.MayDispatch(v.ID) {
-		return approval.ErrTransition
+		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	d, err := h.snapshot(v)
 	a := h.api(write, slackCheck, h.final)
@@ -220,7 +220,7 @@ func (h *postHandler) Run(ctx context.Context, j *approval.Journal, v approval.V
 		return h.failPost(j, v.ID, "pre_dispatch", err)
 	}
 	if ctx.Err() != nil || !j.ClaimDispatch(v.ID) {
-		return approval.ErrTransition
+		return stopBeforeDispatch(j, v.ID, h.now())
 	}
 	reply := a.post(ctx, d, h.user, v.SlackOperation)
 	switch {
