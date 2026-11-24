@@ -150,10 +150,9 @@ new="$apps/.Beacon.app.new.$$"
 verify "$new"
 
 if [[ "$dry_run" != true && -n "$(beacon_pids)" ]]; then
-	# As the menu's Quit: services stop and approvals not yet started expire. The new CLI asks through the socket
-	# (signed like the old one, so the running app admits it); SIGTERM is the fallback for an app without `quit`.
+	# The installed CLI, then SIGTERM to that bundle's executable, then a Quit Apple event. The reply is printed.
 	say "Quitting the running Beacon…"
-	if ! how=$(quit_beacon "$new/Contents/Helpers/beacon" 30); then
+	if ! how=$(quit_beacon "$app" 30); then
 		echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
 		exit 1
 	fi

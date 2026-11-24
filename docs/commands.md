@@ -323,8 +323,9 @@ reads one JSON object from standard input,
 `{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
 Each command sends one request and prints the app's one-line JSON reply. A reply with `error` exits 1. `wait`
 defaults to `--after 0 --timeout 300`. There is no command to approve or list. `quit` asks the app to quit as its
-menu's Quit does; the app answers it only for its bundled CLI, and `scripts/install.sh` uses it to replace a running
-app.
+menu's Quit does. The app answers it for its own bundled CLI, or for another process with that CLI's signature that
+it can classify as external; otherwise the reply is `{"error":"invalid","field":"/op"}`. `scripts/install.sh` uses
+the installed CLI, and prints that reply, to replace a running app.
 
 It reads the app's code requirement from `~/Library/Application Support/beacon/act.json`,
 `{ "requirement": "…" }`. The signed app writes that file on its first launch and refuses to listen if the file

@@ -178,9 +178,13 @@ checkout's opencode configuration does not deny.
     on first launch and refuses to open the socket if the file names another signature. An approval is one
     click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
      proposal once. Tether resumes an approved run only after Beacon acknowledges recording its process group. Without
-     the acknowledgement tether kills the suspended process. The installer CLI must match its code requirement and
-     be positively identified as external to use `quit`; runs, their known descendants and unclassified peers cannot.
-     A run's snapshot is dropped when its supervisor stops. After an unconfirmed stop, known run
+     the acknowledgement tether kills the suspended process. `quit` requires the bundled CLI's code requirement.
+     The running app's own `Contents/Helpers/beacon` may quit without an external classification; a run that executes
+     that binary can quit the app, which the same user can already do with SIGTERM. A copy at another path must be
+     positively external. Runs, their known descendants and unclassified peers cannot quit through another path.
+     The interactive installer asks with the installed CLI, reports the reply, signals that bundle's executable,
+     and can send a Quit Apple event. A run's snapshot is dropped when its supervisor stops. After an unconfirmed
+     stop, known run
     groups keep their ownership, and other peers cannot create, read or withdraw proposals until the sweep and
     group checks confirm recovery. Quit and relaunch expire every approval that has no durable start, and a start
     without a result is never dispatched again. The journal and outbox hold prompts and messages in plain text in

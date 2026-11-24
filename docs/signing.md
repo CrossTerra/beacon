@@ -26,11 +26,15 @@ It:
    `identifier "dev.beacon.cli" and certificate leaf = H"<SHA-1>"`. `codesign` may ask once to use the identity's
    private key; choose **Always Allow**;
 4. verifies each signature against its requirement, before and after installing;
-5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It asks
-    through the app's socket with the new CLI (`beacon act quit`, restricted to the bundled CLI's verified external
-    peers), then, if it cannot quit through the socket, with SIGTERM. Neither needs permission to control another app.
-    It waits up to 30 seconds for each and stops if Beacon is still running. It then replaces
-    `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;
+5. quits a running Beacon as its menu's Quit does: services stop and approvals that never started expire. It runs
+   `act quit` with the CLI inside the installed `~/Applications/Beacon.app`, not the staged replacement. The running
+   app admits that binary even when it cannot classify the caller as external; a caller it refuses gets
+   `{"error":"invalid","field":"/op"}`, and a signature it does not admit is disconnected with no reply. The
+   installer prints that reply. If the app does not exit, it sends SIGTERM to the pid whose executable is exactly
+   `Beacon.app/Contents/MacOS/Beacon`, then `osascript` quits `dev.beacon.app` by bundle id. macOS may ask once for
+   Automation permission. Each step gets 30 seconds. It reports which one worked, or why each failed, and stops
+   without replacing the app if it is still running. It then replaces `~/Applications/Beacon.app`, moving the old
+   copy aside first and back if the move fails;
 6. points `~/.local/bin/beacon` at the app's CLI, so `beacon` and `beacon act` on your PATH are the app's. A plain
    file there from an older install is kept as `beacon.pre-app`;
 7. removes the old collector LaunchAgent (`dev.beacon.agent`) if it is installed, with `beacon service uninstall`:

@@ -124,7 +124,7 @@ final class ApprovalService: ObservableObject {
                                         slackLookup: posts.place)
             // scripts/install.sh quits a running Beacon through the bundled CLI, as the menu's Quit does, without
             // asking for permission to control the app.
-            server.quit = (client: client, action: {
+            server.quit = (client: client, executable: cli, action: {
                 DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
             })
             try server.start()

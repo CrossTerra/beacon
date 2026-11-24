@@ -2,9 +2,22 @@
 # What scripts/install.sh does around the build: quitting a running Beacon, repairing the keychain items after a
 # rebuild, and the next steps. Sourced; scripts/test-install-lib.sh exercises each with fakes.
 
-# The running Beacon.app's process ids, one per line. BEACON_APP_PATTERN replaces the pattern in tests.
+# The installed bundle whose executable this installer may signal. Tests set it; a real install uses ~/Applications.
+beacon_app_path() {
+	printf '%s' "${BEACON_APP_PATH:-$HOME/Applications/Beacon.app}"
+}
+
+# PIDs of that bundle's executable, one per line. The command must be that path, not a regex and not a lookalike
+# whose arguments merely contain it. A staged .Beacon.app.new is a different path and is not this app.
 beacon_pids() {
-	pgrep -U "$(id -u)" -f "${BEACON_APP_PATTERN:-/Beacon\.app/Contents/MacOS/Beacon$}" || true
+	local want pid command
+	want="$(beacon_app_path)/Contents/MacOS/Beacon"
+	[[ -n "$want" ]] || return 0
+	/bin/ps -axww -o pid=,command= | while read -r pid command; do
+		case "$command" in
+		"$want"|"$want "*) printf '%s\n' "$pid" ;;
+		esac
+	done
 }
 
 # Waits up to $1 seconds for Beacon to exit. Returns 0 once it has.
@@ -17,29 +30,74 @@ beacon_gone_within() {
 	[[ -z "$(beacon_pids)" ]]
 }
 
-# Quits a running Beacon as its menu's Quit does: its services stop and approvals not yet started expire. First
-# through its socket with the app's CLI ($1, `beacon act quit`, which only that CLI may ask), then with SIGTERM.
-# Neither needs permission to control another app. $2 is how long to wait for each, in seconds (Quit itself waits
-# at most 23 for its services). Prints how it quit; returns 1 if Beacon is still running.
+# Kept separate so the installer fixtures never send a real Apple event.
+beacon_osascript() {
+	/usr/bin/osascript "$@"
+}
+
+# Quits the running Beacon: use the CLI in the installed bundle ($1), not the staged CLI, so a new signature or
+# CLI version cannot prevent socket admission. The app can still refuse a caller it cannot verify as external.
+# Fall back to SIGTERM and finally AppleScript. $2 is how long to wait for exit after each request (Quit itself
+# waits at most 23 seconds for services). Print the outcome on stdout and why a path failed on stderr.
 quit_beacon() {
-	local cli=$1 wait=${2:-30} pids
+	local app=$1 cli="$1/Contents/Helpers/beacon" wait=${2:-30} pids reply term_status=0
+	# Only this bundle's executable is signaled, even if the caller exported another BEACON_APP_PATH.
+	local BEACON_APP_PATH=$app
 	pids=$(beacon_pids)
 	if [[ -z "$pids" ]]; then
 		echo "not running"
 		return 0
 	fi
-	if "$cli" act quit >/dev/null 2>&1 && beacon_gone_within "$wait"; then
-		echo "quit through its socket"
-		return 0
+	if [[ ! -f "$cli" || ! -x "$cli" ]]; then
+		printf 'Socket quit skipped: no executable installed CLI at %s.\n' "$cli" >&2
+	elif reply=$("$cli" act quit 2>&1); then
+		if beacon_gone_within "$wait"; then
+			echo "quit through its socket"
+			return 0
+		fi
+		printf 'Socket quit returned success, but Beacon did not exit within %s seconds (%s).\n' "$wait" "${reply:-no reply}" >&2
+	else
+		printf 'Socket quit via %s failed (exit %d): %s\n' "$cli" "$?" "${reply:-no output}" >&2
 	fi
 	pids=$(beacon_pids)
-	if [[ -n "$pids" ]]; then
-		# shellcheck disable=SC2086
-		kill -TERM $pids 2>/dev/null || true
+	if [[ -z "$pids" ]]; then
+		echo "exited during the socket quit attempt"
+		return 0
+	fi
+	# One argument per PID from pgrep. Even if one signal fails, another may have been sent.
+	# shellcheck disable=SC2086
+	reply=$(kill -TERM $pids 2>&1) || term_status=$?
+	if [[ "$term_status" -ne 0 ]]; then
+		printf 'SIGTERM failed (exit %d): %s\n' "$term_status" "${reply:-no output}" >&2
 	fi
 	if beacon_gone_within "$wait"; then
-		echo "quit with SIGTERM"
+		if [[ "$term_status" -eq 0 ]]; then
+			echo "quit with SIGTERM"
+		else
+			echo "exited during the SIGTERM attempt"
+		fi
 		return 0
+	fi
+	if [[ "$term_status" -eq 0 ]]; then
+		printf 'SIGTERM was sent, but Beacon did not exit within %s seconds.\n' "$wait" >&2
+	fi
+
+	echo "Trying AppleScript to quit Beacon; macOS may ask for Automation permission." >&2
+	# Check again inside the script so a late exit does not turn the quit event into a launch.
+	if reply=$(beacon_osascript -e "with timeout of $wait seconds" \
+		-e 'if application id "dev.beacon.app" is running then quit app id "dev.beacon.app"' \
+		-e 'end timeout' 2>&1); then
+		if beacon_gone_within "$wait"; then
+			echo "quit with AppleScript"
+			return 0
+		fi
+		printf 'AppleScript returned success, but Beacon did not exit within %s seconds.\n' "$wait" >&2
+	else
+		printf 'AppleScript quit failed (exit %d): %s\n' "$?" "${reply:-no output}" >&2
+		if [[ -z "$(beacon_pids)" ]]; then
+			echo "exited during the AppleScript attempt"
+			return 0
+		fi
 	fi
 	return 1
 }

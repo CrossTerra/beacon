@@ -54,7 +54,7 @@ it is closed with `frame_too_large`, which frees its wait.
 | `get` | `id` | `{ id, status, version }` |
 | `wait` | `id`, `after`, `timeout` (1 to 300 seconds) | the same, once `version` is past `after` or the timeout ends |
 | `withdraw` | `id` | the same, while pending; otherwise `not_pending` |
-| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does; only for a peer that matches the bundled CLI's code requirement (`scripts/install.sh`) and is confirmed to be external |
+| `quit` | nothing else | `{ status: "quitting" }`, then the app quits as its menu's Quit does. The peer must match the bundled CLI's code requirement. It must also be that running app's own `Contents/Helpers/beacon`, or be confirmed external. Anything else is `{ error: "invalid", field: "/op" }` and does not quit |
 
 The proposals live in the [journal](#the-journal-and-the-outbox). There is no operation to approve, list proposals, read history or see runners. `get`, `wait` and `withdraw` answer
 only the client identity that made the proposal, and the same run: a connection from a process in the process group
@@ -71,8 +71,11 @@ it cannot attribute to a run cannot `propose`, `get`, `wait` or `withdraw`. It g
 already in flight and for a Slack proposal whose intake lookup was in flight (nothing is stored); `types` is still
 available. After the sweep and the check that the old run groups are gone,
 external clients must reconnect. A connection that was not cleared does not gain access by staying open. The quit
-operation refuses runs, descendants known to have left a run's group, and unclassified peers, even when they use
-the bundled CLI. The installer can fall back to SIGTERM if the socket refuses the request.
+operation refuses a run, a descendant known to have left a run's group, and an unclassified peer when that process
+is not the running app's own CLI. Executing that exact binary may quit, including before the sweep: it is the
+installer, and the same user can already signal the process. A copy at another path, including the staged
+replacement, still has to be external. The [installer](signing.md#install) asks with the installed CLI, prints the
+reply, then signals that bundle's executable and, if needed, sends a Quit Apple event.
 
 **Limits.** At most 32 connections, 16 concurrent waits, 20 pending proposals per client identity, 40 pending in
 all and 60 proposals per identity per hour. Past a limit the reply is `busy`. An incomplete frame is dropped with
