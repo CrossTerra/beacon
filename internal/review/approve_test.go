@@ -151,6 +151,45 @@ func TestFreezeNonceIsBoundToTheSessionAndANewFreezeCancelsTheOld(t *testing.T) 
 	postApproval(t, s, cookie, key, prf, second.Nonce, second.Challenge, http.StatusOK)
 }
 
+type fixturePin struct{ closed int }
+
+func (p *fixturePin) Close() error { p.closed++; return nil }
+
+func TestFreezePinsAreClosedWhenSupersededExpiredOrShutDown(t *testing.T) {
+	s, cookie, _, prf := registeredPreview(t)
+	defer clear(prf)
+	j := s.journal.(*approval.Journal)
+	p, err := j.Add(approval.Request{Type: approval.Run, Agent: "fixture", Reason: "fixture", Params: approval.Object{
+		"checkout": "test", "model": "test/model", "prompt": "fixture",
+	}}, approval.PeerLabel{}, s.now())
+	must(t, err)
+	var pins []*fixturePin
+	s.SetActions(Actions{Resolve: func(_ context.Context, p approval.Proposal) (approval.Resolved, error) {
+		pin := new(fixturePin)
+		pins = append(pins, pin)
+		return approval.Resolved{Binding: approval.Binding{Account: "macos:user:fixture", Destination: approval.Object{
+			"checkout_id": "vol:1/inode:2", "branch": "main",
+		}}, Pin: pin}, nil
+	}})
+	freezeNonce(t, s, cookie, p.ID)
+	if pins[0].closed != 0 {
+		t.Fatal("checkout was unpinned before approval")
+	}
+	freezeNonce(t, s, cookie, p.ID)
+	if pins[0].closed != 1 || pins[1].closed != 0 {
+		t.Fatal("refreeze did not release exactly the old pin")
+	}
+	s.ExpireChallenges(s.now().Add(2 * time.Minute))
+	if pins[1].closed != 1 {
+		t.Fatal("expired challenge still owns a checkout pin")
+	}
+	freezeNonce(t, s, cookie, p.ID)
+	s.CloseChallenges()
+	if pins[2].closed != 1 {
+		t.Fatal("shutdown did not release the checkout pin")
+	}
+}
+
 func TestNoNonceIsHeldWhenTheCeremonyCannotBeBuilt(t *testing.T) {
 	s, j := site(t, false, nil)
 	s.SetResolver(func(p approval.Proposal) (approval.Binding, error) {

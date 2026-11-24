@@ -26,6 +26,7 @@ const actUsage = `usage: beacon act types
        beacon act wait ID [--after VERSION] [--timeout SECONDS]
        beacon act withdraw ID
        beacon act quit
+       beacon act --state-dir DIR resume-delivery
 
 Use beacon act --state-dir DIR OP to talk to the Go review preview. That socket has no quit operation.
 `
@@ -97,6 +98,11 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "types", "quit":
 		if len(args) != 1 || stateDir != "" && args[0] == "quit" {
+			fmt.Fprint(a.stderr, actUsage)
+			return exitError{2}
+		}
+	case "resume-delivery":
+		if len(args) != 1 || stateDir == "" {
 			fmt.Fprint(a.stderr, actUsage)
 			return exitError{2}
 		}

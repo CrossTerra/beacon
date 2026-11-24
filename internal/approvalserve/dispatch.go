@@ -3,6 +3,7 @@ package approvalserve
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/review"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 type dispatcher struct {
@@ -62,7 +64,7 @@ func (d *dispatcher) controls(p *actionexec.Providers) review.Actions {
 // submit is the only live path from a verified assertion to a start. Check every exact binding and open its
 // sealed write token before approving anything, then give the worker only scoped credentials, not the vault key.
 // A local run has no write token, but still takes the verified assertion and an exclusive checkout reservation.
-func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, key []byte) error {
+func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, key []byte, pin io.Closer) error {
 	if d.ctx.Err() != nil || len(credentialID) == 0 || len(key) != 32 || len(items) == 0 || len(items) > 10 {
 		return approval.ErrTransition
 	}
@@ -114,7 +116,8 @@ func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, ke
 			secrets[b] = token
 		}
 		if local, ok := h.(*actionexec.RunHandler); ok {
-			releaseReservation, err = local.Reserve(&f)
+			directory, _ := pin.(*supervisor.Directory)
+			releaseReservation, err = local.Reserve(&f, directory)
 			if err != nil {
 				return err
 			}

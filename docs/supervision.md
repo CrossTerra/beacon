@@ -66,19 +66,21 @@ definitions; this part changes neither the installer nor the currently installed
 Trusted service code uses `Supervisor.PrepareRun` with an approved run ID and explicit command. The reaper
 installs the process group and its ownership before returning `Run.PGID()`. A trusted bootstrap waits for a
 permit on a private pipe: it has not loaded the target executable or received its environment. The handler
-durably records the registered group and claims the permit before calling `Run.Release()`. Release waits for
-the bootstrap's exec. The permit write and the exec-status read share the request's deadline, a poll inside
-that wait, and a late start does not grant a new timeout. A failed exec is reported on a close-on-exec status
-pipe as a launch error, not as a successful start followed by exit 126. A timeout after writing the permit
-is unconfirmed. Shutdown, `Run.Stop()` or five seconds without release cancels a prepared launch without
-executing the target. `Run.Wait` returns the leader's exit code (128 plus signal when signaled) after the
-tree is gone, or a cleanup/launch error. There is no retry.
+durably records the registered group and claims the permit before release. The bootstrap's readiness,
+permit write and exec-status read share the request's deadline; a late start does not grant a new timeout.
+A failed exec writes an error on a close-on-exec status pipe. Silent EOF alone could be bootstrap death.
+macOS requires a kernel exec notification; Linux corroborates EOF with a non-exiting child or a normal
+exit status the bootstrap could not return. An ambiguous death or timeout after the permit is unconfirmed.
+The reaper syncs a receipt before acknowledging an approved run's exec. Shutdown, `Run.Stop()` or five seconds
+without release cancels a prepared launch without executing the target. The leader's exit is reported without
+reaping it; `Run.Wait` confirms the whole tree is gone or returns a cleanup/launch error. There is no retry.
 
-When supplied, the approved checkout's device and inode are checked on an open descriptor and the bootstrap
-enters that descriptor, not the path again. It sets `PWD` after entering, so a renamed directory cannot leave
-`PWD` pointing at a replacement. `OLDPWD` is not inherited. Prompt and output files are private. Run
-outputs are created exclusively; fixed job logs append. The handler, not the reaper, owns approval, durable launch
-records and construction of the command and environment. Do not pass Beacon credentials to a child.
+When supplied, the service passes the checkout descriptor from freeze to the reaper over a private Unix
+socket pair. The bootstrap enters by descriptor and verifies the approved path still names it just before
+exec. `PWD` is the approved path; `OLDPWD` is not inherited. The approved prompt is sent to the child
+through an anonymous pipe; there is no prompt file to reopen. Run outputs are created exclusively; fixed
+job logs append. The handler, not the reaper, owns approval and construction of the command and environment.
+Do not pass Beacon credentials to a child.
 
 The proposal socket resolves the kernel peer PID once, at connect time. Group membership or tracked ancestry
 can identify a run; an environment marker alone cannot. An empty run ID means the peer was read and is not

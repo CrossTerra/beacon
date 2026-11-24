@@ -10,9 +10,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +30,14 @@ import (
 func TestMain(m *testing.M) {
 	if code, helper := supervisor.HelperExit(os.Args[1:]); helper {
 		os.Exit(code)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--run-fixture-descendant" {
+		signal.Ignore(unix.SIGTERM)
+		if os.WriteFile("descendant", []byte(strconv.Itoa(os.Getpid())), 0o600) != nil {
+			os.Exit(1)
+		}
+		time.Sleep(30 * time.Second) // watchdog; the reaper should kill it
+		os.Exit(0)
 	}
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		if err := fakeOpenCode(); err != nil {
@@ -73,6 +83,21 @@ func fakeOpenCode() error {
 	prompt, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
+	}
+	if string(prompt) == "leave fixture descendant" {
+		child := exec.Command(os.Args[0], "--run-fixture-descendant")
+		if err := child.Start(); err != nil {
+			return err
+		}
+		for until := time.Now().Add(5 * time.Second); ; {
+			if _, err := os.Stat("descendant"); err == nil {
+				break
+			}
+			if time.Now().After(until) {
+				return errors.New("descendant did not come up")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	}
 	inv, err := json.Marshal(invocation{Args: os.Args[1:], Cwd: cwd, Prompt: string(prompt),
 		PWD: os.Getenv("PWD"), OLDPWD: os.Getenv("OLDPWD"), ServiceOnly: os.Getenv("FIXTURE_SERVICE_ONLY"), NestedProposal: nested.ID, PID: os.Getpid()})
@@ -179,7 +204,7 @@ func TestServeAgentRunsUseSeparateAssertionsAndPinnedCheckouts(t *testing.T) {
 	opts, a, b := runOptions(t)
 	key, prf := registerFixturePasskey(t, opts.StateDir)
 	web, stop := signInBrowser(t, opts)
-	prompt := "  keep \"quotes\", --flags and 👍\n\n"
+	prompt := "  keep \"quotes\", --flags and 👍\n\n" + strings.Repeat("👍", 24_000) // larger than a pipe buffer
 	first := proposeRun(t, opts.StateDir, "a", prompt)
 	second := proposeRun(t, opts.StateDir, "b", "different run")
 	alias := proposeRun(t, opts.StateDir, "alias", "must not overlap")
@@ -189,6 +214,9 @@ func TestServeAgentRunsUseSeparateAssertionsAndPinnedCheckouts(t *testing.T) {
 	}
 	web.request(http.MethodPost, "/freeze", url.Values{"csrf": {web.csrf}, "id": {first.ID, second.ID}}, 400)
 	previous := web.form(key, prf, web.freezeRun(first, "", 200))
+	web.freezeRun(first, "test/unavailable", 409)
+	web.request(http.MethodPost, "/approve", previous, 409)
+	previous = web.form(key, prf, web.freezeRun(first, "", 200))
 	page = web.freezeRun(first, "test/two", 200)
 	if !strings.Contains(page, "Originally proposed model") || !strings.Contains(page, a) || !strings.Contains(page, "vol:") || !strings.Contains(page, "--auto") {
 		t.Fatal("frozen page did not show the changed model, pinned checkout and permission warning")
@@ -208,6 +236,9 @@ func TestServeAgentRunsUseSeparateAssertionsAndPinnedCheckouts(t *testing.T) {
 	web.request(http.MethodPost, "/approve", assertion, 200)
 	web.request(http.MethodPost, "/approve", assertion, 409)
 	firstCall := waitInvocation(t, a)
+	if _, err := os.Lstat(filepath.Join(opts.StateDir, "runs", first.Runner, "prompt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("frozen stdin had a pathname while the run was active")
+	}
 	web.freezeRun(alias, "", 409)
 	page = web.freezeRun(second, "", 200)
 	web.request(http.MethodPost, "/approve", web.form(key, prf, page), 200)
@@ -262,6 +293,33 @@ func TestServeAgentRunsUseSeparateAssertionsAndPinnedCheckouts(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(dir, "prompt")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("the duplicate prompt was kept")
 		}
+	}
+}
+
+func TestServeShutdownPreservesLeaderReportWhileDescendantDrains(t *testing.T) {
+	opts, dir, _ := runOptions(t)
+	// Keep the TERM-ignoring descendant around for a distinct cleanup phase.
+	opts.Supervision.Grace = 2 * time.Second
+	key, prf := registerFixturePasskey(t, opts.StateDir)
+	web, stop := signInBrowser(t, opts)
+	p := proposeRun(t, opts.StateDir, "a", "leave fixture descendant")
+	alias := proposeRun(t, opts.StateDir, "alias", "wait for entire tree")
+	web.runCSRF(p)
+	page := web.freezeRun(p, "", 200)
+	web.request(http.MethodPost, "/approve", web.form(key, prf, page), 200)
+	waitInvocation(t, dir)
+	must(t, os.WriteFile(filepath.Join(dir, "finish"), nil, 0o600))
+	web.waitFor(p.ID, "<code>runner_finished</code>")
+	web.freezeRun(alias, "", 409) // successful leader, still a live checkout claim
+	stop()
+	j, err := approval.OpenJournal(opts.StateDir, opts.Now(), "")
+	must(t, err)
+	defer j.Close()
+	v, _, err := j.Get(p.ID, opts.Now())
+	must(t, err)
+	if v.RunnerState != approval.RunnerClosed || v.RunOutcome.Kind != approval.RunnerFinished ||
+		v.RunOutcome.Text != "Done in the approved checkout." {
+		t.Fatalf("shutdown lost the leader's successful report: %s %+v", v.RunnerState, v.RunOutcome)
 	}
 }
 

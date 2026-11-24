@@ -75,6 +75,59 @@ func start(t *testing.T, opts Options) func() {
 	return stop
 }
 
+type recordsFunc func(context.Context, []byte) approval.RecordAnswer
+
+func (f recordsFunc) PostRecord(ctx context.Context, body []byte) approval.RecordAnswer {
+	return f(ctx, body)
+}
+
+func TestResumeDeliveryOverProposalSocket(t *testing.T) {
+	opts := options(t)
+	j, err := approval.OpenJournal(opts.StateDir, opts.Now(), "")
+	must(t, err)
+	fixtureProposal(t, j)
+	must(t, j.Close())
+	var calls atomic.Int32
+	attempts := make(chan []byte, 2)
+	opts.ConnectRecords = func(context.Context) (approval.SignalIdentity, approval.RecordTransport, error) {
+		return approval.SignalIdentity{Person: "act_01m6a6ft00e40r2081040g2081", Handle: "fixture"}, recordsFunc(func(_ context.Context, body []byte) approval.RecordAnswer {
+			n := calls.Add(1)
+			select {
+			case attempts <- bytes.Clone(body):
+			default:
+				t.Error("unexpected extra delivery attempts")
+			}
+			if n == 1 {
+				return approval.RecordAnswer{Stopped: "conflict:transition", Ambiguous: true}
+			}
+			return approval.RecordAnswer{EventID: "evt_01m6a6ft00e81840g2081040g2"}
+		}), nil
+	}
+	_, stop := signInBrowser(t, opts)
+	next := func() []byte {
+		t.Helper()
+		select {
+		case b := <-attempts:
+			return b
+		case <-time.After(5 * time.Second):
+			t.Fatal("delivery did not send a record")
+			return nil
+		}
+	}
+	first := next()
+	bad, err := actsocket.Call(t.Context(), opts.StateDir, approval.Object{"op": "resume-delivery", "target": "fixture"}, 0)
+	must(t, err)
+	if !bytes.Contains(bad, []byte(`"error":"invalid"`)) || calls.Load() != 1 {
+		t.Fatal("resume accepted an extra field or delivery retried automatically")
+	}
+	b, err := actsocket.Call(t.Context(), opts.StateDir, approval.Object{"op": "resume-delivery"}, 0)
+	must(t, err)
+	if string(b) != `{"queued":true}` || !bytes.Equal(next(), first) {
+		t.Fatal("resume did not replay the exact pending bytes")
+	}
+	stop()
+}
+
 func TestServiceResumesInterruptedRecordAndDeliversExpiryWithoutARead(t *testing.T) {
 	opts := options(t)
 	var advance atomic.Bool

@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"io"
 	"maps"
 	"regexp"
 	"slices"
@@ -259,6 +260,7 @@ type Resolved struct {
 	Binding
 	AccountLabel, DestinationLabel string
 	Facts                          Object
+	Pin                            io.Closer // live checkout capability, owned by the reviewer; never serialized
 }
 
 // Refusal carries a fixed reason code and optional display-only detail chosen by a handler.

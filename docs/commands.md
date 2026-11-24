@@ -375,7 +375,8 @@ The default is review-only. To enable [GitHub merges](go-approvals.md#provider-c
 [Slack posts](go-approvals.md#slack-posts), configure `action-providers.json` and save separate read and
 write credentials through **Provider credentials** with a passkey. To enable [agent runs](go-approvals.md#agent-runs-and-checkouts),
 configure `agent-runs.json`. Each run needs its own passkey assertion. [Signal record delivery](go-approvals.md#journal-and-record-delivery)
-is also opt-in. `egress --state-dir DIR` lists the configured GitHub, Slack and Signal hosts; it reads no credentials
+is also opt-in. `beacon act --state-dir DIR resume-delivery` wakes a stopped or backing-off record sender without
+starting any action. `egress --state-dir DIR` lists the configured GitHub, Slack and Signal hosts; it reads no credentials
 or collector config. Proposal parameters and reasons remain plaintext in the private journal. The Go preview
 does not use the login Keychain.
 

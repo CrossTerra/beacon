@@ -49,20 +49,24 @@ func runnerTransition(s *proposalState, kind RunnerKind) bool {
 // ClaimRunDispatch records the attribution installed by PrepareRun and the one-shot permit to
 // release it. No target image may execute until this local frame is durable. Recovery never uses
 // the PID as authority to signal or as evidence that the image actually executed.
-func (j *Journal) ClaimRunDispatch(id string, pgid int, at time.Time) error {
+func (j *Journal) ClaimRunDispatch(id string, pgid int, at time.Time) (string, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if !j.healthy() {
-		return ErrJournalUnhealthy
+		return "", ErrJournalUnhealthy
 	}
 	if j.stopping {
-		return ErrStopping
+		return "", ErrStopping
 	}
 	s := j.states[id]
 	if !j.dispatchable(s) || s.Type != Run || pgid <= 1 {
-		return ErrTransition
+		return "", ErrTransition
 	}
-	return j.commit(frame{Kind: "run_permit", ID: id, PGID: pgid, At: at.UnixMilli()})
+	token := nonce()
+	if err := j.commit(frame{Kind: "run_permit", ID: id, PGID: pgid, RunToken: token, At: at.UnixMilli()}); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 func (j *Journal) RecordRunner(id string, event RunnerEvent, at time.Time) error {
@@ -95,7 +99,12 @@ func (j *Journal) RecoverRuns(at time.Time) error {
 			if err := j.action(frame{ID: s.ID, Kind: "failed", Result: &Result{ConfirmedBy: "read_back", Error: "not_launched"}}, at); err != nil {
 				return err
 			}
-		case s.Status == "executed" && s.RunnerState != RunnerClosed:
+		case s.Status == "outcome_unknown" && hasRunExec(j.dir, s.RunnerID, s.RunPGID, s.runToken):
+			if err := j.action(frame{ID: s.ID, Kind: "executed", Result: &Result{ConfirmedBy: "read_back"}}, at); err != nil {
+				return err
+			}
+		}
+		if s.Status == "executed" && s.RunnerState != RunnerClosed {
 			if !s.RunnerState.terminal() {
 				if err := j.recordRunner(s, RunnerEvent{Kind: RunnerFailed, Error: "interrupted"}, at); err != nil {
 					return err

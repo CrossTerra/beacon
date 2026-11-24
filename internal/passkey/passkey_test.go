@@ -158,6 +158,35 @@ func TestSwappedVaultIsAJournalledReset(t *testing.T) {
 	_ = prf
 }
 
+func TestOpenVaultAuthenticatesOneSnapshotAgainstLiveEnrollment(t *testing.T) {
+	dir, rp, prf, id := register(t)
+	defer clear(prf)
+	noteVault(t, dir)
+	path := filepath.Join(dir, writeVaultName)
+	// The journal's open handle and replayed enrollment still belong to the service.
+	if err := os.Rename(filepath.Join(dir, "journal.log"), filepath.Join(dir, "live.log")); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	key, err := openVault(dir, id, bytes.Clone(prf), rp.Origin, func(dir string) ([]byte, error) {
+		reads++
+		body, err := readVault(dir)
+		if err != nil {
+			return nil, err
+		}
+		// Change the path only after taking the snapshot. Neither decrypt nor
+		// enrollment verification should reopen a file to validate those bytes.
+		return body, os.WriteFile(path, []byte(`{"status":"replaced"}`), 0o600)
+	})
+	defer clear(key)
+	if err != nil || len(key) != keyBytes || reads != 1 {
+		t.Fatalf("did not validate the enrolled snapshot: reads=%d err=%v", reads, err)
+	}
+	if _, err := OpenVault(dir, id, bytes.Clone(prf), rp.Origin); err != ErrReset {
+		t.Fatalf("replacement was not refused by the live journal: %v", err)
+	}
+}
+
 func TestUnrecordedVaultIsDebrisAndAFailedRecordRollsBack(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	now := time.Unix(1_800_000_000, 0).UTC()

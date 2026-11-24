@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/CrossTerra/beacon/internal/approval"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 	"golang.org/x/sys/unix"
 )
 
@@ -90,15 +91,12 @@ var (
 
 // Read only small regular files; do not run Git or read from an untrusted FIFO. Accept Git's
 // worktree pointer, an ordinary .git directory and a detached HEAD like the Swift resolver.
-func checkoutBranch(path string) string {
-	git := filepath.Join(path, ".git")
-	if target, ok := strings.CutPrefix(readGitLine(git), "gitdir: "); ok {
+func checkoutBranch(pin *supervisor.Directory) string {
+	git := ".git"
+	if target, ok := strings.CutPrefix(readGitLine(pin, git), "gitdir: "); ok {
 		git = strings.TrimSpace(target)
-		if !filepath.IsAbs(git) {
-			git = filepath.Join(path, git)
-		}
 	}
-	head := readGitLine(filepath.Join(git, "HEAD"))
+	head := readGitLine(pin, filepath.Join(git, "HEAD"))
 	if name, ok := strings.CutPrefix(head, "ref: refs/heads/"); ok && gitBranch.MatchString(name) {
 		return name
 	}
@@ -108,8 +106,8 @@ func checkoutBranch(path string) string {
 	return "none"
 }
 
-func readGitLine(path string) string {
-	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_NOCTTY, 0)
+func readGitLine(pin *supervisor.Directory, path string) string {
+	f, err := pin.OpenAt(path, os.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_NOCTTY)
 	if err != nil {
 		return ""
 	}

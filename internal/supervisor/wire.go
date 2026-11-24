@@ -22,21 +22,23 @@ var (
 )
 
 const (
-	maxFrame      = 1 << 20 // maximum local control/gate frame in bytes, not including the newline
-	wireTimeout   = 2 * time.Second
-	gracePeriod   = 15 * time.Second
-	killWait      = 5 * time.Second
-	prepareWait   = 5 * time.Second
-	reaperSlack   = 3 * time.Second
-	unconfirmed   = 4 // helper exit status, distinct from an unexpected death or protocol error
-	codeStopped   = "stopped"
-	codeLaunch    = "launch"
-	codeCheckout  = "checkout_changed"
-	codeTimeout   = "launch_timeout"
-	codeBusy      = "busy"
-	codeSession   = "session"
-	codeRecovery  = "unconfirmed"
-	codeAttribute = "attribute"
+	maxFrame        = 1 << 20 // maximum local control/gate frame in bytes, not including the newline
+	wireTimeout     = 2 * time.Second
+	gracePeriod     = 15 * time.Second
+	killWait        = 5 * time.Second
+	prepareWait     = 5 * time.Second
+	reaperSlack     = 3 * time.Second
+	unconfirmed     = 4 // helper exit status, distinct from an unexpected death or protocol error
+	codeStopped     = "stopped"
+	codeLaunch      = "launch"
+	codeCheckout    = "checkout_changed"
+	codeTimeout     = "launch_timeout"
+	codeBusy        = "busy"
+	codeSession     = "session"
+	codeRecovery    = "unconfirmed"
+	codeAttribute   = "attribute"
+	codeReaper      = "reaper"
+	bootstrapFailed = 126
 )
 
 type Options struct {
@@ -69,6 +71,8 @@ type request struct {
 	Jobs    []FixedJob `json:",omitempty"`
 	Periods *periods   `json:",omitempty"`
 	Until   int64      `json:",omitempty"` // absolute unix nanos; release must finish by then
+	Receipt string     `json:",omitempty"` // durable permit nonce, only for actual agent.run requests
+	Reason  string     `json:",omitempty"` // fixed stop code
 }
 
 type message struct {
@@ -76,7 +80,9 @@ type message struct {
 	RunID    string `json:",omitempty"`
 	PID      int    `json:",omitempty"`
 	Finished uint64 `json:",omitempty"`
+	Exited   uint64 `json:",omitempty"`
 	Exit     int    `json:",omitempty"`
+	Reason   string `json:",omitempty"`
 }
 
 func (m message) err() error {

@@ -3,6 +3,7 @@ package approval
 import (
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"maps"
@@ -54,6 +55,7 @@ type frame struct {
 	SlackOperation string       `json:"slack_operation,omitempty"`
 	Runner         *RunnerEvent `json:"runner,omitempty"`
 	PGID           int          `json:"pgid,omitempty"` // local launch permit; never used to signal on replay
+	RunToken       string       `json:"run_token,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -74,6 +76,7 @@ type proposalState struct {
 	order      int
 	approvedAt time.Time
 	dispatched bool // process-local; replay never dispatches a started action
+	runToken   string
 }
 
 // Journal owns the service's instance lock. It never dispatches an action. A failed append/sync poisons the
@@ -94,6 +97,7 @@ type Journal struct {
 	draining   sync.Mutex
 	stopping   bool
 	failed     bool
+	vaultHash  []byte // last committed enrollment, cleared by a committed reset
 	hooks      journalHooks
 }
 
@@ -330,13 +334,26 @@ func (j *Journal) recordLocal(kind, reason string, hash []byte, at time.Time) er
 	return j.commit(frame{Kind: kind, At: at.UnixMilli(), Reason: reason, VaultHash: hash})
 }
 
-// NoteVaultMismatch records a visible passkey reset while this process holds the journal.
-func NoteVaultMismatch(dir string, at time.Time) error {
+// CheckPasskeyVault compares one vault snapshot with the live journal, not a new read of
+// journal.log. A mismatched active vault is durably reset before returning.
+func CheckPasskeyVault(dir string, hash []byte, at time.Time) (bool, error) {
 	v, ok := liveJournals.Load(filepath.Clean(dir))
 	if !ok {
-		return ErrLocked
+		return false, ErrLocked
 	}
-	return v.(*Journal).recordLocal("passkeys_reset", "vault_mismatch", nil, at)
+	j := v.(*Journal)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.healthy() || j.stopping {
+		return false, ErrJournalUnhealthy
+	}
+	if len(j.vaultHash) != 32 {
+		return false, nil
+	}
+	if subtle.ConstantTimeCompare(hash, j.vaultHash) == 1 {
+		return true, nil
+	}
+	return false, j.commit(frame{Kind: "passkeys_reset", At: at.UnixMilli(), Reason: "vault_mismatch"})
 }
 
 func localKind(kind string) bool {
@@ -765,17 +782,28 @@ func (j *Journal) sweep(at time.Time) error {
 // Replay checks the disk format and transition order, not today's intake parameter schema.
 func (j *Journal) fold(e frame) bool {
 	if localKind(e.Kind) {
-		return e.Seq == 0 && e.ID == ""
+		if e.Seq != 0 || e.ID != "" {
+			return false
+		}
+		switch e.Kind {
+		case "passkey_added":
+			j.vaultHash = e.VaultHash
+		case "passkeys_reset":
+			j.vaultHash = nil
+		}
+		return true
 	}
 	if e.ID == "" {
 		return j.foldDelivery(e)
 	}
 	s := j.states[e.ID]
 	if e.Kind == "run_permit" {
-		if e.Seq != 0 || e.PGID <= 1 || s == nil || s.Type != Run || s.Status != "started" || !s.asserted || s.RunPGID != 0 {
+		if e.Seq != 0 || e.PGID <= 1 || s == nil || s.Type != Run || s.Status != "started" || !s.asserted || s.RunPGID != 0 ||
+			e.RunToken != "" && !replayNonce.matches(e.RunToken) {
 			return false
 		}
 		s.RunPGID, s.dispatched = e.PGID, true
+		s.runToken = e.RunToken
 		return true
 	}
 	if e.Seq != j.lastSeq+1 || !replayNonce.matches(e.Nonce) || !ValidID(e.ID, "apr") {

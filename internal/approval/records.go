@@ -10,7 +10,7 @@ const maxRecord = 1 << 20
 
 var (
 	replayNonce = pattern(`[0-9a-f]{32}`)
-	actorHandle = pattern(`[a-z][a-z0-9-]{0,62}`)
+	actorHandle = pattern(`[a-z0-9][a-z0-9._-]{0,63}`)
 )
 
 // SignalIdentity is supplied by trusted Signal settings, never the proposer.

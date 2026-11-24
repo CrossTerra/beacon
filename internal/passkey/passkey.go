@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -251,12 +252,25 @@ func CommitAdded(dir string, at time.Time, record func([]byte, time.Time) error)
 
 // VaultHash is the SHA-256 of write-vault.json.
 func VaultHash(dir string) ([]byte, error) {
-	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	body, err := readVault(dir)
 	if err != nil {
 		return nil, err
 	}
 	sum := sha256.Sum256(body)
 	return append([]byte(nil), sum[:]...), nil
+}
+
+func readVault(dir string) ([]byte, error) {
+	f, err := approval.OpenPrivate(filepath.Join(dir, writeVaultName), os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	body, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(body) > 4096 {
+		return nil, ErrVault
+	}
+	return body, nil
 }
 
 // Abandon removes a registration that was not recorded. The reset marker stays.
@@ -267,12 +281,16 @@ func Abandon(dir string) {
 
 // OpenVault unwraps the write-vault data key for one credential. The caller must clear the key.
 // A wrong PRF output fails closed and approves nothing.
-func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte, err error) {
+func OpenVault(dir string, credentialID, prf []byte, origin string) ([]byte, error) {
+	return openVault(dir, credentialID, prf, origin, readVault)
+}
+
+func openVault(dir string, credentialID, prf []byte, origin string, read func(string) ([]byte, error)) ([]byte, error) {
 	if len(prf) != prfBytes {
 		return nil, ErrPRF
 	}
 	defer clear(prf)
-	vaultBody, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	vaultBody, err := read(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrVault
@@ -280,14 +298,11 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 		return nil, err
 	}
 	sum := sha256.Sum256(vaultBody)
-	recorded, active, err := approval.PasskeyVault(dir)
+	matches, err := approval.CheckPasskeyVault(dir, sum[:], time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
-	if !active || subtle.ConstantTimeCompare(sum[:], recorded) != 1 {
-		if active {
-			_ = approval.NoteVaultMismatch(dir, time.Now().UTC())
-		}
+	if !matches {
 		return nil, ErrReset
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "passkeys.json"))
@@ -321,11 +336,14 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 	if err != nil {
 		return nil, err
 	}
-	key, err = gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
+	if len(found.Wrap.Nonce) != gcm.NonceSize() {
+		return nil, ErrVault
+	}
+	key, err := gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
 	if err != nil {
 		return nil, err
 	}
-	if err := openVaultCheck(dir, key, origin); err != nil {
+	if err := openVaultCheck(vaultBody, key, origin); err != nil {
 		clear(key)
 		return nil, err
 	}
@@ -378,14 +396,7 @@ func sealVault(dir string, key []byte, origin string) error {
 	return publishNew(dir, writeVaultName, body)
 }
 
-func openVaultCheck(dir string, key []byte, origin string) error {
-	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrVault
-		}
-		return err
-	}
+func openVaultCheck(body, key []byte, origin string) error {
 	var stored vaultFile
 	if err := json.Unmarshal(body, &stored); err != nil || stored.Origin != origin || len(stored.Nonce) != nonceBytes {
 		return ErrVault

@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/approval"
@@ -42,12 +41,8 @@ type RunHandler struct {
 
 type runClaim struct {
 	id, checkout string
-
-	// Stop and the monitor settle the reason together, not while holding the claims lock.
-	mu       sync.Mutex
-	run      *supervisor.Run
-	reason   string
-	quitting atomic.Bool // shutdown can mark this without waiting for a stop RPC
+	pin          *supervisor.Directory // kept until PrepareRun hands it to the reaper
+	run          *supervisor.Run
 }
 
 func NewRunHandler(ctx context.Context, s RunSettings, state string, sup *supervisor.Supervisor, now func() time.Time) (*RunHandler, error) {
@@ -77,7 +72,7 @@ func (h *RunHandler) checkout(name string) string {
 	return ""
 }
 
-func checkoutID(pin supervisor.Directory) string {
+func checkoutID(pin *supervisor.Directory) string {
 	return fmt.Sprintf("vol:%d/inode:%d", pin.Device, pin.Inode)
 }
 
@@ -97,22 +92,27 @@ func (h *RunHandler) Resolve(ctx context.Context, p approval.Proposal) (approval
 	if path == "" {
 		return approval.Resolved{}, refusal("unknown_checkout")
 	}
-	pin, err := supervisor.PinDirectory(path)
-	if err != nil {
-		return approval.Resolved{}, refusal("checkout_missing")
-	}
 	if !executableFile(h.settings.Opencode) {
 		return approval.Resolved{}, refusal("opencode_missing")
 	}
 	if !slices.Contains(h.settings.Models, model) {
 		return approval.Resolved{}, refusal("model_unavailable")
 	}
-	id, branch := checkoutID(pin), checkoutBranch(path)
+	pin, err := supervisor.PinDirectory(path)
+	if err != nil {
+		return approval.Resolved{}, refusal("checkout_missing")
+	}
+	id, branch := checkoutID(pin), checkoutBranch(pin)
 	h.mu.Lock()
 	busy := h.claims[id] != nil
 	h.mu.Unlock()
 	if busy {
+		_ = pin.Close()
 		return approval.Resolved{}, refusal("checkout_busy")
+	}
+	if !pin.MatchesPath() {
+		_ = pin.Close()
+		return approval.Resolved{}, refusal("checkout_changed")
 	}
 	facts := approval.Object{
 		"Checkout": path,
@@ -124,7 +124,7 @@ func (h *RunHandler) Resolve(ctx context.Context, p approval.Proposal) (approval
 	}
 	return approval.Resolved{Binding: approval.Binding{Account: h.account, Destination: approval.Object{
 		"checkout_id": id, "branch": branch,
-	}}, AccountLabel: h.name, DestinationLabel: name + " · " + branch + " · " + path, Facts: facts}, nil
+	}}, AccountLabel: h.name, DestinationLabel: name + " · " + branch + " · " + path, Facts: facts, Pin: pin}, nil
 }
 
 // Unlock is called only after the site's assertion and PRF vault check. There is no provider
@@ -143,7 +143,7 @@ func (h *RunHandler) Unlock(f *approval.Frozen, key []byte) (keychain.Secret, er
 
 // Reserve runs before ApproveAll; a busy checkout leaves the proposal pending. The returned
 // cleanup releases only an untransferred claim (e.g. if ApproveAll fails or the start expires).
-func (h *RunHandler) Reserve(f *approval.Frozen) (func(), error) {
+func (h *RunHandler) Reserve(f *approval.Frozen, pin *supervisor.Directory) (func(), error) {
 	if !h.ready() {
 		return nil, refusal("supervisor_not_ready")
 	}
@@ -153,11 +153,20 @@ func (h *RunHandler) Reserve(f *approval.Frozen) (func(), error) {
 		return nil, approval.ErrStopping
 	}
 	c := &runClaim{id: f.ID, checkout: str(f.Destination, "checkout_id")}
+	if pin == nil || checkoutID(pin) != c.checkout || h.checkout(str(f.Params, "checkout")) != pin.Path {
+		return nil, approval.ErrStale
+	}
 	if h.claims[c.checkout] != nil {
 		return nil, refusal("checkout_busy")
 	}
+	owned, err := pin.Dup()
+	if err != nil {
+		return nil, refusal("checkout_missing")
+	}
+	c.pin = owned
 	h.claims[c.checkout] = c
 	return func() {
+		_ = owned.Close() // no-op if the dispatcher has already handed it to the reaper
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if h.claims[c.checkout] == c && c.run == nil {
@@ -185,12 +194,8 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	if !reserved || !h.ready() {
 		return fail("supervisor_unavailable")
 	}
-	path, model := h.checkout(str(f.Params, "checkout")), str(f.Params, "model")
-	pin, err := supervisor.PinDirectory(path)
-	if err != nil {
-		return fail("checkout_missing")
-	}
-	if checkoutID(pin) != id || checkoutBranch(path) != str(f.Destination, "branch") {
+	model := str(f.Params, "model")
+	if !c.pin.MatchesPath() || checkoutBranch(c.pin) != str(f.Destination, "branch") {
 		return fail("checkout_changed")
 	}
 	if !slices.Contains(h.settings.Models, model) {
@@ -199,12 +204,14 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	if !executableFile(h.settings.Opencode) {
 		return fail("opencode_missing")
 	}
-	cmd, err := h.prepare(v.RunnerID, str(f.Params, "prompt"), model, pin)
+	cmd, err := h.prepare(v.RunnerID, str(f.Params, "prompt"), model, c.pin)
 	if err != nil {
 		return fail("launch_failed")
 	}
-	defer os.Remove(cmd.Stdin)
 	r, err := h.sup.PrepareRun(v.RunnerID, cmd)
+	_ = c.pin.Close() // a successful prepare passed the held descriptor to the gated child
+	clear(cmd.Input)
+	cmd.Input, cmd.Dir = nil, nil
 	if err != nil {
 		switch {
 		case errors.Is(err, supervisor.ErrCheckoutChanged):
@@ -217,25 +224,20 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	}
 	h.mu.Lock()
 	c.run = r
-	c.quitting.Store(h.stopping)
 	h.mu.Unlock()
 	launched := false
 	defer func() {
 		h.monitors.Add(1)
 		go h.monitor(j, c, cmd, launched)
 	}()
-	// The gated child already has the descriptor. Do not retain a second prompt file.
-	if err := os.Remove(cmd.Stdin); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = r.Stop()
-		return fail("launch_failed")
-	}
 	// PrepareRun registered the group but has given the child neither args nor environment.
 	// Record that attribution and consume the one-shot permit before Release can exec.
 	if ctx.Err() != nil || !h.ready() {
 		_ = r.Stop()
 		return stopBeforeDispatch(j, v.ID, h.now())
 	}
-	if err := j.ClaimRunDispatch(v.ID, r.PGID(), h.now()); err != nil {
+	permit, err := j.ClaimRunDispatch(v.ID, r.PGID(), h.now())
+	if err != nil {
 		_ = r.Stop()
 		if errors.Is(err, approval.ErrStopping) {
 			return stopBeforeDispatch(j, v.ID, h.now())
@@ -246,8 +248,10 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 		_ = r.Stop()
 		return j.SetResult(v.ID, approval.Result{ConfirmedBy: "pre_dispatch", Error: "stopped"}, h.now())
 	}
-	if err := r.Release(); err != nil {
+	if err := r.ReleaseWithReceipt(permit); err != nil {
 		switch {
+		case errors.Is(err, supervisor.ErrCheckoutChanged):
+			return j.SetResult(v.ID, approval.Result{ConfirmedBy: "reply", Error: "checkout_changed"}, h.now())
 		case errors.Is(err, supervisor.ErrStopped), errors.Is(err, supervisor.ErrPrepareTimeout), errors.Is(err, supervisor.ErrLaunch):
 			return j.SetResult(v.ID, approval.Result{ConfirmedBy: "reply", Error: "launch_failed"}, h.now())
 		default:
@@ -264,7 +268,7 @@ func (h *RunHandler) Run(ctx context.Context, j *approval.Journal, v approval.Vi
 	return j.RecordRunner(v.ID, approval.RunnerEvent{Kind: approval.RunnerWorking}, h.now())
 }
 
-func (h *RunHandler) prepare(id, prompt, model string, pin supervisor.Directory) (supervisor.Command, error) {
+func (h *RunHandler) prepare(id, prompt, model string, pin *supervisor.Directory) (supervisor.Command, error) {
 	if err := approval.PrivateDir(h.dir); err != nil {
 		return supervisor.Command{}, err
 	}
@@ -272,18 +276,8 @@ func (h *RunHandler) prepare(id, prompt, model string, pin supervisor.Directory)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return supervisor.Command{}, err
 	}
-	stdin := filepath.Join(dir, "prompt")
-	f, err := approval.OpenPrivate(stdin, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
-	if err != nil {
-		return supervisor.Command{}, err
-	}
-	_, err = f.WriteString(prompt)
-	if err := errors.Join(err, f.Close()); err != nil {
-		os.Remove(stdin)
-		return supervisor.Command{}, err
-	}
 	return supervisor.Command{Path: h.settings.Opencode, Args: []string{"run", "--standalone", "--format", "json", "--auto", "--model", model},
-		Env: h.env, Dir: &pin, Stdin: stdin, Stdout: filepath.Join(dir, "output"), Stderr: filepath.Join(dir, "errors")}, nil
+		Env: h.env, Dir: pin, Input: []byte(prompt), Stdout: filepath.Join(dir, "output"), Stderr: filepath.Join(dir, "errors")}, nil
 }
 
 // RecoverRunFiles deletes temporary input left by a crash. Call under instance.lock, after the
@@ -319,29 +313,58 @@ func (h *RunHandler) monitor(j *approval.Journal, c *runClaim, cmd supervisor.Co
 	r := c.run
 	watch := time.NewTicker(2 * time.Second)
 	defer watch.Stop()
+	leader := r.LeaderDone()
+	outcomeRecorded, requestedStop := false, false
+	recordLeader := func(exit supervisor.LeaderExit) {
+		if launched && !outcomeRecorded {
+			outcomeRecorded = true
+			h.record(j, c.id, runOutcome(cmd, exit))
+		}
+	}
+	settle := func(confirmed bool) {
+		if exit, ok := r.LeaderExit(); ok {
+			recordLeader(exit) // the exit and cleanup notifications can both be ready
+		} else if launched && !outcomeRecorded {
+			outcomeRecorded = true
+			h.record(j, c.id, approval.RunnerEvent{Kind: approval.RunnerFailed, Error: "supervisor_ended"})
+		}
+		if !confirmed {
+			return // preserve the outcome but don't close or free the checkout
+		}
+		h.mu.Lock()
+		delete(h.claims, c.checkout)
+		h.mu.Unlock()
+		if launched {
+			h.record(j, c.id, approval.RunnerEvent{Kind: approval.RunnerClosed})
+		}
+	}
 	for {
 		select {
+		case <-leader:
+			exit, _ := r.LeaderExit()
+			recordLeader(exit)
+			leader = nil
 		case <-r.Done():
-			goto finished
+			_, err := r.Wait(context.Background())
+			settle(err == nil || !launched && !errors.Is(err, supervisor.ErrUnconfirmed))
+			return
 		case <-h.joined:
 			// Close reached its bound. Accept a completion already received, but do not
 			// wait forever or claim cleanup when the reaper could not confirm it.
 			select {
 			case <-r.Done():
-				goto finished
+				_, err := r.Wait(context.Background())
+				settle(err == nil || !launched && !errors.Is(err, supervisor.ErrUnconfirmed))
 			default:
-				h.finish(j, c, cmd, launched, 0, supervisor.ErrUnconfirmed)
-				return
+				settle(false)
 			}
+			return
 		case <-watch.C:
-			if outputTooLarge(cmd) {
-				_ = c.stop("output_too_large")
+			if launched && leader != nil && !requestedStop && outputTooLarge(cmd) {
+				requestedStop = r.StopWithReason("output_too_large") == nil
 			}
 		}
 	}
-finished:
-	exit, err := r.Wait(context.Background()) // Done is closed
-	h.finish(j, c, cmd, launched, exit, err)
 }
 
 func outputTooLarge(cmd supervisor.Command) bool {
@@ -357,74 +380,46 @@ func outputTooLarge(cmd supervisor.Command) bool {
 	return false
 }
 
-func (h *RunHandler) finish(j *approval.Journal, c *runClaim, cmd supervisor.Command, launched bool, exit int, waitErr error) {
-	confirmed := !errors.Is(waitErr, supervisor.ErrUnconfirmed)
-	// Wait may return a definite pre-exec error after the tree is gone. A launched run
-	// has no such error; keep the checkout and journal open if cleanup is uncertain.
-	if confirmed {
-		h.mu.Lock()
-		delete(h.claims, c.checkout)
-		h.mu.Unlock()
-	}
-	if !launched {
-		return
-	}
-	c.mu.Lock()
-	reason := c.reason
-	c.mu.Unlock()
-	if reason == "" && c.quitting.Load() {
-		reason = "stopped_at_quit"
-	}
+func runOutcome(cmd supervisor.Command, exit supervisor.LeaderExit) approval.RunnerEvent {
+	reason := exit.Reason
 	event := approval.RunnerEvent{Kind: approval.RunnerFailed, Error: reason}
-	switch {
-	case !confirmed:
-		event.Error = firstText(reason, "supervisor_ended")
-	case reason == "stopped_at_quit":
+	if reason == "stopped_at_quit" {
 		event.Text = "Beacon stopped while the run was working."
-	default:
-		report := readRunReport(cmd.Stdout)
-		switch {
-		case reason != "":
-			event.Text = firstText(report.text, report.problem)
-		case exit == 0:
-			event = approval.RunnerEvent{Kind: approval.RunnerFinished, Text: firstText(report.text, "The run ended without a final message.")}
-		default:
-			event.Error = "exit_" + strconv.Itoa(exit)
-			if exit == 130 {
-				event.Error = "interrupted"
-			} else if exit > 128 {
-				event.Error = "signal_" + strconv.Itoa(exit-128)
-			}
-			event.Text = firstText(report.problem, errorTail(cmd.Stderr), report.text)
+		return event
+	}
+	if reason == "output_too_large" || outputTooLarge(cmd) {
+		return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: "output_too_large"}
+	}
+	report := readRunReport(cmd.Stdout)
+	switch {
+	case reason != "":
+		event.Text = firstText(report.text, report.problem)
+	case exit.Code == 0:
+		// Catch a burst between ticks (or growth while the report was read). A prefix
+		// of an oversized stream cannot establish what the final message was.
+		if outputTooLarge(cmd) {
+			return approval.RunnerEvent{Kind: approval.RunnerFailed, Error: "output_too_large"}
 		}
+		return approval.RunnerEvent{Kind: approval.RunnerFinished, Text: firstText(report.text, "The run ended without a final message.")}
+	default:
+		event.Error = "exit_" + strconv.Itoa(exit.Code)
+		if exit.Code == 130 {
+			event.Error = "interrupted"
+		} else if exit.Code > 128 {
+			event.Error = "signal_" + strconv.Itoa(exit.Code-128)
+		}
+		event.Text = firstText(report.problem, errorTail(cmd.Stderr), report.text)
 	}
-	err := j.RecordRunner(c.id, event, h.now())
-	if err == nil && confirmed {
-		err = j.RecordRunner(c.id, approval.RunnerEvent{Kind: approval.RunnerClosed}, h.now())
-	}
-	if err != nil {
+	return event
+}
+
+func (h *RunHandler) record(j *approval.Journal, id string, event approval.RunnerEvent) {
+	if err := j.RecordRunner(id, event, h.now()); err != nil {
 		select {
 		case h.failed <- err:
 		default:
 		}
 	}
-}
-
-func (c *runClaim) stop(reason string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	select {
-	case <-c.run.Done():
-		return approval.ErrTransition
-	default:
-	}
-	if c.reason == "" {
-		if err := c.run.Stop(); err != nil {
-			return refusal("supervisor_unavailable")
-		}
-		c.reason = reason
-	}
-	return nil
 }
 
 func (h *RunHandler) running(id string) *runClaim {
@@ -437,6 +432,7 @@ func (h *RunHandler) running(id string) *runClaim {
 		if c.id == id && c.run != nil {
 			select {
 			case <-c.run.Done():
+			case <-c.run.LeaderDone():
 			default:
 				return c
 			}
@@ -449,7 +445,10 @@ func (h *RunHandler) CanStop(id string) bool { return h.running(id) != nil }
 
 func (h *RunHandler) Stop(id string) error {
 	if c := h.running(id); c != nil {
-		return c.stop("stopped")
+		if err := c.run.Stop(); err != nil {
+			return refusal("supervisor_unavailable")
+		}
+		return nil
 	}
 	return approval.ErrTransition
 }
@@ -457,20 +456,7 @@ func (h *RunHandler) Stop(id string) error {
 func (h *RunHandler) BeginShutdown() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.stopping {
-		return
-	}
 	h.stopping = true
-	for _, c := range h.claims {
-		if c.run == nil {
-			continue
-		}
-		select {
-		case <-c.run.Done():
-		default:
-			c.quitting.Store(true)
-		}
-	}
 }
 
 func (h *RunHandler) Failed() <-chan error { return h.failed }

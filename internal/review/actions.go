@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -17,7 +18,7 @@ type Actions struct {
 	Resolve  func(context.Context, approval.Proposal) (approval.Resolved, error)
 	// Approve is only called with the exact held snapshots and key from the verified assertion. The
 	// callback must not keep the vault key or attach it to work that outlives this request.
-	Approve     func(items []approval.Frozen, credentialID, batchChallenge, key []byte) error
+	Approve     func(items []approval.Frozen, credentialID, batchChallenge, key []byte, pin io.Closer) error
 	ReadBack    func(context.Context, approval.View) error
 	CanReadBack func(approval.Action) bool
 	Targets     []CredentialTarget
@@ -140,6 +141,11 @@ func (s *Site) changeCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/settings/begin" {
+		selection, ok := s.beginSelection(r)
+		if !ok {
+			http.Error(w, "passkey unavailable", http.StatusUnauthorized)
+			return
+		}
 		var target *CredentialTarget
 		for _, t := range s.actions.Targets {
 			if t.Service == r.PostForm.Get("service") {
@@ -157,7 +163,7 @@ func (s *Site) changeCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		page := ceremonyPage{Action: "/settings/save", Title: "Save provider credentials", Button: "Save with passkey", Target: target}
-		s.challenge(w, r, creds[0], held{target: target.Service}, page, func(instance string, nonce []byte) ([]byte, error) {
+		s.challenge(w, creds[0], selection, held{target: target.Service}, page, func(instance string, nonce []byte) ([]byte, error) {
 			return passkey.SettingsChallenge(s.origin.URL(), instance, nonce, target.Service, target.Origin, target.Account, target.Workspace)
 		})
 		return
@@ -166,6 +172,7 @@ func (s *Site) changeCredentials(w http.ResponseWriter, r *http.Request) {
 	if key == nil {
 		return
 	}
+	defer item.close()
 	defer clear(key)
 	read, write, err := keychain.ActionTokens(r.PostForm)
 	delete(r.Form, "read_token")

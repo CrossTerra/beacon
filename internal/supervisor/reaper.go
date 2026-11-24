@@ -35,10 +35,8 @@ func HelperExit(args []string) (int, bool) {
 		if len(args) != 2 || os.Geteuid() == 0 {
 			return 2, true
 		}
-		if err := execJob(); err != nil {
-			return 126, true
-		}
-		return 0, true
+		execJob()
+		return bootstrapFailed, true // successful exec never returns to this image
 	default:
 		return 0, false
 	}
@@ -78,7 +76,13 @@ func reap(dir string) error {
 		return err
 	}
 	defer reply.Close()
-	return reaperLoop(dir, lock, life, os.Stdin, reply)
+	descriptors := os.NewFile(6, "checkout receiver")
+	defer descriptors.Close()
+	if kind, err := unix.GetsockoptInt(6, unix.SOL_SOCKET, unix.SO_TYPE); err != nil || kind != unix.SOCK_DGRAM {
+		return ErrReaper
+	}
+	unix.CloseOnExec(6)
+	return reaperLoop(dir, lock, life, os.Stdin, reply, descriptors)
 }
 
 func checkLock(dir string, lock *os.File) error {
@@ -96,7 +100,7 @@ func checkLock(dir string, lock *os.File) error {
 	return nil
 }
 
-func reaperLoop(dir string, lock, life, input, reply *os.File) error {
+func reaperLoop(dir string, lock, life, input, reply, descriptors *os.File) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	lifeFD := int32(life.Fd())
@@ -173,8 +177,9 @@ func reaperLoop(dir string, lock, life, input, reply *os.File) error {
 		return err
 	}
 	e := newEngine(self, prefix, t, emit)
+	e.recordExec = func(id string, pid int, permit string) error { return approval.PersistRunExec(dir, id, pid, permit) }
 	if emit(message{}) == nil {
-		err = e.serve(ctx, requests, live)
+		err = e.serve(ctx, requests, live, descriptors)
 	} else {
 		err = ErrReaper
 	}
@@ -196,7 +201,7 @@ func sweepPrevious(dir string, lock *os.File, t timing) error {
 	return newEngine("", old, t, nil).drain(context.Background())
 }
 
-func (e *engine) serve(ctx context.Context, requests <-chan request, live func() bool) error {
+func (e *engine) serve(ctx context.Context, requests <-chan request, live func() bool, descriptors *os.File) error {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	fixedSet := false
@@ -220,16 +225,25 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 				}
 				fixedSet = true
 			case "prepare":
-				m = e.prepare(r)
+				m = e.prepareWithDirectory(r, descriptors)
+				if m.Error == codeReaper {
+					return ErrReaper // cannot keep reading after losing descriptor/frame synchronization
+				}
 			case "release":
 				var until time.Time
 				if r.Until != 0 {
 					until = time.Unix(0, r.Until)
 				}
-				m = e.release(ctx, r.Ticket, until)
+				m = e.release(ctx, r.Ticket, until, r.Receipt)
 			case "stop":
 				if j := e.runs[r.Ticket]; j != nil {
-					j.stop(time.Now(), e.timing, "")
+					if err := e.observeExit(j); err != nil {
+						return err
+					}
+					if r.Reason != "output_too_large" {
+						r.Reason = "stopped"
+					}
+					j.stopRun(time.Now(), e.timing, r.Reason)
 				}
 			case "attribute":
 				id, attrErr := e.attribute(r.PID)
@@ -257,4 +271,16 @@ func (e *engine) serve(ctx context.Context, requests <-chan request, live func()
 		}
 	}
 	return nil
+}
+
+func (e *engine) prepareWithDirectory(r request, descriptors *os.File) message {
+	if r.Command != nil && r.Command.Dir != nil {
+		file, err := receiveDirectory(descriptors, r.Ticket)
+		if err != nil {
+			return message{Error: codeReaper}
+		}
+		defer file.Close() // spawn passes its own reference to the gated bootstrap
+		r.Command.Dir.file = file
+	}
+	return e.prepare(r)
 }

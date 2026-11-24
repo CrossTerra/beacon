@@ -16,9 +16,10 @@ The output is not written. A second passkey is refused until a later assertion-g
 `/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
 takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
 The first registration writes `write-vault.json`, a key-check sealed under the new data key. Its SHA-256
-is stored on the `passkey_added` journal frame. `OpenVault` refuses a file that does not match the latest
-`passkey_added` with no later `passkeys_reset`. Later means a higher frame in the journal, not a later
-clock. It records that mismatch as `passkeys_reset` (`vault_mismatch`). The page then says to stop
+is stored on the `passkey_added` journal frame. The service reads the vault once per assertion: the
+bytes it hashes against the live journal's enrollment are the bytes it decrypts. A later reset clears
+that enrollment, ordered by journal position, not the clock. It records an active enrollment's hash
+mismatch as `passkeys_reset` (`vault_mismatch`). The page then says to stop
 `beacon serve` and run `beacon setup --reset-passkeys`; the files stay until that command removes them.
 A same-user process can still replace both files and the check. The real backstop is
 that write credentials are sealed under the real data key, so a swapped vault approves nothing that can
@@ -30,8 +31,8 @@ left behind with no `passkey_added` is failed-registration debris and is removed
 
 A signed-in browser can freeze a proposal only when a handler resolves its account and destination. One
 assertion covers that frozen hash, or a batch of at most 10 merges or posts in their pending-list order.
-An `agent.run` cannot join a batch. The freeze nonce belongs to that browser session; a new freeze
-cancels the session's earlier nonce. The assertion is refused unless its PRF output unwraps the write
+An `agent.run` cannot join a batch. The freeze nonce belongs to that browser session; starting a
+new selection cancels the earlier nonce even if the new selection fails. The assertion is refused unless its PRF output unwraps the write
 vault and that key opens the key-check. A missing write vault approves nothing. The new sign count is
 stored before the journal records `approved`. A batch is several `approved` frames plus an
 `approved_commit` marker; replay applies the frames only when the marker is present. Each approved frame
@@ -162,29 +163,34 @@ model. **Resolve and review** freezes the selection and displays the prompt and 
 The one-use assertion covers that snapshot. A checkout can have more than one name, but only one run can
 claim its directory at a time. If it is busy the proposal stays pending. Other checkouts run in parallel.
 
-After the durable start, Beacon checks the checkout and branch again. The [reaper](supervision.md) opens
-the directory and verifies the approved device and inode. While the bootstrap is still gated, Beacon
+Beacon keeps a directory descriptor from freeze through the handoff and reads branch metadata relative
+to it. An abandoned or expired freeze releases the descriptor. After the durable start, Beacon checks
+the checkout and branch again and passes the held descriptor to the [reaper](supervision.md). The
+bootstrap enters through it and refuses to exec if the approved path no longer resolves to that device
+and inode. While the bootstrap is still gated, Beacon
 records its group locally as a one-shot launch permit. The child cannot make a proposal before the group
 has been registered. Launch is `opencode run --standalone --format json --auto --model MODEL`, with the
-unchanged prompt on stdin, `PWD` set from the directory the child actually enters, and no `OLDPWD`. Beacon
+unchanged prompt on an anonymous stdin pipe, `PWD` set to the verified checkout, and no `OLDPWD`. Beacon
 does not run a checkout's `bin/run`. `--auto` allows permissions that OpenCode's configuration does not
 deny. This is **not a sandbox**: the agent acts as your user and may use your files, sign-in and network.
 Those connections are OpenCode's, not Beacon's. To use the preview proposal socket from a run, use
 `beacon act --state-dir DIR` as for other preview clients.
 
-An acknowledged exec is `executed`, then `runner_working`. A definite refusal is `failed`; if a permit
-was sent and there is no exec result, the launch stays unknown. Nothing restarts it. The extra copy of the
-prompt is unlinked after the reaper opens it, or discarded on the next startup after a crash. `output` and
-`errors` stay `0600` under `runs/{runner_id}/` (`0700`). They are not service logs.
+The reaper syncs a local receipt tied to the journalled permit before acknowledging confirmed exec.
+The service records `executed`, then `runner_working`. A definite refusal is `failed`; if a permit
+was sent but there is no exec evidence, the launch stays unknown. After a crash, the next service can
+read back a matching receipt once the reaper's sweep succeeds. Nothing restarts the run. No prompt file
+is created. `output` and `errors` stay `0600` under `runs/{runner_id}/` (`0700`); they are not service logs.
 
 **Stop run** on the proposal page uses the reaper's bounded TERM/KILL cleanup. Service shutdown stops
 all active runs. Beacon also asks the reaper to stop a run if its output and errors exceed 64 MiB at a
-check. After the whole tree is gone, exit 0 produces `runner_finished` with the last assistant message,
+check, and checks again before recording success. At leader exit, exit 0 produces `runner_finished` with the last assistant message,
 capped at 32,000 characters, or a fixed message if there is none. Other exits produce `runner_failed`
 with a fixed code and, where available, the last OpenCode error or a bounded stderr tail. A requested stop
-records a stop reason instead. `runner_closed` follows the outcome only after the reaper confirms cleanup.
-The next startup can close interrupted runs after its sweep. A durable start without a permit is recovered
-as not launched; a permit alone is not evidence of launch.
+records a stop reason if the leader was still running. Shutting down during descendant cleanup does not
+replace a leader's recorded result. The checkout is released, and `runner_closed` is recorded, only after
+the reaper confirms cleanup. The next startup can close interrupted runs after its sweep. A durable start
+without a permit is recovered as not launched; a permit alone is not evidence of launch.
 
 ## Unattended vault
 
@@ -239,7 +245,10 @@ to Signal. Without a trusted Slack intake lookup, Slack records use the person's
 
 The delivery worker waits 30 seconds after a retryable failure, then doubles the delay up to 15 minutes. A
 longer `Retry-After` from a rate limit or server failure takes precedence (up to an hour). New proposals do not
-shorten the wait or clear a stop. An explicit resume can bypass backoff, including when requested during a send.
+shorten the wait or clear a stop. After addressing a delivery refusal, run
+`beacon act --state-dir DIR resume-delivery`. It uses the same-user proposal socket and queues a resume of
+the stopped head, or bypasses backoff, including when requested during a send. It cannot approve or retry
+an action, skip a record or resend an acknowledged one.
 
 To opt into delivery, add `signal` to `action-providers.json` with your **test** approval app actor ID, its
 person's actor ID and handle, and the Signal origin. For example:

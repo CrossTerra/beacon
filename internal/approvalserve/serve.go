@@ -133,6 +133,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 		}
 	}()
 	desk := review.New(opts.Origin, j, opts.Now)
+	defer desk.CloseChallenges()
 	desk.SetState(opts.StateDir)
 	var dispatch *dispatcher
 	var dispatchFailed <-chan error
@@ -153,9 +154,19 @@ func Run(ctx context.Context, opts Options) (err error) {
 		}
 		desk.SetActions(controls)
 	}
+	connectRecords := opts.ConnectRecords
+	if connectRecords == nil && configured.Signal != nil {
+		connectRecords = configured.Signal.RecordConnection(opts.StateDir)
+	}
+	var worker *approval.DeliveryWorker
+	var resumeDelivery func()
+	if connectRecords != nil {
+		worker = approval.NewDeliveryWorker(j, connectRecords)
+		resumeDelivery = worker.Resume
+	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
-		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
+		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake(), ResumeDelivery: resumeDelivery})
 	if err != nil {
 		return err
 	}
@@ -188,16 +199,11 @@ func Run(ctx context.Context, opts Options) (err error) {
 		})
 	}
 	start(func() error { return socket.Serve(work) })
-	start(func() error { return expire(work, j, opts.Now) })
+	start(func() error { return expire(work, j, opts.Now, desk.ExpireChallenges) })
 	if dispatch != nil {
 		start(dispatch.recover)
 	}
-	connectRecords := opts.ConnectRecords
-	if connectRecords == nil && configured.Signal != nil {
-		connectRecords = configured.Signal.RecordConnection(opts.StateDir)
-	}
-	if connectRecords != nil {
-		worker := approval.NewDeliveryWorker(j, connectRecords)
+	if worker != nil {
 		start(func() error {
 			err := worker.Run(work)
 			if errors.Is(err, context.Canceled) && work.Err() != nil {
@@ -221,6 +227,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 
 	stopJobs()
+	desk.CloseChallenges()
 	err = errors.Join(err, j.Shutdown(opts.Now()))
 	cancel()
 	err = errors.Join(err, socket.Close())
@@ -243,7 +250,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	return err
 }
 
-func expire(ctx context.Context, j *approval.Journal, now func() time.Time) error {
+func expire(ctx context.Context, j *approval.Journal, now func() time.Time, cleanups ...func(time.Time)) error {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -251,7 +258,11 @@ func expire(ctx context.Context, j *approval.Journal, now func() time.Time) erro
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			if err := j.Expire(now()); err != nil {
+			at := now()
+			for _, cleanup := range cleanups {
+				cleanup(at)
+			}
+			if err := j.Expire(at); err != nil {
 				return err
 			}
 		}

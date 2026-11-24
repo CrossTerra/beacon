@@ -53,6 +53,26 @@ func TestCanonicalHashes(t *testing.T) {
 	}
 }
 
+func TestRunnerSubjectsAcceptSignalHandles(t *testing.T) {
+	for _, handle := range []string{"0", "9.test_name-2", "a" + strings.Repeat("9", 63)} {
+		who := SignalIdentity{Person: who.Person, Handle: handle}
+		runner := "run_01m7x1v080ec1r60r30c1g60r3"
+		s := &proposalState{View: View{Proposal: Proposal{RunnerID: runner, Request: Request{Type: Run}}}}
+		b, err := record("jrn_01m6a6ft00e81840g2081040g2", &frame{Kind: "runner_closed", Runner: &RunnerEvent{Kind: RunnerClosed}}, s, who)
+		must(t, err)
+		o, err := ParseObject(b)
+		must(t, err)
+		if o["subject"] != "agent-run:"+handle+":"+strings.TrimPrefix(runner, "run_") {
+			t.Fatal("runner subject does not carry the Signal handle")
+		}
+	}
+	for _, handle := range []string{"_start", "Upper", "a" + strings.Repeat("x", 64)} {
+		if (SignalIdentity{Person: who.Person, Handle: handle}).Valid() {
+			t.Fatalf("accepted %q", handle)
+		}
+	}
+}
+
 func TestStrictJSON(t *testing.T) {
 	for _, s := range []string{`1.0`, `1e0`, `-1E2`, `9007199254740992`, `-9007199254740992`, `01`, `{"a":1,"\u0061":2}`,
 		`"\ud800"`, `"\udc00x"`, `"\ud800\ud800"`, "\"a\x01b\"", `[1,]`, `{}x`, ``, `nul`, `"\x41"`, "\"\xff\"",

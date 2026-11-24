@@ -39,6 +39,7 @@ type Site struct {
 	now      func() time.Time
 	sessions sessions
 	held     map[string]held
+	closing  bool // guarded by sessions.mu, alongside held
 }
 
 func New(origin approval.Origin, j proposals, now func() time.Time) *Site {

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/CrossTerra/beacon/internal/approval"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 func TestRunSettingsRefusePathsAndModelsOutsideTheSchema(t *testing.T) {
@@ -38,7 +41,12 @@ func TestRunSettingsRefusePathsAndModelsOutsideTheSchema(t *testing.T) {
 
 func TestCheckoutBranchReadsWorktreeAndDetachedHead(t *testing.T) {
 	dir := t.TempDir()
-	if got := checkoutBranch(dir); got != "none" {
+	pin, err := supervisor.PinDirectory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	if got := checkoutBranch(pin); got != "none" {
 		t.Fatal(got)
 	}
 	if err := os.Mkdir(filepath.Join(dir, "worktree"), 0o700); err != nil {
@@ -51,9 +59,60 @@ func TestCheckoutBranchReadsWorktreeAndDetachedHead(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "worktree", "HEAD"), []byte(tc[0]), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := checkoutBranch(dir); got != tc[1] {
+		if got := checkoutBranch(pin); got != tc[1] {
 			t.Fatalf("branch = %q, want %q", got, tc[1])
 		}
+	}
+}
+
+func TestCheckoutFactsStayWithTheHeldDirectory(t *testing.T) {
+	dir := t.TempDir()
+	checkout := filepath.Join(dir, "checkout")
+	moved := filepath.Join(dir, "renamed")
+	setBranch := func(name string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(checkout, ".git", "HEAD"), []byte("ref: refs/heads/"+name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setBranch("approved")
+	pin, err := supervisor.PinDirectory(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	if err := os.Rename(checkout, moved); err != nil {
+		t.Fatal(err)
+	}
+	setBranch("replacement")
+	if pin.MatchesPath() || checkoutBranch(pin) != "approved" {
+		t.Fatal("the held directory followed the replacement instead of the approved branch")
+	}
+}
+
+func TestSuccessfulExitCannotReportAnOversizePrefix(t *testing.T) {
+	for _, name := range []string{"output", "errors"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			cmd := supervisor.Command{Stdout: filepath.Join(dir, "output"), Stderr: filepath.Join(dir, "errors")}
+			if err := os.WriteFile(cmd.Stdout, []byte(`{"type":"text","part":{"messageID":"m1","id":"p1","text":"Not the final report."}}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(f.Truncate(runOutputLimit+1), f.Close()); err != nil {
+				t.Fatal(err)
+			}
+			event := runOutcome(cmd, supervisor.LeaderExit{Code: 0}) // no periodic output check ran
+			if event.Kind != approval.RunnerFailed || event.Error != "output_too_large" || event.Text != "" {
+				t.Fatal("the first part of oversized output was reported as a successful result")
+			}
+		})
 	}
 }
 

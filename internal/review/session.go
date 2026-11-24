@@ -19,8 +19,9 @@ const (
 )
 
 type session struct {
-	csrf    string
-	expires time.Time
+	csrf     string
+	expires  time.Time
+	revision uint64 // only the last selection can publish a challenge
 }
 
 // Sessions belong to this service instance, not to the state directory or the journal.
