@@ -35,8 +35,9 @@ type Options struct {
 	Enabled []approval.Action
 	Now     func() time.Time
 	// Attribute is looked up once, using the kernel PID. Only the supervisor may supply it; it must
-	// return a run id only for a member of a live run. Nil or an empty result means unattributed.
-	Attribute func(pid int) string
+	// return a run id only for a member of a live run. Nil or an empty result means unattributed;
+	// a supervisor error rejects the connection rather than widening a run's ownership.
+	Attribute func(pid int) (string, error)
 	// IssueOpen issues a read-only sign-in code or reports a full code pool. Nil disables open.
 	IssueOpen func() (code string, ok bool)
 }
@@ -122,9 +123,11 @@ func (s *Server) serveConn(ctx context.Context, c *net.UnixConn) {
 	}
 	peer := approval.PeerLabel{PID: pid, Executable: executable(pid)}
 	if s.opts.Attribute != nil {
-		if id := s.opts.Attribute(pid); approval.ValidID(id, "run") {
-			peer.RunID = id
+		id, err := s.opts.Attribute(pid)
+		if err != nil || (id != "" && !approval.ValidID(id, "run")) {
+			return
 		}
+		peer.RunID = id
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { c.Close() })

@@ -225,11 +225,11 @@ const (
 func attributed(t *testing.T) (Options, *atomic.Int32) {
 	t.Helper()
 	var active atomic.Int32
-	return Options{Enabled: []approval.Action{approval.Merge}, Attribute: func(pid int) string {
+	return Options{Enabled: []approval.Action{approval.Merge}, Attribute: func(pid int) (string, error) {
 		if pid != os.Getpid() {
 			t.Errorf("attribution got PID %d, not the kernel peer's", pid)
 		}
-		return []string{"", runA, runB}[active.Load()]
+		return []string{"", runA, runB}[active.Load()], nil
 	}}, &active
 }
 

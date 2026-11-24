@@ -15,6 +15,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/approvalserve"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 func (a *app) reviewFlags(name string) (*flag.FlagSet, *string) {
@@ -45,7 +46,10 @@ func (a *app) cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return approvalserve.Run(ctx, approvalserve.Options{StateDir: dir, Origin: o, Now: a.now, ListenReview: a.approvalListeners})
+	// The preview has no unattended credential source or live handlers. Take the supervision lock
+	// and sweep, but do not infer live job definitions from the user's config or environment.
+	return approvalserve.Run(ctx, approvalserve.Options{StateDir: dir, Origin: o, Now: a.now,
+		Supervision: &supervisor.Options{}, ListenReview: a.approvalListeners})
 }
 
 // This is a sandbox, not cutover. Require a separate path and never probe the live proposal socket

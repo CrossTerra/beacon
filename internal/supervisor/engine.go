@@ -200,6 +200,10 @@ func (e *engine) track(table processTable, sweep bool) {
 	if !sweep && len(cleaning) == 0 {
 		return
 	}
+	// On recovery, a live marked group leader found in this snapshot also identifies the
+	// same-user members of its group. Never send a negative-PID signal using such a snapshot:
+	// we don't own these leaders and can't keep their PGIDs reserved.
+	var anchors map[int]member
 	for pid, p := range table {
 		if p.zombie || pid == os.Getpid() || e.tracked[pid].job != nil {
 			continue
@@ -208,7 +212,21 @@ func (e *engine) track(table processTable, sweep bool) {
 		if j := cleaning[tag]; j != nil {
 			e.tracked[pid] = member{proc: p, job: j}
 		} else if sweep && tag != 0 {
-			e.tracked[pid] = member{proc: p, job: &e.orphans}
+			m := member{proc: p, job: &e.orphans}
+			e.tracked[pid] = m
+			if p.pid == p.group && len(e.jobs) == 0 {
+				if anchors == nil {
+					anchors = make(map[int]member)
+				}
+				anchors[p.group] = m
+			}
+		}
+	}
+	if len(anchors) != 0 {
+		for pid, p := range table {
+			if m, ok := anchors[p.group]; ok && !p.zombie && pid != os.Getpid() && e.tracked[pid].job == nil && m.proc.birth <= p.birth {
+				e.tracked[pid] = member{proc: p, job: m.job}
+			}
 		}
 	}
 	e.adoptChildren(table)
@@ -271,17 +289,26 @@ func (e *engine) signalMembers(now time.Time) {
 
 func (e *engine) refresh(sweep bool) (bool, error) {
 	now := time.Now()
+	for _, j := range e.jobs {
+		if j.gate != nil && !now.Before(j.preparedUntil) {
+			j.stop(now, e.timing, codeTimeout)
+		}
+	}
 	table, err := e.list()
 	if err != nil {
+		e.signalMembers(now) // group IDs are pinned even without a fresh process table
+		for _, j := range e.jobs {
+			if !j.killAt.IsZero() && !now.Before(j.killAt.Add(e.timing.killWait)) {
+				return false, ErrUnconfirmed
+			}
+		}
 		return false, nil // not an empty snapshot; no confirmation and no new starts
 	}
 	for _, j := range e.jobs {
 		if !j.killAt.IsZero() {
 			continue
 		}
-		if j.gate != nil && !now.Before(j.preparedUntil) {
-			j.stop(now, e.timing, codeTimeout)
-		} else if p, ok := table[j.pid]; !ok || p.zombie {
+		if p, ok := table[j.pid]; !ok || p.zombie {
 			j.stop(now, e.timing, "")
 		}
 	}
@@ -327,7 +354,14 @@ func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 	if status.Signaled() {
 		code = 128 + int(status.Signal())
 	}
-	return e.emit(message{Finished: j.ticket, Exit: code, Error: j.failure})
+	if e.emit == nil {
+		return nil
+	}
+	if err := e.emit(message{Finished: j.ticket, Exit: code, Error: j.failure}); err != nil {
+		e.emit = nil // at most one reply deadline, not one per finished run, during cleanup
+		return err
+	}
+	return nil
 }
 
 func (f *fixed) backoff(now time.Time) {
@@ -335,9 +369,9 @@ func (f *fixed) backoff(now time.Time) {
 	f.fails = min(f.fails+1, 5)
 }
 
-func (e *engine) startFixed(ctx context.Context) {
+func (e *engine) startFixed(ctx context.Context, live func() bool) {
 	for _, f := range e.fixed {
-		if ctx.Err() != nil {
+		if !live() {
 			return
 		}
 		now := time.Now()
@@ -350,6 +384,9 @@ func (e *engine) startFixed(ctx context.Context) {
 			continue
 		}
 		f.job = j
+		if !live() {
+			return // still gated; drain will kill it without an exec permit
+		}
 		if err := j.release(ctx); err != nil {
 			j.killAt, j.failure = now, codeLaunch
 		} else {

@@ -99,6 +99,26 @@ func checkLock(dir string, lock *os.File) error {
 func reaperLoop(dir string, life, input, reply *os.File) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	lifeFD := int32(life.Fd())
+	live := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		// Also check synchronously before executing a queued permit or restart. EOF can be
+		// visible to the kernel before the reader goroutine has been scheduled.
+		fd := [1]unix.PollFd{{Fd: lifeFD, Events: unix.POLLIN}}
+		for {
+			n, err := unix.Poll(fd[:], 0)
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			if n != 0 || err != nil {
+				cancel()
+				return false
+			}
+			return true
+		}
+	}
 	go func() {
 		var b [1]byte
 		_, _ = life.Read(b[:]) // never a byte written; EOF is independent of pending commands
@@ -142,7 +162,7 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 		_ = emit(message{Error: codeRecovery})
 		return err
 	}
-	if ctx.Err() != nil {
+	if !live() {
 		return nil
 	}
 	self, err := os.Executable()
@@ -156,7 +176,7 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 	}
 	e := newEngine(self, prefix, t, emit)
 	if err := emit(message{}); err == nil {
-		err = e.serve(ctx, requests)
+		err = e.serve(ctx, requests, live)
 	} else {
 		err = ErrReaper
 	}
@@ -168,16 +188,16 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 	return errors.Join(err, clearSession(dir))
 }
 
-func (e *engine) serve(ctx context.Context, requests <-chan request) error {
+func (e *engine) serve(ctx context.Context, requests <-chan request, live func() bool) error {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	fixedSet := false
-	for ctx.Err() == nil {
+	for live() {
 		select {
 		case <-ctx.Done():
 			return nil
 		case r := <-requests:
-			if ctx.Err() != nil {
+			if !live() {
 				return nil
 			}
 			var m message
@@ -216,7 +236,7 @@ func (e *engine) serve(ctx context.Context, requests <-chan request) error {
 				return err
 			}
 			if fresh {
-				e.startFixed(ctx)
+				e.startFixed(ctx, live)
 			}
 		}
 	}
