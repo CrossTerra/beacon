@@ -47,7 +47,10 @@ Linux reads `/proc/PID/stat` and `/proc/PID/environ`, and the process UID from `
 non-dumpable process of this user is not dropped because `stat` is root-owned. A missing table entry is not
 leader death: exit is confirmed with `waitid` `WNOWAIT`, which does not reap. An already-tracked process
 that disappears from the table stays pending until death or PID reuse is confirmed; otherwise cleanup fails
-at its deadline. The reaper does not reap a leader until a previous census confirmed the exit. macOS uses `kern.proc` and
+at its deadline. `waitid` only sees the reaper's own children. Any other tracked process, such as a detached
+descendant or an orphan found by the startup sweep, is reaped by its own parent or init: on Linux it is
+confirmed gone when `kill(pid, 0)` reports `ESRCH`, or when the PID's `/proc/PID/stat` shows another start
+time. A PID that still exists but cannot be read stays pending. The reaper does not reap a leader until a previous census confirmed the exit. macOS uses `kern.proc` and
 `KERN_PROCARGS2`, without cgo. Only a matching marker is retained from those environment queries. There is
 no new network egress.
 

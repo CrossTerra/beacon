@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"strconv"
@@ -135,11 +136,33 @@ func siginfoPID(info *unix.Siginfo) int32 {
 	return int32(binary.NativeEndian.Uint32(b[off : off+4]))
 }
 
+// processGone confirms that the process recorded with this start time no longer exists. Only
+// the reaper's own children can be confirmed by waitid; anything else (a detached descendant, an
+// orphan from a startup sweep) is reaped by its own parent or init, so ESRCH from kill is its
+// death. A PID that exists with another start time has been reused. A process that exists but
+// whose stat cannot be read is not dead.
 func processGone(pid int, birth uint64) bool {
 	if p, ok := lookupProcess(pid); ok {
 		return p.zombie || p.birth != birth
 	}
-	return confirmedExit(pid)
+	if pid <= 1 {
+		return false
+	}
+	if confirmedExit(pid) {
+		return true
+	}
+	if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) {
+		return true
+	} else if err != nil && !errors.Is(err, unix.EPERM) {
+		return false
+	}
+	// The PID exists, possibly for another user. stat is world-readable even when status is not.
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return os.IsNotExist(err) && errors.Is(unix.Kill(pid, 0), unix.ESRCH)
+	}
+	p, ok := parseStat(pid, string(b))
+	return ok && (p.zombie || p.birth != birth)
 }
 
 func deviceBits(st unix.Stat_t) uint64 { return st.Dev }

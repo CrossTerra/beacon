@@ -136,3 +136,44 @@ func TestLookupKeepsNonDumpableSameUser(t *testing.T) {
 		t.Fatal("dropped a same-user non-dumpable process")
 	}
 }
+
+func TestProcessGoneForReapedNonChild(t *testing.T) {
+	sh := exec.Command("/bin/sh", "-c", `sleep 0.5 & echo $!; wait $!`)
+	out, err := sh.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sh.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sh.Process.Kill()
+		_ = sh.Wait()
+	})
+	buf := make([]byte, 32)
+	n, err := out.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(string(buf[:n-1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, ok := lookupProcess(pid)
+	if !ok {
+		t.Fatal("could not read the grandchild")
+	}
+	if processGone(pid, live.birth) {
+		t.Fatal("a live grandchild was reported gone")
+	}
+	if !processGone(pid, live.birth+1) {
+		t.Fatal("a PID with another start time was not reported gone")
+	}
+	if err := sh.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	// Its parent reaped it. waitid cannot see it, since it was never this process's child.
+	if !processGone(pid, live.birth) {
+		t.Fatal("a grandchild reaped by its parent stayed tracked")
+	}
+}
