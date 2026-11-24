@@ -251,6 +251,52 @@ func TestResetCodeMustFollowTheJournalReset(t *testing.T) {
 	}
 }
 
+func TestJournalResetBindsTheCodeWithoutTheMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	now := time.Unix(1_800_000_000, 0).UTC()
+	j, err := approval.OpenJournal(dir, now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RecordLocal("passkeys_reset", now); err != nil {
+		t.Fatal(err)
+	}
+	j.Close()
+	code, err := Issue(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	createCh, assertCh, _, err := Begin(dir, rp, code, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := os.ReadFile(filepath.Join(dir, "register-pending.json"))
+	if err != nil || !bytes.Contains(pending, []byte(`"reset_index":`)) {
+		t.Fatalf("pending was not bound to the journal reset: %s %v", pending, err)
+	}
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := key.Register("localhost", approval.LocalOrigin, createCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asserted, err := key.Assert("localhost", approval.LocalOrigin, assertCh, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Finish(dir, rp, Ceremony{
+		ClientDataJSON: created.ClientDataJSON, AttestationObject: created.AttestationObject, PRFEnabled: true,
+	}, Ceremony{
+		ClientDataJSON: asserted.ClientDataJSON, AuthenticatorData: asserted.AuthenticatorData,
+		Signature: asserted.Signature, CredentialID: asserted.CredentialID, PRFOutput: bytes.Repeat([]byte{0x11}, 32),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPendingRegistrationCannotFinishAfterReset(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "state")
 	now := time.Unix(1_800_000_000, 0).UTC()

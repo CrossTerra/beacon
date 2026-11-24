@@ -27,7 +27,7 @@ that write credentials are sealed under the real data key, so a swapped vault ap
 execute. Handlers must fail closed when they cannot unseal. Deleting `passkeys.json` does not allow
 another first registration while a recorded passkey exists. `beacon setup --reset-passkeys` (service
 stopped) opens the journal and records `passkeys_reset`. A later setup code is bound to that frame's
-position in the journal, not to the clock. A ceremony started before the reset cannot finish. A vault
+position in the journal, not to the clock, including when the reset marker file is missing. A ceremony started before the reset cannot finish. A vault
 left behind with no `passkey_added` is failed-registration debris and is removed.
 
 A signed-in browser can freeze a proposal only when a resolver supplies the account binding. This preview

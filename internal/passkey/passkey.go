@@ -514,7 +514,8 @@ func priorPasskeys(dir string) (resetIndex int, block bool, err error) {
 		return 0, false, markerErr
 	}
 	if !vault && !marker && addedIndex == 0 {
-		return 0, false, nil
+		// A journalled reset still binds the ceremony if the marker was never written or was removed.
+		return resetIndex, resetIndex != 0, nil
 	}
 	if !vault && resetIndex > addedIndex {
 		return resetIndex, true, nil
