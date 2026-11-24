@@ -214,10 +214,14 @@ func supervisionService(dir, state, mode string) error {
 	if mode == "leaky-watch" {
 		watch = mode
 	}
+	grace := fixtureGrace
+	if mode == "backoff" {
+		grace = 1200 * time.Millisecond // exceed the watch's first one-second restart delay
+	}
 	var addr string
 	return approvalserve.Run(ctx, approvalserve.Options{
 		StateDir: state, Origin: origin,
-		Supervision: &supervisor.Options{Grace: fixtureGrace, KillWait: 3 * time.Second,
+		Supervision: &supervisor.Options{Grace: grace, KillWait: 3 * time.Second,
 			Jobs: []supervisor.FixedJob{{Command: collector}, {Command: fixtureCommand(watch, dir)}}},
 		ListenReview: func() ([]net.Listener, error) {
 			l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -346,6 +350,14 @@ func startSupervised(t *testing.T, root, generation, mode string) *supervisedSer
 	}
 	if s.reaper <= 1 || s.reaper == c.Process.Pid {
 		t.Fatal("reaper does not have its own process group")
+	}
+	for _, name := range []string{"collector", "tree"} {
+		pid, err := strconv.Atoi(fileText(dir, name+".pid"))
+		must(t, err)
+		pgid, err := unix.Getpgid(pid)
+		if err != nil || pgid != pid {
+			t.Fatalf("%s does not lead its own group: %d %d %v", name, pid, pgid, err)
+		}
 	}
 	return s
 }

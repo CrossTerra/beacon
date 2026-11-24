@@ -57,7 +57,6 @@ func markerOf(pid int, prefix string) uint64 {
 }
 
 func procArgs(mib *[3]int32, buf *byte, n *uintptr) error {
-	//lint:ignore SA1019 No libc wrapper exposed by x/sys for a numeric sysctl on Darwin.
 	_, _, errno := unix.Syscall6(unix.SYS___SYSCTL, uintptr(unsafe.Pointer(mib)), uintptr(len(mib)),
 		uintptr(unsafe.Pointer(buf)), uintptr(unsafe.Pointer(n)), 0, 0)
 	runtime.KeepAlive(mib)

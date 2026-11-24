@@ -175,7 +175,7 @@ func reaperLoop(dir string, life, input, reply *os.File) error {
 		return err
 	}
 	e := newEngine(self, prefix, t, emit)
-	if err := emit(message{}); err == nil {
+	if emit(message{}) == nil {
 		err = e.serve(ctx, requests, live)
 	} else {
 		err = ErrReaper
