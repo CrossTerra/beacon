@@ -185,6 +185,15 @@ func (s *Supervisor) BeginShutdown() {
 
 func (s *Supervisor) Done() <-chan struct{} { return s.done }
 
+func (s *Supervisor) Ready() bool {
+	select {
+	case <-s.stopping:
+		return false
+	default:
+		return true
+	}
+}
+
 // Close waits for confirmation. If the reaper itself is stuck, leave the marker for the next start.
 func (s *Supervisor) Close() error {
 	s.BeginShutdown()
@@ -243,6 +252,8 @@ func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
 }
 
 func (r *Run) PGID() int { return r.pgid }
+
+func (r *Run) Done() <-chan struct{} { return r.done }
 
 func (r *Run) Release() error {
 	// The wait is wireTimeout+poll. The reaper is told to finish a poll sooner, so the

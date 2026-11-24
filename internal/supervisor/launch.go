@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/CrossTerra/beacon/internal/approval"
 	"golang.org/x/sys/unix"
@@ -83,9 +84,6 @@ func (c Command) image(marker string) ([]byte, error) {
 		if name != markerKey && !(c.Dir != nil && (name == "PWD" || name == "OLDPWD")) {
 			i.Env = append(i.Env, entry)
 		}
-	}
-	if c.Dir != nil {
-		i.Env = append(i.Env, "PWD="+c.Dir.Path)
 	}
 	i.Env = append(i.Env, marker)
 	b, err := json.Marshal(i)
@@ -250,17 +248,20 @@ func releaseDeadline(now, until time.Time) time.Time {
 
 func (j *job) execResult(deadline time.Time) error {
 	if j.execStatus == nil || !time.Now().Before(deadline) {
-		return ErrLaunch
+		return ErrUnconfirmed // the permit was sent; exec may have happened
 	}
 	if err := j.execStatus.SetReadDeadline(deadline); err != nil {
-		return ErrLaunch
+		return ErrUnconfirmed
 	}
 	var buf [4]byte
 	n, err := io.ReadFull(j.execStatus, buf[:])
-	if n == 0 && errors.Is(err, io.EOF) {
+	if n > 0 {
+		return ErrLaunch // the bootstrap reported a definite refusal
+	}
+	if errors.Is(err, io.EOF) {
 		return nil // successful exec closed the close-on-exec writer
 	}
-	return ErrLaunch
+	return ErrUnconfirmed
 }
 
 func execJob() error {
@@ -298,6 +299,13 @@ func execJob() error {
 		if err != nil {
 			return fail(ErrLaunch)
 		}
+		// A rename after the pin was opened cannot redirect fchdir. Do not give tools a
+		// stale PWD that might point at a replacement, even though cwd itself is correct.
+		cwd, err := os.Getwd()
+		if err != nil || !utf8.ValidString(cwd) {
+			return fail(ErrLaunch)
+		}
+		i.Env = append(i.Env, "PWD="+cwd)
 	}
 	// A successful exec closes this fd. The reaper then reads EOF rather than an error code.
 	unix.CloseOnExec(4)

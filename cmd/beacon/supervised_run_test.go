@@ -73,7 +73,7 @@ func TestSupervisionPreparedRun(t *testing.T) {
 	if code, err := waitRun(t, run); code != 3 || err != nil {
 		t.Fatalf("run result: %d %v", code, err)
 	}
-	if got := fileText(dir, "output"); got != moved+" "+checkout+" fixture-prompt fixture-env\n" {
+	if got := fileText(dir, "output"); got != moved+" "+moved+" fixture-prompt fixture-env\n" {
 		t.Fatalf("wrong run cwd, environment or input: %q", got)
 	}
 	var session struct {

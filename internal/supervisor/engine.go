@@ -138,8 +138,11 @@ func (e *engine) release(ctx context.Context, ticket uint64, until time.Time) me
 		return message{Error: codeTimeout}
 	}
 	if err := j.release(ctx, until); err != nil {
-		j.killAt, j.failure = now, codeLaunch
-		return message{Error: codeLaunch}
+		j.killAt, j.failure = time.Now(), codeLaunch
+		if errors.Is(err, ErrUnconfirmed) {
+			return message{Error: codeRecovery}
+		}
+		return message{Error: j.failure}
 	}
 	j.started = now
 	return message{}
@@ -420,13 +423,11 @@ func (e *engine) reportExpired(now time.Time) bool {
 		}
 		j.reported = true
 		gaveUp = true
-		if j.failure == "" {
-			j.failure = codeRecovery
-		}
 		if e.emit == nil {
 			continue
 		}
-		if err := e.emit(message{Finished: j.ticket, Error: j.failure}); err != nil {
+		// A previous launch error is not evidence that the tree is gone.
+		if err := e.emit(message{Finished: j.ticket, Error: codeRecovery}); err != nil {
 			e.emit = nil // one failed reply write; do not keep notifying on a dead pipe
 		}
 	}
@@ -464,7 +465,7 @@ func (e *engine) startFixed(ctx context.Context, live func() bool) {
 			return // still gated; drain will kill it without an exec permit
 		}
 		if err := j.release(ctx, time.Time{}); err != nil {
-			j.killAt, j.failure = now, codeLaunch
+			j.killAt, j.failure = time.Now(), codeLaunch
 		} else {
 			j.started = now
 		}
