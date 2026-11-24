@@ -358,8 +358,9 @@ only by the same run. The group is registered before the process can connect. Be
 request and before completing asynchronous requests. A socket that changes identity must reconnect. A process in
 an unrecorded group whose ancestor belongs to a run is neither the run nor Bosun: it can neither read, withdraw nor
 create proposals. It cannot quit either, except when the kernel's code reference is the running app's own
-`Contents/Helpers/beacon`. That file, including when reached through `~/.local/bin/beacon`, may quit and may do
-nothing else; attribution is not checked for that one operation. A peer whose ancestry cannot be checked is not
+`Contents/Helpers/beacon`. That file, including when reached through `~/.local/bin/beacon`, may quit. The exception
+grants no proposal access: `types` stays available, and propose, get, wait and withdraw stay refused. Attribution
+is not checked for that one operation. A peer whose ancestry cannot be checked is not
 treated as external. Beacon keeps
 known group assignments after an unconfirmed stop until the next session's sweep and a kernel check confirm the
 groups are gone. Approving a run's proposal is a separate approval (D22).

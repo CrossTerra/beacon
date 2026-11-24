@@ -65,6 +65,11 @@ if [[ "$dry_run" == true ]]; then
 	mkdir -p "$prefix"
 	# The physical path: no symlinks (/var is /private/var) and no doubled slashes, so links and checks agree.
 	prefix=$(cd "$prefix" && pwd -P)
+	home_phys=$(cd "$HOME" && pwd -P)
+	if [[ "$prefix" == "$home_phys" ]]; then
+		echo "--prefix resolves to the live install ($HOME). Refusing." >&2
+		exit 1
+	fi
 else
 	identities=$(/usr/bin/security find-identity -v -p codesigning |
 		sed -nE 's/^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"(.*)"$/\1	\2/p')
@@ -156,6 +161,11 @@ if [[ "$dry_run" != true ]]; then
 		exit 1
 	fi
 	if [[ -n "$running" ]]; then
+		if ! beacon_quit_can_finish "$app"; then
+			echo "This Beacon was built before quit could finish. Socket quit and SIGTERM can deadlock it." >&2
+			echo "Quit it from its menu, then run install.sh again." >&2
+			exit 1
+		fi
 		say "Quitting the running Beacon…"
 		if ! how=$(quit_beacon "$app" 30 dev.beacon.app "$cert"); then
 			echo "Beacon is still running. Quit it from its menu, then run install.sh again." >&2
@@ -176,6 +186,17 @@ old=
 if [[ -e "$app" || -L "$app" ]]; then
 	old="$apps/.Beacon.app.old.$$"
 	mv "$app" "$old"
+	if ! still=$(beacon_pids "$old"); then
+		mv "$old" "$app"
+		echo "Could not confirm the moved Beacon had stopped. The earlier copy is back." >&2
+		exit 1
+	fi
+	if [[ -n "$still" ]]; then
+		mv "$old" "$app"
+		echo "Beacon is still running from the moved copy. It is back in place." >&2
+		echo "Quit it from its menu, then run install.sh again." >&2
+		exit 1
+	fi
 fi
 if ! mv "$new" "$app"; then
 	if [[ -n "$old" ]]; then mv "$old" "$app"; fi

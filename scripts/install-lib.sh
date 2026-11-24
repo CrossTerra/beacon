@@ -10,10 +10,10 @@ beacon_inspect() {
 	/usr/bin/python3 - "$exe" "$bundle" <<'PY'
 import ctypes, ctypes.util, os, subprocess, sys
 exe, bundle = sys.argv[1], sys.argv[2]
-if not os.path.exists(exe):
-    sys.exit(0)
 try:
     want = os.stat(exe)
+except FileNotFoundError:
+    sys.exit(0)
 except OSError:
     sys.exit(2)
 libc = ctypes.CDLL(ctypes.util.find_library("c"))
@@ -23,24 +23,43 @@ proc_pidpath.restype = ctypes.c_int
 uid = os.getuid()
 buf = ctypes.create_string_buffer(4096)
 try:
-    listing = subprocess.check_output(["/bin/ps", "-axo", "pid=,uid="], text=True)
+    listing = subprocess.check_output(["/bin/ps", "-axww", "-o", "pid=,uid=,command="], text=True)
 except (OSError, subprocess.CalledProcessError):
     sys.exit(2)
 for line in listing.splitlines():
-    parts = line.split()
+    parts = line.split(None, 2)
     if len(parts) < 2 or int(parts[1]) != uid:
         continue
     pid = int(parts[0])
     n = proc_pidpath(pid, buf, len(buf))
-    if n <= 0:
-        continue
-    path = os.fsdecode(buf.value)
+    if n > 0:
+        path = os.fsdecode(buf.value)
+    else:
+        # proc_pidpath failed. The process table's path is a fallback, not a guess: if that is missing too and
+        # the process is still alive, this listing cannot say the executable is absent.
+        token = parts[2].split()[0] if len(parts) > 2 else ""
+        if token.startswith("/"):
+            path = token
+        else:
+            try:
+                subprocess.check_output(["/bin/ps", "-p", str(pid), "-o", "pid="], stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.CalledProcessError):
+                continue
+            sys.exit(2)
     try:
         st = os.stat(path)
-    except OSError:
+    except FileNotFoundError:
         continue
+    except OSError:
+        sys.exit(2)
     if (st.st_dev, st.st_ino) == (want.st_dev, want.st_ino):
-        print(f"exe {pid}")
+        try:
+            started = subprocess.check_output(["/bin/ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+        except (OSError, subprocess.CalledProcessError):
+            sys.exit(2)
+        if not started:
+            sys.exit(2)
+        print(f"exe\t{pid}\t{started}")
     if bundle and "/Contents/MacOS/" in path:
         plist = os.path.join(os.path.dirname(os.path.dirname(path)), "Info.plist")
         try:
@@ -50,7 +69,7 @@ for line in listing.splitlines():
         except (OSError, subprocess.CalledProcessError):
             continue
         if found == bundle:
-            print(f"bundle {pid}")
+            print(f"bundle\t{pid}")
 PY
 }
 
@@ -63,39 +82,26 @@ beacon_pids() {
 		echo "Could not inspect processes for $app." >&2
 		return 2
 	fi
-	while read -r kind pid; do
+	while IFS=$'\t' read -r kind pid _; do
 		[[ "$kind" == exe && -n "$pid" ]] && printf '%s\n' "$pid"
 	done <<< "$listing"
 	return 0
 }
 
-# True when pid still executes $1's Beacon binary. Call this immediately before signalling: a pid can be reused.
-beacon_pid_matches() {
-	local app=$1 pid=$2 found
-	found=$(beacon_pids "$app" | awk -v want="$pid" '$0 == want { print; exit }')
-	[[ "$found" == "$pid" ]]
+# The start time recorded for pid executing $1, or failure if it is not that executable now.
+beacon_started() {
+	local app=$1 pid=$2 listing started
+	listing=$(beacon_inspect "$app/Contents/MacOS/Beacon") || return 2
+	started=$(awk -F '\t' -v want="$pid" '$1 == "exe" && $2 == want { print $3; exit }' <<< "$listing")
+	[[ -n "$started" ]] || return 1
+	printf '%s\n' "$started"
 }
 
-# The proposal socket's listener, or nothing when it is not open. Exit 2 if the open socket cannot be identified.
-# Tests replace this; a fixture must not connect to the installed app's socket.
-beacon_socket_owner() {
-	local sock=${BEACON_ACT_SOCKET:-$HOME/Library/Application Support/beacon/run/act.sock}
-	[[ -S "$sock" ]] || return 0
-	/usr/bin/python3 - "$sock" <<'PY'
-import ctypes, socket, sys
-LOCAL_PEERPID = 2
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-try:
-    s.settimeout(2)
-    s.connect(sys.argv[1])
-except OSError:
-    sys.exit(0)
-pid = ctypes.c_int()
-n = ctypes.c_uint(ctypes.sizeof(pid))
-if ctypes.CDLL(None).getsockopt(s.fileno(), 0, LOCAL_PEERPID, ctypes.byref(pid), ctypes.byref(n)) != 0:
-    sys.exit(2)
-print(pid.value)
-PY
+# True when pid still has the start time captured for this Beacon. A reused pid does not.
+beacon_same_process() {
+	local pid=$1 started=$2 now
+	now=$(/bin/ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+	[[ -n "$now" && "$now" == "$started" ]]
 }
 
 # Waits until SECONDS reaches $2 for $1's Beacon to exit. Exit 2 if inspection fails; that is not "gone".
@@ -115,26 +121,29 @@ beacon_osascript() {
 	/usr/bin/osascript "$@"
 }
 
-# True when $1 is a signed dev.beacon.cli. $2 is the expected certificate SHA-1, or "-" for an ad-hoc test signature.
-# A failure skips the helper; it is not executed.
+# The requirement install.sh uses for the CLI. "-" is the ad-hoc fixture signature: identifier only.
+cli_requirement() {
+	if [[ -z "$1" || "$1" == "-" ]]; then
+		printf 'identifier "dev.beacon.cli"'
+	else
+		printf 'identifier "dev.beacon.cli" and certificate leaf = H"%s"' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
+	fi
+}
+
+# True when codesign accepts $1 against that requirement. A failure skips the helper; it is not executed.
+# A certificate other than $2, including the previous install's, does not pass.
 cli_is_beacon() {
-	local cli=$1 expect=$2 details id req
-	if ! details=$(/usr/bin/codesign --verify --strict "$cli" 2>&1); then
-		printf 'Socket quit skipped: %s does not verify (%s).\n' "$cli" "${details:-codesign failed}" >&2
+	local cli=$1 expect=$2 req details
+	req=$(cli_requirement "$expect")
+	if ! details=$(/usr/bin/codesign --verify --strict -R "=$req" "$cli" 2>&1); then
+		printf 'Socket quit skipped: %s does not meet %s (%s).\n' "$cli" "$req" "${details:-codesign failed}" >&2
 		return 1
 	fi
-	id=$(/usr/bin/codesign -d --verbose=1 "$cli" 2>&1 | sed -n 's/^Identifier=//p')
-	if [[ "$id" != dev.beacon.cli ]]; then
-		printf 'Socket quit skipped: %s is %s, not dev.beacon.cli.\n' "$cli" "${id:-unsigned}" >&2
-		return 1
-	fi
-	if [[ -n "$expect" && "$expect" != "-" ]]; then
-		req=$(/usr/bin/codesign -d -r- "$cli" 2>&1 | tr '[:lower:]' '[:upper:]')
-		if [[ "$req" != *"CERTIFICATE LEAF = H\"$(printf '%s' "$expect" | tr '[:lower:]' '[:upper:]')\""* ]]; then
-			printf 'Socket quit skipped: %s is not signed by the expected certificate.\n' "$cli" >&2
-			return 1
-		fi
-	fi
+}
+
+# An installed Info.plist from before deferred quit. Socket quit and SIGTERM can deadlock that build.
+beacon_quit_can_finish() {
+	/usr/bin/plutil -extract BeaconDeferredQuit raw -o - "$1/Contents/Info.plist" >/dev/null 2>&1
 }
 
 # Quits the Beacon at $1. $2 is the overall wait in seconds, $3 the bundle id, $4 the CLI's expected certificate
@@ -143,7 +152,7 @@ cli_is_beacon() {
 # successful socket reply. A failed process inspection is not treated as the app having exited.
 quit_beacon() {
 	local app="$1" cli="$1/Contents/Helpers/beacon" wait="${2:-30}" bundle_id="${3:-dev.beacon.app}" expect=${4:-}
-	local pids reply owner pid signalled=0 deadline remain instances
+	local pids reply pid started signalled=0 deadline remain
 	if [[ -n "${BEACON_INSTALL_TEST:-}" && "$app" == "$HOME/Applications/Beacon.app" ]]; then
 		echo "refusing to quit the installed Beacon.app from a test" >&2
 		return 1
@@ -159,17 +168,17 @@ quit_beacon() {
 		echo "not running"
 		return 0
 	fi
-	if [[ ! -f "$cli" || ! -x "$cli" ]]; then
+	# One deadline for the socket, the signal and the Apple event. Later stages use only what is left.
+	deadline=$((SECONDS + wait))
+	# Socket quit only when one process executes this binary, and the CLI checks that pid on its own connection.
+	if [[ "$(printf '%s\n' "$pids" | grep -c .)" -ne 1 ]]; then
+		echo "Socket quit skipped: not exactly one process executes this Beacon, so its socket peer cannot be named." >&2
+	elif [[ ! -f "$cli" || ! -x "$cli" ]]; then
 		printf 'Socket quit skipped: no executable installed CLI at %s.\n' "$cli" >&2
 	elif ! cli_is_beacon "$cli" "$expect"; then
 		:
-	elif ! owner=$(beacon_socket_owner); then
-		echo "Socket quit skipped: the proposal socket is open but its listener could not be identified." >&2
-	elif [[ -n "$owner" ]] && ! beacon_pid_matches "$app" "$owner"; then
-		printf 'Socket quit skipped: the proposal socket belongs to pid %s, not this Beacon.\n' "$owner" >&2
-	elif reply=$("$cli" act quit 2>&1); then
+	elif reply=$(BEACON_ACT_PID=$pids "$cli" act quit 2>&1); then
 		printf 'socket reply: %s\n' "$reply" >&2
-		deadline=$((SECONDS + wait))
 		if beacon_gone_until "$app" "$deadline"; then
 			printf 'quit through its socket (%s)\n' "$reply"
 			return 0
@@ -187,8 +196,12 @@ quit_beacon() {
 	fi
 	while read -r pid; do
 		[[ -n "$pid" ]] || continue
-		if ! beacon_pid_matches "$app" "$pid"; then
+		started=$(beacon_started "$app" "$pid") || {
 			printf 'Not signalling %s: it is no longer this Beacon.\n' "$pid" >&2
+			continue
+		}
+		if ! beacon_same_process "$pid" "$started"; then
+			printf 'Not signalling %s: that pid is no longer the process that was verified.\n' "$pid" >&2
 			continue
 		fi
 		if kill -TERM "$pid"; then
@@ -197,32 +210,38 @@ quit_beacon() {
 			printf 'SIGTERM of %s failed.\n' "$pid" >&2
 		fi
 	done <<< "$pids"
-	deadline=$((SECONDS + wait))
-	if beacon_gone_until "$app" "$deadline"; then
-		if [[ "$signalled" -eq 1 ]]; then
-			echo "quit with SIGTERM"
-		else
-			echo "exited during the SIGTERM attempt"
-		fi
+	if [[ "$signalled" -eq 1 ]] && beacon_gone_until "$app" "$deadline"; then
+		echo "quit with SIGTERM"
 		return 0
 	fi
 	if [[ "$signalled" -eq 1 ]]; then
 		echo "SIGTERM was sent, but Beacon did not exit." >&2
 	fi
-	if ! instances=$(beacon_inspect "$app/Contents/MacOS/Beacon" "$bundle_id"); then
-		echo "AppleScript quit skipped: could not tell how many copies are running." >&2
+	remain=$((deadline - SECONDS))
+	if ((remain < 1)); then
+		echo "AppleScript quit skipped: no time left in the ${wait}s deadline." >&2
 		return 1
 	fi
-	if [[ "$(awk '$1 == "bundle" { n++ } END { print n + 0 }' <<< "$instances")" -ne 1 ]]; then
-		echo "AppleScript quit skipped: bundle id $bundle_id is not exactly one process. Quit that copy from its menu." >&2
+	if ! pids=$(beacon_pids "$app"); then
 		return 1
 	fi
-	deadline=$((SECONDS + wait))
-	remain=$wait
-	echo "Trying AppleScript to quit the one $bundle_id; macOS may ask for Automation permission." >&2
-	# One deadline covers the Apple event and the exit wait. The running check avoids launching a copy.
+	if [[ "$(printf '%s\n' "$pids" | grep -c .)" -ne 1 ]]; then
+		echo "AppleScript quit skipped: not exactly one verified Beacon to address." >&2
+		return 1
+	fi
+	pid=$pids
+	started=$(beacon_started "$app" "$pid") || {
+		echo "AppleScript quit skipped: the verified process is gone." >&2
+		return 1
+	}
+	if ! beacon_same_process "$pid" "$started"; then
+		echo "AppleScript quit skipped: pid $pid changed before the Apple event." >&2
+		return 1
+	fi
+	echo "Trying AppleScript to quit pid $pid; macOS may ask for Automation permission." >&2
+	# The event names that pid. A bundle-id quit can land on a different copy.
 	if reply=$(beacon_osascript -e "with timeout of $remain seconds" \
-		-e "if application id \"$bundle_id\" is running then quit app id \"$bundle_id\"" \
+		-e "tell application \"System Events\" to quit (first process whose unix id is $pid)" \
 		-e 'end timeout' 2>&1); then
 		if beacon_gone_until "$app" "$deadline"; then
 			echo "quit with AppleScript"

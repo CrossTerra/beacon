@@ -31,22 +31,27 @@ It:
    signed by this install's certificate. It never runs the staged helper. The running app's socket admits only the
    CLI requirement it stored at launch, and a newly signed helper cannot change that check.
 
-   **Same certificate.** The installed CLI meets the running app's requirement. An app that already has this quit
-   rule admits that binary even when the caller is not external, and prints the reply (`{"status":"quitting"}` or
-   `{"error":"invalid","field":"/op"}`). An older app still has the external-caller rule, so the same CLI can be
-   refused with `invalid /op`. The installer prints that reply. It then sends SIGTERM only to a pid it has just
-   checked still executes that bundle's binary (device and inode, so a symlink or a relative launch still matches,
-   and a reused pid is not signalled). If exactly one process has bundle id `dev.beacon.app`, it sends one Quit
-   Apple event to that id; macOS may ask once for Automation permission. Two copies make that event ambiguous, so
-   it is skipped and the message says so. Socket, signal and Apple event share one 30-second deadline. A failed
-   process listing is not treated as the app having exited, and the listing is repeated immediately before the old
-   bundle is moved. If Beacon is still running, the install stops and the new bundle is not put in its place.
+   **An installed build from before this fix must be quit from its menu once.** Socket quit and SIGTERM both used
+   to call terminate from the main queue, and with tether alive that deadlocks: the app answers and does not exit.
+   `install.sh` reads `BeaconDeferredQuit` in the installed app's Info.plist. If it is missing, it does not try the
+   socket or SIGTERM. It tells you to quit from the menu and run it again. After that one menu quit, later upgrades
+   can quit the running app themselves.
 
-   **A different certificate.** The staged helper is signed by the new certificate. The running app's stored
-   requirement names the old one. The installer does not run that helper; nothing it could say would make the old
-   app admit it. It runs the installed CLI, which the old app can admit, and otherwise uses the signal and Apple
-   event above. After the new app launches it admits the new CLI. `act.json` still names the previous app
-   requirement, so a certificate change still needs that file removed before the new build will listen
+   **Same certificate.** The installed CLI meets the running app's requirement. An app that already has this quit
+   rule admits that binary even when the caller is not external, and the installer prints the reply
+   (`{"status":"quitting"}` or `{"error":"invalid","field":"/op"}`). The CLI checks that its own connection's
+   listener is the one verified process; if that peer cannot be named, socket quit is skipped. SIGTERM is sent only
+   to a pid whose start time still matches, so a reused pid is not signalled. A Quit Apple event, if time remains
+   in the one 30-second deadline, names that pid. It is not sent by bundle id. A failed process listing is not
+   treated as the app having exited. After the old bundle is moved aside, the installer checks again that nothing
+   still runs from it and moves it back if something does.
+
+   **A different certificate.** The installer skips the old CLI: its certificate is not the one this install is
+   signing with, so `codesign --verify -R` fails and the helper is not executed. The staged helper is not run
+   either; the running app's stored requirement would refuse it anyway. Quit is then the signal and the Apple
+   event above, or the menu if this is still a build from before deferred quit. After the new app launches it
+   admits the new CLI. `act.json` still names the previous app requirement, so a certificate change still needs
+   that file removed before the new build will listen
    ([changing the certificate](#changing-the-certificate)).
 
    It then replaces `~/Applications/Beacon.app`, moving the old copy aside first and back if the move fails;

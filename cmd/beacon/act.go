@@ -11,12 +11,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/peer"
+	"golang.org/x/sys/unix"
 )
 
 const actUsage = `usage: beacon act types
@@ -209,6 +211,14 @@ func actCall(ctx context.Context, settings actSettings, frame []byte, timeout ti
 	if err := peer.Check(unix, settings.Requirement); err != nil {
 		return nil, err
 	}
+	// BEACON_ACT_PID names the instance this connection must be talking to. Checked on this connection, before
+	// any request byte, so a probe on a different connection cannot stand in for it.
+	if want := os.Getenv("BEACON_ACT_PID"); want != "" {
+		got, err := listenerPID(unix)
+		if err != nil || strconv.Itoa(got) != want {
+			return nil, fmt.Errorf("the proposal socket's listener is pid %d, not %s", got, want)
+		}
+	}
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
@@ -220,4 +230,19 @@ func actCall(ctx context.Context, settings actSettings, frame []byte, timeout ti
 		return nil, errors.New("the app closed the connection without a reply")
 	}
 	return bytes.TrimSuffix(line, []byte("\n")), nil
+}
+
+func listenerPID(conn *net.UnixConn) (int, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var pid int
+	var opErr error
+	if err := raw.Control(func(fd uintptr) {
+		pid, opErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+	}); err != nil {
+		return 0, err
+	}
+	return pid, opErr
 }

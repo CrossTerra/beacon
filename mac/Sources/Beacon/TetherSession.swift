@@ -51,9 +51,12 @@ final class TetherSession: RunLauncher {
         self.fd = fd
         self.event = event
         let box = TetherSessionBox()
-        // The read source is not on the main queue. Quit's modal loop does not drain that queue when terminate
-        // was entered from a main-queue callback; the run loop still runs, including in the modal mode.
-        reader = TetherLeaseReader(fd: fd) { event in
+        // A separate close-on-exec fd. The reader's cancel closes that dup, not this writer, so a reused fd
+        // number cannot be closed under a send or shutdown still in flight.
+        let readFd = dup(fd)
+        precondition(readFd >= 0)
+        _ = fcntl(readFd, F_SETFD, FD_CLOEXEC)
+        reader = TetherLeaseReader(fd: readFd) { event in
             RunLoop.main.perform(inModes: [.default, .common, .modalPanel]) {
                 MainActor.assumeIsolated { box.session?.event(event) }
             }
@@ -61,6 +64,8 @@ final class TetherSession: RunLauncher {
         box.session = self
         reader.start()
     }
+
+    deinit { close(fd) }
 
     /// The longest Quit waits for confirmation: tether's grace period plus its give-up margin, and a little more.
     static let stopTimeout: TimeInterval = 15 + 5 + 3

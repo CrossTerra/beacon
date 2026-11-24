@@ -95,9 +95,10 @@ run_mode() { # $1 mode, $2 seconds; prints the output and returns 0 if the proce
 	local i
 	for ((i = 0; i < seconds * 10; i++)); do
 		if ! kill -0 "$pid" 2>/dev/null; then
-			wait "$pid" || true
+			local status=0
+			wait "$pid" || status=$?
 			pid=
-			return 0
+			return "$status"
 		fi
 		sleep 0.1
 	done

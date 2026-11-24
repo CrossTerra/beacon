@@ -11,6 +11,14 @@ tmp=$(cd "$tmp" && pwd -P)
 fake_pid=
 extra_pids=()
 track_pid() { extra_pids+=("$1"); }
+untrack_pid() {
+	local pid=$1 p keep=()
+	for p in ${extra_pids[@]+"${extra_pids[@]}"}; do
+		[[ "$p" == "$pid" ]] || keep+=("$p")
+	done
+	extra_pids=()
+	for p in ${keep[@]+"${keep[@]}"}; do extra_pids+=("$p"); done
+}
 stop_fake_app() {
 	local pid
 	if [[ -n "$fake_pid" ]]; then
@@ -41,7 +49,6 @@ export BEACON_ACT_SOCKET="$tmp/missing.sock"
 export BEACON_INSTALL_TEST=1
 export QUIT_LOG="$tmp/quit-paths"
 export REPAIR_LOG="$tmp/repairs"
-beacon_socket_owner() { return 0; }
 bundle_id="test.beacon.install-lib"
 [[ "$app" != "$HOME/Applications/Beacon.app" && "$bundle_id" != dev.beacon.app ]] || fail "fixture targets the installed app"
 exe="$app/Contents/MacOS/Beacon"
@@ -102,7 +109,12 @@ int main(int argc, char **argv) {
     const char *log = getenv("QUIT_LOG");
     if (argc >= 3 && strcmp(argv[1], "act") == 0 && strcmp(argv[2], "quit") == 0) {
         FILE *out = log ? fopen(log, "a") : NULL;
-        if (out) { fprintf(out, "socket:%s\n", argv[0]); fclose(out); }
+        if (out) {
+            fprintf(out, "socket:%s\n", argv[0]);
+            const char *peer = getenv("BEACON_ACT_PID");
+            if (peer) fprintf(out, "peer:%s\n", peer);
+            fclose(out);
+        }
         const char *mode = getenv("FAKE_QUIT");
         if (!mode) mode = "";
         if (strcmp(mode, "socket") == 0) {
@@ -149,8 +161,9 @@ kill() {
 }
 beacon_osascript() {
 	echo AppleScript >> "$tmp/quit-paths"
+	printf '%s\n' "$4" >> "$tmp/quit-event"
 	if [[ $# -ne 6 || $1 != -e || $2 != 'with timeout of '* || $3 != -e ||
-		$4 != "if application id \"$bundle_id\" is running then quit app id \"$bundle_id\"" ||
+		$4 != "tell application \"System Events\" to quit (first process whose unix id is $fake_pid)" ||
 		$5 != -e || $6 != 'end timeout' ]]; then
 		echo "unexpected AppleScript: $*" >&2
 		return 2
@@ -175,12 +188,13 @@ expect_detail() {
 }
 reap_fake_app() {
 	wait "$fake_pid"
+	untrack_pid "$fake_pid"
 	fake_pid=
 }
 
 [[ $(try_quit) == "not running" ]] || fail "quit with nothing running"
 expect_paths ""
-socket="socket:$cli"
+socket() { printf 'socket:%s\npeer:%s' "$cli" "$fake_pid"; }
 fake_app stubborn
 staged="$tmp/.Beacon.app.new/Contents/MacOS/Beacon"
 mkdir -p "${staged%/*}"
@@ -203,39 +217,36 @@ sleep 0.1
 kill -KILL "$staged_pid" "$mention_pid" 2>/dev/null || true
 wait "$staged_pid" 2>/dev/null || true
 wait "$mention_pid" 2>/dev/null || true
+untrack_pid "$staged_pid"
+untrack_pid "$mention_pid"
 [[ $(FAKE_QUIT=socket try_quit) == 'quit through its socket ({"status":"quitting"})' ]] || fail "the installed CLI's socket quit: $(try_quit)"
-expect_paths "$socket"
+expect_paths "$(socket)"
 reap_fake_app
 
 fake_app term
 [[ $(FAKE_QUIT=unadmitted try_quit) == "quit with SIGTERM" ]] || fail "the SIGTERM fallback"
-expect_paths "$socket"$'\nSIGTERM'
+expect_paths "$(socket)"$'\nSIGTERM'
 expect_detail 'the app closed the connection without a reply'
 reap_fake_app
 
 fake_app term
 [[ $(FAKE_QUIT=ack try_quit 1) == "quit with SIGTERM" ]] || fail "the socket reply alone was treated as exit"
-expect_paths "$socket"$'\nSIGTERM'
+expect_paths "$(socket)"$'\nSIGTERM'
 expect_detail 'Socket quit returned success, but Beacon did not exit'
 reap_fake_app
 
 fake_app stubborn
-[[ $(FAKE_AUTOMATION=quit try_quit 1) == "quit with AppleScript" ]] || fail "the AppleScript fallback"
-expect_paths "$socket"$'\nSIGTERM\nAppleScript'
-expect_detail '{"error":"invalid","field":"/op"}'
-expect_detail 'SIGTERM was sent, but Beacon did not exit.'
-expect_detail 'macOS may ask for Automation permission'
-reap_fake_app
+if FAKE_AUTOMATION=quit try_quit 1 >/dev/null; then fail "a deadline spent on SIGTERM was reported as quit"; fi
+expect_paths "$(socket)"$'\nSIGTERM'
+expect_detail 'no time left in the 1s deadline'
+stop_fake_app
 
 fake_app stubborn
-if try_quit 1 >/dev/null; then fail "reported a stubborn app as quit after Automation was refused"; fi
-expect_paths "$socket"$'\nSIGTERM\nAppleScript'
-expect_detail 'AppleScript quit failed (exit 1): Not authorized to send Apple events to Beacon. (-1743)'
-if FAKE_TERM_ERROR=yes FAKE_AUTOMATION=ack try_quit 1 >/dev/null; then fail "reported a stubborn app as quit"; fi
-expect_paths "$socket"$'\nSIGTERM\nAppleScript'
-expect_detail 'Operation not permitted'
-expect_detail 'AppleScript returned success, but Beacon did not exit before the deadline'
-stop_fake_app
+[[ $(FAKE_TERM_ERROR=yes FAKE_AUTOMATION=quit try_quit 2) == "quit with AppleScript" ]] || fail "the pid Apple event"
+expect_paths "$(socket)"$'\nSIGTERM\nAppleScript'
+expect_detail "Trying AppleScript to quit pid $fake_pid"
+grep -F "unix id is $fake_pid" "$tmp/quit-event" >/dev/null || fail "the Apple event did not name the verified pid"
+reap_fake_app
 
 fake_app term
 chmod -x "$cli"
@@ -251,7 +262,7 @@ mkdir -p "${staged_cli%/*}"
 cp "$cli" "$staged_cli"
 fake_app term
 [[ $(FAKE_QUIT=socket try_quit) == 'quit through its socket ({"status":"quitting"})' ]] || fail "staged helper was required"
-expect_paths "$socket"
+expect_paths "$(socket)"
 [[ ! -s "$tmp/staged-ran" ]] || fail "the staged helper ran"
 reap_fake_app
 
@@ -260,19 +271,29 @@ fake_app term
 /usr/bin/codesign --remove-signature "$cli"
 [[ $(try_quit) == "quit with SIGTERM" ]] || fail "an unsigned CLI was executed: $(cat "$tmp/quit-paths")"
 expect_paths SIGTERM
-expect_detail 'does not verify'
+expect_detail 'does not meet'
 /usr/bin/codesign --force --sign - --identifier dev.beacon.cli "$cli"
 reap_fake_app
 
-# Another copy owning the socket is not this instance.
-fake_app term
-# shellcheck disable=SC2329 # quit_beacon calls this; the redefinition is the point of the case.
-beacon_socket_owner() { echo 1; }
-[[ $(FAKE_QUIT=socket try_quit) == "quit with SIGTERM" ]] || fail "a foreign socket was treated as this Beacon"
-expect_paths SIGTERM
-expect_detail 'proposal socket belongs to pid 1'
-beacon_socket_owner() { return 0; }
-reap_fake_app
+# Two processes of this executable: the quit connection's peer cannot be named, so the CLI is not run.
+fake_app stubborn
+"$exe" "$tmp/ready-two" stubborn &
+second=$!
+track_pid "$second"
+sleep 0.2
+if FAKE_QUIT=socket try_quit 1 >/dev/null; then fail "two processes used the socket"; fi
+expect_detail 'not exactly one process'
+if grep -q '^socket:' "$tmp/quit-paths"; then fail "the CLI ran without a named peer"; fi
+kill -KILL "$second" 2>/dev/null || true
+wait "$second" 2>/dev/null || true
+untrack_pid "$second"
+stop_fake_app
+
+mkdir -p "$tmp/old.app/Contents"
+cp "$app/Contents/Info.plist" "$tmp/old.app/Contents/Info.plist"
+if beacon_quit_can_finish "$tmp/old.app"; then fail "a build without deferred quit was offered socket quit"; fi
+/usr/bin/plutil -insert BeaconDeferredQuit -bool YES "$tmp/old.app/Contents/Info.plist"
+beacon_quit_can_finish "$tmp/old.app" || fail "a marked build was not recognised"
 
 # A symlink and a relative launch are still this executable.
 link="$tmp/linked-beacon"

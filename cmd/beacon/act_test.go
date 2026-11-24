@@ -91,6 +91,20 @@ func TestActProposeChecksTheListenerThenSendsOneFrame(t *testing.T) {
 	}
 }
 
+func TestActQuitSendsNothingWhenTheListenerPidDiffers(t *testing.T) {
+	f, a, h := newFakeApp(t, selfRequirement(t), `{"status":"quitting"}`)
+	t.Setenv("BEACON_ACT_PID", "1")
+	if code := a.main(context.Background(), []string{"act", "quit"}); code == 0 {
+		t.Fatalf("exit %d: %s", code, h.stderr.String())
+	}
+	if !strings.Contains(h.stderr.String(), "not 1") {
+		t.Fatalf("stderr %s", h.stderr.String())
+	}
+	if got := <-f.received; len(got) != 0 {
+		t.Fatalf("the unnamed listener received %q", got)
+	}
+}
+
 func TestActSendsNothingToAnotherListener(t *testing.T) {
 	f, a, h := newFakeApp(t, `identifier "dev.beacon.app" and anchor apple generic`, `{"status":"pending"}`)
 	if code := a.main(context.Background(), []string{"act", "get", "apr_x"}); code == 0 || !strings.Contains(h.stderr.String(), "not the configured Beacon app") {
