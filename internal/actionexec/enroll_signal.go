@@ -58,7 +58,7 @@ func RegisterSignal(ctx context.Context, dir, origin string, key keychain.Secret
 		defer resp.Body.Close()
 		b, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 		if err != nil || resp.StatusCode != http.StatusOK || len(b) > 1<<20 || json.Unmarshal(b, out) != nil {
-			return errors.New("Signal did not verify the approval-app key")
+			return errors.New("could not verify the approval-app key with Signal")
 		}
 		return nil
 	}

@@ -2,6 +2,7 @@ package cutover
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 )
 
@@ -35,6 +37,7 @@ func fixture(t *testing.T, events string) (dir, sqlite, db string) {
         CREATE TABLE outbox(seq INTEGER PRIMARY KEY,key TEXT NOT NULL,nonce TEXT,bytes BLOB,state TEXT,event_id TEXT,stopped TEXT);
         INSERT INTO meta VALUES('journal_id','`+oldID+`');`+events)
 	must(t, os.Chmod(db, 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, "app", "settings.json"), []byte(`{"signal":{"origin":"https://signal.fixture.test","actor":"act_01m6a6ft00e40r2081040g2082","person":"act_01m6a6ft00e40r2081040g2081"}}`), 0o600))
 	return dir, sqlite, db
 }
 
@@ -119,6 +122,13 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 	must(t, cmd.Wait())
 	must(t, os.WriteFile(db, main, 0o600))
 	must(t, os.WriteFile(db+"-wal", wal, 0o600))
+	must(t, os.Mkdir(filepath.Join(dir, "run"), 0o700))
+	socket := filepath.Join(dir, "run", "act.sock")
+	old, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	must(t, err)
+	old.SetUnlinkOnClose(false)
+	must(t, os.Chmod(socket, 0o600))
+	must(t, old.Close())
 	closeLock := lockDir(t, dir)
 	m, err := Migrate(t.Context(), dir, sqlite)
 	must(t, err)
@@ -127,13 +137,52 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 		t.Fatalf("archive missing the committed WAL: %+v", m)
 	}
 	closeLock()
+	if j, err := approval.OpenJournal(dir, time.Unix(0, 0), m.Journal); !errors.Is(err, approval.ErrJournalAge) {
+		if j != nil {
+			j.Close()
+		}
+		t.Fatalf("accepted a journal that cannot sort after Swift: %v", err)
+	}
 	j, err := approval.OpenJournal(dir, time.Now().Add(24*time.Hour), m.Journal)
 	must(t, err)
 	defer j.Close()
 	if j.ID() <= oldID || j.DeliveryStatus().Waiting != 0 {
 		t.Fatal("Go did not start with a strictly newer, empty outbox")
 	}
+	at := time.Now().UTC()
+	must(t, j.RecordLocal("settings_changed", at))
+	origin, err := approval.ParseOrigin(approval.LocalOrigin, "")
+	must(t, err)
+	s, err := actsocket.Listen(dir, j, actsocket.Options{Origin: origin, Enabled: []approval.Action{approval.Merge}})
+	must(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	defer func() { cancel(); s.Close(); <-done }()
+	reply, err := actsocket.Call(ctx, dir, approval.Object{"op": "propose", "type": "github.merge", "params": approval.Object{
+		"repo": "fixture/project", "number": int64(1), "base": "main", "head": strings.Repeat("a", 40), "method": "squash"},
+		"agent": approval.Object{"name": "fixture"}, "reason": "new work"}, 0)
+	must(t, err)
+	if !strings.Contains(string(reply), `"review_url":"`+approval.LocalOrigin+`/p/apr_`) {
+		t.Fatalf("Go did not take over the same proposal socket: %s", reply)
+	}
+	posts := 0
+	who := approval.SignalIdentity{Person: "act_01m6a6ft00e40r2081040g2081", Handle: "fixture"}
+	result, err := j.Drain(t.Context(), who, recordSink(func(b []byte) approval.RecordAnswer {
+		posts++
+		if !strings.Contains(string(b), `"beacon:`+j.ID()+`:1"`) || strings.Contains(string(b), oldID) {
+			t.Fatal("the first new Signal record was not sequence 1 or included the retired journal")
+		}
+		return approval.RecordAnswer{EventID: "evt_01m6a6ft00e40r2081040g2081"}
+	}))
+	if err != nil || posts != 1 || result.Sent != 1 {
+		t.Fatalf("new journal delivery: %v, %d, %v", result, posts, err)
+	}
 }
+
+type recordSink func([]byte) approval.RecordAnswer
+
+func (f recordSink) PostRecord(_ context.Context, b []byte) approval.RecordAnswer { return f(b) }
 
 func TestLiveSocketAndUnconfirmedTetherAreRefused(t *testing.T) {
 	dir, sqlite, _ := fixture(t, "")

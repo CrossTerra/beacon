@@ -91,7 +91,7 @@ func (a *app) cmdAct(ctx context.Context, args []string) error {
 		return err
 	}
 	if _, err := localstate.Load(dir); err != nil {
-		return errors.New("Go Beacon is not set up in this state directory")
+		return errors.New("this state directory is not set up for Go Beacon")
 	}
 	reply, err := actsocket.Call(ctx, dir, request, wait)
 	if err != nil {

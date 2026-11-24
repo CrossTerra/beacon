@@ -1,6 +1,6 @@
 # Commands
 
-Every command but `version`, `act`, `keychain repair`, `spike-passkey`, `serve`, `open` and `setup` takes `--config PATH`. See
+Collector commands take `--config PATH`. See
 [`configuration.md`](configuration.md) for where the config is found otherwise.
 
 ## `beacon init`
@@ -10,9 +10,9 @@ beacon init --signal-url https://signal.example.com --handle @winton
 ```
 
 Writes the config (mode `dry-run`, no sources), an empty rules file beside it and the state directory, and stores
-the Signal key, read from standard input, in the keychain. Echo is off while it reads from a terminal, and Ctrl+C
+the Signal key, read from standard input, in the unattended vault. Echo is off while it reads from a terminal, and Ctrl+C
 restores it and ends `init` without writing anything. It refuses to overwrite a config without `--force`.
-`--keychain-account` names the keychain account.
+`--keychain-account` is the historical option for the collector's credential slot; it does not use Keychain.
 
 ## `beacon key set`
 
@@ -20,7 +20,7 @@ restores it and ends `init` without writing anything. It refuses to overwrite a 
 beacon key set [--force]
 ```
 
-Replaces the Signal key in the keychain, in the same account `init` used. It reads the new key from standard input,
+Replaces the collector's Signal key in the unattended vault, in the same slot `init` used. It reads the new key from standard input,
 with echo off when that is a terminal, and does not print it. Before storing, it checks the key with `GET /api/me`.
 Signal must accept it, and the key's actor must be the configured person or their agent: the handle in
 `person.handle`, the actor the stored key already is, or an agent of that person. If the stored key is refused,
@@ -62,7 +62,7 @@ personal body plain) or `sensitive_shared` (it would be sealed on a shared subje
 error, a DEC-32 personal body without `seal` included, stops `run`.
 
 It exits non-zero when the pass cannot go on: Signal refused the key (401; store another with `beacon key set`) or the lease claim, another process holds
-the outbox, the key is not in the keychain, the binary does not match a certificate pinned by the retired installer,
+the outbox, the vault is locked or the required credential is unavailable,
 or the config, rules or a source cannot be loaded. The message names the
 reason and the command that shows details (`beacon rules check`, `beacon outbox`); it never repeats an error's text,
 which can name item keys or rule patterns. An unreachable Signal is not an error: bodies stay pending for the next
@@ -112,7 +112,7 @@ beacon status [--coverage]
 ```
 
 Prints the last pass from `pass.json` (`last_pass`, `outcome`, `lease`, `holder`, and a `withheld:` line per personal
-source), as `beacon service status` does, without asking launchd. `pass.json` also records, for Beacon.app's menu,
+source), without asking the service manager. `pass.json` also records
 when a held lease runs out (`lease_until`), why a lease was not taken (`lease_reason`), and why sending stopped part
 way through an otherwise clean pass (`send_reason`: `unavailable` or `lease_expired`), all as fixed codes. With the source loops, the last pass is the last
 source's pass; a personal source's `withheld:` line stays until that source's next pass.
@@ -205,7 +205,7 @@ Signal accepted, is not sent again.
 ## `beacon egress`
 
 Prints every host Beacon may contact under the current config, as `host:port` and why: the Signal host, and each
-enabled source's hosts. It also lists the hosts Beacon.app contacts under its settings
+enabled source's hosts. It also lists the configured approval provider and Signal record hosts
 (`~/Library/Application Support/beacon/app/settings.json`): the GitHub API origin it merges through, and the Signal
 origin it sends approval records to. A hosted
 classifier would be listed here (DEC-7); Phase 1 has none. Beacon's transport refuses every other host.
@@ -218,7 +218,7 @@ personal subject can take, and, as warnings, plaintext personal content in `send
 
 ## `beacon source add`
 
-Stores a source credential in the keychain and enables the source in the config. The token is not printed and is
+Stores a source credential in the unattended vault and enables the source in the config. The token is not printed and is
 not written to the config.
 
 ```bash
@@ -232,7 +232,7 @@ With `--from-gh`, the keychain package imports the output of `gh auth token`. Wi
 `gh auth token --hostname <hostname>`, using the hostname portion of the flag. The command asks for confirmation.
 Use `--yes` to confirm when input is piped. Without `--from-gh`, enter the GitHub token at the hidden prompt. For Jira,
 enter the account email and API token. The keychain reader hides terminal token input and also accepts the two lines
-from a pipe. The keychain account is `source:<name>` under the service `beacon`. `--name` overrides the default,
+from a pipe. The credential slot is `source:<name>` at the source's origin. `--name` overrides the default,
 which is the kind.
 
 `google` enables Gmail, Calendar and Drive, or only those named with `--gmail`, `--calendar` and `--drive`, and
@@ -275,37 +275,20 @@ collect that failed is not a completed summary. The next send pass may send thei
 a cursor. It does not send by itself. A running collector reads the acceptance before each pass, so
 it does not need a restart.
 
-## `beacon service`
+## Approval service
 
-Migration commands for the retired macOS collector LaunchAgent (`dev.beacon.agent` in the GUI domain).
-`beacon service install` no longer writes or starts a job. For the replacement, see [tether](tether.md).
+`beacon serve` runs the local approval pages, socket, reaper and configured collector under the user service
+manager. `beacon setup --origin localhost|tailscale` sets the origin and prints a registration code. It must run
+with the service stopped. `beacon setup --reset-passkeys` destroys the write vault and prints a replacement code.
+`beacon setup --signal` verifies a new Signal app setup code in hidden input and does not change the origin.
+`beacon status --review` checks the configured origin and Tailscale proxy. `beacon logs` prints the collector's
+bounded summary log. See [installs, updates and service controls](install.md).
 
-```bash
-beacon service uninstall [--config PATH]
-beacon service status [--config PATH]
-beacon service logs [--legacy [--config PATH]]
-```
-
-`uninstall` stops the job and removes `~/Library/LaunchAgents/dev.beacon.agent.plist`. It does not delete the
-state directory, change the certificate pin or remove other services. `beacon run` still refuses a binary whose
-certificate does not match a legacy pin. `status` prints `identity: mismatch` if the legacy job's binary does not
-match the pin, without printing the hash.
-
-`status` prints whether the job is loaded and running, and the last pass from `pass.json` in the state directory:
-the time, the outcome (`ok`, `stopped`, or a reason code), and the lease. A failed start records its reason there
-even when the pass did not send, so a persistent 401 or a refused lease is visible while the agent is backing off.
-When this instance held the lease, the holder is the instance id; the claim's `metadata.run` is that id plus
-`:lease`. Another holder is reported as `another instance`. A personal source the last pass did not send for is a
-`withheld: <source> <prefix> <reason>` line: `prefix_unrestricted` (ask Signal's admin to restrict the prefix) or
-`restrictions_unknown` (the restrictions could not be read; Beacon's key needs `read`). Status does not contact Signal, and it does not print a
-pass record that is not in that fixed set. For the app-supervised collector's latest pass and coverage, use
-`beacon status --coverage`.
-
-`logs` prints the supervised collector's summary log, `~/Library/Logs/Beacon/collector.log` (see
-[tether](tether.md#what-it-runs)). `--legacy` prints the retired LaunchAgent's summary log,
-`service.stdout.log` in the state directory. Neither follows.
-
-Uninstall and legacy job status are only available on macOS.
+`beacon open` prints a two-minute, one-use browser sign-in link. Open it privately; it cannot approve.
+The browser listeners are `127.0.0.1:7317` and `[::1]:7317`, with no fallback port. Service commands have an
+optional `--state-dir DIR`; defaults are documented under [Go approvals](go-approvals.md).
+Configure [agent runs](go-approvals.md#agent-runs-and-checkouts) with `agent-runs.json` in that state directory.
+Each run requires a separate passkey assertion.
 
 ## `beacon act`
 
@@ -315,89 +298,23 @@ beacon act propose < REQUEST.json
 beacon act get ID
 beacon act wait ID [--after VERSION] [--timeout SECONDS]
 beacon act withdraw ID
-beacon act quit
+beacon act resume-delivery
 ```
 
-Without `--state-dir`, this is the client for Beacon.app's proposal socket ([approvals](approvals.md)). `propose`
+This is the client for the same-user service socket ([approvals](approvals.md)). `propose`
 reads one JSON object from standard input,
 `{ type, params, reason, agent: { name, session? }, context?: { subject } }`, at most 256 KiB.
 Each command sends one request and prints the app's one-line JSON reply. A reply with `error` exits 1. `wait`
-defaults to `--after 0 --timeout 300`. There is no command to approve or list. `quit` asks the app to quit as its
-menu's Quit does. The app answers it for its own bundled CLI, or for another process with that CLI's signature that
-it can classify as external; otherwise the reply is `{"error":"invalid","field":"/op"}`. `scripts/install.sh` uses
-the installed CLI, and prints that reply, to replace a running app.
+defaults to `--after 0 --timeout 300`. `propose` returns `review_url` and, for `agent.run`, `runner_id`. Pass `--state-dir DIR` before the operation
+to select a different socket. A request reads no credential. Until an action type is configured, `propose`
+answers `type_disabled`. There is no command to approve, list or quit. `resume-delivery` wakes the journal's
+ordered sender; it cannot resend an acknowledged record or retry an action.
 
-It reads the app's code requirement from `~/Library/Application Support/beacon/act.json`,
-`{ "requirement": "…" }`. The signed app writes that file on its first launch and refuses to listen if the file
-names another signature. Before sending a byte, `beacon act` checks the socket's listener against that
-requirement using the kernel's audit token. A listener with another signature, or run by another user, receives
-nothing. It takes no `--config` and reads no credential. Until an action type is enabled, `propose` answers
-`type_disabled`.
+## `beacon vault`
 
-## Go review preview
-
-Use a locally built binary on macOS or Linux and a dedicated scratch directory outside the collector and
-Beacon.app state. The directory must be owned by you with mode `0700`. `serve` creates it if it is missing
-and its parent exists. Run as your own user, not root. The preview commands do not use `--config`.
-
-```bash
-beacon serve --state-dir DIR [--origin ORIGIN] [--tailscale-login LOGIN]
-beacon act --state-dir DIR types
-beacon act --state-dir DIR propose < FIXTURE.json
-beacon act --state-dir DIR get ID
-beacon act --state-dir DIR wait ID [--after VERSION] [--timeout SECONDS]
-beacon act --state-dir DIR withdraw ID
-beacon open --state-dir DIR
-beacon setup --state-dir DIR [--reset-passkeys]
-beacon egress --state-dir DIR
-```
-
-`serve` listens only on `127.0.0.1:7317` and `[::1]:7317`. It fails if either bind fails. Use Ctrl-C or
-SIGTERM to stop it. Its [reaper](supervision.md) sweeps any previous Go session before it opens the listeners;
-it starts no collector or watches. `--origin` defaults to `http://localhost:7317`.
-With an existing private Tailscale Serve
-proxy, set `--origin https://MACHINE.TAILNET.ts.net` (substitute the exact lowercase name) and
-`--tailscale-login LOGIN` to the one expected `Tailscale-User-Login`. `serve` does not configure or verify
-that proxy. Use localhost when you do not have one.
-
-`act` requires `--state-dir DIR` **before** the operation to select the Go socket. It uses the same request
-shape and adds `review_url` to `propose` replies (`runner_id` too for `agent.run`). Go `act` has no `quit`, and a failed Go connection never
-tries the signed route. `open` prints (but does not launch) a two-minute, one-use link for a browser
-session. Open it privately, then follow the `review_url` or use the pending list. The link cannot approve a write.
-Restart clears all sign-in
-codes and sessions, not unexpired proposals.
-
-`setup` prints a 10-minute, one-use passkey code. It refuses while `serve` holds the directory. The code is
-not stored. With `serve` running, open `/passkeys/new` and enter the code. `--reset-passkeys` records a
-passkey reset and removes the passkey list and write vault; the service must be stopped. See [Go approvals](go-approvals.md#passkey-setup).
-
-The default is review-only. To enable [GitHub merges](go-approvals.md#provider-credentials-and-github) or
-[Slack posts](go-approvals.md#slack-posts), configure `action-providers.json` and save separate read and
-write credentials through **Provider credentials** with a passkey. To enable [agent runs](go-approvals.md#agent-runs-and-checkouts),
-configure `agent-runs.json`. Each run needs its own passkey assertion. [Signal record delivery](go-approvals.md#journal-and-record-delivery)
-is also opt-in. `beacon act --state-dir DIR resume-delivery` wakes a stopped or backing-off record sender without
-starting any action. `egress --state-dir DIR` lists the configured GitHub, Slack and Signal hosts; it reads no credentials
-or collector config. Proposal parameters and reasons remain plaintext in the private journal. The Go preview
-does not use the login Keychain.
-
-## `beacon keychain list`
-
-Prints the account of every keychain item under the service `beacon`, one per line, from the items' attributes. It
-reads no value, so it never prompts. `scripts/install.sh` counts them to say how many prompts a repair will ask.
-
-## `beacon keychain repair`
-
-Re-creates every keychain item under the service `beacon`, so each one has the access a new item gets from the
-running build and none of what earlier builds added to it: only code with this build's identifier and signing
-certificate reads it without asking, and the item's partition list holds only this build's partition. Run it once
-after switching the signing certificate, with the build you will keep (see
-[Local builds and the keychain](development.md#local-builds-and-the-keychain)).
-
-It lists the items by attributes, which does not prompt, then for each one reads the value once (macOS asks once per
-item; choose Always Allow), stores a copy as `repair:<account>`, deletes the item, writes it back, reads it back to
-check the bytes, and deletes the copy. If it stops part way, the copy keeps the value and the next run restores it.
-It prints the account names it repaired and never a value. It takes no `--config`: it repairs every Beacon item. A
-build that is not signed with a certificate refuses it, as it refuses every keychain read.
+`beacon vault key-file PATH` exports an owner-only key file for KeePassXC; it refuses an existing path.
+`beacon vault import-keychain [--config PATH]` is an offline, one-time macOS migration of configured collector
+items. It never replaces an existing Go entry, discloses a value or deletes an item. See [cutover](install.md).
 
 ## `beacon spike-passkey`
 
@@ -446,9 +363,9 @@ line never holds item content, a rule's match, an item key, a request body, a cr
 | `heartbeat_failed` | Signal did not renew a source's heartbeat lease: the source and a reason (`lease_refused` with Signal's status and code, `unauthorized`, `unavailable`, `lease_expired`). Not a failure of the pass. |
 
 Reason codes: `config`, `source_failed`, `unauthorized`, `unavailable`, `lease_refused`, `lease_expired`,
-`egress_denied`, `outbox_locked`, `state_files`, `keychain`, `keychain_read_refused` (macOS denied, cancelled or
-could not show a keychain access prompt; `beacon keychain repair` fixes it), `canceled`, `internal`, `rate_limited`,
-`source_unauthorized`, `scope_denied`, `identity_mismatch`, `signing_mismatch`, `item_invalid`, `project_failed`,
+`egress_denied`, `outbox_locked`, `state_files`, `credential_unavailable`, `vault_locked`, `vault_key_missing`,
+`vault_unreadable`, `vault_ambiguous`, `canceled`, `internal`, `rate_limited`,
+`source_unauthorized`, `scope_denied`, `identity_mismatch`, `item_invalid`, `project_failed`,
 `prefix_unrestricted`, `restrictions_unknown`, `no_read_scope`, `names_scope`, `names_failed`, `body_needs_seal`,
 `sensitive_shared`. A source that was not collected is also printed by
 `run`, with the reason and not the error text.

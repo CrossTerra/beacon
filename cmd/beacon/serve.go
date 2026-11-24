@@ -16,6 +16,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/approvalserve"
 	"github.com/CrossTerra/beacon/internal/cutover"
 	"github.com/CrossTerra/beacon/internal/localstate"
+	"github.com/CrossTerra/beacon/internal/notice"
 	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
@@ -51,7 +52,9 @@ func (a *app) cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 	var jobs []supervisor.FixedJob
-	if a.approvalListeners == nil { // fixtures do not start an installed collector
+	var notify func(context.Context, string)
+	if a.approvalListeners == nil { // fixtures do not start an installed collector or notify the logged-in user
+		notify = notice.Send
 		job, err := collectorJob(dir, *collector)
 		if err != nil {
 			return err
@@ -61,7 +64,7 @@ func (a *app) cmdServe(ctx context.Context, args []string) error {
 		}
 	}
 	return approvalserve.Run(ctx, approvalserve.Options{StateDir: dir, Origin: o, Now: a.now,
-		AfterJournal: archive.Journal, ArchiveSignal: archive.Signal,
+		AfterJournal: archive.Journal, ArchiveSignal: archive.Signal, Notify: notify, RequireHandlers: a.approvalListeners == nil,
 		Supervision: &supervisor.Options{Jobs: jobs}, ListenReview: a.approvalListeners})
 }
 
@@ -112,7 +115,7 @@ func (a *app) cmdOpen(ctx context.Context, args []string) error {
 		return err
 	}
 	if _, err := localstate.Load(dir); err != nil {
-		return errors.New("Go Beacon is not set up in this state directory")
+		return errors.New("this state directory is not set up for Go Beacon")
 	}
 	b, err := actsocket.Call(ctx, dir, approval.Object{"op": "open"}, 0)
 	if err != nil {

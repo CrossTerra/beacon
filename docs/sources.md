@@ -4,9 +4,9 @@ A source yields items. Beacon has GitHub, Jira, Gmail, Google Calendar, Google D
 [fixture](configuration.md#fixture-source). Each has a fixed field list and a fixed state field list. A rule names
 what leaves; anything else stays.
 
-Credentials are in the keychain, under the service `beacon`: account `source:<name>` for GitHub and Jira, and
-`google:<address>:client` and `google:<address>:refresh` for the [Google grant](#google) a Google account's sources
-share, and `slack:<workspace id>:<user id>` for a [Slack](#slack) user token. They are read
+Credentials are in the [unattended vault](go-approvals.md#unattended-vault), bound to a configured source and origin.
+The Google client and refresh slots are shared by that account's Google sources. A Slack binding includes its
+workspace and user IDs. Credentials are read
 when a pass needs them and set only as an Authorization header (or, for the Google grant, sent only to Google's
 token endpoint). They are never written to the config, the log, or the outbox.
 

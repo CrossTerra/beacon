@@ -1,36 +1,23 @@
-// Package service handles the collector's last-pass record and reads the retired LaunchAgent's status and logs.
+// Package service handles the supervised collector's last-pass record and log rotation.
 package service
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 )
 
 const (
-	// Label is the launchd job label.
-	Label = "dev.beacon.agent"
-	// PlistName is the file in ~/Library/LaunchAgents.
-	PlistName = "dev.beacon.agent.plist"
 	// StdoutName and StderrName are the log files in the state directory.
 	StdoutName = "service.stdout.log"
 	StderrName = "service.stderr.log"
 	// PassName is the last send pass, in the state directory.
 	PassName = "pass.json"
-	// LeafName is the certificate leaf hash recorded at install, in the state directory.
-	LeafName = "service.leaf"
 
 	// BackoffCap is the longest a poll loop waits before a non-zero exit on a persistent failure.
 	BackoffCap = 30 * time.Minute
@@ -42,35 +29,9 @@ const (
 	rotateReadMax = 8 << 20
 )
 
-// AgentsDir is ~/Library/LaunchAgents.
-func AgentsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "LaunchAgents"), nil
-}
-
-// CollectorLog is ~/Library/Logs/Beacon/collector.log. tether appends the supervised collector's standard output,
-// its pass summaries, there.
-func CollectorLog() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "Logs", "Beacon", "collector.log"), nil
-}
-
-// Domain is the GUI launchd domain for uid. A LaunchAgent there runs as that user, in the graphical session, and
-// can read the login keychain. It is not the system domain.
-func Domain(uid int) string { return "gui/" + strconv.Itoa(uid) }
-
-// Target is the service target in that domain.
-func Target(uid int) string { return Domain(uid) + "/" + Label }
-
 // Rotate copies path aside to path.1 and truncates it when it is at least limit bytes.
 //
-// tether (and launchd before it) holds the log descriptor open and writes with append. A rename would leave that descriptor on the old
+// The supervisor holds the log descriptor open and writes with append. A rename would leave that descriptor on the old
 // inode, so the file is truncated in place. The copy happens first. A file larger than rotateReadMax is truncated
 // without a copy.
 func Rotate(path string, limit int64) error {
@@ -310,196 +271,7 @@ func writeAtomic(dir, name string, data []byte) error {
 	return d.Sync()
 }
 
-// Job is what `launchctl print` said about the agent. It is empty when the job is not loaded.
-type Job struct {
-	Loaded  bool
-	Running bool
-	State   string
-	PID     int
-	Program string
-}
-
-// ParsePrint reads `launchctl print` output. A job with a state line is loaded. Only state "running" is running.
-func ParsePrint(out string) Job {
-	var job Job
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "state = "):
-			job.Loaded = true
-			job.State = strings.TrimPrefix(line, "state = ")
-			job.Running = job.State == "running"
-		case strings.HasPrefix(line, "pid = "):
-			n, err := strconv.Atoi(strings.TrimPrefix(line, "pid = "))
-			if err == nil && n > 0 {
-				job.PID = n
-			}
-		case strings.HasPrefix(line, "program = "):
-			job.Program = strings.TrimPrefix(line, "program = ")
-		}
-	}
-	return job
-}
-
-// Identity is what codesign reported about a binary. It is not a credential.
-type Identity struct {
-	Identifier string
-	Authority  string
-	AdHoc      bool
-	// Leaf is the SHA-256 of the signing certificate, hex. It is what install pins. A rebuild with the same
-	// certificate keeps it; a different signer does not.
-	Leaf string
-}
-
-// Stable reports whether the identity is a certificate, not an ad-hoc signature. An ad-hoc signature changes every
-// rebuild, so the keychain treats each rebuild as a different program.
-func (id Identity) Stable() bool {
-	return id.Authority != "" && !id.AdHoc
-}
-
-// ParseIdentity reads `codesign -dvv` output.
-func ParseIdentity(out string) Identity {
-	var id Identity
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(line, "Identifier="):
-			id.Identifier = strings.TrimPrefix(line, "Identifier=")
-		case strings.HasPrefix(line, "Authority=") && id.Authority == "":
-			id.Authority = strings.TrimPrefix(line, "Authority=")
-		case line == "Signature=adhoc" || strings.Contains(line, "(adhoc)"):
-			id.AdHoc = true
-		}
-	}
-	return id
-}
-
-// ErrNotStable means the binary is unsigned, ad-hoc signed, or failed verification.
-var ErrNotStable = errors.New("service: binary is not code-signed with a stable identity")
-
-// CodesignIdentity runs codesign. The error is ErrNotStable and does not include codesign's text.
-func CodesignIdentity(ctx context.Context, path string) (Identity, error) {
-	if _, err := exec.CommandContext(ctx, "codesign", "--verify", "--strict", path).CombinedOutput(); err != nil {
-		return Identity{}, ErrNotStable
-	}
-	out, err := exec.CommandContext(ctx, "codesign", "-dvv", path).CombinedOutput()
-	if err != nil {
-		return Identity{}, ErrNotStable
-	}
-	id := ParseIdentity(string(out))
-	leaf, err := leafHash(ctx, path)
-	if err != nil {
-		return Identity{}, ErrNotStable
-	}
-	id.Leaf = leaf
-	if !id.Stable() || !LeafOK(id.Leaf) {
-		return Identity{}, ErrNotStable
-	}
-	return id, nil
-}
-
-// HashLeaf is the SHA-256 of a leaf certificate, hex. Install records it; run and status compare it.
-func HashLeaf(der []byte) string {
-	sum := sha256.Sum256(der)
-	return hex.EncodeToString(sum[:])
-}
-
-// LeafOK reports whether s is a leaf hash this package would write.
-func LeafOK(s string) bool { return leafPattern.MatchString(s) }
-
-var leafPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-func leafHash(ctx context.Context, path string) (string, error) {
-	dir, err := os.MkdirTemp("", "beacon-codesign")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(dir)
-	prefix := filepath.Join(dir, "cert")
-	if err := exec.CommandContext(ctx, "codesign", "-d", "--extract-certificates="+prefix, path).Run(); err != nil {
-		return "", ErrNotStable
-	}
-	der, err := os.ReadFile(prefix + "0")
-	if err != nil || len(der) == 0 {
-		return "", ErrNotStable
-	}
-	return HashLeaf(der), nil
-}
-
-// WriteLeaf records the leaf hash, mode 0600.
-func WriteLeaf(dir, leaf string) error {
-	if !LeafOK(leaf) {
-		return errors.New("service: signing identity is unreadable")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return writeAtomic(dir, LeafName, []byte(leaf+"\n"))
-}
-
-// ReadLeaf reads the recorded leaf hash. A missing file is os.ErrNotExist. Anything else that is not a hash is a
-// fixed error and does not include the file.
-func ReadLeaf(dir string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(dir, LeafName))
-	if err != nil {
-		return "", err
-	}
-	s := strings.TrimSpace(string(data))
-	if !LeafOK(s) {
-		return "", ErrIdentity
-	}
-	return s, nil
-}
-
-// ErrIdentity means the recorded signing identity is not a leaf hash. Its text does not include the file.
-var ErrIdentity = errors.New("service: signing identity is unreadable")
-
-// BinaryFromPlist returns the executable named by a plist this package wrote, or "" if it cannot.
-func BinaryFromPlist(data []byte) string {
-	const key = "<key>ProgramArguments</key>"
-	i := bytes.Index(data, []byte(key))
-	if i < 0 {
-		return ""
-	}
-	rest := data[i+len(key):]
-	start := bytes.Index(rest, []byte("<string>"))
-	if start < 0 {
-		return ""
-	}
-	rest = rest[start+len("<string>"):]
-	end := bytes.Index(rest, []byte("</string>"))
-	if end < 0 {
-		return ""
-	}
-	s := strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">").Replace(string(rest[:end]))
-	if !filepath.IsAbs(s) || strings.ContainsAny(s, "\r\n") {
-		return ""
-	}
-	return s
-}
-
-// FormatStatus is the fixed status text. Fields are already validated; this does not read a file.
-func FormatStatus(job Job, pass Pass, passErr error, identity string) string {
-	loaded, running, pid := "no", "no", "none"
-	if job.Loaded {
-		loaded = "yes"
-	}
-	if job.Running {
-		running = "yes"
-		if job.PID > 0 {
-			pid = strconv.Itoa(job.PID)
-		}
-	}
-	switch identity {
-	case "ok", "mismatch", "none", "unreadable":
-	default:
-		identity = "unreadable"
-	}
-	head, withheld := passLines(pass, passErr)
-	return fmt.Sprintf("loaded: %s\nrunning: %s\npid: %s\n", loaded, running, pid) + head + "identity: " + identity + "\n" + withheld
-}
-
-// FormatPass is the last pass as `beacon status` prints it: the pass.json lines of FormatStatus, without the job.
+// FormatPass is the last pass as `beacon status` prints it.
 func FormatPass(pass Pass, passErr error) string {
 	head, withheld := passLines(pass, passErr)
 	return head + withheld

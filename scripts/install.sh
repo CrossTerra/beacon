@@ -64,11 +64,18 @@ start_service() {
 wait_ready() {
 	local deadline=$((SECONDS + 30))
 	while ((SECONDS < deadline)); do
-		if "$bin" act --state-dir "$state" types >/dev/null 2>&1 &&
-			{ [[ "$platform" == Darwin ]] || systemctl --user is-active --quiet beacon.service; }; then return 0; fi
+		if service_running && "$bin" act --state-dir "$state" types >/dev/null 2>&1; then return 0; fi
 		sleep 1
 	done
 	return 1
+}
+
+service_running() {
+	if [[ "$platform" == Darwin ]]; then
+		/bin/launchctl print "$domain/dev.beacon.serve" 2>/dev/null | grep -E '^[[:space:]]*state = running$' >/dev/null
+	else
+		systemctl --user is-active --quiet beacon.service
+	fi
 }
 
 xml() { printf '%s' "$1" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -281,7 +288,14 @@ main() {
 		if [[ -n "$previous" ]]; then "$candidate" setup --state-dir "$state" --check-stopped; fi
 		if [[ "$migrate" == true ]]; then "$candidate" migrate-swift --state-dir "$state"; fi
 	fi
-	if [[ -z "$previous" ]]; then "$candidate" setup --state-dir "$state" --origin "$origin"; fi
+	if [[ -z "$previous" ]]; then
+		if [[ "$dry" == true ]]; then
+			# A fixture must never create an item on the person's Linux session bus.
+			DBUS_SESSION_BUS_ADDRESS='' XDG_RUNTIME_DIR='' "$candidate" setup --state-dir "$state" --origin "$origin"
+		else
+			"$candidate" setup --state-dir "$state" --origin "$origin"
+		fi
+	fi
 	changed=true
 	mv -f "$binary_stage" "$bin"
 	mv -f "$unit_stage" "$unit"

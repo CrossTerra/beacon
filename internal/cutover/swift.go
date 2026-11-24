@@ -32,7 +32,7 @@ type SignalActor struct {
 	Person string `json:"person"`
 }
 
-var ErrDrain = errors.New("Swift has pending work, a start without a result, an unclosed run, or an unacknowledged record; finish draining it before cutover")
+var ErrDrain = errors.New("the Swift journal has pending work, a start without a result, an unclosed run, or an unacknowledged record; finish draining it before cutover")
 
 // Load returns the ordering floor. Refuse to start or set up Go over unmigrated Swift data.
 func Load(dir string) (Archive, error) {
@@ -40,7 +40,7 @@ func Load(dir string) (Archive, error) {
 	if _, err := approval.CheckPrivate(path, os.ModeDir|0o700); errors.Is(err, os.ErrNotExist) {
 		for _, p := range []string{"act.json", "tether.session", "app/journal.sqlite"} {
 			if _, err := os.Lstat(filepath.Join(dir, p)); !errors.Is(err, os.ErrNotExist) {
-				return Archive{}, errors.New("Swift state is present; drain and quit Beacon.app and use install.sh --migrate-swift")
+				return Archive{}, errors.New("legacy Swift state is present; drain and quit Beacon.app and use install.sh --migrate-swift")
 			}
 		}
 		return Archive{}, nil
@@ -79,7 +79,7 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 		return Load(dir) // a completed archive is never replaced
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
-		return Archive{}, errors.New("Go journal already exists without a Swift archive; nothing was changed")
+		return Archive{}, errors.New("a Go journal already exists without a Swift archive; nothing was changed")
 	}
 	app := filepath.Join(dir, "app")
 	if _, err := approval.CheckPrivate(app, os.ModeDir|0o700); err != nil {
@@ -112,9 +112,12 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 	if err := os.Chmod(snapshot, 0o600); err != nil {
 		return Archive{}, err
 	}
-	id, err := verify(ctx, sqlite, snapshot)
+	id, hasRecords, err := verify(ctx, sqlite, snapshot)
 	if err != nil {
 		return Archive{}, err
+	}
+	if hasRecords && settings.Signal == nil {
+		return Archive{}, errors.New("the drained Swift journal has records but no saved Signal actor; reconnect the same actor before cutover")
 	}
 	f, err := approval.OpenPrivate(snapshot, os.O_RDWR)
 	if err != nil {
@@ -147,11 +150,11 @@ func stopped(ctx context.Context, dir string) (*os.File, error) {
 	}
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		f.Close()
-		return nil, errors.New("Swift tether still holds its lock; quit Beacon.app from its menu")
+		return nil, errors.New("the Swift tether still holds its lock; quit Beacon.app from its menu")
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "tether.session")); !errors.Is(err, os.ErrNotExist) {
 		f.Close()
-		return nil, errors.New("Swift tether cleanup is unconfirmed; reopen Swift to finish its sweep before cutting over")
+		return nil, errors.New("the Swift tether cleanup is unconfirmed; reopen Swift to finish its sweep before cutting over")
 	}
 	if err := socketFree(ctx, dir); err != nil {
 		f.Close()
@@ -211,13 +214,14 @@ func query(ctx context.Context, sqlite, db, sql string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func verify(ctx context.Context, sqlite, db string) (string, error) {
+func verify(ctx context.Context, sqlite, db string) (string, bool, error) {
 	const checks = `PRAGMA quick_check;
 SELECT value FROM meta WHERE name='journal_id';
 SELECT count(*) FROM entries e WHERE
  e.kind NOT IN ('proposed','approved','declined','withdrawn','expired','started','outcome_unknown','executed','failed',
                 'runner_working','runner_waiting','runner_stalled','runner_finished','runner_failed','runner_closed')
  OR NOT json_valid(e.body)
+ OR (e.kind='started' AND NOT EXISTS (SELECT 1 FROM entries r WHERE r.proposal=e.proposal AND r.seq>e.seq AND r.kind IN ('executed','failed')))
  OR (e.kind NOT GLOB 'runner_*' AND e.seq = (SELECT max(seq) FROM entries WHERE proposal=e.proposal AND kind NOT GLOB 'runner_*')
        AND (e.kind NOT IN ('declined','withdrawn','expired','executed','failed')
          OR (e.kind='executed' AND ((SELECT json_extract(p.body,'$.type') FROM entries p WHERE p.proposal=e.proposal AND p.kind='proposed')='agent.run')
@@ -226,17 +230,18 @@ SELECT count(*) FROM entries e WHERE
 SELECT count(*) FROM entries e LEFT JOIN outbox o ON e.seq=o.seq
  WHERE o.seq IS NULL OR o.state!='delivered' OR o.event_id IS NULL OR o.event_id=''
     OR o.key!='beacon:'||(SELECT value FROM meta WHERE name='journal_id')||':'||e.seq;
-SELECT count(*) FROM outbox WHERE seq NOT IN (SELECT seq FROM entries);`
+SELECT count(*) FROM outbox WHERE seq NOT IN (SELECT seq FROM entries);
+SELECT EXISTS (SELECT 1 FROM entries);`
 	out, err := query(ctx, sqlite, db, checks)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	lines := strings.Split(out, "\n")
-	if len(lines) != 5 || lines[0] != "ok" || !approval.ValidID(lines[1], "jrn") {
-		return "", fmt.Errorf("%w: invalid Swift journal metadata", approval.ErrCorrupt)
+	if len(lines) != 6 || lines[0] != "ok" || !approval.ValidID(lines[1], "jrn") {
+		return "", false, fmt.Errorf("%w: invalid Swift journal metadata", approval.ErrCorrupt)
 	}
 	if lines[2] != "0" || lines[3] != "0" || lines[4] != "0" {
-		return "", ErrDrain
+		return "", false, ErrDrain
 	}
-	return lines[1], nil
+	return lines[1], lines[5] != "0", nil
 }

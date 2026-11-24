@@ -16,14 +16,11 @@ staticcheck ./...
 echo "staticcheck: ok"
 go test -race -count=1 ./...
 # Use macOS's system Bash 3.2 even if PATH has a newer bash.
-for script in scripts/install.sh scripts/install-lib.sh scripts/test-install{,-lib}.sh scripts/test-quit-deadlock.sh; do
+for script in scripts/install.sh scripts/test-install.sh; do
 	/bin/bash -n "$script"
 done
 bash scripts/test-checkout.sh
-if [[ $(uname -s) == Darwin ]]; then
-	/bin/bash scripts/test-install-lib.sh
-	/bin/bash scripts/test-quit-deadlock.sh
-fi
+/bin/bash scripts/test-install.sh
 if command -v shellcheck >/dev/null; then
 	shellcheck scripts/*.sh
 	echo "shellcheck: ok"

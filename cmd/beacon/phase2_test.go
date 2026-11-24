@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,14 +53,14 @@ printf '%s\n' `+tok)
 		t.Fatal("token stored without confirmation")
 	}
 	openStore := a.keychain
-	a.keychain = func() (keychain.Store, error) { return nil, keychain.ErrAdHocBuild }
+	a.keychain = func() (keychain.Store, error) { return nil, errors.New("vault unavailable") }
 	out.Reset()
 	errOut.Reset()
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh", "--yes"}); code == 0 {
-		t.Fatal("an ad-hoc build imported a token")
+		t.Fatal("an unavailable vault accepted an import")
 	}
 	if _, err := os.Stat(ghCalled); !os.IsNotExist(err) {
-		t.Fatal("gh was called before the keychain could be used")
+		t.Fatal("gh was called before the vault could be used")
 	}
 	a.keychain = openStore
 	out.Reset()

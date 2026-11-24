@@ -70,7 +70,7 @@ func InUnattended(dir string, secret Secret) (bool, error) { return vault.Contai
 // on refusal. No item is updated or deleted. Its service and account are labels, never a secret.
 func LegacyRead(ctx context.Context, account string) (Secret, error) {
 	if runtime.GOOS != "darwin" {
-		return Secret{}, errors.New("Keychain import is only available on macOS")
+		return Secret{}, errors.New("importing from Keychain is only available on macOS")
 	}
 	if account == "" || strings.ContainsRune(account, 0) {
 		return Secret{}, ErrNotFound
@@ -78,10 +78,10 @@ func LegacyRead(ctx context.Context, account string) (Secret, error) {
 	b, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-w", "-s", Service, "-a", account).Output()
 	defer clear(b)
 	if err != nil {
-		return Secret{}, errors.New("Keychain item could not be read; unlock it or re-enter the credential")
+		return Secret{}, errors.New("could not read the Keychain item; unlock it or re-enter the credential")
 	}
 	if len(b) > 64<<10 {
-		return Secret{}, errors.New("Keychain item is too large")
+		return Secret{}, errors.New("the Keychain item is too large")
 	}
 	return FromString(strings.TrimSuffix(string(b), "\n"))
 }

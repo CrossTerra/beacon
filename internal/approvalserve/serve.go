@@ -24,6 +24,9 @@ type Options struct {
 	ArchiveSignal *cutover.SignalActor
 	Origin        approval.Origin
 	Now           func() time.Time
+	Notify        func(context.Context, string)
+	// Only list types the live service has configured. Review-only fixtures opt out.
+	RequireHandlers bool
 	// ConnectRecords can replace the configured delivery connection in tests.
 	ConnectRecords approval.ConnectRecords
 	// The CLI supplies supervision for the collector and configured runs. Library tests may leave it nil.
@@ -106,7 +109,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	if old, next := opts.ArchiveSignal, configured.Signal; old != nil && next != nil &&
 		(old.Actor != next.Actor || old.Origin != next.Origin || old.Person != next.Person) {
-		return errors.New("Signal setup must use the same approval-app actor and person as the Swift archive")
+		return errors.New("use the same Signal approval-app actor and person as the Swift archive")
 	}
 	providers, err := actionexec.New(configured, opts.StateDir, opts.Now, opts.ProviderTransport)
 	if err != nil {
@@ -171,9 +174,31 @@ func Run(ctx context.Context, opts Options) (err error) {
 		worker = approval.NewDeliveryWorker(j, connectRecords)
 		resumeDelivery = worker.Resume
 	}
+	enabled := []approval.Action{approval.Merge, approval.Post, approval.Run}
+	if opts.RequireHandlers {
+		types := enabled[:0]
+		if opts.ArchiveSignal == nil || configured.Signal != nil {
+			for _, kind := range enabled {
+				if handlers[kind] != nil {
+					types = append(types, kind)
+				}
+			}
+		}
+		enabled = types
+	}
+	changes := make(chan struct{}, 1)
+	var proposed func()
+	if opts.Notify != nil {
+		proposed = func() {
+			select {
+			case changes <- struct{}{}:
+			default: // the pending count is read after commits; do not delay the socket
+			}
+		}
+	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
-		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
-		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake(), ResumeDelivery: resumeDelivery})
+		Enabled: enabled, Now: opts.Now, Proposed: proposed, ResumeDelivery: resumeDelivery,
+		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
 	if err != nil {
 		return err
 	}
@@ -192,7 +217,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	httpd := desk.Server()
 	httpd.BaseContext = func(net.Listener) context.Context { return work }
 	var tasks sync.WaitGroup
-	exits := make(chan error, len(listeners)+4)
+	exits := make(chan error, len(listeners)+5)
 	start := func(f func() error) {
 		tasks.Add(1)
 		go func() { defer tasks.Done(); exits <- f() }()
@@ -207,6 +232,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	start(func() error { return socket.Serve(work) })
 	start(func() error { return expire(work, j, opts.Now, desk.ExpireChallenges) })
+	if opts.Notify != nil {
+		start(func() error { return noticeLoop(work, changes, opts.Notify, j, opts.Now) })
+	}
 	if dispatch != nil {
 		start(dispatch.recover)
 	}

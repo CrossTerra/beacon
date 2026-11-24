@@ -75,7 +75,7 @@ and a state snapshot when the coverage changes ([events](events.md#coverage)).
 
 | Package | Role |
 | --- | --- |
-| `cmd/beacon` | The CLI. Builds everything from the config; the only place that wires the keychain and the transport. |
+| `cmd/beacon` | CLI, setup and user service entry points. Builds the collector from the config and wires the bound vaults and transports. |
 | `internal/source` | The `Item` shape, the `Source` interface, and the fixture source. |
 | `internal/github`, `internal/jira` | The GitHub and Jira sources. See [`sources.md`](sources.md). |
 | `internal/google` | The Gmail, Calendar and Drive sources, the OAuth grant they share, and the installed-app flow `beacon source add google` runs. |
@@ -84,7 +84,7 @@ and a state snapshot when the coverage changes ([events](events.md#coverage)).
 | `internal/seed` | The seed file (DEC-24). |
 | `internal/limited` | Rate-limit backoff for source HTTP. |
 | `internal/config` | Reads and validates the config file. Holds no secrets. |
-| `internal/keychain` | The only code that reads or writes a credential. macOS Keychain through the Security framework, refused to a build not signed with a certificate, with items that trust the creating build's designated requirement and `Repair` to re-create them; and an in-memory store for tests. It also builds OAuth token requests and reads token responses, so a token's bytes stay in it. |
+| `internal/keychain`, `internal/vault` | Redacting secrets, bound read and write vaults, and an in-memory store for tests. The only legacy Keychain reader is a one-time operator command. |
 | `internal/rules` | Parses the rules file, decides tiers, and checks for rules that can never match. |
 | `internal/project` | Builds the request body from an item and its rule. |
 | `internal/outbox` | The append-only record of every body, and each key's state. |
@@ -97,7 +97,7 @@ and a state snapshot when the coverage changes ([events](events.md#coverage)).
 | `internal/egress` | The list of hosts Beacon may contact, and the transport guard that enforces it. |
 | `internal/logs` | The log: JSON lines with fixed event names. |
 | `internal/service` | The last-pass record and the retired LaunchAgent's status and log rotation. It does not read a credential and it does not send. |
-| `mac` | The menu-bar app and [tether](tether.md), the helper that runs the collector while the app is open and stops it on Quit or when the app dies. `BeaconCore` holds the [approval](approvals.md) contract with Signal (canonical JSON, hashes, ids, action schemas), the proposal socket, the vault, the journal and outbox, and the approval desk the window uses. `BeaconSecurity` checks a socket peer's code signature and holds the vault key. |
+| `internal/approvalserve`, `internal/approval`, `internal/review`, `internal/actsocket` | [Approvals](approvals.md), the append-only journal and outbox, verified passkey actions, and the same-user socket. The [Go reaper](supervision.md) controls child lifetime. |
 | `internal/peer` | `beacon act`'s check of the proposal socket's listener: the kernel audit token, this user, the configured code requirement. |
 
 Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
@@ -125,7 +125,7 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `service.stdout.log`, `service.stderr.log` | The retired LaunchAgent's logs. Standard error is the JSON log. Rotated by size, one generation kept | No |
 
 The supervised collector's pass summaries are outside the state directory, in `~/Library/Logs/Beacon/collector.log`
-and one previous file, `collector.log.1` ([tether](tether.md#what-it-runs)).
+and one previous file, `collector.log.1` ([supervision](supervision.md)).
 
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue
@@ -138,7 +138,7 @@ queue files, skip a torn last line (it may be a record a sending process is appe
 A source implements `source.Source`: a name, a fixed field list, a fixed state field list (DEC-28), the hosts it
 contacts, and `Collect`. `Collect` takes the committed cursor and returns the next one; the runner stores it after
 deciding. Its hosts appear in `beacon egress` and in the transport guard without other changes. A source keeps its
-credentials in the keychain through `internal/keychain`, and reads them per pass. A source that can skip reading
+its credentials in the unattended vault through `internal/keychain`, and reads them per pass. A source that can skip reading
 bodies implements `SetBodies`; the app tells it whether any rule could send one. A source whose subjects can be
 personal implements `PersonalStem`, and its stem must be in `source.PersonalStems`. Every source but the fixture reads
 open state on its first run and waits for `beacon accept-first`. The sources are [`sources.md`](sources.md).

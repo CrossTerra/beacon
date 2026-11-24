@@ -94,60 +94,23 @@ func TestPassRoundTrip(t *testing.T) {
 	}
 }
 
-func TestParsePrint(t *testing.T) {
-	running := ParsePrint(`gui/501/dev.beacon.agent = {
-	state = running
-	program = /Users/winton/.local/bin/beacon
-	pid = 12345
-	runs = 1
-}`)
-	if !running.Loaded || !running.Running || running.PID != 12345 || running.Program != "/Users/winton/.local/bin/beacon" {
-		t.Fatalf("%+v", running)
-	}
-	waiting := ParsePrint("state = not running\n")
-	if !waiting.Loaded || waiting.Running || waiting.PID != 0 {
-		t.Fatalf("%+v", waiting)
-	}
-	if job := ParsePrint("Could not find service \"dev.beacon.agent\" in domain\n"); job.Loaded || job.Running {
-		t.Fatalf("not loaded parsed as %+v", job)
-	}
-}
-
-func TestParseIdentity(t *testing.T) {
-	stable := ParseIdentity(`Identifier=dev.beacon.cli
-CodeDirectory v=20400 size=1 flags=0x0(none) hashes=1
-Authority=Beacon Local Signing
-TeamIdentifier=not set
-`)
-	if !stable.Stable() || stable.Authority != "Beacon Local Signing" || stable.Identifier != "dev.beacon.cli" {
-		t.Fatalf("%+v", stable)
-	}
-	adhoc := ParseIdentity("Identifier=beacon\nCodeDirectory v=20400 flags=0x2(adhoc) hashes=1\nSignature=adhoc\n")
-	if adhoc.Stable() || !adhoc.AdHoc {
-		t.Fatalf("%+v", adhoc)
-	}
-	if ParseIdentity("Identifier=beacon\n").Stable() {
-		t.Fatal("unsigned identity counted as stable")
-	}
-}
-
-func TestFormatStatus(t *testing.T) {
+func TestFormatPass(t *testing.T) {
 	at := time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC)
-	got := FormatStatus(Job{Loaded: true, Running: true, PID: 42}, Pass{At: at, Outcome: "ok", Lease: LeaseHeld, Holder: "0123456789abcdef"}, nil, "ok")
-	want := "loaded: yes\nrunning: yes\npid: 42\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\nidentity: ok\n"
+	got := FormatPass(Pass{At: at, Outcome: "ok", Lease: LeaseHeld, Holder: "0123456789abcdef"}, nil)
+	want := "last_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\n"
 	if got != want {
 		t.Fatalf("%q", got)
 	}
-	other := FormatStatus(Job{Loaded: true}, Pass{At: at, Outcome: "ok", Lease: LeaseOther}, nil, "mismatch")
-	if !strings.Contains(other, "holder: another instance\n") || strings.Contains(other, "0123456789abcdef") || !strings.Contains(other, "identity: mismatch\n") {
+	other := FormatPass(Pass{At: at, Outcome: "ok", Lease: LeaseOther}, nil)
+	if !strings.Contains(other, "holder: another instance\n") || strings.Contains(other, "0123456789abcdef") {
 		t.Fatalf("%s", other)
 	}
-	bad := FormatStatus(Job{}, Pass{}, ErrPass, "not a code")
-	if strings.Contains(bad, "fixture") || !strings.Contains(bad, "last_pass: unreadable\n") || !strings.Contains(bad, "identity: unreadable\n") {
+	bad := FormatPass(Pass{}, ErrPass)
+	if strings.Contains(bad, "fixture") || !strings.Contains(bad, "last_pass: unreadable\n") {
 		t.Fatalf("%s", bad)
 	}
-	none := FormatStatus(Job{}, Pass{}, os.ErrNotExist, "none")
-	if !strings.Contains(none, "loaded: no\n") || !strings.Contains(none, "last_pass: none\n") || !strings.Contains(none, "identity: none\n") {
+	none := FormatPass(Pass{}, os.ErrNotExist)
+	if !strings.Contains(none, "last_pass: none\n") {
 		t.Fatalf("%s", none)
 	}
 }
@@ -162,17 +125,6 @@ func TestBackoff(t *testing.T) {
 	}
 	if NextFailures(Pass{}, false) != 1 || NextFailures(Pass{Outcome: "ok"}, true) != 1 || NextFailures(Pass{Outcome: "unauthorized", Failures: 3}, true) != 4 {
 		t.Fatal("streak")
-	}
-}
-
-func TestLegacyBinaryAndPin(t *testing.T) {
-	plist := []byte(`<key>ProgramArguments</key><array><string>/Users/fixture/Beacon &amp; logs/beacon</string></array>`)
-	if BinaryFromPlist(plist) != "/Users/fixture/Beacon & logs/beacon" {
-		t.Fatalf("binary %q", BinaryFromPlist(plist))
-	}
-	sum := HashLeaf([]byte("leaf-cert"))
-	if !LeafOK(sum) {
-		t.Fatal(sum)
 	}
 }
 
@@ -221,7 +173,7 @@ func TestPassWithheld(t *testing.T) {
 	if err != nil || len(got.Withheld) != 2 {
 		t.Fatalf("%v %+v", err, got)
 	}
-	out := FormatStatus(Job{}, got, nil, "none")
+	out := FormatPass(got, nil)
 	if !strings.Contains(out, "withheld: gmail gmail:* prefix_unrestricted\n") || !strings.Contains(out, "withheld: drive drive:* restrictions_unknown\n") {
 		t.Fatalf("%s", out)
 	}

@@ -5,6 +5,9 @@ content (config format, rule grammar, event shapes) moves into `docs/`, and the 
 
 Read this file in full before writing code, especially **Decisions**. A decision here overrides anything older.
 
+The cross-platform approval service in Signal's plan 13.01 supersedes the native app, its signing and the old
+collector LaunchAgent. See [the current installer](../docs/install.md) for platform and vault behavior.
+
 ## Goal
 
 One agent per person that turns activity in the services they use into a small number of actionable events in

@@ -109,6 +109,9 @@ func (a *app) cmdVault(ctx context.Context, args []string) error {
 		if !isTerminal(a.stdin) {
 			return errors.New("run the one-time Keychain import yourself in a terminal with the service stopped")
 		}
+		if err := a.confirm("Confirm the collector’s provider tokens are read-only and distinct from Swift’s write tokens. Import them? [y/N] ", false); err != nil {
+			return err
+		}
 		read = keychain.LegacyRead
 	}
 	bindings := collectorBindings(cfg)

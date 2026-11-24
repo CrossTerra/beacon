@@ -44,6 +44,8 @@ type Options struct {
 	PlaceSlack func(context.Context, approval.Request, string) (approval.SlackPlacement, error)
 	// ResumeDelivery wakes the ordered sender. It does not approve a proposal or dispatch an action.
 	ResumeDelivery func()
+	// Proposed signals after a successful append. The callback must not block or take the proposal lock.
+	Proposed func()
 }
 
 type Server struct {
@@ -310,6 +312,9 @@ func (s *Server) store(ctx context.Context, peer approval.PeerLabel, o approval.
 		return journalError(err)
 	}
 	s.recent[peer.RunID] = append(s.recent[peer.RunID], at)
+	if s.opts.Proposed != nil {
+		s.opts.Proposed()
+	}
 	answer := status(p)
 	answer["params_hash"] = p.ParamsHash
 	answer["review_url"] = s.opts.Origin.URL() + "/p/" + p.ID

@@ -1,9 +1,10 @@
 # Configuration
 
-Beacon reads one YAML file. It holds no secrets: the Signal key is in the keychain. Unknown keys are errors.
+The collector reads one YAML file. It holds no secrets: credentials are in the unattended vault. Unknown keys are errors.
 
 The file is found at `--config PATH`, else `$BEACON_CONFIG`, else `config.yaml` in the user config directory
-(`~/Library/Application Support/beacon/` on macOS). `beacon init` writes it.
+(`~/Library/Application Support/beacon/` on macOS and `${XDG_CONFIG_HOME:-$HOME/.config}/beacon/` on Linux).
+`beacon init` writes it. The [approval service](go-approvals.md) has its own JSON settings and journal.
 
 ```yaml
 signal:
@@ -36,7 +37,7 @@ sources:
 | Key | Meaning |
 | --- | --- |
 | `signal.url` | The Signal base URL, with no path. `http` is allowed only to `localhost` or a loopback address. |
-| `signal.keychain_account` | The keychain account holding the Signal key, under the service `beacon`. |
+| `signal.keychain_account` | Historical field name for the collector key's slot in the unattended vault. |
 | `person.handle` | The person Beacon serves. Asks name it in `to` (DEC-27). With a Google or Slack source it must be an `@handle`: personal subjects carry it without the `@` (DEC-10). |
 | `person.identities` | The person's own identity per source. An own act carries `by` with this identity (DEC-27). Signal must have it attached to the person's actor, and Beacon's key must have a `relay` prefix that covers it. |
 | `rules` | The rules file. Its grammar is in [`rules.md`](rules.md). |
@@ -70,15 +71,15 @@ and sends nothing under `gmail:`, `calendar:`, `drive:` or `slack:dm:` until Sig
 ([`sources.md`](sources.md#google)). Beacon reads nothing else with it. Without Google or Slack sources, no `read`
 scope is needed.
 
-`beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the login
-keychain. `beacon key set` replaces that key, in the same account, after `GET /api/me` accepts it and the actor is the
+`beacon init` reads the key from standard input, with echo off when it is a terminal, and stores it in the unattended
+vault. `beacon key set` replaces that key, in the same slot, after `GET /api/me` accepts it and the actor is the
 configured person or the agent the stored key already is (`--force` stores another actor). It reads from
 standard input the same way and does not print the key. A refusal stores nothing. `beacon run` reads the key from
-the keychain when it sends. A dry run does not read it.
+the vault when it sends. A dry run does not read it. The approval app's Signal key is a separate binding.
 
 ## Sources
 
-`beacon source add` writes the source into this file and stores the credential in the keychain. It rewrites the
+`beacon source add` writes the source into this file and stores the credential in the unattended vault. It rewrites the
 file, so a comment in it is not kept. Details of what each source reads are in [`sources.md`](sources.md).
 
 ```yaml
