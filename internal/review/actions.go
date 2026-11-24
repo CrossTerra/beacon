@@ -17,16 +17,25 @@ type Actions struct {
 	Resolve  func(context.Context, approval.Proposal) (approval.Resolved, error)
 	// Approve is only called with the exact held snapshots and key from the verified assertion. The
 	// callback must not keep the vault key or attach it to work that outlives this request.
-	Approve  func(items []approval.Frozen, credentialID, batchChallenge, key []byte) error
-	ReadBack func(context.Context, approval.View) error
-	Targets  []CredentialTarget
-	Save     func(context.Context, string, keychain.Secret, keychain.Secret, []byte) error
+	Approve     func(items []approval.Frozen, credentialID, batchChallenge, key []byte) error
+	ReadBack    func(context.Context, approval.View) error
+	CanReadBack func(approval.Action) bool
+	Targets     []CredentialTarget
+	Save        func(context.Context, string, keychain.Secret, keychain.Secret, []byte) error
+	Checkouts   []Checkout
+	RunModels   []string
+	CanStopRun  func(string) bool
+	StopRun     func(string) error
 }
 
 func (s *Site) SetActions(actions Actions) { s.actions = actions }
 
 func (s *Site) supports(a approval.Action) bool {
 	return s.actions.Resolve != nil && (s.actions.Supports == nil || s.actions.Supports(a))
+}
+
+func (s *Site) canReadBack(a approval.Action) bool {
+	return s.actions.ReadBack != nil && s.supports(a) && (s.actions.CanReadBack == nil || s.actions.CanReadBack(a))
 }
 
 type pendingRow struct {
@@ -45,7 +54,7 @@ func (s *Site) pendingPage(w http.ResponseWriter, sess session, at time.Time) {
 		Unknown               []approval.View
 		CSRF                  string
 		Live, Settings, Batch bool
-	}{CSRF: sess.csrf, Live: s.actions.Approve != nil, Settings: len(s.actions.Targets) != 0}
+	}{CSRF: sess.csrf, Live: s.actions.Approve != nil, Settings: s.hasSettings()}
 	for _, p := range pending {
 		review := s.supports(p.Type)
 		if review && (p.Type == approval.Merge || p.Type == approval.Post) {
@@ -74,6 +83,10 @@ func (s *Site) readBack(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if err == nil && !s.canReadBack(v.Type) {
+		http.NotFound(w, r)
+		return
+	}
 	if err == nil && v.Status == "outcome_unknown" {
 		err = s.actions.ReadBack(r.Context(), v)
 	}
@@ -85,13 +98,40 @@ func (s *Site) readBack(w http.ResponseWriter, r *http.Request) {
 }
 
 type CredentialTarget struct{ Service, Origin, Account, Workspace string }
+type Checkout struct{ Name, Path string }
+
+func (s *Site) hasSettings() bool {
+	return len(s.actions.Targets) != 0 || len(s.actions.Checkouts) != 0
+}
 
 func (s *Site) settingsPage(w http.ResponseWriter, sess session, saved bool) {
 	render(w, "settings", http.StatusOK, struct {
-		Targets []CredentialTarget
-		CSRF    string
-		Saved   bool
-	}{s.actions.Targets, sess.csrf, saved})
+		Targets   []CredentialTarget
+		Checkouts []Checkout
+		CSRF      string
+		Saved     bool
+	}{s.actions.Targets, s.actions.Checkouts, sess.csrf, saved})
+}
+
+// A signed-in session may stop an existing run; it cannot start or approve one.
+func (s *Site) stopRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PostForm.Get("id")
+	if s.actions.StopRun == nil || !approval.ValidID(id, "apr") {
+		http.NotFound(w, r)
+		return
+	}
+	v, _, err := s.journal.Get(id, s.now())
+	if err == nil && (v.Type != approval.Run || v.Status != "executed") {
+		err = approval.ErrTransition
+	}
+	if err == nil {
+		err = s.actions.StopRun(id)
+	}
+	if err != nil {
+		refused(w, "Stop run", err)
+		return
+	}
+	http.Redirect(w, r, "/p/"+id, http.StatusSeeOther)
 }
 
 func (s *Site) changeCredentials(w http.ResponseWriter, r *http.Request) {

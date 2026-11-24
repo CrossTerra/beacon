@@ -21,7 +21,7 @@ type Options struct {
 	StateDir string
 	Origin   approval.Origin
 	Now      func() time.Time
-	// Only tests supply a Signal connection. The CLI does not have a credential source.
+	// ConnectRecords can replace the configured delivery connection in tests.
 	ConnectRecords approval.ConnectRecords
 	// The CLI always supplies supervision, but no live jobs in the preview. Library tests may
 	// leave it nil. ConnectJobs hands the supervisor to trusted service code, never to a request.
@@ -47,6 +47,14 @@ func Run(ctx context.Context, opts Options) (err error) {
 		opts.ListenReview = review.ListenLoopback
 	}
 	var sup *supervisor.Supervisor
+	var supClosed bool
+	closeReaper := func() error {
+		if sup == nil || supClosed {
+			return nil
+		}
+		supClosed = true
+		return sup.Close()
+	}
 	var startup func(*os.File) error
 	if opts.Supervision != nil {
 		startup = func(lock *os.File) error {
@@ -57,9 +65,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	j, err := approval.OpenJournalBeforeReplay(opts.StateDir, opts.Now(), "", startup)
 	defer func() {
-		if sup != nil {
-			err = errors.Join(err, sup.Close())
-		}
+		err = errors.Join(err, closeReaper())
 		if j != nil {
 			err = errors.Join(err, j.Close())
 		}
@@ -69,6 +75,27 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	if ctx.Err() != nil {
 		return nil
+	}
+	var runs *actionexec.RunHandler
+	var runFailed <-chan error
+	runSettings, err := actionexec.LoadRunSettings(opts.StateDir)
+	if err != nil {
+		return err
+	}
+	if sup != nil {
+		if err := actionexec.RecoverRunFiles(opts.StateDir); err != nil {
+			return err
+		}
+		if err := j.RecoverRuns(opts.Now()); err != nil {
+			return err
+		}
+		if runSettings != nil {
+			runs, err = actionexec.NewRunHandler(ctx, *runSettings, opts.StateDir, sup, opts.Now)
+			if err != nil {
+				return err
+			}
+			runFailed = runs.Failed()
+		}
 	}
 	configured, err := actionexec.LoadSettings(opts.StateDir)
 	if err != nil {
@@ -80,10 +107,18 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	var attribute func(int) (string, error)
 	var reaperDone <-chan struct{}
+	stopJobs := func() {
+		if runs != nil && ctx.Err() != nil {
+			runs.BeginShutdown()
+		}
+		if sup != nil {
+			sup.BeginShutdown()
+		}
+	}
 	if sup != nil {
 		attribute, reaperDone = sup.Attribute, sup.Done()
-		stopJobs := context.AfterFunc(ctx, sup.BeginShutdown)
-		defer stopJobs()
+		stop := context.AfterFunc(ctx, stopJobs)
+		defer stop()
 	}
 	// The parent requests shutdown. Mark the journal stopping before closing listeners or canceling work.
 	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
@@ -101,10 +136,22 @@ func Run(ctx context.Context, opts Options) (err error) {
 	desk.SetState(opts.StateDir)
 	var dispatch *dispatcher
 	var dispatchFailed <-chan error
-	if handlers := providers.Handlers(); len(handlers) != 0 {
+	handlers := providers.Handlers()
+	if runs != nil {
+		handlers[approval.Run] = runs
+	}
+	if len(handlers) != 0 {
 		dispatch = newDispatcher(work, j, opts.Now, handlers)
 		dispatchFailed = dispatch.failed
-		desk.SetActions(dispatch.controls(providers))
+		controls := dispatch.controls(providers)
+		if runs != nil {
+			controls.CanStopRun, controls.StopRun = runs.CanStop, runs.Stop
+			controls.RunModels = runSettings.Models
+			for _, c := range runSettings.Checkouts {
+				controls.Checkouts = append(controls.Checkouts, review.Checkout(c))
+			}
+		}
+		desk.SetActions(controls)
 	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
@@ -145,8 +192,12 @@ func Run(ctx context.Context, opts Options) (err error) {
 	if dispatch != nil {
 		start(dispatch.recover)
 	}
-	if opts.ConnectRecords != nil {
-		worker := approval.NewDeliveryWorker(j, opts.ConnectRecords)
+	connectRecords := opts.ConnectRecords
+	if connectRecords == nil && configured.Signal != nil {
+		connectRecords = configured.Signal.RecordConnection(opts.StateDir)
+	}
+	if connectRecords != nil {
+		worker := approval.NewDeliveryWorker(j, connectRecords)
 		start(func() error {
 			err := worker.Run(work)
 			if errors.Is(err, context.Canceled) && work.Err() != nil {
@@ -162,15 +213,14 @@ func Run(ctx context.Context, opts Options) (err error) {
 			err = supervisor.ErrReaper
 		}
 	case err = <-dispatchFailed:
+	case err = <-runFailed:
 	case err = <-exits:
 		if err == nil {
 			err = errors.New("review service stopped unexpectedly")
 		}
 	}
 
-	if sup != nil {
-		sup.BeginShutdown()
-	}
+	stopJobs()
 	err = errors.Join(err, j.Shutdown(opts.Now()))
 	cancel()
 	err = errors.Join(err, socket.Close())
@@ -181,6 +231,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	if dispatch != nil {
 		err = errors.Join(err, dispatch.wait())
+	}
+	if runs != nil {
+		err = errors.Join(err, closeReaper(), runs.Join())
 	}
 	tasks.Wait()
 	close(exits)

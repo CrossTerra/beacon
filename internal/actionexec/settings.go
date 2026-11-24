@@ -26,6 +26,7 @@ const settingsName = "action-providers.json"
 type Settings struct {
 	GitHub *GitHubSettings `json:"github"`
 	Slack  *SlackSettings  `json:"slack"`
+	Signal *SignalSettings `json:"signal"`
 }
 
 type GitHubSettings struct {
@@ -104,8 +105,14 @@ func (s Settings) check() error {
 		}
 	}
 	if s.Slack != nil {
-		_, err := s.Slack.binding()
-		return err
+		if _, err := s.Slack.binding(); err != nil {
+			return err
+		}
+	}
+	if s.Signal != nil {
+		if _, err := s.Signal.identity(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -123,15 +130,20 @@ func (s Settings) Hosts() []egress.Host {
 		hosts = append(hosts, egress.Host{Address: egress.Address(u),
 			Purpose: "Go approvals: Slack account validation, slack.post reads and one approved post"})
 	}
+	if s.Signal != nil {
+		if host, err := approval.RecordEgress(s.Signal.Origin); err == nil {
+			hosts = append(hosts, host)
+		}
+	}
 	return hosts
 }
 
-// Handler is the seam at a durable passkey-approved start. A future local handler can use the same seam
+// Handler is the seam at a durable passkey-approved start. A local handler can use the same seam
 // without opening provider credentials or implementing provider read-back.
 type Handler interface {
 	Resolve(context.Context, approval.Proposal) (approval.Resolved, error)
 	// Unlock is called only with the data key from a verified assertion, before anything is started.
-	// A future local handler can return an empty secret and use its own passkey-approved start path.
+	// A local handler can return an empty secret without opening any write credential.
 	Unlock(*approval.Frozen, []byte) (keychain.Secret, error)
 	Run(context.Context, *approval.Journal, approval.View, keychain.Secret) error
 }

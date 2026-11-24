@@ -76,8 +76,8 @@ type SignalRecords struct {
 	authorize func(http.Header)
 }
 
-// RecordEgress is the single host used for record delivery. A future credential source must use this same
-// origin binding when displaying egress. HTTP is accepted only on a literal loopback IP for fakes.
+// RecordEgress is the single host used for record delivery, shared by the client and beacon egress.
+// HTTP is accepted only on a literal loopback IP for fakes.
 func RecordEgress(origin string) (egress.Host, error) {
 	u, err := url.Parse(origin)
 	if err != nil || u.Hostname() == "" || (origin != u.Scheme+"://"+u.Host) || u.User != nil || strings.HasSuffix(u.Host, ":") ||
@@ -88,7 +88,7 @@ func RecordEgress(origin string) (egress.Host, error) {
 }
 
 // NewSignalRecords takes an opaque authorization hook from the credential package, already bound to origin
-// and the app actor. This package never reads or persists a key. The skeleton has no live credential source.
+// and the app actor. This package never reads or persists a key.
 func NewSignalRecords(origin string, authorize func(http.Header)) (*SignalRecords, error) {
 	host, err := RecordEgress(origin)
 	if err != nil {
@@ -127,6 +127,8 @@ func (s *SignalRecords) PostRecord(ctx context.Context, b []byte) RecordAnswer {
 	}
 	return classify(res.StatusCode, answer, res.Header.Get("Retry-After"), time.Now())
 }
+
+func (s *SignalRecords) Close() { s.client.CloseIdleConnections() }
 
 type recordReply struct {
 	EventID  string `json:"event_id"`

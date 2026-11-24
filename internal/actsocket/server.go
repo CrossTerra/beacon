@@ -299,6 +299,9 @@ func (s *Server) store(ctx context.Context, peer approval.PeerLabel, o approval.
 	answer := status(p)
 	answer["params_hash"] = p.ParamsHash
 	answer["review_url"] = s.opts.Origin.URL() + "/p/" + p.ID
+	if p.RunnerID != "" {
+		answer["runner_id"] = p.RunnerID
+	}
 	return answer
 }
 

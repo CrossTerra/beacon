@@ -58,6 +58,9 @@ func (w *DeliveryWorker) Run(ctx context.Context) error {
 			out.Retry = true // there was no POST
 		} else {
 			out, err = w.journal.Drain(ctx, who, transport)
+			if scoped, ok := transport.(interface{ Close() }); ok {
+				scoped.Close()
+			}
 			if err != nil {
 				return err
 			}

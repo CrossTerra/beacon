@@ -66,6 +66,21 @@ func ActionTokenFingerprint(s Secret) [32]byte { return sha256.Sum256(s.value) }
 // ReadAction reads only the unattended credential for b. A write token never goes into this database.
 func ReadAction(dir string, b vault.Binding) (Secret, error) {
 	b.Use = "read"
+	return readBound(dir, b)
+}
+
+// ReadRecordKey opens only the unattended app-records key for this Signal origin and app actor.
+// It is not a provider write credential and never comes from a proposal or the service environment.
+func ReadRecordKey(dir, origin, actor string) (Secret, error) {
+	s, err := readBound(dir, vault.Binding{Service: "signal", Origin: origin, Account: actor, Use: "records"})
+	if err != nil || !bytes.HasPrefix(s.value, []byte("sig_")) || len(s.value) == 4 {
+		s.Clear()
+		return Secret{}, errActionCredential
+	}
+	return s, nil
+}
+
+func readBound(dir string, b vault.Binding) (Secret, error) {
 	value, err := vault.Get(dir, b)
 	secret := Secret{value: []byte(value)}
 	if err != nil || !ActionToken(secret) {

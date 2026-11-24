@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"maps"
 	"net/http"
 	"time"
 
@@ -76,6 +77,14 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "selection no longer pending", http.StatusConflict)
 		return
 	}
+	selected := ""
+	if models, ok := r.PostForm["model"]; ok {
+		if len(proposals) != 1 || proposals[0].Type != approval.Run || len(models) != 1 || models[0] == "" {
+			http.Error(w, "model selection refused", http.StatusBadRequest)
+			return
+		}
+		selected = models[0]
+	}
 	creds, err := passkey.List(s.state)
 	if err != nil || len(creds) == 0 {
 		refused(w, "Resolve approval", approval.Refusal{Code: "no_passkey"})
@@ -87,12 +96,17 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 	var cards []approvalCard
 	var hashes []string
 	for _, p := range proposals {
-		resolved, err := s.actions.Resolve(ctx, p)
+		candidate := p
+		if selected != "" {
+			candidate.Params = maps.Clone(p.Params)
+			candidate.Params["model"] = selected
+		}
+		resolved, err := s.actions.Resolve(ctx, candidate)
 		if err != nil {
 			refused(w, "Resolve approval", err)
 			return
 		}
-		f, err := approval.Freeze(p, resolved.Binding, "")
+		f, err := approval.Freeze(p, resolved.Binding, selected)
 		if err != nil {
 			refused(w, "Resolve approval", err)
 			return
@@ -244,7 +258,7 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// A trusted resolver with no dispatcher can only record an approval. The live service never supplies
-		// a resolver for a missing handler, including agent.run until the supervisor joins it.
+		// a resolver for a missing handler.
 		j, ok := s.journal.(interface {
 			ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
 		})

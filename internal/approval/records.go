@@ -19,6 +19,10 @@ type SignalIdentity struct {
 	Handle string
 }
 
+func (s SignalIdentity) Valid() bool {
+	return ValidID(s.Person, "act") && actorHandle.matches(s.Handle)
+}
+
 type Result struct {
 	ConfirmedBy string `json:"confirmed_by"`
 	Native      string `json:"native,omitempty"`
