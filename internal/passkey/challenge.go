@@ -24,3 +24,17 @@ func ApprovalChallenge(origin, instance string, nonce []byte, hashes []string) (
 	sum := sha256.Sum256(b)
 	return sum[:], nil
 }
+
+// SettingsChallenge authorizes storing credentials for one configured binding, never an action.
+func SettingsChallenge(origin, instance string, nonce []byte, service, provider, account, workspace string) ([]byte, error) {
+	b, err := approval.Canonical(approval.Object{
+		"v": int64(1), "kind": "settings", "origin": origin, "instance": instance,
+		"nonce": base64.RawURLEncoding.EncodeToString(nonce), "service": service, "provider": provider,
+		"account": account, "workspace": workspace,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	return sum[:], nil
+}

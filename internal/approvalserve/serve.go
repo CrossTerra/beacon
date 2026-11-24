@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/actionexec"
 	"github.com/CrossTerra/beacon/internal/actsocket"
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/review"
@@ -28,6 +29,8 @@ type Options struct {
 	ConnectJobs func(*supervisor.Supervisor) error
 	// Test seam for ephemeral loopback listeners. The CLI uses both fixed D4 addresses.
 	ListenReview func() ([]net.Listener, error)
+	// ProviderTransport is a test seam. Production uses a guarded TLS transport, without proxy or redirects.
+	ProviderTransport func([]string) http.RoundTripper
 }
 
 func Run(ctx context.Context, opts Options) (err error) {
@@ -67,6 +70,14 @@ func Run(ctx context.Context, opts Options) (err error) {
 	if ctx.Err() != nil {
 		return nil
 	}
+	configured, err := actionexec.LoadSettings(opts.StateDir)
+	if err != nil {
+		return err
+	}
+	providers, err := actionexec.New(configured, opts.StateDir, opts.Now, opts.ProviderTransport)
+	if err != nil {
+		return err
+	}
 	var attribute func(int) (string, error)
 	var reaperDone <-chan struct{}
 	if sup != nil {
@@ -74,6 +85,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 		stopJobs := context.AfterFunc(ctx, sup.BeginShutdown)
 		defer stopJobs()
 	}
+	// The parent requests shutdown. Mark the journal stopping before closing listeners or canceling work.
+	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
 	listeners, err := opts.ListenReview()
 	if err != nil {
 		return err
@@ -85,9 +99,16 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}()
 	desk := review.New(opts.Origin, j, opts.Now)
 	desk.SetState(opts.StateDir)
+	var dispatch *dispatcher
+	var dispatchFailed <-chan error
+	if handlers := providers.Handlers(); len(handlers) != 0 {
+		dispatch = newDispatcher(work, j, opts.Now, handlers)
+		dispatchFailed = dispatch.failed
+		desk.SetActions(dispatch.controls(providers))
+	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
-		Attribute: attribute, IssueOpen: desk.IssueOpen})
+		Attribute: attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
 	if err != nil {
 		return err
 	}
@@ -103,13 +124,10 @@ func Run(ctx context.Context, opts Options) (err error) {
 		}
 	}
 
-	// The parent requests shutdown. Mark the journal stopping before closing listeners or canceling work.
-	work, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancel()
 	httpd := desk.Server()
 	httpd.BaseContext = func(net.Listener) context.Context { return work }
 	var tasks sync.WaitGroup
-	exits := make(chan error, len(listeners)+3)
+	exits := make(chan error, len(listeners)+4)
 	start := func(f func() error) {
 		tasks.Add(1)
 		go func() { defer tasks.Done(); exits <- f() }()
@@ -124,6 +142,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	start(func() error { return socket.Serve(work) })
 	start(func() error { return expire(work, j, opts.Now) })
+	if dispatch != nil {
+		start(dispatch.recover)
+	}
 	if opts.ConnectRecords != nil {
 		worker := approval.NewDeliveryWorker(j, opts.ConnectRecords)
 		start(func() error {
@@ -140,6 +161,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 		if ctx.Err() == nil {
 			err = supervisor.ErrReaper
 		}
+	case err = <-dispatchFailed:
 	case err = <-exits:
 		if err == nil {
 			err = errors.New("review service stopped unexpectedly")
@@ -156,6 +178,9 @@ func Run(ctx context.Context, opts Options) (err error) {
 	defer stop()
 	if httpErr := httpd.Shutdown(deadline); httpErr != nil {
 		err = errors.Join(err, httpErr, httpd.Close())
+	}
+	if dispatch != nil {
+		err = errors.Join(err, dispatch.wait())
 	}
 	tasks.Wait()
 	close(exits)

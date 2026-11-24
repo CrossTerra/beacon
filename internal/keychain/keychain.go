@@ -6,6 +6,7 @@ package keychain
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -43,6 +44,11 @@ const redacted = "[redacted]"
 
 // Empty reports whether the secret holds nothing.
 func (s Secret) Empty() bool { return len(s.value) == 0 }
+
+// Same reports whether two nonempty credentials have the same bytes without exposing them.
+func (s Secret) Same(other Secret) bool {
+	return !s.Empty() && subtle.ConstantTimeCompare(s.value, other.value) == 1
+}
 
 // Authorize sets the bearer Authorization header on h.
 func (s Secret) Authorize(h http.Header) {

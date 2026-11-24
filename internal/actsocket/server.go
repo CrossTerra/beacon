@@ -38,8 +38,10 @@ type Options struct {
 	// return a run id only for a member of a live run. Nil or an empty result means unattributed;
 	// a supervisor error rejects the connection rather than widening a run's ownership.
 	Attribute func(pid int) (string, error)
-	// IssueOpen issues a read-only sign-in code or reports a full code pool. Nil disables open.
+	// IssueOpen issues a sign-in code or reports a full code pool. The code cannot authorize an action.
 	IssueOpen func() (code string, ok bool)
+	// PlaceSlack verifies visibility before the journal commits the proposed record. Nil keeps Slack review-only.
+	PlaceSlack func(context.Context, approval.Request, string) (approval.SlackPlacement, error)
 }
 
 type Server struct {
@@ -156,7 +158,7 @@ func (s *Server) serveConn(ctx context.Context, c *net.UnixConn) {
 		case o["op"] == "wait":
 			answer, closeAfter = s.wait(ctx, &frames, peer, o)
 		default:
-			answer = s.handle(peer, o)
+			answer = s.handle(ctx, peer, o)
 		}
 		if answer == nil || !reply(c, answer) || closeAfter {
 			return
@@ -200,7 +202,7 @@ func journalError(err error) approval.Object {
 	}
 }
 
-func (s *Server) handle(peer approval.PeerLabel, o approval.Object) approval.Object {
+func (s *Server) handle(ctx context.Context, peer approval.PeerLabel, o approval.Object) approval.Object {
 	switch o["op"] {
 	case "types":
 		if len(o) != 1 {
@@ -224,7 +226,7 @@ func (s *Server) handle(peer approval.PeerLabel, o approval.Object) approval.Obj
 		}
 		return approval.Object{"code": code, "url": s.opts.Origin.URL() + "/open?code=" + url.QueryEscape(code)}
 	case "propose":
-		return s.store(peer, o)
+		return s.store(ctx, peer, o)
 	case "get", "withdraw":
 		id, bad := requestID(o, "op", "id")
 		if bad != nil {
@@ -247,7 +249,7 @@ func (s *Server) handle(peer approval.PeerLabel, o approval.Object) approval.Obj
 	}
 }
 
-func (s *Server) store(peer approval.PeerLabel, o approval.Object) approval.Object {
+func (s *Server) store(ctx context.Context, peer approval.PeerLabel, o approval.Object) approval.Object {
 	r, err := approval.ParseRequest(o)
 	if err != nil {
 		return journalError(err)
@@ -255,9 +257,53 @@ func (s *Server) store(peer approval.PeerLabel, o approval.Object) approval.Obje
 	if !slices.Contains(s.opts.Enabled, r.Type) {
 		return failure("type_disabled")
 	}
+	var place approval.SlackPlacement
+	placeSlack := r.Type == approval.Post && s.opts.PlaceSlack != nil
+	if placeSlack {
+		// Do not spend intake reads for a proposal already over a limit. Recheck after I/O, without
+		// holding the socket's proposal lock across a network request.
+		s.propose.Lock()
+		bad := s.admit(peer, s.opts.Now())
+		s.propose.Unlock()
+		if bad != nil {
+			return bad
+		}
+		place, err = s.opts.PlaceSlack(ctx, r, peer.RunID)
+		if err != nil {
+			var r approval.Refusal
+			if errors.As(err, &r) && r.Code == "busy" {
+				return failure("busy")
+			}
+			return failure("unavailable")
+		}
+	}
 	s.propose.Lock()
 	defer s.propose.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
 	at := s.opts.Now()
+	if bad := s.admit(peer, at); bad != nil {
+		return bad
+	}
+	var p approval.Proposal
+	if placeSlack {
+		p, err = s.journal.AddSlack(r, peer, at, place)
+	} else {
+		p, err = s.journal.Add(r, peer, at)
+	}
+	if err != nil {
+		return journalError(err)
+	}
+	s.recent[peer.RunID] = append(s.recent[peer.RunID], at)
+	answer := status(p)
+	answer["params_hash"] = p.ParamsHash
+	answer["review_url"] = s.opts.Origin.URL() + "/p/" + p.ID
+	return answer
+}
+
+// admit runs under the proposal lock. Nil means there is room for the proposal now.
+func (s *Server) admit(peer approval.PeerLabel, at time.Time) approval.Object {
 	for key, times := range s.recent {
 		// Prune all idle identities, not only the caller. Proposals per live run are bounded, but
 		// many different runs can connect over a service lifetime.
@@ -288,15 +334,7 @@ func (s *Server) store(peer approval.PeerLabel, o approval.Object) approval.Obje
 	if count >= s.limits.pendingPerPeer {
 		return failure("busy")
 	}
-	p, err := s.journal.Add(r, peer, at)
-	if err != nil {
-		return journalError(err)
-	}
-	s.recent[peer.RunID] = append(recent, at)
-	answer := status(p)
-	answer["params_hash"] = p.ParamsHash
-	answer["review_url"] = s.opts.Origin.URL() + "/p/" + p.ID
-	return answer
+	return nil
 }
 
 func requestID(o approval.Object, keys ...string) (string, approval.Object) {

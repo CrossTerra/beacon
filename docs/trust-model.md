@@ -212,24 +212,39 @@ checkout's opencode configuration does not deny.
      membership, or whether the proposal can be approved. The raw ids stay under Show exact parameters. A missing
      Slack scope is a scope name (`chat:write`), recorded in the result and shown in the window; the token and
      Slack's `provided` list are not. Saving the token checks `X-OAuth-Scopes` against the scopes Beacon needs.
-16. **The Go preview is separate and cannot act.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
+16. **Go provider writes require a passkey and a bound credential.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
     are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
-    takes the signed route above; there is no fallback. The preview reads no keychain item or live credential,
-     starts only its same-binary reaper (no live jobs) and makes no outbound HTTP request. Its socket trusts the kernel's user ID, not a code
+     takes the signed route above; there is no fallback. The service reads no login keychain item and sends no
+     live Signal record. It starts only its same-binary reaper, with no live jobs, and contacts a provider only
+     when that provider is configured. Its socket trusts the kernel's user ID, not a code
     signature. Anyone running as that user can submit, read the owner-only plaintext journal, or get a one-use
     review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
     Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
     login header does not identify local processes; cookies can be received by another port on the same host.
-    The pages have no approval or settings routes. `beacon setup` prints a one-time passkey code and
+     `beacon setup` prints a one-time passkey code and
     refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
     a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
     that data key. The journal records the check file's hash. A later assertion can record an approval only
     for a resolved binding, and only if the PRF output unwraps that key, the key opens the check, and the
     file still matches the journal. A swapped file is a journalled reset and approves nothing. Write
-    credentials are sealed under the real data key, so a swapped vault cannot execute; a handler must fail
-    closed when it cannot unseal. The preview
-    supplies no resolver and starts no handler, so a live page does not freeze or dispatch. See
-    [Go approvals](go-approvals.md).
+     credentials are sealed under the real data key, so a replacement key cannot open them. An unseal failure
+     prevents approval and dispatch. A separate settings assertion is required to save tokens, and Beacon
+      verifies the configured identity for both. The unattended KDBX vault holds a distinct read token for
+      intake, preflight and recovery. GitHub's binding includes the configured HTTPS origin and user ID.
+      Slack's is the fixed `https://slack.com` origin, user ID and workspace; the unattended token can hold
+      only the allowed read scopes. Slack placement and the operation UUID stay on the machine, except that
+      the UUID goes to Slack with the post. Only `github.merge` and `slack.post` can share an assertion (up to
+      ten, in display order), and every write token in the batch must unseal before any approval is recorded.
+      Each write requires a durable start, fresh provider checks with that token, and a one-shot dispatch claim.
+      If the service stops or the request is cancelled before that claim, and the journal can still record, the
+      action fails as `stopped` rather than becoming an unknown write. A journal that had already failed is not
+      rewritten. A failed append of that stop record fails shutdown. A lost reply permits only read-back with
+      the unattended token. A merged pull request with a different actor, head, or base fails as
+      `merged_otherwise`. Incomplete attribution stays unknown, and a pull request already seen merged is
+      never later recorded as not merged. Automatic merge read-back backs off after the settlement window,
+      up to 15 minutes, and is checked every 15 seconds so one stuck read does not spend the recovery budget. Without provider config there is no resolver
+      or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
+      See [Go approvals](go-approvals.md).
 
 ## Known limits
 

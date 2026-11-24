@@ -10,6 +10,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -91,10 +92,11 @@ func Put(dir string, b Binding, secret string) error {
 }
 
 func put(dir string, b Binding, secret string, retried bool) error {
-	key, err := os.ReadFile(filepath.Join(dir, keyName))
+	key, err := readKeyFile(dir)
 	if err != nil {
 		return err
 	}
+	defer clear(key)
 	body, info, err := readDB(dir)
 	if err != nil {
 		return err
@@ -187,10 +189,11 @@ func entrySecret(body, key []byte, b Binding) (string, error) {
 
 // Get returns the secret for one binding. Two entries with the same binding are unusable.
 func Get(dir string, b Binding) (string, error) {
-	key, err := os.ReadFile(filepath.Join(dir, keyName))
+	key, err := readKeyFile(dir)
 	if err != nil {
 		return "", err
 	}
+	defer clear(key)
 	body, _, err := readDB(dir)
 	if err != nil {
 		return "", err
@@ -278,8 +281,8 @@ func decode(body, key []byte) (*gokeepasslib.Database, error) {
 		return nil, err
 	}
 	db.Credentials = cred
-	if err := gokeepasslib.NewDecoder(bytes.NewReader(body)).Decode(db); err != nil {
-		return nil, err
+	if err := gokeepasslib.NewDecoder(bytes.NewReader(body)).Decode(db); err != nil || db.Content == nil || len(db.Content.Root.Groups) == 0 {
+		return nil, ErrUnreadable
 	}
 	return db, nil
 }
@@ -311,13 +314,32 @@ func save(dir string, db *gokeepasslib.Database, base *[32]byte) error {
 }
 
 func readDB(dir string) ([]byte, os.FileInfo, error) {
-	path := filepath.Join(dir, dbName)
-	info, err := os.Lstat(path)
+	f, err := approval.OpenPrivate(filepath.Join(dir, dbName), os.O_RDONLY)
 	if err != nil {
 		return nil, nil, err
 	}
-	body, err := os.ReadFile(path)
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	body, err := io.ReadAll(f)
 	return body, info, err
+}
+
+func readKeyFile(dir string) ([]byte, error) {
+	const limit = 4096
+	f, err := approval.OpenPrivate(filepath.Join(dir, keyName), os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || len(b) > limit {
+		clear(b)
+		return nil, ErrUnreadable
+	}
+	return b, nil
 }
 
 func keyFile(raw []byte) ([]byte, error) {

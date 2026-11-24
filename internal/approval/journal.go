@@ -25,6 +25,9 @@ var (
 	ErrStopping   = errors.New("approval journal is shutting down")
 	ErrJournalAge = errors.New("journal must sort after the archived journal")
 	ErrJournalIO  = errors.New("approval journal write was not confirmed; restart to recover")
+	// ErrJournalUnhealthy means the journal had already failed before this call. A write that fails
+	// while appending is ErrJournalIO, not this error.
+	ErrJournalUnhealthy = errors.New("approval journal is already unhealthy")
 )
 
 const startWindow = 10 * time.Minute
@@ -48,18 +51,24 @@ type frame struct {
 	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
 	Batch          []string  `json:"batch,omitempty"`
 	VaultHash      []byte    `json:"vault_hash,omitempty"`
+	SlackOperation string    `json:"slack_operation,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
 type View struct {
 	Proposal
-	Frozen *Frozen
+	Frozen               *Frozen
+	StartedAt, UnknownAt time.Time
+	Outcome              *Result
+	SlackOperation       string `json:"-"` // durability marker, never part of a wire record
+	asserted             bool
 }
 
 type proposalState struct {
 	View
 	order      int
 	approvedAt time.Time
+	dispatched bool // process-local; replay never dispatches a started action
 }
 
 // Journal owns the service's instance lock. It never dispatches an action. A failed append/sync poisons the
@@ -182,6 +191,10 @@ func (j *Journal) load(path string, at time.Time, after string) error {
 			return ErrCorrupt
 		}
 		if e.Kind == "approved" && len(e.BatchChallenge) > 0 {
+			s := j.states[e.ID]
+			if len(batch) == 10 || s == nil || s.Type != Merge && s.Type != Post {
+				return ErrCorrupt
+			}
 			if len(batch) == 0 {
 				batchAt = offset
 			}
@@ -330,6 +343,22 @@ func localKind(kind string) bool {
 }
 
 func (j *Journal) Add(r Request, peer PeerLabel, at time.Time) (Proposal, error) {
+	return j.addRequest(r, peer, at, nil)
+}
+
+// AddSlack commits the verified placement with the proposal. No later lookup can change its subject.
+func (j *Journal) AddSlack(r Request, peer PeerLabel, at time.Time, placement SlackPlacement) (Proposal, error) {
+	placement.PublicDay = ""
+	if placement.Visibility == SlackPublic && r.Params["thread_ts"] == nil {
+		placement.PublicDay = at.In(time.Local).Format(time.DateOnly)
+	}
+	if !placement.valid(r) {
+		return Proposal{}, Invalid("/slack_placement")
+	}
+	return j.addRequest(r, peer, at, &placement)
+}
+
+func (j *Journal) addRequest(r Request, peer PeerLabel, at time.Time, placement *SlackPlacement) (Proposal, error) {
 	if err := r.check(); err != nil {
 		return Proposal{}, err
 	}
@@ -344,7 +373,7 @@ func (j *Journal) Add(r Request, peer PeerLabel, at time.Time) (Proposal, error)
 	if err != nil {
 		return Proposal{}, err
 	}
-	p := Proposal{Request: r, ID: id, Salt: nonce(), Peer: peer, ProposedAt: at, ExpiresAt: at.Add(Lifetime), Status: "pending", Version: 1}
+	p := Proposal{Request: r, ID: id, Salt: nonce(), Peer: peer, Slack: placement, ProposedAt: at, ExpiresAt: at.Add(Lifetime), Status: "pending", Version: 1}
 	if r.Type == Run {
 		p.RunnerID, err = j.hooks.newID("run", at)
 		if err != nil {
@@ -376,10 +405,18 @@ func (j *Journal) add(p Proposal) (Proposal, error) {
 func (s *proposalState) snapshot() View {
 	v := s.View
 	v.Params = maps.Clone(v.Params)
+	if v.Slack != nil {
+		p := *v.Slack
+		v.Slack = &p
+	}
 	if f := v.Frozen; f != nil {
 		cp := *f
 		cp.Params, cp.Destination = maps.Clone(cp.Params), maps.Clone(cp.Destination)
 		v.Frozen = &cp
+	}
+	if v.Outcome != nil {
+		r := *v.Outcome
+		v.Outcome = &r
 	}
 	return v
 }
@@ -487,6 +524,9 @@ func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte
 			return err
 		}
 		p := j.states[f.ID].Proposal
+		if len(items) > 1 && p.Type != Merge && p.Type != Post {
+			return ErrTransition
+		}
 		selected := ""
 		if p.Type == Run {
 			selected = text(f.Params, "model")
@@ -546,22 +586,96 @@ func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte
 // Start commits the no-retry barrier before the handler may perform a write. Once started, a process
 // crash leaves the outcome unknown; recovery cannot issue a second Start.
 func (j *Journal) Start(id string, at time.Time) (Frozen, error) {
+	v, err := j.start(id, at, false)
+	if err != nil {
+		return Frozen{}, err
+	}
+	return *v.Frozen, nil
+}
+
+// StartAsserted consumes a durably committed passkey approval for one handler, not a frozen preview.
+// Only the assertion route calls the dispatcher; the credential ID in the approval is a further check.
+func (j *Journal) StartAsserted(id string, at time.Time) (View, error) {
+	return j.start(id, at, true)
+}
+
+func (j *Journal) start(id string, at time.Time, asserted bool) (View, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.stopping {
-		return Frozen{}, ErrStopping
+		return View{}, ErrStopping
 	}
 	if err := j.require(id, "approved", at); err != nil {
-		return Frozen{}, err
+		return View{}, err
 	}
 	s := j.states[id]
-	if at.Before(s.approvedAt) {
-		return Frozen{}, ErrTransition
+	if at.Before(s.approvedAt) || asserted && !s.asserted {
+		return View{}, ErrTransition
 	}
-	if err := j.transition(id, "started", "", at); err != nil {
-		return Frozen{}, err
+	start := frame{Kind: "started", ID: id}
+	if s.Type == Post {
+		start.SlackOperation = newSlackOperation()
 	}
-	return *s.snapshot().Frozen, nil
+	if err := j.action(start, at); err != nil {
+		return View{}, err
+	}
+	return s.snapshot(), nil
+}
+
+// MayDispatch checks whether the action can begin its final reads.
+func (j *Journal) MayDispatch(id string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.dispatchable(j.states[id])
+}
+
+// ClaimDispatch is the one-shot barrier at the write, after final reads. It never holds the journal
+// lock across a provider call. The durable start already prevents a replay after process death.
+func (j *Journal) ClaimDispatch(id string) bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	s := j.states[id]
+	if !j.dispatchable(s) {
+		return false
+	}
+	s.dispatched = true
+	return true
+}
+
+// FailUnclaimed records a definite failure for a start that has not claimed its write. An unhealthy
+// journal is left unchanged so restart can still recover it. A claimed write is also left unchanged:
+// the provider may already have accepted it.
+func (j *Journal) FailUnclaimed(id string, result Result, at time.Time) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.healthy() {
+		return ErrJournalUnhealthy
+	}
+	s := j.states[id]
+	if s == nil || s.Status != "started" || s.dispatched {
+		return ErrTransition
+	}
+	if err := result.check(s.Type); err != nil {
+		return err
+	}
+	return j.action(frame{ID: id, Kind: "failed", Result: &result}, at)
+}
+
+func (j *Journal) dispatchable(s *proposalState) bool {
+	return j.healthy() && !j.stopping && s != nil && s.Status == "started" && s.asserted && !s.dispatched
+}
+
+// Unknowns is a read-only recovery queue. It cannot produce a start.
+func (j *Journal) Unknowns() []View {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	var out []View
+	for _, s := range j.order {
+		if s.Status == "outcome_unknown" {
+			out = append(out, s.snapshot())
+		}
+	}
+	return out
 }
 
 func (j *Journal) Unknown(id, reason string, at time.Time) error {
@@ -657,7 +771,7 @@ func (j *Journal) fold(e frame) bool {
 	s := j.states[e.ID]
 	if e.Kind == "proposed" {
 		if s != nil || e.Proposal == nil || e.Proposal.ID != e.ID || e.Proposal.Params == nil ||
-			e.Proposal.Status != "pending" || e.Proposal.Version != 1 {
+			e.Proposal.Status != "pending" || e.Proposal.Version != 1 || e.Proposal.Slack != nil && !e.Proposal.Slack.valid(e.Proposal.Request) {
 			return false
 		}
 		s = &proposalState{View: View{Proposal: *e.Proposal}, order: len(j.order)}
@@ -679,7 +793,7 @@ func (j *Journal) fold(e frame) bool {
 }
 
 func batchCommitted(parts []frame, marker frame) bool {
-	if len(parts) < 2 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
+	if len(parts) < 2 || len(parts) > 10 || len(marker.Batch) != len(parts) || len(marker.BatchChallenge) == 0 {
 		return false
 	}
 	for i, part := range parts {
@@ -753,17 +867,34 @@ func foldTransition(s *proposalState, e frame) bool {
 			return false
 		}
 		s.Frozen, s.approvedAt = e.Frozen, time.UnixMilli(e.At)
+		s.asserted = len(e.CredentialID) != 0
 		return true
 	case "withdrawn", "declined":
 		return s.Status == "pending"
 	case "expired":
 		return s.Status == "pending" || s.Status == "approved"
 	case "started":
-		return s.Status == "approved"
+		if s.Status != "approved" || e.SlackOperation != "" && (s.Type != Post || !slackOperation.matches(e.SlackOperation)) {
+			return false
+		}
+		if s.Slack != nil && e.SlackOperation == "" {
+			return false // a verified Slack placement is new enough to require an operation UUID
+		}
+		s.StartedAt = time.UnixMilli(e.At)
+		s.SlackOperation = e.SlackOperation
+		return true
 	case "outcome_unknown":
-		return s.Status == "started"
+		if s.Status != "started" {
+			return false
+		}
+		s.UnknownAt = time.UnixMilli(e.At)
+		return true
 	case "executed", "failed":
-		return e.Result != nil && (s.Status == "started" || s.Status == "outcome_unknown" && e.Result.ConfirmedBy == "read_back")
+		if e.Result == nil || !(s.Status == "started" || s.Status == "outcome_unknown" && e.Result.ConfirmedBy == "read_back") {
+			return false
+		}
+		s.Outcome = e.Result
+		return true
 	}
 	return false
 }
