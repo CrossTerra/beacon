@@ -368,11 +368,12 @@ codes and sessions, not unexpired proposals.
 not stored. With `serve` running, open `/passkeys/new` and enter the code. `--reset-passkeys` records a
 passkey reset and removes the passkey list and write vault; the service must be stopped. See [Go approvals](go-approvals.md#passkey-setup).
 
-The default is review-only. To enable GitHub merges, configure `action-providers.json` and save credentials
-through **Provider credentials** with a passkey. `egress --state-dir DIR` reports only the Go service's
-destinations; it does not read collector config. Proposal parameters and reasons remain plaintext in the
-private journal. There is no login keychain access, live Signal delivery or runner launch.
-See [Go approvals](go-approvals.md#provider-credentials-and-github) for setup and the trust boundary.
+The default is review-only. To enable [GitHub merges](go-approvals.md#provider-credentials-and-github) or
+[Slack posts](go-approvals.md#slack-posts), configure `action-providers.json` and save separate read and
+write credentials through **Provider credentials** with a passkey. `egress --state-dir DIR` lists the
+configured GitHub API origin and/or `slack.com:443`; it does not read credentials or collector config.
+Proposal parameters and reasons remain plaintext in the private journal. There is no login keychain access,
+live Signal delivery or runner launch.
 
 ## `beacon keychain list`
 

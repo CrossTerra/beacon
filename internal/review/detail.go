@@ -19,6 +19,7 @@ type detail struct {
 	approval.View
 	Fields, Destination          []field
 	Exact, CSRF                  string
+	SlackPreview                 *slackPreview
 	ShowFrozen, Review, ReadBack bool
 }
 
@@ -51,6 +52,7 @@ func (s *Site) detail(w http.ResponseWriter, r *http.Request, sess session, at t
 		return
 	}
 	model.Exact, model.Fields = string(b), fields(params)
+	model.SlackPreview = slackDraft(v.Type, params)
 	render(w, "proposal", http.StatusOK, model)
 }
 

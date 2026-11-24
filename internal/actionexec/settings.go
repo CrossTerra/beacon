@@ -25,11 +25,26 @@ const settingsName = "action-providers.json"
 
 type Settings struct {
 	GitHub *GitHubSettings `json:"github"`
+	Slack  *SlackSettings  `json:"slack"`
 }
 
 type GitHubSettings struct {
 	Origin string `json:"origin"`
 	UserID int64  `json:"user_id"`
+}
+
+const slackOrigin = "https://slack.com"
+
+type SlackSettings struct {
+	Workspace string `json:"workspace"`
+	UserID    string `json:"user_id"`
+}
+
+func (s SlackSettings) binding() (vault.Binding, error) {
+	if !slackID.MatchString(s.Workspace) || !slackUserID.MatchString(s.UserID) {
+		return vault.Binding{}, errSettings
+	}
+	return vault.Binding{Service: "slack", Origin: slackOrigin, Account: "slack:user:" + s.UserID, Workspace: s.Workspace}, nil
 }
 
 var (
@@ -84,7 +99,12 @@ func LoadSettings(dir string) (Settings, error) {
 
 func (s Settings) check() error {
 	if s.GitHub != nil {
-		_, err := s.GitHub.binding()
+		if _, err := s.GitHub.binding(); err != nil {
+			return err
+		}
+	}
+	if s.Slack != nil {
+		_, err := s.Slack.binding()
 		return err
 	}
 	return nil
@@ -97,6 +117,11 @@ func (s Settings) Hosts() []egress.Host {
 		u, _ := url.Parse(s.GitHub.Origin)
 		hosts = append(hosts, egress.Host{Address: egress.Address(u),
 			Purpose: "Go approvals: GitHub account validation, github.merge reads and one approved merge"})
+	}
+	if s.Slack != nil {
+		u, _ := url.Parse(slackOrigin)
+		hosts = append(hosts, egress.Host{Address: egress.Address(u),
+			Purpose: "Go approvals: Slack account validation, slack.post reads and one approved post"})
 	}
 	return hosts
 }
@@ -119,6 +144,7 @@ type ReadBack interface {
 // Providers is immutable after construction. No request can change the configured origins or accounts.
 type Providers struct {
 	github *mergeHandler
+	slack  *postHandler
 }
 
 // New constructs guarded clients without making a request. transport is an injection point for fakes.
@@ -135,6 +161,11 @@ func New(s Settings, dir string, now func() time.Time, transport func([]string) 
 		b, _ := s.GitHub.binding()
 		p.github = &mergeHandler{provider: newProvider(b, dir, now, transport, preflight), user: s.GitHub.UserID}
 	}
+	if s.Slack != nil {
+		b, _ := s.Slack.binding()
+		p.slack = &postHandler{provider: newProvider(b, dir, now, transport, preflight), user: s.Slack.UserID,
+			intake: newBudget(120, 2), intakePerPeer: 30}
+	}
 	return p, nil
 }
 
@@ -143,7 +174,17 @@ func (p *Providers) Handlers() map[approval.Action]Handler {
 	if p != nil && p.github != nil {
 		h[approval.Merge] = p.github
 	}
+	if p != nil && p.slack != nil {
+		h[approval.Post] = p.slack
+	}
 	return h
+}
+
+func (p *Providers) SlackIntake() func(context.Context, approval.Request, string) (approval.SlackPlacement, error) {
+	if p == nil || p.slack == nil {
+		return nil
+	}
+	return p.slack.place
 }
 
 type CredentialTarget struct {
@@ -155,6 +196,10 @@ func (p *Providers) Targets() []CredentialTarget {
 	if p != nil && p.github != nil {
 		b := p.github.binding
 		out = append(out, CredentialTarget{Service: b.Service, Origin: b.Origin, Account: b.Account})
+	}
+	if p != nil && p.slack != nil {
+		b := p.slack.binding
+		out = append(out, CredentialTarget{Service: b.Service, Origin: b.Origin, Account: b.Account, Workspace: b.Workspace})
 	}
 	return out
 }
@@ -170,6 +215,9 @@ func (p *Providers) Save(ctx context.Context, service string, read, write keycha
 	}
 	if p != nil && p.github != nil && service == "github" {
 		return p.github.save(ctx, read, write, key)
+	}
+	if p != nil && p.slack != nil && service == "slack" {
+		return p.slack.save(ctx, read, write, key)
 	}
 	return refusal("not_configured")
 }

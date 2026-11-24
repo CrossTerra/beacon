@@ -5,8 +5,8 @@ separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of
 `beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
 The preview does not read collector config, Keychain items or the Swift journal. There is no installer
 cutover, migration, live Signal credential source, or runner launch. Without provider settings, every proposal
-is review-only. With GitHub configured, `github.merge` can execute with passkey approval; `slack.post` and
-`agent.run` are still review-only.
+is review-only. With the respective providers configured, `github.merge` and `slack.post` can execute with
+passkey approval. `agent.run` is still review-only.
 
 ## Passkey setup
 
@@ -70,6 +70,55 @@ reply is read back with the unattended token. Success requires the approved repo
 and a merge SHA. An open PR settles as `not_merged` only after two eligible reads at least a minute apart,
 both at least a minute after the outcome became unknown. **Read again** uses the same bounded read-back
 budget as automatic recovery; it cannot resend a merge.
+
+## Slack posts
+
+Set the Slack workspace and user IDs in `action-providers.json`, alongside or instead of `github`:
+
+```json
+{"slack":{"workspace":"T0123456789","user_id":"U0123456789"}}
+```
+
+Slack's origin is fixed at `https://slack.com`. In [Slack apps](https://api.slack.com/apps), use **OAuth &
+Permissions → User Token Scopes** to obtain two distinct, non-rotating **User OAuth Tokens** (`xoxp-…`)
+for this user in this workspace. Use separate app grants so the unattended token has only these scopes:
+
+- `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`
+- `channels:history`, `groups:history`, `im:history`, `mpim:history`
+- Optionally `metadata.message:read` for read-back, if the workspace requires it
+
+The write token needs the required reads plus `chat:write`. Use **Provider credentials → Set slack tokens**
+with a separate settings assertion. Beacon checks each token's user and workspace with `auth.test` and
+its grants with `X-OAuth-Scopes` before saving. The write token is sealed in `write-slack.sealed` under
+the passkey vault key, bound to Slack's origin, user and workspace. The read token goes in `unattended.kdbx`.
+
+Propose with `{ workspace, channel, thread_ts, text }`; use `thread_ts: null` for a top-level post. When Slack
+is configured, intake must verify the workspace and conversation visibility with the read token, or the
+socket refuses the proposal. A verified public channel uses `slack:<channel>:<root ts>` for a reply, or
+`slack:<channel>:<YYYY-MM-DD>` for the proposal's local day for a top-level post. Private channels, DMs and
+group DMs stay on the person's Signal subject. This does not change after intake, and the proposer cannot
+choose the record subject. With no Slack configuration, proposals stay review-only on the person's subject.
+After enabling Slack, resubmit a pending proposal that had no verified intake.
+
+Review rechecks the account, workspace, visibility, archive state, membership and (for a reply) the exact
+thread root. Conversation names and the root's first line are for display only. A failed name lookup shows
+`unknown channel <id>`. The preview has no live links. It flags broadcast and group mentions and opens
+**Exact Slack mrkdwn** by default for special mentions. **Show exact parameters** includes the verbatim
+text and destination IDs. Drafts over 4,000 UTF-16 code units cannot be approved.
+
+After approval and durable start, Beacon repeats the checks with the unsealed write token and makes at
+most one `chat.postMessage` with the frozen text and unfurls off. The start's operation UUID goes in both
+`client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. The provider alone
+enforces permissions at the write. A definite refusal is terminal; a `429` respects `Retry-After` but never
+retries the post.
+
+A lost or unclear reply triggers only read-back with the unattended token. It searches up to four pages of 15
+messages in the approved conversation or thread, from one minute before to at most five minutes after the
+original start. It confirms only one unambiguous match for the UUID, exact text, user, destination and time.
+Missing or conflicting evidence stays `outcome_unknown`. Automatic read-back runs at startup and after a lost
+reply, backing off from 15 to 120 seconds until a minute after the search window ends. **Read again** can
+still search that same window. Intake, review and recovery have separate read budgets and Slack method
+cooldowns; none can resend a post.
 
 ## Unattended vault
 
@@ -150,8 +199,11 @@ the configured origin) and `open` (issues a browser sign-in code, not authority 
 Limits from Swift are retained: newline-delimited JSON at most 256 KiB per frame, 32 connections, 16 waits
 of up to 300 seconds, 20 pending and 60 proposals per hour per identity, and 40 pending overall. Hourly
 counters are in memory. Partial frames and idle connections time out. A disconnected waiter frees its slot
-without waiting for a journal change. Provider preflight reads are capped at two in flight and 120 per hour,
-including pages. Final checks have their own budget, and recovery has a separate 60-read hourly budget.
+without waiting for a journal change. Slack intake has a four-second deadline, with at most two lookups in
+flight, 120 reads per hour overall and 30 per hour per identity. Verified intake identity and user/group names
+can be reused for ten minutes. Provider preflight reads are capped at two batches of reads in flight and 120
+requests per hour, including pages. Final checks have their own budget, and recovery has a separate 60-read
+hourly budget per provider.
 
 ## Browser review
 

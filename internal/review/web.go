@@ -21,7 +21,8 @@ import (
 var assets embed.FS
 
 var pages = template.Must(template.New("review").Funcs(template.FuncMap{
-	"visible": visibleText, "action": actionName, "shownTime": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
+	"visible": visibleText, "action": actionName, "proposalTitle": proposalTitle,
+	"shownTime": func(t time.Time) string { return t.UTC().Format(time.RFC3339) },
 }).ParseFS(assets, "templates/*.html"))
 
 // Read access only. The journal can durably expire stale proposals as part of taking a view.

@@ -1,8 +1,10 @@
 package keychain
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
 	"errors"
 	"net/url"
 
@@ -43,6 +45,23 @@ func ActionToken(s Secret) bool {
 	}
 	return true
 }
+
+// ActionSlackUserToken accepts only Slack's user OAuth token form, before any network request.
+func ActionSlackUserToken(s Secret) bool {
+	if len(s.value) <= 5 || len(s.value) > 1029 || !bytes.HasPrefix(s.value, []byte("xoxp-")) {
+		return false
+	}
+	for _, b := range s.value[5:] {
+		if !(b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// ActionTokenFingerprint ties a short-lived, in-memory identity check to this exact credential. It must
+// not be logged or saved, and is never accepted in place of a token.
+func ActionTokenFingerprint(s Secret) [32]byte { return sha256.Sum256(s.value) }
 
 // ReadAction reads only the unattended credential for b. A write token never goes into this database.
 func ReadAction(dir string, b vault.Binding) (Secret, error) {

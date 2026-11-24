@@ -78,7 +78,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	}
 	socket, err := actsocket.Listen(opts.StateDir, j, actsocket.Options{Origin: opts.Origin,
 		Enabled: []approval.Action{approval.Merge, approval.Post, approval.Run}, Now: opts.Now,
-		Attribute: opts.Attribute, IssueOpen: desk.IssueOpen})
+		Attribute: opts.Attribute, IssueOpen: desk.IssueOpen, PlaceSlack: providers.SlackIntake()})
 	if err != nil {
 		return err
 	}

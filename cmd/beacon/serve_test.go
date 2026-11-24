@@ -236,3 +236,19 @@ func TestOpenPrintsOnlyCanonicalLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestGoEgressListsConfiguredProvidersWithoutCredentials(t *testing.T) {
+	dir := previewTemp(t)
+	settings := `{"github":{"origin":"https://github.fixture.test","user_id":123},"slack":{"workspace":"TWORKSPACE","user_id":"UPERSON"}}`
+	if err := os.WriteFile(filepath.Join(dir, "action-providers.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, out, stderr := previewCLI()
+	if code := a.main(t.Context(), []string{"egress", "--state-dir", dir}); code != 0 {
+		t.Fatalf("egress exited %d: %s", code, stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.HasPrefix(lines[0], "github.fixture.test:443 ") || !strings.HasPrefix(lines[1], "slack.com:443 ") {
+		t.Fatalf("wrong Go provider egress: %s", out)
+	}
+}

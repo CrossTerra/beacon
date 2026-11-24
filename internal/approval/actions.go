@@ -235,15 +235,16 @@ type PeerLabel struct {
 
 type Proposal struct {
 	Request
-	ID         string    `json:"id"`
-	Salt       string    `json:"salt"`
-	ParamsHash string    `json:"params_hash"`
-	Peer       PeerLabel `json:"peer"`
-	RunnerID   string    `json:"runner_id,omitempty"` // the run being proposed, not the proposer
-	ProposedAt time.Time `json:"proposed_at"`
-	ExpiresAt  time.Time `json:"expires_at"`
-	Status     string    `json:"status"`
-	Version    int64     `json:"version"`
+	ID         string          `json:"id"`
+	Salt       string          `json:"salt"`
+	ParamsHash string          `json:"params_hash"`
+	Peer       PeerLabel       `json:"peer"`
+	RunnerID   string          `json:"runner_id,omitempty"` // the run being proposed, not the proposer
+	Slack      *SlackPlacement `json:"slack_placement,omitempty"`
+	ProposedAt time.Time       `json:"proposed_at"`
+	ExpiresAt  time.Time       `json:"expires_at"`
+	Status     string          `json:"status"`
+	Version    int64           `json:"version"`
 }
 
 type Binding struct {
@@ -310,6 +311,9 @@ func Freeze(p Proposal, b Binding, selectedModel string) (Frozen, error) {
 			return Frozen{}, Invalid("/destination")
 		}
 	case Post:
+		if p.Slack != nil && p.Slack.Account != b.Account {
+			return Frozen{}, Invalid("/account")
+		}
 		for _, k := range []string{"workspace", "channel", "thread_ts"} {
 			if b.Destination[k] != f.Params[k] {
 				return Frozen{}, Invalid("/destination/" + k)

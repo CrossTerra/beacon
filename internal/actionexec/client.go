@@ -121,7 +121,7 @@ func (p *provider) store(read, write keychain.Secret, key []byte) error {
 }
 
 func (p *provider) Unlock(f *approval.Frozen, key []byte) (keychain.Secret, error) {
-	if f == nil || f.Origin != p.binding.Origin || f.Account != p.binding.Account {
+	if !p.bound(f) {
 		return keychain.Secret{}, refusal("destination_changed")
 	}
 	if len(key) != 32 {
@@ -139,6 +139,11 @@ func (p *provider) Unlock(f *approval.Frozen, key []byte) (keychain.Secret, erro
 		return keychain.Secret{}, refusal("credential_unavailable")
 	}
 	return write, nil
+}
+
+func (p *provider) bound(f *approval.Frozen) bool {
+	return f != nil && f.Origin == p.binding.Origin && f.Account == p.binding.Account &&
+		(p.binding.Workspace == "" || f.Destination["workspace"] == p.binding.Workspace)
 }
 
 func (p *provider) reader() (keychain.Secret, error) {
@@ -198,7 +203,8 @@ func (p *provider) call(ctx context.Context, token keychain.Secret, b *budget, m
 	a := answer{status: res.StatusCode, header: res.Header}
 	a.body, err = io.ReadAll(io.LimitReader(res.Body, maxResponse+1))
 	if err != nil || len(a.body) > maxResponse {
-		return answer{}, refusal("unavailable")
+		a.body = nil
+		return a, refusal("unavailable")
 	}
 	return a, nil
 }
@@ -223,7 +229,7 @@ func (p *provider) readView(ctx context.Context, j *approval.Journal, id string,
 	leave := func() { p.recovering.Delete(id) }
 	v, _, err := j.Get(id, p.now())
 	if err != nil || ctx.Err() != nil || v.Type != action || v.Status != "outcome_unknown" ||
-		v.Frozen == nil || v.Frozen.Origin != p.binding.Origin || v.Frozen.Account != p.binding.Account {
+		!p.bound(v.Frozen) {
 		leave()
 		return approval.View{}, nil, false
 	}

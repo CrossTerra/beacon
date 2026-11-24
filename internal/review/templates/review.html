@@ -47,16 +47,26 @@
     {{if .DestinationLabel}}<dt>Destination</dt><dd><bdi>{{visible .DestinationLabel}}</bdi></dd>{{end}}
   </dl>
   {{template "fields" .Facts}}
+  {{if .SlackPreview}}
+  {{template "slack-preview" .SlackPreview}}
+  <details><summary>Show exact parameters</summary>
+    <h3>Bound destination</h3>
+    {{template "fields" .Destination}}
+    <pre><bdi>{{visible .Exact}}</bdi></pre>
+  </details>
+  {{else}}
   <h3>Bound destination</h3>
   {{template "fields" .Destination}}
   <h3>Parameters</h3>
   {{template "fields" .Fields}}
   <details><summary>Show exact parameters</summary><pre><bdi>{{visible .Exact}}</bdi></pre></details>
+  {{end}}
 </section>
 {{end}}
 {{if .Target}}
 <p><bdi>{{.Target.Service}}</bdi> · <code>{{.Target.Origin}}</code> · <code>{{.Target.Account}}</code>{{if .Target.Workspace}} · <code>{{.Target.Workspace}}</code>{{end}}</p>
 <p>Use two different tokens for the account above: one limited to reads, and a separate one allowed to write. Beacon checks both accounts before saving either token.</p>
+{{if eq .Target.Service "slack"}}<p>Use Slack User OAuth Tokens (<code>xoxp-…</code>) and only the read scopes for the unattended token. The write token also needs <code>chat:write</code>.</p>{{end}}
 {{end}}
 <noscript><p>Turn scripts on. The passkey API is only reachable from script.</p></noscript>
 <p id="ceremony-error"></p>
@@ -133,7 +143,7 @@
 {{if .Batch}}<form method="post" action="/freeze"><input type="hidden" name="csrf" value="{{.CSRF}}">{{end}}
 <ol>
 {{range .Rows}}
-  <li>{{if and .Review (ne .Type "agent.run")}}<label><input type="checkbox" name="id" value="{{.ID}}"> Select</label> · {{end}}<a href="/p/{{.ID}}">{{action .Type}}</a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>
+  <li>{{if and .Review (ne .Type "agent.run")}}<label><input type="checkbox" name="id" value="{{.ID}}"> Select</label> · {{end}}<a href="/p/{{.ID}}"><bdi>{{visible (proposalTitle .Proposal)}}</bdi></a> · <bdi>{{visible .Agent}}</bdi> (claimed) · {{shownTime .ProposedAt}}</li>
 {{else}}
   <li>No pending proposals.</li>
 {{end}}
@@ -152,10 +162,19 @@
 </dl>
 {{end}}
 
+{{define "slack-preview"}}
+<h3>Slack message preview</h3>
+{{if .Special}}<p><strong>Slack special mentions:</strong> broadcasts and user-group mentions can notify other people. Review the exact source.</p>{{end}}
+<pre><bdi>{{visible .Plain}}</bdi></pre>
+{{if or .Special (ne .Plain .Source)}}
+<details{{if .Special}} open{{end}}><summary>Exact Slack mrkdwn</summary><pre><bdi>{{visible .Source}}</bdi></pre></details>
+{{end}}
+{{end}}
+
 {{define "proposal"}}
 {{template "head" (action .Type)}}
 <nav><a href="/">Pending proposals</a></nav>
-<h1>{{action .Type}}</h1>
+<h1><bdi>{{visible (proposalTitle .Proposal)}}</bdi></h1>
 <p><code>{{.ID}}</code> · {{visible .Status}} (version {{.Version}})</p>
 {{with .Outcome}}
 <p>Confirmed by <code>{{.ConfirmedBy}}</code>{{if .Error}} · <code>{{.Error}}</code>{{end}}{{if .Native}} · <code>{{.Native}}</code>{{end}}.</p>
@@ -187,6 +206,8 @@
   <p>Proposed {{shownTime .ProposedAt}}; expires {{shownTime .ExpiresAt}}.</p>
   {{if .Frozen}}
     <p><a href="/p/{{.ID}}/frozen">View recorded frozen snapshot</a></p>
+  {{else if .Slack}}
+    <p>Beacon verified this Slack destination at intake and will check it again before approval.</p>
   {{else}}
     <p>These are the proposer's parameters. Beacon has not checked an account or resolved the destination.</p>
   {{end}}
@@ -203,7 +224,9 @@
   <pre><bdi>{{visible .Reason}}</bdi></pre>
 {{end}}
 <h2>Parameters</h2>
+{{if .SlackPreview}}{{template "slack-preview" .SlackPreview}}{{else}}
 {{template "fields" .Fields}}
+{{end}}
 <details>
   <summary>Show exact parameters</summary>
   <pre><bdi>{{visible .Exact}}</bdi></pre>

@@ -48,6 +48,7 @@ type frame struct {
 	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
 	Batch          []string  `json:"batch,omitempty"`
 	VaultHash      []byte    `json:"vault_hash,omitempty"`
+	SlackOperation string    `json:"slack_operation,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -56,6 +57,7 @@ type View struct {
 	Frozen               *Frozen
 	StartedAt, UnknownAt time.Time
 	Outcome              *Result
+	SlackOperation       string `json:"-"` // durability marker, never part of a wire record
 	asserted             bool
 }
 
@@ -321,6 +323,22 @@ func localKind(kind string) bool {
 }
 
 func (j *Journal) Add(r Request, peer PeerLabel, at time.Time) (Proposal, error) {
+	return j.addRequest(r, peer, at, nil)
+}
+
+// AddSlack commits the verified placement with the proposal. No later lookup can change its subject.
+func (j *Journal) AddSlack(r Request, peer PeerLabel, at time.Time, placement SlackPlacement) (Proposal, error) {
+	placement.PublicDay = ""
+	if placement.Visibility == SlackPublic && r.Params["thread_ts"] == nil {
+		placement.PublicDay = at.In(time.Local).Format(time.DateOnly)
+	}
+	if !placement.valid(r) {
+		return Proposal{}, Invalid("/slack_placement")
+	}
+	return j.addRequest(r, peer, at, &placement)
+}
+
+func (j *Journal) addRequest(r Request, peer PeerLabel, at time.Time, placement *SlackPlacement) (Proposal, error) {
 	if err := r.check(); err != nil {
 		return Proposal{}, err
 	}
@@ -335,7 +353,7 @@ func (j *Journal) Add(r Request, peer PeerLabel, at time.Time) (Proposal, error)
 	if err != nil {
 		return Proposal{}, err
 	}
-	p := Proposal{Request: r, ID: id, Salt: nonce(), Peer: peer, ProposedAt: at, ExpiresAt: at.Add(Lifetime), Status: "pending", Version: 1}
+	p := Proposal{Request: r, ID: id, Salt: nonce(), Peer: peer, Slack: placement, ProposedAt: at, ExpiresAt: at.Add(Lifetime), Status: "pending", Version: 1}
 	if r.Type == Run {
 		p.RunnerID, err = j.hooks.newID("run", at)
 		if err != nil {
@@ -367,6 +385,10 @@ func (j *Journal) add(p Proposal) (Proposal, error) {
 func (s *proposalState) snapshot() View {
 	v := s.View
 	v.Params = maps.Clone(v.Params)
+	if v.Slack != nil {
+		p := *v.Slack
+		v.Slack = &p
+	}
 	if f := v.Frozen; f != nil {
 		cp := *f
 		cp.Params, cp.Destination = maps.Clone(cp.Params), maps.Clone(cp.Destination)
@@ -570,7 +592,11 @@ func (j *Journal) start(id string, at time.Time, asserted bool) (View, error) {
 	if at.Before(s.approvedAt) || asserted && !s.asserted {
 		return View{}, ErrTransition
 	}
-	if err := j.transition(id, "started", "", at); err != nil {
+	start := frame{Kind: "started", ID: id}
+	if s.Type == Post {
+		start.SlackOperation = newSlackOperation()
+	}
+	if err := j.action(start, at); err != nil {
 		return View{}, err
 	}
 	return s.snapshot(), nil
@@ -706,7 +732,7 @@ func (j *Journal) fold(e frame) bool {
 	s := j.states[e.ID]
 	if e.Kind == "proposed" {
 		if s != nil || e.Proposal == nil || e.Proposal.ID != e.ID || e.Proposal.Params == nil ||
-			e.Proposal.Status != "pending" || e.Proposal.Version != 1 {
+			e.Proposal.Status != "pending" || e.Proposal.Version != 1 || e.Proposal.Slack != nil && !e.Proposal.Slack.valid(e.Proposal.Request) {
 			return false
 		}
 		s = &proposalState{View: View{Proposal: *e.Proposal}, order: len(j.order)}
@@ -809,10 +835,14 @@ func foldTransition(s *proposalState, e frame) bool {
 	case "expired":
 		return s.Status == "pending" || s.Status == "approved"
 	case "started":
-		if s.Status != "approved" {
+		if s.Status != "approved" || e.SlackOperation != "" && (s.Type != Post || !slackOperation.matches(e.SlackOperation)) {
 			return false
 		}
+		if s.Slack != nil && e.SlackOperation == "" {
+			return false // a verified Slack placement is new enough to require an operation UUID
+		}
 		s.StartedAt = time.UnixMilli(e.At)
+		s.SlackOperation = e.SlackOperation
 		return true
 	case "outcome_unknown":
 		if s.Status != "started" {

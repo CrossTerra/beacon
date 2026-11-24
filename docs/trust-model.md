@@ -225,11 +225,16 @@ checkout's opencode configuration does not deny.
     file still matches the journal. A swapped file is a journalled reset and approves nothing. Write
      credentials are sealed under the real data key, so a replacement key cannot open them. An unseal failure
      prevents approval and dispatch. A separate settings assertion is required to save tokens, and Beacon
-     verifies the configured identity for both. The unattended KDBX vault holds a distinct read token for
-     preflight and recovery. GitHub's binding includes the configured HTTPS origin and the user ID. A handler
-     requires a durable start, fresh provider checks, and a one-shot dispatch claim. A lost reply permits
-     read-back only. Without provider config there is no resolver or outbound provider request; otherwise
-     `beacon egress --state-dir DIR` lists the allowed hosts. See [Go approvals](go-approvals.md).
+      verifies the configured identity for both. The unattended KDBX vault holds a distinct read token for
+      intake, preflight and recovery. GitHub's binding includes the configured HTTPS origin and user ID.
+      Slack's is the fixed `https://slack.com` origin, user ID and workspace; the unattended token can hold
+      only the allowed read scopes. Slack placement and the operation UUID stay on the machine, except that
+      the UUID goes to Slack with the post. Only `github.merge` and `slack.post` can share an assertion (up to
+      ten, in display order), and every write token in the batch must unseal before any approval is recorded.
+      Each write requires a durable start, fresh provider checks with that token, and a one-shot dispatch claim.
+      A lost reply permits only read-back with the unattended token. Without provider config there is no resolver
+      or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
+      See [Go approvals](go-approvals.md).
 
 ## Known limits
 

@@ -31,6 +31,7 @@ type approvalCard struct {
 	AccountLabel, DestinationLabel string
 	Destination, Facts, Fields     []field
 	Exact                          string
+	SlackPreview                   *slackPreview
 }
 
 func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +106,8 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 		hashes = append(hashes, f.Hash)
 		cards = append(cards, approvalCard{Type: p.Type, Frozen: f,
 			AccountLabel: resolved.AccountLabel, DestinationLabel: resolved.DestinationLabel,
-			Destination: fields(f.Destination), Facts: fields(resolved.Facts), Fields: fields(f.Params), Exact: string(b)})
+			Destination: fields(f.Destination), Facts: fields(resolved.Facts), Fields: fields(f.Params), Exact: string(b),
+			SlackPreview: slackDraft(p.Type, f.Params)})
 	}
 	page := ceremonyPage{Action: "/approve", Title: "Approve these frozen actions", Button: "Approve with passkey", Cards: cards}
 	s.challenge(w, r, creds[0], item, page, func(instance string, nonce []byte) ([]byte, error) {

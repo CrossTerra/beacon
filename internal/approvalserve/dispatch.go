@@ -65,8 +65,8 @@ func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, ke
 		return approval.Refusal{Code: "busy"}
 	}
 	type dispatchKey struct {
-		action          approval.Action
-		origin, account string
+		action                     approval.Action
+		origin, account, workspace string
 	}
 	secrets := make(map[dispatchKey]keychain.Secret)
 	work := make([]readyAction, 0, len(items))
@@ -94,8 +94,8 @@ func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, ke
 		if h == nil {
 			return approval.Refusal{Code: "not_configured"}
 		}
-		// There is one configured binding per provider. The origin/account include the workspace for Slack.
-		b := dispatchKey{v.Type, f.Origin, f.Account}
+		workspace, _ := f.Destination["workspace"].(string)
+		b := dispatchKey{v.Type, f.Origin, f.Account, workspace}
 		token, ok := secrets[b]
 		if !ok {
 			token, err = h.Unlock(&f, key)
@@ -157,12 +157,22 @@ func (d *dispatcher) readBack(ctx context.Context, v approval.View) error {
 }
 
 func (d *dispatcher) recover() error {
-	t := time.NewTicker(time.Minute)
+	const tick = 15 * time.Second
+	t := time.NewTicker(tick)
 	defer t.Stop()
+	var lastMerge time.Time
 	for d.ctx.Err() == nil {
+		at := time.Now()
+		mergeDue := at.Sub(lastMerge) >= time.Minute
+		if mergeDue {
+			lastMerge = at
+		}
 		for _, v := range d.j.Unknowns() {
 			if d.ctx.Err() != nil {
 				return nil
+			}
+			if v.Type == approval.Merge && !mergeDue {
+				continue
 			}
 			if h, ok := d.handlers[v.Type].(actionexec.ReadBack); ok && h.Due(v) {
 				if err := h.Reconcile(d.ctx, d.j, v.ID); err != nil {
