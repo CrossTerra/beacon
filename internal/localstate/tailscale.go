@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -13,13 +16,30 @@ import (
 )
 
 const proxy = "http://127.0.0.1:" + approval.ReviewPort
+const tailscaleAppCLI = "Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
 type TailCommand func(context.Context, ...string) ([]byte, error)
 
 func Tailscale(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "tailscale", args...).Output()
+	return tailscaleCommand(ctx, runtime.GOOS, "/"+tailscaleAppCLI, args...).Output()
+}
+
+func tailscaleCommand(ctx context.Context, platform, systemCLI string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "tailscale", args...)
+	if platform != "darwin" || !errors.Is(cmd.Err, exec.ErrNotFound) {
+		return cmd
+	}
+	if path, err := exec.LookPath(systemCLI); err == nil {
+		return exec.CommandContext(ctx, path, args...)
+	}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		if path, err := exec.LookPath(filepath.Join(home, tailscaleAppCLI)); err == nil {
+			return exec.CommandContext(ctx, path, args...)
+		}
+	}
+	return cmd
 }
 
 func TailOrigin(ctx context.Context, run TailCommand) (approval.Origin, error) {
@@ -28,7 +48,11 @@ func TailOrigin(ctx context.Context, run TailCommand) (approval.Origin, error) {
 	}
 	b, err := run(ctx, "status", "--json")
 	if err != nil {
-		return approval.Origin{}, errors.New("could not read Tailscale status; install and connect Tailscale first")
+		msg := "could not read Tailscale status; install and connect Tailscale first"
+		if runtime.GOOS == "darwin" {
+			msg += " (use tailscale on PATH, /" + tailscaleAppCLI + ", or ~/" + tailscaleAppCLI + ")"
+		}
+		return approval.Origin{}, errors.New(msg)
 	}
 	var s struct {
 		BackendState string
