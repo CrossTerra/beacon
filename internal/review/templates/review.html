@@ -36,7 +36,7 @@
 {{template "head" .Title}}
 <nav><a href="/">Pending proposals</a></nav>
 <h1>{{.Title}}</h1>
-{{if .Cards}}<p>Beacon will act on these exact parameters, in the order shown. It checks the destination again before each write.</p>{{end}}
+{{if .Cards}}<p>Beacon will act on these exact parameters, in the order shown. It checks the destination again before acting.</p>{{end}}
 {{range .Cards}}
 <section>
   <h2>{{action .Type}}</h2>
@@ -45,6 +45,7 @@
     <dt>Account</dt><dd><bdi>{{visible .AccountLabel}}</bdi> <code>{{.Account}}</code></dd>
     <dt>Origin</dt><dd>{{if .Origin}}<code>{{.Origin}}</code>{{else}}Local machine{{end}}</dd>
     {{if .DestinationLabel}}<dt>Destination</dt><dd><bdi>{{visible .DestinationLabel}}</bdi></dd>{{end}}
+    {{if .OriginalModel}}<dt>Originally proposed model</dt><dd><bdi>{{visible .OriginalModel}}</bdi></dd>{{end}}
   </dl>
   {{template "fields" .Facts}}
   {{if .SlackPreview}}
@@ -98,6 +99,7 @@
 <nav><a href="/">Pending proposals</a></nav>
 <h1>Provider credentials</h1>
 {{if .Saved}}<p>Credentials saved.</p>{{end}}
+{{if .Targets}}
 <p>Origins and account IDs are set in the service's <code>action-providers.json</code>. This page cannot change them.</p>
 {{range .Targets}}
 <form method="post" action="/settings/begin">
@@ -106,6 +108,12 @@
   <p><code>{{.Origin}}</code> · <code>{{.Account}}</code>{{if .Workspace}} · <code>{{.Workspace}}</code>{{end}}</p>
   <button type="submit">Set {{.Service}} tokens</button>
 </form>
+{{end}}
+{{end}}
+{{if .Checkouts}}
+<h2>Checkouts for agent runs</h2>
+<p>To change these checkouts, stop the service and edit <code>agent-runs.json</code> in its state directory.</p>
+<dl>{{range .Checkouts}}<dt><bdi>{{visible .Name}}</bdi></dt><dd><bdi>{{visible .Path}}</bdi></dd>{{end}}</dl>
 {{end}}
 {{template "end"}}
 {{end}}
@@ -138,8 +146,8 @@
 {{define "pending"}}
 {{template "head" "Pending proposals"}}
 <h1>Pending proposals</h1>
-{{if .Settings}}<nav><a href="/settings">Provider credentials</a> · <a href="/passkeys/new">Register passkey</a></nav>{{end}}
-{{if .Live}}<p>Review the resolved destination and exact parameters before approving with a passkey.</p>{{else}}<p>This service has no provider handler configured. It cannot dispatch an action.</p>{{end}}
+{{if .Settings}}<nav><a href="/settings">Settings</a> · <a href="/passkeys/new">Register passkey</a></nav>{{end}}
+{{if .Live}}<p>Review the resolved destination and exact parameters before approving with a passkey.</p>{{else}}<p>This service has no action handler configured. It cannot dispatch an action.</p>{{end}}
 {{if .Batch}}<form method="post" action="/freeze"><input type="hidden" name="csrf" value="{{.CSRF}}">{{end}}
 <ol>
 {{range .Rows}}
@@ -181,7 +189,19 @@
 {{if .Text}}<p><bdi>{{visible .Text}}</bdi></p>{{end}}
 {{if .Evidence}}<p><bdi>{{visible .Evidence}}</bdi></p>{{end}}
 {{end}}
-{{if eq .Status "outcome_unknown"}}<p>The provider may have acted. Beacon will not resend the write.</p>{{end}}
+{{if eq .Status "outcome_unknown"}}<p>{{if eq .Type "agent.run"}}The run may have launched. Beacon will not start it again.{{else}}The provider may have acted. Beacon will not resend the write.{{end}}</p>{{end}}
+{{if .RunnerState}}
+<h2>Run</h2>
+<p><code>{{.RunnerID}}</code> · <code>{{.RunnerState}}</code>{{if .RunOutcome.Error}} · <code>{{.RunOutcome.Error}}</code>{{end}}</p>
+{{if .RunOutcome.Text}}<p>Run report (untrusted text):</p><pre><bdi>{{visible .RunOutcome.Text}}</bdi></pre>{{end}}
+{{end}}
+{{if .CanStop}}
+<form method="post" action="/stop-run">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="id" value="{{.ID}}">
+  <button type="submit">Stop run</button>
+</form>
+{{end}}
 {{if .ReadBack}}
 <form method="post" action="/read-back">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -235,6 +255,7 @@
 <form method="post" action="/freeze">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
   <input type="hidden" name="id" value="{{.ID}}">
+  {{if .Models}}<label>Model <select name="model">{{range .Models}}<option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>{{end}}
   <button type="submit">Resolve and review</button>
 </form>
 {{end}}

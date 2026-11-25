@@ -3,6 +3,8 @@ package approval
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"io"
 	"maps"
@@ -35,23 +37,26 @@ const startWindow = 10 * time.Minute
 // frame is the v1 disk schema. An action entry commits its sequence and replay nonce in the same frame.
 // Its proposal/transition is the record recipe; the outbox later commits the wire bytes before sending.
 type frame struct {
-	Kind           string    `json:"kind"`
-	ID             string    `json:"id,omitempty"`
-	Seq            int64     `json:"seq,omitempty"`
-	At             int64     `json:"at,omitempty"` // Unix milliseconds
-	Nonce          string    `json:"nonce,omitempty"`
-	Proposal       *Proposal `json:"proposal,omitempty"`
-	Frozen         *Frozen   `json:"frozen,omitempty"`
-	Result         *Result   `json:"result,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Note           string    `json:"note,omitempty"`
-	Bytes          []byte    `json:"bytes,omitempty"`
-	Ambiguous      bool      `json:"ambiguous,omitempty"`
-	CredentialID   []byte    `json:"credential_id,omitempty"`
-	BatchChallenge []byte    `json:"batch_challenge,omitempty"`
-	Batch          []string  `json:"batch,omitempty"`
-	VaultHash      []byte    `json:"vault_hash,omitempty"`
-	SlackOperation string    `json:"slack_operation,omitempty"`
+	Kind           string       `json:"kind"`
+	ID             string       `json:"id,omitempty"`
+	Seq            int64        `json:"seq,omitempty"`
+	At             int64        `json:"at,omitempty"` // Unix milliseconds
+	Nonce          string       `json:"nonce,omitempty"`
+	Proposal       *Proposal    `json:"proposal,omitempty"`
+	Frozen         *Frozen      `json:"frozen,omitempty"`
+	Result         *Result      `json:"result,omitempty"`
+	Reason         string       `json:"reason,omitempty"`
+	Note           string       `json:"note,omitempty"`
+	Bytes          []byte       `json:"bytes,omitempty"`
+	Ambiguous      bool         `json:"ambiguous,omitempty"`
+	CredentialID   []byte       `json:"credential_id,omitempty"`
+	BatchChallenge []byte       `json:"batch_challenge,omitempty"`
+	Batch          []string     `json:"batch,omitempty"`
+	VaultHash      []byte       `json:"vault_hash,omitempty"`
+	SlackOperation string       `json:"slack_operation,omitempty"`
+	Runner         *RunnerEvent `json:"runner,omitempty"`
+	PGID           int          `json:"pgid,omitempty"` // local launch permit; never used to signal on replay
+	RunCommitment  []byte       `json:"run_commitment,omitempty"`
 }
 
 // View is a detached snapshot of a proposal and any previously committed approval.
@@ -61,14 +66,18 @@ type View struct {
 	StartedAt, UnknownAt time.Time
 	Outcome              *Result
 	SlackOperation       string `json:"-"` // durability marker, never part of a wire record
+	RunnerState          RunnerKind
+	RunOutcome           RunnerEvent
+	RunPGID              int `json:"-"` // set only after registering the gated group
 	asserted             bool
 }
 
 type proposalState struct {
 	View
-	order      int
-	approvedAt time.Time
-	dispatched bool // process-local; replay never dispatches a started action
+	order         int
+	approvedAt    time.Time
+	dispatched    bool // process-local; replay never dispatches a started action
+	runCommitment []byte
 }
 
 // Journal owns the service's instance lock. It never dispatches an action. A failed append/sync poisons the
@@ -89,6 +98,8 @@ type Journal struct {
 	draining   sync.Mutex
 	stopping   bool
 	failed     bool
+	frameIndex int // committed disk frames after the header, including batch markers
+	passkeys   passkeyScan
 	hooks      journalHooks
 }
 
@@ -211,6 +222,7 @@ func (j *Journal) load(path string, at time.Time, after string) error {
 					return ErrCorrupt
 				}
 			}
+			j.frameIndex++ // approved_commit is not an action
 			batch = nil
 			offset += size
 			batchAt = offset
@@ -249,10 +261,10 @@ func (j *Journal) ID() string { return j.id }
 func (j *Journal) Close() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	liveJournals.Delete(j.dir)
 	if j.lock == nil {
 		return nil
 	}
+	liveJournals.Delete(j.dir)
 	err := error(nil)
 	if j.file != nil {
 		err = j.file.Close()
@@ -305,33 +317,61 @@ func (j *Journal) transition(id, kind, reason string, at time.Time) error {
 
 // RecordLocal writes a local audit marker without allocating a record sequence. It takes no credential or payload.
 func (j *Journal) RecordLocal(kind string, at time.Time) error {
-	return j.recordLocal(kind, "", nil, at)
-}
-
-// RecordPasskey records the SHA-256 of write-vault.json. OpenVault refuses a different file.
-func (j *Journal) RecordPasskey(hash []byte, at time.Time) error {
-	if len(hash) != 32 {
-		return Invalid("/vault_hash")
-	}
-	return j.recordLocal("passkey_added", "", append([]byte(nil), hash...), at)
-}
-
-func (j *Journal) recordLocal(kind, reason string, hash []byte, at time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if !localKind(kind) {
+	if !localKind(kind) || kind == "passkey_added" {
 		return Invalid("/kind")
 	}
-	return j.commit(frame{Kind: kind, At: at.UnixMilli(), Reason: reason, VaultHash: hash})
+	return j.commit(frame{Kind: kind, At: at.UnixMilli()})
 }
 
-// NoteVaultMismatch records a visible passkey reset while this process holds the journal.
-func NoteVaultMismatch(dir string, at time.Time) error {
+// EnrollPasskey keeps the eligibility check, exclusive publication, and hash commit
+// under the live journal lock. Only the bytes handed to publish can establish
+// enrollment. publish undoes partial writes; rollback is for journal IO failure.
+func EnrollPasskey(dir string, resetIndex int, at time.Time, sealed []byte, publish func([]byte) error, rollback func() error) error {
 	v, ok := liveJournals.Load(filepath.Clean(dir))
 	if !ok {
 		return ErrLocked
 	}
-	return v.(*Journal).recordLocal("passkeys_reset", "vault_mismatch", nil, at)
+	j := v.(*Journal)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.healthy() || j.stopping {
+		return ErrJournalUnhealthy
+	}
+	if j.passkeys.active() || resetIndex != j.passkeys.resetIndex {
+		return ErrTransition
+	}
+	hash := sha256.Sum256(sealed)
+	if err := publish(sealed); err != nil {
+		return err
+	}
+	if err := j.commit(frame{Kind: "passkey_added", At: at.UnixMilli(), VaultHash: hash[:]}); err != nil {
+		return errors.Join(err, rollback())
+	}
+	return nil
+}
+
+// CheckPasskeyVault compares one vault snapshot with the live journal, not a new read of
+// journal.log. A mismatched active vault is durably reset before returning.
+func CheckPasskeyVault(dir string, hash []byte, at time.Time) (bool, error) {
+	v, ok := liveJournals.Load(filepath.Clean(dir))
+	if !ok {
+		return false, ErrLocked
+	}
+	j := v.(*Journal)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if !j.healthy() || j.stopping {
+		return false, ErrJournalUnhealthy
+	}
+	if !j.passkeys.active() {
+		return false, nil
+	}
+	if subtle.ConstantTimeCompare(hash, j.passkeys.hash) == 1 {
+		return true, nil
+	}
+	return false, j.commit(frame{Kind: "passkeys_reset", At: at.UnixMilli(), Reason: "vault_mismatch"})
 }
 
 func localKind(kind string) bool {
@@ -579,6 +619,9 @@ func (j *Journal) ApproveAll(items []Frozen, credentialID, batchChallenge []byte
 			return ErrJournalIO
 		}
 	}
+	if len(frames) > 1 {
+		j.frameIndex++ // approved_commit is not folded
+	}
 	j.notify()
 	return nil
 }
@@ -635,7 +678,7 @@ func (j *Journal) ClaimDispatch(id string) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	s := j.states[id]
-	if !j.dispatchable(s) {
+	if !j.dispatchable(s) || s.Type == Run {
 		return false
 	}
 	s.dispatched = true
@@ -759,16 +802,30 @@ func (j *Journal) sweep(at time.Time) error {
 
 // Replay checks the disk format and transition order, not today's intake parameter schema.
 func (j *Journal) fold(e frame) bool {
+	j.frameIndex++
 	if localKind(e.Kind) {
-		return e.Seq == 0 && e.ID == ""
+		if e.Seq != 0 || e.ID != "" {
+			return false
+		}
+		j.passkeys.record(e, j.frameIndex)
+		return true
 	}
 	if e.ID == "" {
 		return j.foldDelivery(e)
 	}
+	s := j.states[e.ID]
+	if e.Kind == "run_permit" {
+		if e.Seq != 0 || e.PGID <= 1 || s == nil || s.Type != Run || s.Status != "started" || !s.asserted || s.RunPGID != 0 ||
+			len(e.RunCommitment) != 0 && len(e.RunCommitment) != sha256.Size {
+			return false
+		}
+		s.RunPGID, s.dispatched = e.PGID, true
+		s.runCommitment = e.RunCommitment
+		return true
+	}
 	if e.Seq != j.lastSeq+1 || !replayNonce.matches(e.Nonce) || !ValidID(e.ID, "apr") {
 		return false
 	}
-	s := j.states[e.ID]
 	if e.Kind == "proposed" {
 		if s != nil || e.Proposal == nil || e.Proposal.ID != e.ID || e.Proposal.Params == nil ||
 			e.Proposal.Status != "pending" || e.Proposal.Version != 1 || e.Proposal.Slack != nil && !e.Proposal.Slack.valid(e.Proposal.Request) {
@@ -777,6 +834,15 @@ func (j *Journal) fold(e frame) bool {
 		s = &proposalState{View: View{Proposal: *e.Proposal}, order: len(j.order)}
 		j.states[s.ID], j.active[s.ID] = s, s
 		j.order = append(j.order, s)
+	} else if e.Runner != nil {
+		if e.Kind != string(e.Runner.Kind) || e.Runner.check() != nil || !runnerTransition(s, e.Runner.Kind) {
+			return false
+		}
+		s.RunnerState = e.Runner.Kind
+		if s.RunnerState.terminal() {
+			s.RunOutcome = *e.Runner
+		}
+		s.Version++
 	} else {
 		if s == nil || !foldTransition(s, e) {
 			return false
@@ -816,7 +882,7 @@ func PasskeyMarks(dir string) (addedIndex, resetIndex int, err error) {
 // Later means a higher frame index, not a later wall-clock time.
 func PasskeyVault(dir string) (hash []byte, active bool, err error) {
 	st, err := scanPasskeys(dir)
-	if err != nil || st.addedIndex == 0 || st.resetIndex > st.addedIndex || len(st.hash) != 32 {
+	if err != nil || !st.active() || len(st.hash) != 32 {
 		return nil, false, err
 	}
 	return append([]byte(nil), st.hash...), true, nil
@@ -827,7 +893,27 @@ type passkeyScan struct {
 	hash                   []byte
 }
 
+func (s passkeyScan) active() bool { return s.addedIndex > s.resetIndex }
+
+func (s *passkeyScan) record(e frame, index int) {
+	switch e.Kind {
+	case "passkey_added":
+		s.addedIndex, s.hash = index, e.VaultHash
+	case "passkeys_reset":
+		s.resetIndex, s.hash = index, nil
+	}
+}
+
 func scanPasskeys(dir string) (passkeyScan, error) {
+	if v, ok := liveJournals.Load(filepath.Clean(dir)); ok {
+		j := v.(*Journal)
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		if !j.healthy() || j.stopping {
+			return passkeyScan{}, ErrJournalUnhealthy
+		}
+		return j.passkeys, nil
+	}
 	var st passkeyScan
 	f, err := OpenPrivate(filepath.Join(dir, journalName), os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
@@ -851,12 +937,7 @@ func scanPasskeys(dir string) (passkeyScan, error) {
 			return passkeyScan{}, err
 		}
 		index++
-		switch e.Kind {
-		case "passkey_added":
-			st.addedIndex, st.hash = index, append([]byte(nil), e.VaultHash...)
-		case "passkeys_reset":
-			st.resetIndex = index
-		}
+		st.record(e, index)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 type Supervisor struct {
 	life, input *os.File
+	descriptors *os.File
 	cmd         *exec.Cmd
 	replies     chan message
 	stopping    chan struct{}
@@ -55,21 +56,31 @@ func Open(ctx context.Context, dir string, lock *os.File, opts Options) (*Superv
 		return nil, ErrReaper
 	}
 	defer replyW.Close()
-	cmd := exec.Command(self, "serve", "--reaper", dir)
-	cmd.Env = []string{}
-	cmd.Stdin, cmd.ExtraFiles = inputR, []*os.File{lock, lifeIn, replyW}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	sendFD, recvFD, err := descriptorPair()
+	if err != nil {
 		lifeOut.Close()
 		inputW.Close()
 		replyR.Close()
 		return nil, ErrReaper
 	}
+	defer recvFD.Close()
+	cmd := exec.Command(self, "serve", "--reaper", dir)
+	cmd.Env = []string{}
+	cmd.Stdin, cmd.ExtraFiles = inputR, []*os.File{lock, lifeIn, replyW, recvFD}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		lifeOut.Close()
+		inputW.Close()
+		replyR.Close()
+		sendFD.Close()
+		return nil, ErrReaper
+	}
 	// No service-side writer of replies (otherwise EOF would not report reaper death).
 	replyW.Close()
+	recvFD.Close()
 	p := periods{opts.Grace, opts.KillWait, opts.PrepareWait}
 	t := p.timing()
-	s := &Supervisor{life: lifeOut, input: inputW, cmd: cmd, stopLimit: t.grace + t.killWait + reaperSlack,
+	s := &Supervisor{life: lifeOut, input: inputW, descriptors: sendFD, cmd: cmd, stopLimit: t.grace + t.killWait + reaperSlack,
 		replies: make(chan message, 1), stopping: make(chan struct{}), done: make(chan struct{}), runs: make(map[uint64]*Run)}
 	go s.watch(replyR)
 	if _, err := s.call(ctx, request{Op: "open", Periods: &p}, s.stopLimit); err != nil {
@@ -91,7 +102,11 @@ func (s *Supervisor) watch(reply *os.File) {
 				break
 			}
 			if m.Finished != 0 {
-				s.finishRun(m.Finished, m.Exit, m.err())
+				s.finishRun(m.Finished, m.Exit, m.err(), m.Cleaned)
+				continue
+			}
+			if m.Exited != 0 {
+				s.reportExit(m.Exited, LeaderExit{Code: m.Exit, Reason: m.Reason})
 				continue
 			}
 			select {
@@ -136,6 +151,12 @@ func (s *Supervisor) call(ctx context.Context, r request, wait time.Duration) (m
 	default:
 	}
 	deadline := time.Now().Add(wait)
+	if r.Op == "prepare" && r.Command != nil && r.Command.descriptorCount() != 0 {
+		if err := sendCommandFiles(s.descriptors, r.Ticket, r.Command); err != nil {
+			s.BeginShutdown()
+			return message{}, ErrReaper
+		}
+	}
 	if err := wireWrite(s.input, b, deadline); err != nil {
 		s.BeginShutdown()
 		return message{}, ErrReaper
@@ -180,10 +201,20 @@ func (s *Supervisor) BeginShutdown() {
 		close(s.stopping)
 		s.life.Close()
 		s.input.Close()
+		s.descriptors.Close()
 	})
 }
 
 func (s *Supervisor) Done() <-chan struct{} { return s.done }
+
+func (s *Supervisor) Ready() bool {
+	select {
+	case <-s.stopping:
+		return false
+	default:
+		return true
+	}
+}
 
 // Close waits for confirmation. If the reaper itself is stuck, leave the marker for the next start.
 func (s *Supervisor) Close() error {
@@ -202,18 +233,26 @@ func (s *Supervisor) Close() error {
 // Run is a prepared process group, not yet an executed image. Its unique ticket survives a PID
 // reuse: a late Release or Stop can never address another run. Wait confirms exit of the whole tree.
 type Run struct {
-	s      *Supervisor
-	ticket uint64
-	pgid   int
-	done   chan struct{}
-	exit   int
-	err    error
+	s          *Supervisor
+	ticket     uint64
+	pgid       int
+	done       chan struct{}
+	exit       int
+	err        error
+	cleaned    bool // published by closing done
+	leaderDone chan struct{}
+	leader     LeaderExit // published by closing leaderDone, before cleanup is acknowledged
+}
+
+type LeaderExit struct {
+	Code   int
+	Reason string // fixed stop code only if the reaper began stopping a live leader
 }
 
 // PrepareRun installs attribution before returning. A handler can durably record start using
 // PGID(), then call Release. If it doesn't, the reaper times out and kills the bootstrap unopened.
 func (s *Supervisor) PrepareRun(id string, c Command) (*Run, error) {
-	r := &Run{s: s, ticket: s.next.Add(1), done: make(chan struct{})}
+	r := &Run{s: s, ticket: s.next.Add(1), done: make(chan struct{}), leaderDone: make(chan struct{})}
 	s.runsMu.Lock()
 	select {
 	case <-s.stopping:
@@ -225,18 +264,31 @@ func (s *Supervisor) PrepareRun(id string, c Command) (*Run, error) {
 	s.runsMu.Unlock()
 	m, err := s.request(request{Op: "prepare", RunID: id, Ticket: r.ticket, Command: &c})
 	if err != nil {
-		s.finishRun(r.ticket, 0, err)
+		s.finishRun(r.ticket, 0, err, false)
 		return nil, err
 	}
 	r.pgid = m.PID
 	return r, nil
 }
 
-func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
+func (s *Supervisor) reportExit(ticket uint64, exit LeaderExit) {
 	s.runsMu.Lock()
 	defer s.runsMu.Unlock()
 	if r := s.runs[ticket]; r != nil {
-		r.exit, r.err = exit, err
+		select {
+		case <-r.leaderDone:
+		default:
+			r.leader = exit
+			close(r.leaderDone)
+		}
+	}
+}
+
+func (s *Supervisor) finishRun(ticket uint64, exit int, err error, cleaned bool) {
+	s.runsMu.Lock()
+	defer s.runsMu.Unlock()
+	if r := s.runs[ticket]; r != nil {
+		r.exit, r.err, r.cleaned = exit, err, cleaned
 		close(r.done)
 		delete(s.runs, ticket)
 	}
@@ -244,10 +296,36 @@ func (s *Supervisor) finishRun(ticket uint64, exit int, err error) {
 
 func (r *Run) PGID() int { return r.pgid }
 
-func (r *Run) Release() error {
+func (r *Run) Done() <-chan struct{} { return r.done }
+
+func (r *Run) CleanupConfirmed() bool {
+	select {
+	case <-r.done:
+		return r.cleaned
+	default:
+		return false
+	}
+}
+
+func (r *Run) LeaderDone() <-chan struct{} { return r.leaderDone }
+
+func (r *Run) LeaderExit() (LeaderExit, bool) {
+	select {
+	case <-r.leaderDone:
+		return r.leader, true
+	default:
+		return LeaderExit{}, false
+	}
+}
+
+func (r *Run) Release() error { return r.ReleaseWithReceipt("") }
+
+// ReleaseWithReceipt acknowledges exec only after the reaper syncs the matching receipt.
+func (r *Run) ReleaseWithReceipt(permit string) error {
 	// The wait is wireTimeout+poll. The reaper is told to finish a poll sooner, so the
 	// exec read cannot outlast this request and the reply is still observable.
 	req, wait := releaseRequest(r.ticket, time.Now())
+	req.Receipt = permit
 	_, err := r.s.call(context.Background(), req, wait)
 	return err
 }
@@ -256,8 +334,10 @@ func releaseRequest(ticket uint64, now time.Time) (request, time.Duration) {
 	return request{Op: "release", Ticket: ticket, Until: now.Add(wireTimeout).UnixNano()}, wireTimeout + poll
 }
 
-func (r *Run) Stop() error {
-	_, err := r.s.request(request{Op: "stop", Ticket: r.ticket})
+func (r *Run) Stop() error { return r.StopWithReason("stopped") }
+
+func (r *Run) StopWithReason(reason string) error {
+	_, err := r.s.request(request{Op: "stop", Ticket: r.ticket, Reason: reason})
 	return err
 }
 

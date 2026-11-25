@@ -14,6 +14,10 @@ import (
 )
 
 type field struct{ Key, Value string }
+type modelOption struct {
+	Name     string
+	Selected bool
+}
 
 type detail struct {
 	approval.View
@@ -21,6 +25,8 @@ type detail struct {
 	Exact, CSRF                  string
 	SlackPreview                 *slackPreview
 	ShowFrozen, Review, ReadBack bool
+	Models                       []modelOption
+	CanStop                      bool
 }
 
 func (s *Site) detail(w http.ResponseWriter, r *http.Request, sess session, at time.Time) {
@@ -40,7 +46,17 @@ func (s *Site) detail(w http.ResponseWriter, r *http.Request, sess session, at t
 		return
 	}
 	model := detail{View: v, ShowFrozen: more, CSRF: sess.csrf, Review: v.Status == "pending" && s.supports(v.Type),
-		ReadBack: v.Status == "outcome_unknown" && s.actions.ReadBack != nil && s.supports(v.Type)}
+		ReadBack: v.Status == "outcome_unknown" && s.canReadBack(v.Type),
+		CanStop:  v.Status == "executed" && v.Type == approval.Run && s.actions.CanStopRun != nil && s.actions.CanStopRun(id)}
+	if model.Review && v.Type == approval.Run && len(s.actions.RunModels) != 0 {
+		proposed, _ := v.Params["model"].(string)
+		if !slices.Contains(s.actions.RunModels, proposed) {
+			model.Models = append(model.Models, modelOption{proposed, true}) // do not silently select a different model
+		}
+		for _, name := range s.actions.RunModels {
+			model.Models = append(model.Models, modelOption{name, name == proposed})
+		}
+	}
 	params := v.Params
 	if more {
 		params = v.Frozen.Params

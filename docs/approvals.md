@@ -298,6 +298,8 @@ answer is at most 8 MiB, and nothing is retried. `beacon egress` lists the origi
 
 ## Agent runs
 
+This section describes the signed app. The isolated Go preview uses its own [checkout settings and run controls](go-approvals.md#agent-runs-and-checkouts).
+
 `agent.run` (13.00, _Agent runs_, D21, D37) launches opencode in one of the person's checkouts with a full prompt
 and a model. Its params are Signal's: `checkout` (a name from Settings, never a path), `prompt` (1 to 32,000
 characters, exactly as proposed) and `model` (an opencode `provider/model` id). The agent's name and session are the

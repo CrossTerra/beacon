@@ -53,6 +53,26 @@ func TestCanonicalHashes(t *testing.T) {
 	}
 }
 
+func TestRunnerSubjectsAcceptSignalHandles(t *testing.T) {
+	for _, handle := range []string{"0", "9.test_name-2", "a" + strings.Repeat("9", 63)} {
+		who := SignalIdentity{Person: who.Person, Handle: handle}
+		runner := "run_01m7x1v080ec1r60r30c1g60r3"
+		s := &proposalState{View: View{Proposal: Proposal{RunnerID: runner, Request: Request{Type: Run}}}}
+		b, err := record("jrn_01m6a6ft00e81840g2081040g2", &frame{Kind: "runner_closed", Runner: &RunnerEvent{Kind: RunnerClosed}}, s, who)
+		must(t, err)
+		o, err := ParseObject(b)
+		must(t, err)
+		if o["subject"] != "agent-run:"+handle+":"+strings.TrimPrefix(runner, "run_") {
+			t.Fatal("runner subject does not carry the Signal handle")
+		}
+	}
+	for _, handle := range []string{"_start", "Upper", "a" + strings.Repeat("x", 64)} {
+		if (SignalIdentity{Person: who.Person, Handle: handle}).Valid() {
+			t.Fatalf("accepted %q", handle)
+		}
+	}
+}
+
 func TestStrictJSON(t *testing.T) {
 	for _, s := range []string{`1.0`, `1e0`, `-1E2`, `9007199254740992`, `-9007199254740992`, `01`, `{"a":1,"\u0061":2}`,
 		`"\ud800"`, `"\udc00x"`, `"\ud800\ud800"`, "\"a\x01b\"", `[1,]`, `{}x`, ``, `nul`, `"\x41"`, "\"\xff\"",
@@ -134,7 +154,7 @@ func TestActionSchemas(t *testing.T) {
 }
 
 // Play the fixture through production journal transitions, fixing ids, salts, times and replay nonces only.
-// The runner lifecycle belongs to supervision, and Slack without a trusted intake never goes on a shared subject.
+// Slack without a trusted intake never goes on a shared subject.
 func fixtureJournal(t *testing.T) (*Journal, []Object) {
 	t.Helper()
 	dir := scratch(t)
@@ -152,9 +172,6 @@ func fixtureJournal(t *testing.T) (*Journal, []Object) {
 	for _, v := range fixture(t, "journal") {
 		r := obj(obj(v)["body"])
 		kind := text(r, "type")
-		if strings.HasPrefix(kind, "app.runner.") {
-			continue
-		}
 		m, sealed := obj(r["metadata"]), obj(r["sealed"])
 		s := obj(sealed["metadata"])
 		id, a := text(m, "proposal"), Action(text(m, "action"))
@@ -201,6 +218,15 @@ func fixtureJournal(t *testing.T) (*Journal, []Object) {
 			must(t, err)
 		case "app.action.declined":
 			must(t, j.Decline(id, text(s, "note"), at))
+		case "app.runner.working", "app.runner.waiting", "app.runner.finished", "app.runner.closed":
+			event := RunnerEvent{Kind: RunnerKind("runner_" + strings.TrimPrefix(kind, "app.runner."))}
+			switch event.Kind {
+			case RunnerWaiting:
+				event.Text = text(s, "question")
+			case RunnerFinished:
+				event.Text = text(s, "report")
+			}
+			must(t, j.RecordRunner(id, event, at))
 		default:
 			t.Fatalf("unhandled fixture %s", kind)
 		}

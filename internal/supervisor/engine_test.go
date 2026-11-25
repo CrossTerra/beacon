@@ -76,7 +76,7 @@ func TestDrainReportsExpiredRunImmediately(t *testing.T) {
 		return processTable{pid: {pid: pid, group: pid}}, nil
 	}
 	e.signal = func(int, unix.Signal) {}
-	e.jobs[pid] = &job{pid: pid, tag: 1, ticket: 7, killAt: time.Now().Add(-time.Hour)}
+	e.jobs[pid] = &job{pid: pid, tag: 1, ticket: 7, killAt: time.Now().Add(-time.Hour), failure: codeLaunch}
 	e.runs[7] = e.jobs[pid]
 	start := time.Now()
 	err := e.drain(context.Background())

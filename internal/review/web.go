@@ -39,6 +39,7 @@ type Site struct {
 	now      func() time.Time
 	sessions sessions
 	held     map[string]held
+	closing  bool // guarded by sessions.mu, alongside held
 }
 
 func New(origin approval.Origin, j proposals, now func() time.Time) *Site {
@@ -101,6 +102,9 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "/read-back":
 			s.readBack(w, r)
 			return
+		case "/stop-run":
+			s.stopRun(w, r)
+			return
 		case "/settings/begin", "/settings/save":
 			s.changeCredentials(w, r)
 			return
@@ -154,7 +158,7 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.pendingPage(w, sess, at)
 		return
 	case "/settings":
-		if len(s.actions.Targets) == 0 {
+		if !s.hasSettings() {
 			http.NotFound(w, r)
 			return
 		}

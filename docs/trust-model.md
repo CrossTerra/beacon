@@ -217,11 +217,11 @@ checkout's opencode configuration does not deny.
      membership, or whether the proposal can be approved. The raw ids stay under Show exact parameters. A missing
      Slack scope is a scope name (`chat:write`), recorded in the result and shown in the window; the token and
      Slack's `provided` list are not. Saving the token checks `X-OAuth-Scopes` against the scopes Beacon needs.
-16. **Go provider writes require a passkey and a bound credential.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
+16. **Go actions require a passkey. Provider writes also require their bound credential.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
     are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
-     takes the signed route above; there is no fallback. The service reads no login keychain item and sends no
-     live Signal record. It starts only its same-binary reaper, with no live jobs, and contacts a provider only
-     when that provider is configured. Its socket trusts the kernel's user ID, not a code
+      takes the signed route above; there is no fallback. The service reads no login keychain item. It starts
+      its same-binary reaper, but no collector or watch. Provider calls and Signal journal delivery each need
+      explicit settings. Its socket trusts the kernel's user ID, not a code
     signature. Anyone running as that user can submit, read the owner-only plaintext journal, or get a one-use
     review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
     Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
@@ -229,9 +229,11 @@ checkout's opencode configuration does not deny.
      `beacon setup` prints a one-time passkey code and
     refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
     a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
-    that data key. The journal records the check file's hash. A later assertion can record an approval only
-    for a resolved binding, and only if the PRF output unwraps that key, the key opens the check, and the
-    file still matches the journal. A swapped file is a journalled reset and approves nothing. Write
+     that data key. The live journal refuses a second active enrollment and records the hash of the bytes
+     sealed by the first. A later assertion can record an approval only
+     for a resolved binding, and only if the PRF output unwraps that key and it opens the same vault bytes
+     the service verified against its live enrollment hash. A swapped file is a journalled reset and approves nothing. This holds even
+     for `agent.run`, which has no provider write credential and never joins a batch. Write
      credentials are sealed under the real data key, so a replacement key cannot open them. An unseal failure
      prevents approval and dispatch. A separate settings assertion is required to save tokens, and Beacon
       verifies the configured identity for both. The unattended KDBX vault holds a distinct read token for
@@ -247,14 +249,24 @@ checkout's opencode configuration does not deny.
       the unattended token. A merged pull request with a different actor, head, or base fails as
       `merged_otherwise`. Incomplete attribution stays unknown, and a pull request already seen merged is
       never later recorded as not merged. Automatic merge read-back backs off after the settlement window,
-      up to 15 minutes, and is checked every 15 seconds so one stuck read does not spend the recovery budget. Without provider config there is no resolver
-      or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
+       up to 15 minutes, and is checked every 15 seconds so one stuck read does not spend the recovery budget. Without provider config there is no resolver
+       or outbound provider request; otherwise `beacon egress --state-dir DIR` lists the allowed hosts.
+       A run can launch only in an explicitly configured checkout. A descriptor stays pinned from freeze and
+        the bootstrap enters it, then refuses exec if the approved directory or HEAD has changed. The reaper
+        registers its group before a durable one-shot permit releases the child. The exact approved prompt is
+        staged on an anonymous descriptor before release. No service environment, credential or unrelated
+        descriptor reaches the child. OpenCode can use the person's
+       own configuration and sign-in; it is not sandboxed. Run output stays in private files. With delivery
+       configured, the ordered outbox sends the capped report or failure detail sealed as `owner+agents`, marked
+       as untrusted runner text. It uses a separate, origin-bound app key from the unattended vault, never a
+       provider write token or a credential from the runner.
       See [Go approvals](go-approvals.md).
 
 ## Known limits
 
-- **An agent run is not a sandbox (13.00-D12, D22).** It runs as the person, with `--auto`, their login environment
-  and their files, and can do anything they can. Approving it approves a launch in one checkout, not what the agent
+- **An agent run is not a sandbox (13.00-D12, D22).** It runs as the person, with `--auto` and their files, and can
+  do anything they can. The Swift app reads their login environment; the Go preview uses a fixed environment.
+  Approving it approves a launch in one checkout, not what the agent
   then does; a checkout's own `bin/run` guardrails are not applied. A descendant that leaves its process group in the
   ways [tether](tether.md#limits) describes can outlive Stop and Quit. The run's output and errors stay in
   `~/Library/Application Support/beacon/runs/`, readable by the person; its launch file (the login environment)

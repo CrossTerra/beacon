@@ -18,58 +18,88 @@ import (
 
 // Command is built by a trusted caller after approval (or from a fixed job definition), never from
 // a socket request. It inherits no environment or open file from the service. Unset stdio goes to
-// /dev/null; supplied paths name private files. Fixed jobs append, and runs create output exclusively.
-// A fixed job's standard input is a reaper-owned pipe, not Command.Stdin: EOF means the reaper died.
+// /dev/null. A run's Input is staged completely on an anonymous descriptor before
+// it can exec. Output files are private and exclusive for runs; fixed jobs append.
+// A fixed job instead gets a lifetime pipe: EOF means the reaper died.
 type Command struct {
-	Path                  string
-	Args, Env             []string
-	Dir                   *Directory
-	Stdin, Stdout, Stderr string
+	Path           string
+	Args, Env      []string
+	Dir            *Directory
+	Branch         string `json:",omitempty"` // frozen HEAD description for Dir
+	Input          []byte `json:",omitempty"`
+	Stdout, Stderr string
+	Output         *OutputFiles `json:",omitempty"` // optional pinned outputs, instead of paths
 }
 
-// Directory pins the checkout that was approved. Launch opens it once, checks the pin and enters
-// it by descriptor in the child, so renaming or replacing the pathname cannot redirect the run.
+// OutputFiles is passed by descriptor. Readers must use ReadAt/SectionReader,
+// not Seek: the child writes through the same open file descriptions.
+type OutputFiles struct {
+	Stdout *os.File `json:"-"`
+	Stderr *os.File `json:"-"`
+}
+
+func (o *OutputFiles) Close() {
+	if o != nil {
+		closeFile(o.Stdout)
+		closeFile(o.Stderr)
+	}
+}
+
+// Directory retains the open checkout from review to handoff. Its wire description is
+// paired with the actual descriptor, never used to recreate a pin by opening a path.
 type Directory struct {
 	Path          string
 	Device, Inode uint64
+	file          *os.File
 }
 
-func PinDirectory(path string) (Directory, error) {
-	f, st, err := openDirectory(path)
-	if err != nil {
-		return Directory{}, err
-	}
-	f.Close()
-	return Directory{path, deviceBits(st), st.Ino}, nil
-}
-
-func openDirectory(path string) (*os.File, unix.Stat_t, error) {
-	var st unix.Stat_t
+func PinDirectory(path string) (*Directory, error) {
 	if !filepath.IsAbs(path) {
-		return nil, st, ErrLaunch
+		return nil, ErrLaunch
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, st, err
+		return nil, err
 	}
+	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		unix.Close(fd)
-		return nil, st, err
+		return nil, err
 	}
-	return os.NewFile(uintptr(fd), "checkout"), st, nil
+	return &Directory{path, deviceBits(st), st.Ino, os.NewFile(uintptr(fd), "checkout")}, nil
+}
+
+func (d *Directory) Close() error { return d.file.Close() }
+
+func (d *Directory) Dup() (*Directory, error) {
+	fd, err := unix.FcntlInt(d.file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return &Directory{d.Path, d.Device, d.Inode, os.NewFile(uintptr(fd), "checkout")}, nil
+}
+
+func (d *Directory) MatchesPath() bool { return d.matches(int(d.file.Fd())) }
+
+func (d *Directory) matches(fd int) bool {
+	var held, named unix.Stat_t
+	return filepath.IsAbs(d.Path) && unix.Fstat(fd, &held) == nil && held.Mode&unix.S_IFMT == unix.S_IFDIR &&
+		deviceBits(held) == d.Device && held.Ino == d.Inode && unix.Stat(d.Path, &named) == nil &&
+		deviceBits(named) == d.Device && named.Ino == d.Inode
 }
 
 type image struct {
 	Path      string
 	Args, Env []string
-	Chdir     bool
+	Dir       *Directory
+	Branch    string `json:",omitempty"`
 }
 
 func (c Command) image(marker string) ([]byte, error) {
 	if !filepath.IsAbs(c.Path) || strings.ContainsRune(c.Path, 0) {
 		return nil, ErrLaunch
 	}
-	i := image{Path: c.Path, Args: append([]string{c.Path}, c.Args...), Chdir: c.Dir != nil}
+	i := image{Path: c.Path, Args: append([]string{c.Path}, c.Args...), Dir: c.Dir, Branch: c.Branch}
 	for _, arg := range i.Args {
 		if strings.ContainsRune(arg, 0) {
 			return nil, ErrLaunch
@@ -84,9 +114,6 @@ func (c Command) image(marker string) ([]byte, error) {
 			i.Env = append(i.Env, entry)
 		}
 	}
-	if c.Dir != nil {
-		i.Env = append(i.Env, "PWD="+c.Dir.Path)
-	}
 	i.Env = append(i.Env, marker)
 	b, err := json.Marshal(i)
 	if err != nil || len(b) > maxFrame {
@@ -98,21 +125,19 @@ func (c Command) image(marker string) ([]byte, error) {
 // spawn starts only our trusted bootstrap as group leader. The target image, arguments and env
 // (including loader variables) do not reach it until release. EOF alone never authorizes exec.
 func spawn(self string, c Command, marker string, fixed bool) (out *job, err error) {
+	if c.Output != nil && (fixed || c.Stdout != "" || c.Stderr != "" || c.Output.Stdout == nil || c.Output.Stderr == nil) {
+		return nil, ErrLaunch
+	}
 	payload, err := c.image(marker)
 	if err != nil {
 		return nil, err
 	}
 	var dir *os.File
 	if c.Dir != nil {
-		f, st, err := openDirectory(c.Dir.Path)
-		if err != nil {
-			return nil, ErrLaunch
-		}
-		defer f.Close()
-		if deviceBits(st) != c.Dir.Device || st.Ino != c.Dir.Inode {
+		if c.Dir.file == nil || !c.Dir.MatchesPath() {
 			return nil, ErrCheckoutChanged
 		}
-		dir = f
+		dir = c.Dir.file
 	}
 
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -124,7 +149,7 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 	var life *os.File
 	defer func() {
 		if err != nil {
-			closeLife(life)
+			closeFile(life)
 		}
 	}()
 	if fixed {
@@ -137,28 +162,34 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 		defer readEnd.Close()
 		files[0] = readEnd
 		life = writeEnd
+	} else if len(c.Input) != 0 {
+		stdin, err := stagePrompt(c.Input)
+		if err != nil {
+			return nil, ErrLaunch
+		}
+		defer stdin.Close()
+		files[0] = stdin
+	}
+	if c.Output != nil {
+		files[1], files[2] = c.Output.Stdout, c.Output.Stderr
 	}
 	output := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if fixed {
 		output = os.O_WRONLY | os.O_CREATE | os.O_APPEND
 	}
-	for i, path := range []string{c.Stdin, c.Stdout, c.Stderr} {
-		if path == "" || (fixed && i == 0) {
+	for i, path := range []string{c.Stdout, c.Stderr} {
+		if path == "" {
 			continue
 		}
 		if !filepath.IsAbs(path) {
 			return nil, ErrLaunch
 		}
-		flags := output
-		if i == 0 {
-			flags = os.O_RDONLY
-		}
-		f, err := approval.OpenPrivate(path, flags)
+		f, err := approval.OpenPrivate(path, output)
 		if err != nil {
 			return nil, ErrLaunch
 		}
 		defer f.Close()
-		files[i] = f
+		files[i+1] = f
 	}
 	r, w, pipeErr := os.Pipe()
 	if pipeErr != nil {
@@ -171,25 +202,32 @@ func spawn(self string, c Command, marker string, fixed bool) (out *job, err err
 		return nil, ErrLaunch
 	}
 	defer statusW.Close()
-	files = append(files, r, statusW) // fd 3: gate, fd 4: exec-status writer
-	if dir != nil {
-		files = append(files, dir) // fd 5: pinned directory
+	readyR, readyW, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		w.Close()
+		statusR.Close()
+		return nil, ErrLaunch
 	}
+	defer readyW.Close()
+	// fd 3 is the gate, 4 the exec-status writer, 5 the optional pin, and 6 readiness.
+	files = append(files, r, statusW, dir, readyW)
 	p, err := os.StartProcess(self, []string{self, "serve", "--exec-job"}, &os.ProcAttr{
 		Files: files, Env: []string{marker}, Sys: &syscall.SysProcAttr{Setpgid: true},
 	})
 	if err != nil {
 		w.Close()
 		statusR.Close()
+		readyR.Close()
 		return nil, ErrLaunch
 	}
 	pid := p.Pid
 	// Only the reaper calls wait4, after group cleanup. Release Go's optional pidfd, not the PID.
 	p.Release()
-	return &job{pid: pid, gate: w, payload: payload, life: life, execStatus: statusR}, nil
+	return &job{pid: pid, gate: w, payload: payload, life: life, execStatus: statusR, ready: readyR,
+		argv: append([]string{c.Path}, c.Args...)}, nil
 }
 
-func closeLife(f *os.File) {
+func closeFile(f *os.File) {
 	if f != nil {
 		f.Close()
 	}
@@ -201,9 +239,14 @@ func (j *job) closeGate() {
 		j.gate = nil
 	}
 	j.payload = nil
+	j.argv = nil
 	if j.execStatus != nil {
 		j.execStatus.Close()
 		j.execStatus = nil
+	}
+	if j.ready != nil {
+		j.ready.Close()
+		j.ready = nil
 	}
 }
 
@@ -218,6 +261,24 @@ func (j *job) release(ctx context.Context, until time.Time) error {
 	if !time.Now().Before(deadline) {
 		return ErrLaunch
 	}
+	// Observe exec only after the trusted bootstrap is executing; otherwise an
+	// event for starting the bootstrap itself could be mistaken for the target.
+	var ready [1]byte
+	if j.ready == nil || j.ready.SetReadDeadline(deadline) != nil {
+		return ErrLaunch
+	}
+	if _, err := io.ReadFull(j.ready, ready[:]); err != nil || ready[0] != 1 {
+		return ErrLaunch
+	}
+	if ctx.Err() != nil || !time.Now().Before(deadline) {
+		return ErrStopped
+	}
+	events, err := watchChild(j.pid, j.argv)
+	j.argv = nil
+	if err != nil {
+		return ErrLaunch
+	}
+	j.events = events
 	if err := j.gate.SetWriteDeadline(deadline); err != nil {
 		return ErrLaunch
 	}
@@ -250,25 +311,31 @@ func releaseDeadline(now, until time.Time) time.Time {
 
 func (j *job) execResult(deadline time.Time) error {
 	if j.execStatus == nil || !time.Now().Before(deadline) {
-		return ErrLaunch
+		return ErrUnconfirmed // the permit was sent; exec may have happened
 	}
 	if err := j.execStatus.SetReadDeadline(deadline); err != nil {
-		return ErrLaunch
+		return ErrUnconfirmed
 	}
 	var buf [4]byte
 	n, err := io.ReadFull(j.execStatus, buf[:])
-	if n == 0 && errors.Is(err, io.EOF) {
-		return nil // successful exec closed the close-on-exec writer
+	if n == len(buf) {
+		if binary.LittleEndian.Uint32(buf[:]) == uint32(unix.ESTALE) {
+			return ErrCheckoutChanged
+		}
+		return ErrLaunch // the bootstrap explicitly refused
 	}
-	return ErrLaunch
+	if errors.Is(err, io.EOF) && j.events != nil && j.events.confirmExec(deadline) {
+		return nil // EOF alone could also mean the bootstrap died
+	}
+	return ErrUnconfirmed
 }
 
-func execJob() error {
-	status := os.NewFile(4, "exec status")
-	if status == nil {
-		return ErrLaunch
+func execJob() {
+	status, err := inheritedPipe(4, "exec status")
+	if err != nil {
+		return
 	}
-	fail := func(err error) error {
+	fail := func(err error) {
 		var code uint32 = 1
 		if errno, ok := err.(syscall.Errno); ok && errno != 0 {
 			code = uint32(errno)
@@ -276,30 +343,50 @@ func execJob() error {
 		var buf [4]byte
 		binary.LittleEndian.PutUint32(buf[:], code)
 		_, _ = status.Write(buf[:])
-		status.Close()
-		return err
 	}
 	gate, err := inheritedPipe(3, "job gate")
 	if err != nil {
-		return fail(ErrLaunch)
+		fail(ErrLaunch)
+		return
+	}
+	ready, err := inheritedPipe(6, "job ready")
+	if err != nil {
+		fail(ErrLaunch)
+		return
+	}
+	_, err = ready.Write([]byte{1})
+	ready.Close()
+	if err != nil {
+		fail(ErrLaunch)
+		return
 	}
 	b, err := io.ReadAll(io.LimitReader(gate, maxFrame+2))
 	gate.Close()
 	if err != nil || len(b) == 0 || len(b) > maxFrame+1 || b[len(b)-1] != '\n' {
-		return fail(ErrStopped)
+		fail(ErrStopped)
+		return
 	}
 	var i image
 	if json.Unmarshal(b, &i) != nil || !filepath.IsAbs(i.Path) || len(i.Args) == 0 {
-		return fail(ErrLaunch)
+		fail(ErrLaunch)
+		return
 	}
-	if i.Chdir {
-		err := unix.Fchdir(5)
-		unix.Close(5)
-		if err != nil {
-			return fail(ErrLaunch)
+	if err := markNonStdio(); err != nil {
+		fail(ErrLaunch)
+		return
+	}
+	if i.Dir != nil {
+		i.Env = append(i.Env, "PWD="+i.Dir.Path)
+		if unix.Fchdir(5) != nil {
+			fail(unix.ESTALE)
+			return
+		}
+		if branch, err := branchAt(5); err != nil || branch != i.Branch || !i.Dir.matches(5) {
+			fail(unix.ESTALE)
+			return
 		}
 	}
-	// A successful exec closes this fd. The reaper then reads EOF rather than an error code.
-	unix.CloseOnExec(4)
-	return fail(unix.Exec(i.Path, i.Args, i.Env))
+	// The status pipe is already close-on-exec. A failed exec writes a definite refusal;
+	// the reaper checks kernel evidence before accepting a silent EOF.
+	fail(unix.Exec(i.Path, i.Args, i.Env))
 }

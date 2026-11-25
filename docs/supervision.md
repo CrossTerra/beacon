@@ -2,8 +2,9 @@
 
 `beacon serve` starts a reaper from the same binary (`serve --reaper`, an internal mode with inherited
 descriptors). This is the Go replacement for the app's [tether](tether.md), not an installer or a switch to
-the Go service. The isolated review preview takes the lock and sweeps, but defines no live collector,
-watches or run handler. It reads no collector config or credentials. The signed app still uses C tether.
+the Go service. The isolated review preview takes the lock and sweeps. It can launch separately approved
+[agent runs](go-approvals.md#agent-runs-and-checkouts), but starts no live collector or watch and reads
+no collector config or credentials. The signed app still uses C tether.
 
 ## Startup, stop and recovery
 
@@ -65,18 +66,22 @@ definitions; this part changes neither the installer nor the currently installed
 Trusted service code uses `Supervisor.PrepareRun` with an approved run ID and explicit command. The reaper
 installs the process group and its ownership before returning `Run.PGID()`. A trusted bootstrap waits for a
 permit on a private pipe: it has not loaded the target executable or received its environment. The handler
-can durably record start before calling `Run.Release()`. Release waits for the bootstrap's exec. The
-permit write and the exec-status read share the request's deadline, a poll inside that wait, and a
-late start does not grant a new timeout. A failed exec is
-reported on a close-on-exec status pipe as a launch error, not as a successful start followed by
-exit 126. EOF, shutdown, `Run.Stop()` or five seconds without release cancels a prepared launch without
-executing the target. `Run.Wait` returns the leader's exit code (128 plus signal when signaled) after the
-tree is gone, or a cleanup/launch error. There is no retry.
+durably records the registered group and claims the permit before release. The bootstrap's readiness,
+permit write and exec-status read share the request's deadline; a late start does not grant a new timeout.
+A failed exec writes an error on a close-on-exec status pipe. Silent EOF alone could be bootstrap death.
+macOS requires a kernel exec notification; Linux requires the target's executable identity and new argument
+vector, not an exit code. An unobserved image or timeout after the permit is unconfirmed.
+The reaper reveals the permit's nonce in a synced receipt only after positive exec evidence. Shutdown, `Run.Stop()` or five seconds
+without release cancels a prepared launch without executing the target. The leader's exit is reported without
+reaping it; `Run.Wait` confirms the whole tree is gone or returns a cleanup/launch error. There is no retry.
 
-When supplied, the approved checkout's device and inode are checked on an open descriptor and the bootstrap
-enters that descriptor, not the path again. Optional prompt and output files are private. Run outputs are
-created exclusively; fixed job logs append. The handler, not the reaper, owns approval, durable launch
-records and construction of the command and environment. Do not pass Beacon credentials to a child.
+When supplied, the service passes the checkout descriptor from freeze to the reaper over a private Unix
+socket pair. The bootstrap enters by descriptor and rechecks both the approved path and HEAD just before
+exec. `PWD` is the approved path; `OLDPWD` is not inherited. The reaper stages the complete prompt on an
+anonymous file descriptor before preparing the bootstrap. Every non-stdio descriptor is closed on exec.
+Run outputs are created exclusively and measured via the same pinned descriptors the child writes. Fixed
+job logs append. The handler, not the reaper, owns approval and construction of the command and environment.
+Do not pass Beacon credentials to a child.
 
 The proposal socket resolves the kernel peer PID once, at connect time. Group membership or tracked ancestry
 can identify a run; an environment marker alone cannot. An empty run ID means the peer was read and is not

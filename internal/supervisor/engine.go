@@ -45,6 +45,11 @@ type job struct {
 	reported      bool
 	life          *os.File // fixed-job stdin writer; closed when the reaper releases the job
 	execStatus    *os.File
+	ready         *os.File
+	events        *childEvents
+	argv          []string // retained only until the exec check is armed
+	stopReason    string
+	exitReported  bool
 }
 
 func (j *job) stop(now time.Time, timing timing, failure string) {
@@ -60,6 +65,13 @@ func (j *job) stop(now time.Time, timing timing, failure string) {
 	if j.failure == "" {
 		j.failure = failure
 	}
+}
+
+func (j *job) stopRun(now time.Time, timing timing, reason string) {
+	if j.killAt.IsZero() && !j.started.IsZero() && !j.exitReported {
+		j.stopReason = reason
+	}
+	j.stop(now, timing, "")
 }
 
 type member struct {
@@ -84,6 +96,7 @@ type engine struct {
 	emit         func(message) error
 	list         func() (processTable, error)
 	signal       func(int, unix.Signal)
+	recordExec   func(string, int, string) error
 }
 
 func newEngine(self, prefix string, t timing, emit func(message) error) *engine {
@@ -127,7 +140,7 @@ func (e *engine) prepare(r request) message {
 	return message{PID: j.pid}
 }
 
-func (e *engine) release(ctx context.Context, ticket uint64, until time.Time) message {
+func (e *engine) release(ctx context.Context, ticket uint64, until time.Time, receipt string) message {
 	j := e.runs[ticket]
 	now := time.Now()
 	if j == nil || j.gate == nil || !j.killAt.IsZero() {
@@ -138,11 +151,49 @@ func (e *engine) release(ctx context.Context, ticket uint64, until time.Time) me
 		return message{Error: codeTimeout}
 	}
 	if err := j.release(ctx, until); err != nil {
-		j.killAt, j.failure = now, codeLaunch
-		return message{Error: codeLaunch}
+		j.killAt, j.failure = time.Now(), codeLaunch
+		if errors.Is(err, ErrUnconfirmed) {
+			return message{Error: codeRecovery}
+		}
+		if errors.Is(err, ErrCheckoutChanged) {
+			j.failure = codeCheckout
+		}
+		return message{Error: j.failure}
+	}
+	if receipt != "" && (e.recordExec == nil || e.recordExec(j.runID, j.pid, receipt) != nil) {
+		j.killAt = time.Now() // exec proof was lost, but cleanup still has its own outcome
+		return message{Error: codeRecovery}
 	}
 	j.started = now
 	return message{}
+}
+
+func (e *engine) observeExit(j *job) error {
+	if j.ticket == 0 || j.exitReported || j.events == nil || j.started.IsZero() {
+		return nil
+	}
+	if status, ok := j.events.exitStatus(); ok {
+		return e.reportExit(j, status)
+	}
+	return nil
+}
+
+func (e *engine) reportExit(j *job, status unix.WaitStatus) error {
+	if j.ticket == 0 || j.exitReported || j.started.IsZero() {
+		return nil
+	}
+	j.exitReported = true
+	return e.report(message{Exited: j.ticket, Exit: exitCode(status), Reason: j.stopReason})
+}
+
+func (e *engine) report(m message) error {
+	if e.emit != nil {
+		if err := e.emit(m); err != nil {
+			e.emit = nil // cleanup gets at most one reply deadline on a dead pipe
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *engine) attribute(pid int) (string, error) {
@@ -310,9 +361,13 @@ func (e *engine) signalMembers(now time.Time) {
 
 func (e *engine) refresh(sweep bool) (bool, error) {
 	now := time.Now()
+	var failure error
 	for _, j := range e.jobs {
 		if j.gate != nil && !now.Before(j.preparedUntil) {
 			j.stop(now, e.timing, codeTimeout)
+		}
+		if err := e.observeExit(j); err != nil {
+			failure = err
 		}
 	}
 	table, err := e.list()
@@ -323,12 +378,12 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 				return false, ErrUnconfirmed
 			}
 		}
-		return false, nil // not an empty snapshot; no confirmation and no new starts
+		return false, failure // not an empty snapshot; no confirmation and no new starts
 	}
 	confirmed := make(map[int]bool, len(e.jobs))
 	for _, j := range e.jobs {
 		confirmed[j.pid] = j.exitSeen
-		if !leaderDead(j.pid, table) {
+		if !j.exitReported && !leaderDead(j.pid, table) {
 			if j.killAt.IsZero() {
 				j.exitSeen = false
 			}
@@ -343,15 +398,11 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 	}
 	e.track(table, sweep)
 	e.signalMembers(now)
-	var failure error
 	for _, j := range e.jobs {
 		if j.killAt.IsZero() {
 			continue
 		}
-		if j.live == 0 {
-			if !confirmed[j.pid] {
-				continue // this census has not yet confirmed the exit
-			}
+		if j.live == 0 && confirmed[j.pid] { // a prior census, never the one that first saw the exit
 			var status unix.WaitStatus
 			if pid, err := unix.Wait4(j.pid, &status, unix.WNOHANG, nil); err == nil && pid == j.pid {
 				if err := e.finished(j, status, now); err != nil && !sweep {
@@ -370,6 +421,9 @@ func (e *engine) refresh(sweep bool) (bool, error) {
 func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 	delete(e.jobs, j.pid)
 	j.closeLife()
+	if j.events != nil {
+		j.events.close()
+	}
 	if f := j.fixed; f != nil {
 		f.job = nil
 		if status.Exited() && status.ExitStatus() == 0 && j.failure == "" {
@@ -383,21 +437,20 @@ func (e *engine) finished(j *job, status unix.WaitStatus, now time.Time) error {
 		return nil
 	}
 	delete(e.runs, j.ticket)
-	if j.reported || e.emit == nil {
+	if j.reported {
 		return nil
 	}
-	code := status.ExitStatus()
-	if status.Signaled() {
-		code = 128 + int(status.Signal())
-	}
-	if e.emit == nil {
-		return nil
-	}
-	if err := e.emit(message{Finished: j.ticket, Exit: code, Error: j.failure}); err != nil {
-		e.emit = nil // at most one reply deadline, not one per finished run, during cleanup
+	if err := e.reportExit(j, status); err != nil {
 		return err
 	}
-	return nil
+	return e.report(message{Finished: j.ticket, Exit: exitCode(status), Error: j.failure, Cleaned: true})
+}
+
+func exitCode(status unix.WaitStatus) int {
+	if status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return status.ExitStatus()
 }
 
 func (e *engine) orphanWork() bool {
@@ -420,15 +473,9 @@ func (e *engine) reportExpired(now time.Time) bool {
 		}
 		j.reported = true
 		gaveUp = true
-		if j.failure == "" {
-			j.failure = codeRecovery
-		}
-		if e.emit == nil {
-			continue
-		}
-		if err := e.emit(message{Finished: j.ticket, Error: j.failure}); err != nil {
-			e.emit = nil // one failed reply write; do not keep notifying on a dead pipe
-		}
+		// A previous launch error is not evidence that the tree is gone.
+		_ = e.observeExit(j)
+		_ = e.report(message{Finished: j.ticket, Error: codeRecovery})
 	}
 	return gaveUp
 }
@@ -464,7 +511,7 @@ func (e *engine) startFixed(ctx context.Context, live func() bool) {
 			return // still gated; drain will kill it without an exec permit
 		}
 		if err := j.release(ctx, time.Time{}); err != nil {
-			j.killAt, j.failure = now, codeLaunch
+			j.killAt, j.failure = time.Now(), codeLaunch
 		} else {
 			j.started = now
 		}
@@ -480,7 +527,8 @@ func (e *engine) drain(ctx context.Context) error {
 	gaveUp := e.reportExpired(now)
 	for _, j := range e.jobs {
 		if j.killAt.IsZero() {
-			j.stop(now, e.timing, "")
+			_ = e.observeExit(j) // a leader already out keeps its result even when we stop its descendants
+			j.stopRun(now, e.timing, "stopped_at_quit")
 		}
 	}
 	// A startup sweep has no owned groups. Arm the orphan bucket so markers found in the

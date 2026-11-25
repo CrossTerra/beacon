@@ -1473,7 +1473,7 @@ func (a *app) cmdCursor(args []string) error {
 
 func (a *app) cmdEgress(args []string) error {
 	fs, cfgPath := a.flags("egress")
-	state := fs.String("state-dir", "", "list provider egress for this Go approval service instead")
+	state := fs.String("state-dir", "", "list egress for this Go approval service instead")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

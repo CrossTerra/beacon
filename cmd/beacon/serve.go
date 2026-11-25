@@ -46,8 +46,8 @@ func (a *app) cmdServe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// The preview has no unattended credential source or live handlers. Take the supervision lock
-	// and sweep, but do not infer live job definitions from the user's config or environment.
+	// Take the supervision lock and sweep. The preview never starts a collector or watch;
+	// action handlers and record delivery require explicit settings in this state directory.
 	return approvalserve.Run(ctx, approvalserve.Options{StateDir: dir, Origin: o, Now: a.now,
 		Supervision: &supervisor.Options{}, ListenReview: a.approvalListeners})
 }

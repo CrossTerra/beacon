@@ -42,6 +42,8 @@ type Options struct {
 	IssueOpen func() (code string, ok bool)
 	// PlaceSlack verifies visibility before the journal commits the proposed record. Nil keeps Slack review-only.
 	PlaceSlack func(context.Context, approval.Request, string) (approval.SlackPlacement, error)
+	// ResumeDelivery wakes the ordered sender. It does not approve a proposal or dispatch an action.
+	ResumeDelivery func()
 }
 
 type Server struct {
@@ -225,6 +227,18 @@ func (s *Server) handle(ctx context.Context, peer approval.PeerLabel, o approval
 			return failure("busy")
 		}
 		return approval.Object{"code": code, "url": s.opts.Origin.URL() + "/open?code=" + url.QueryEscape(code)}
+	case "resume-delivery":
+		if len(o) != 1 {
+			return invalid("")
+		}
+		if peer.RunID != "" {
+			return failure("forbidden") // attributed runs cannot change global delivery state
+		}
+		if s.opts.ResumeDelivery == nil || ctx.Err() != nil {
+			return failure("unavailable")
+		}
+		s.opts.ResumeDelivery()
+		return approval.Object{"queued": true}
 	case "propose":
 		return s.store(ctx, peer, o)
 	case "get", "withdraw":
@@ -299,6 +313,9 @@ func (s *Server) store(ctx context.Context, peer approval.PeerLabel, o approval.
 	answer := status(p)
 	answer["params_hash"] = p.ParamsHash
 	answer["review_url"] = s.opts.Origin.URL() + "/p/" + p.ID
+	if p.RunnerID != "" {
+		answer["runner_id"] = p.RunnerID
+	}
 	return answer
 }
 

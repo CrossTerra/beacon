@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -164,22 +165,17 @@ func Begin(dir string, rp webauthn.RelyingParty, code string, now time.Time) (cr
 	return create, assert, salt, nil
 }
 
-// Finish verifies the create ceremony and the following assertion, then stores the
-// credential and a data key wrapped under that assertion's PRF output. The output
-// is not written. A passkey without PRF is refused.
+// Finish verifies the ceremonies, then enrolls the credential and wrapped key in
+// the live journal. Publication and the enrollment hash use the same sealed bytes.
 func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now time.Time) error {
+	defer clear(assert.PRFOutput)
 	if !create.PRFEnabled || len(assert.PRFOutput) != prfBytes {
 		return ErrPRF
 	}
-	release, err := withInstance(dir)
-	if err != nil {
-		return err
-	}
-	defer release()
 	mu.Lock()
 	defer mu.Unlock()
-	defer clear(assert.PRFOutput)
-	f, err := approval.OpenPrivate(filepath.Join(dir, "register-pending.json"), os.O_RDWR)
+	pendingPath := filepath.Join(dir, "register-pending.json")
+	f, err := approval.OpenPrivate(pendingPath, os.O_RDONLY)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return ErrPending
@@ -191,14 +187,6 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err := json.NewDecoder(f).Decode(&pending); err != nil || pending.Origin != rp.Origin || pending.RPID != rp.ID ||
 		!now.Before(pending.Expires) {
 		return ErrPending
-	}
-	_, resetIndex, err := approval.PasskeyMarks(dir)
-	if err != nil {
-		return err
-	}
-	if pending.ResetIndex != resetIndex {
-		os.Remove(filepath.Join(dir, "register-pending.json"))
-		return ErrRegistered
 	}
 	reg, err := webauthn.VerifyRegistration(webauthn.RelyingParty{ID: rp.ID, Origin: rp.Origin}, pending.Create, create.ClientDataJSON, create.AttestationObject)
 	if err != nil {
@@ -215,7 +203,8 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 		return err
 	}
 	defer clear(dataKey)
-	if err := sealVault(dir, dataKey, rp.Origin); err != nil {
+	vault, err := sealedVault(dataKey, rp.Origin)
+	if err != nil {
 		return err
 	}
 	body, err := json.Marshal(storeFile{Origin: rp.Origin, RPID: rp.ID, Credentials: []credential{{
@@ -225,54 +214,53 @@ func Finish(dir string, rp webauthn.RelyingParty, create, assert Ceremony, now t
 	if err != nil {
 		return err
 	}
-	if err := publishNew(dir, "passkeys.json", body); err != nil {
-		os.Remove(filepath.Join(dir, writeVaultName))
-		return err
-	}
-	return os.Remove(filepath.Join(dir, "register-pending.json"))
-}
-
-// CommitAdded records the write-vault hash. If that record fails, both registration files are removed.
-func CommitAdded(dir string, at time.Time, record func([]byte, time.Time) error) error {
-	hash, err := VaultHash(dir)
-	if err != nil || record == nil {
-		Abandon(dir)
-		if err == nil {
-			err = errors.New("passkey was not recorded")
+	err = approval.EnrollPasskey(dir, pending.ResetIndex, now, vault, func(sealed []byte) error {
+		if err := publishNew(dir, writeVaultName, sealed); err != nil {
+			return err
 		}
-		return err
+		if err := publishNew(dir, "passkeys.json", body); err != nil {
+			return errors.Join(err, os.Remove(filepath.Join(dir, writeVaultName)))
+		}
+		return nil
+	}, func() error {
+		return errors.Join(os.Remove(filepath.Join(dir, "passkeys.json")), os.Remove(filepath.Join(dir, writeVaultName)), syncDir(dir))
+	})
+	if errors.Is(err, approval.ErrTransition) {
+		return ErrRegistered
 	}
-	if err := record(hash, at); err != nil {
-		Abandon(dir)
-		return err
+	if err != nil {
+		return err // leave the ceremony available if publication failed
 	}
+	// Enrollment is already durable. The journal prevents reuse even if cleanup fails.
+	_ = os.Remove(pendingPath)
 	return nil
 }
 
-// VaultHash is the SHA-256 of write-vault.json.
-func VaultHash(dir string) ([]byte, error) {
-	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+func readVault(dir string) ([]byte, error) {
+	f, err := approval.OpenPrivate(filepath.Join(dir, writeVaultName), os.O_RDONLY)
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(body)
-	return append([]byte(nil), sum[:]...), nil
-}
-
-// Abandon removes a registration that was not recorded. The reset marker stays.
-func Abandon(dir string) {
-	os.Remove(filepath.Join(dir, "passkeys.json"))
-	os.Remove(filepath.Join(dir, writeVaultName))
+	defer f.Close()
+	body, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(body) > 4096 {
+		return nil, ErrVault
+	}
+	return body, nil
 }
 
 // OpenVault unwraps the write-vault data key for one credential. The caller must clear the key.
 // A wrong PRF output fails closed and approves nothing.
-func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte, err error) {
+func OpenVault(dir string, credentialID, prf []byte, origin string) ([]byte, error) {
+	return openVault(dir, credentialID, prf, origin, readVault)
+}
+
+func openVault(dir string, credentialID, prf []byte, origin string, read func(string) ([]byte, error)) ([]byte, error) {
 	if len(prf) != prfBytes {
 		return nil, ErrPRF
 	}
 	defer clear(prf)
-	vaultBody, err := os.ReadFile(filepath.Join(dir, writeVaultName))
+	vaultBody, err := read(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrVault
@@ -280,14 +268,11 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 		return nil, err
 	}
 	sum := sha256.Sum256(vaultBody)
-	recorded, active, err := approval.PasskeyVault(dir)
+	matches, err := approval.CheckPasskeyVault(dir, sum[:], time.Now().UTC())
 	if err != nil {
 		return nil, err
 	}
-	if !active || subtle.ConstantTimeCompare(sum[:], recorded) != 1 {
-		if active {
-			_ = approval.NoteVaultMismatch(dir, time.Now().UTC())
-		}
+	if !matches {
 		return nil, ErrReset
 	}
 	body, err := os.ReadFile(filepath.Join(dir, "passkeys.json"))
@@ -321,11 +306,14 @@ func OpenVault(dir string, credentialID, prf []byte, origin string) (key []byte,
 	if err != nil {
 		return nil, err
 	}
-	key, err = gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
+	if len(found.Wrap.Nonce) != gcm.NonceSize() {
+		return nil, ErrVault
+	}
+	key, err := gcm.Open(nil, found.Wrap.Nonce, found.Wrap.Key, []byte(origin))
 	if err != nil {
 		return nil, err
 	}
-	if err := openVaultCheck(dir, key, origin); err != nil {
+	if err := openVaultCheck(vaultBody, key, origin); err != nil {
 		clear(key)
 		return nil, err
 	}
@@ -358,34 +346,23 @@ func wrapKey(prf, salt, origin []byte) (wrapped, []byte, error) {
 	return wrapped{Nonce: nonce, Key: gcm.Seal(nil, nonce, data, origin)}, data, nil
 }
 
-func sealVault(dir string, key []byte, origin string) error {
+func sealedVault(key []byte, origin string) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	nonce := make([]byte, nonceBytes)
 	if _, err := rand.Read(nonce); err != nil {
-		return err
+		return nil, err
 	}
-	body, err := json.Marshal(vaultFile{Origin: origin, Nonce: nonce, Check: gcm.Seal(nil, nonce, []byte(vaultPlain), []byte(origin))})
-	if err != nil {
-		return err
-	}
-	return publishNew(dir, writeVaultName, body)
+	return json.Marshal(vaultFile{Origin: origin, Nonce: nonce, Check: gcm.Seal(nil, nonce, []byte(vaultPlain), []byte(origin))})
 }
 
-func openVaultCheck(dir string, key []byte, origin string) error {
-	body, err := os.ReadFile(filepath.Join(dir, writeVaultName))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return ErrVault
-		}
-		return err
-	}
+func openVaultCheck(body, key []byte, origin string) error {
 	var stored vaultFile
 	if err := json.Unmarshal(body, &stored); err != nil || stored.Origin != origin || len(stored.Nonce) != nonceBytes {
 		return ErrVault
@@ -617,7 +594,13 @@ func publishNew(dir, name string, body []byte) error {
 		}
 		return err
 	}
-	return syncDir(dir)
+	if err := os.Remove(tmp.Name()); err != nil {
+		return errors.Join(err, os.Remove(path))
+	}
+	if err := syncDir(dir); err != nil {
+		return errors.Join(err, os.Remove(path))
+	}
+	return nil
 }
 
 func writeNew(dir, name string, body []byte) error {

@@ -59,7 +59,6 @@ func registerFixturePasskey(t *testing.T, dir string) (*webauthntest.Key, []byte
 		ClientDataJSON: b.ClientDataJSON, AuthenticatorData: b.AuthenticatorData, CredentialID: b.CredentialID,
 		Signature: b.Signature, PRFOutput: bytes.Clone(prf),
 	}, proposedAt))
-	must(t, passkey.CommitAdded(dir, proposedAt, j.RecordPasskey))
 	return key, prf
 }
 
@@ -72,6 +71,14 @@ type browser struct {
 }
 
 func launchBrowser(t *testing.T, opts Options) (browser, func()) {
+	t.Helper()
+	b, stop := signInBrowser(t, opts)
+	_, page := b.request(http.MethodGet, "/settings", nil, 200)
+	b.csrf = capture(t, page, `name="csrf" value="([a-zA-Z0-9_-]+)"`)
+	return b, stop
+}
+
+func signInBrowser(t *testing.T, opts Options) (browser, func()) {
 	t.Helper()
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
 	must(t, err)
@@ -95,8 +102,6 @@ func launchBrowser(t *testing.T, opts Options) (browser, func()) {
 	must(t, json.Unmarshal(wire, &link))
 	res, _ := b.request(http.MethodGet, "/open?code="+url.QueryEscape(link.Code), nil, 303)
 	b.cookie = res.Cookies()[0]
-	_, page := b.request(http.MethodGet, "/settings", nil, 200)
-	b.csrf = capture(t, page, `name="csrf" value="([a-zA-Z0-9_-]+)"`)
 	return b, stop
 }
 

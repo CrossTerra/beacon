@@ -1,13 +1,11 @@
 package supervisor
 
 import (
-	"encoding/binary"
 	"errors"
 	"io"
 	"os"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -114,26 +112,8 @@ func leaderDead(pid int, table processTable) bool {
 }
 
 func confirmedExit(pid int) bool {
-	// WNOWAIT is not named for Linux in x/sys v0.34. 0x01000000 is the generic value.
-	const wnohang, wexited, wnowait = 0x1, 0x4, 0x01000000
-	buf := make([]byte, 128+8)
-	ptr := unsafe.Pointer((uintptr(unsafe.Pointer(&buf[0])) + 7) &^ 7)
-	info := (*unix.Siginfo)(ptr)
-	err := unix.Waitid(unix.P_PID, pid, info, wexited|wnohang|wnowait, nil)
-	if err != nil {
-		return false // ECHILD is not a confirmed exit, and must not release the group
-	}
-	return siginfoPID(info) == int32(pid)
-}
-
-func siginfoPID(info *unix.Siginfo) int32 {
-	// The wait union's first field is si_pid. 64-bit Linux aligns it to 16; 32-bit starts at 12.
-	off := 12
-	if unsafe.Sizeof(uintptr(0)) == 8 {
-		off = 16
-	}
-	b := unsafe.Slice((*byte)(unsafe.Pointer(info)), off+4)
-	return int32(binary.NativeEndian.Uint32(b[off : off+4]))
+	_, ok := childExitStatus(pid)
+	return ok // ECHILD is not evidence that a leader exited
 }
 
 // processGone confirms that the process recorded with this start time no longer exists. Only

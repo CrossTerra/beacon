@@ -311,7 +311,8 @@ func TestNewJournalAndLocalOnlyEntries(t *testing.T) {
 	fresh, err := OpenJournal(dir, t0.Add(time.Millisecond), old.ID())
 	must(t, err)
 	t.Cleanup(func() { fresh.Close() })
-	for _, kind := range []string{"passkey_added", "settings_changed", "passkeys_reset"} {
+	must(t, EnrollPasskey(dir, 0, t0, []byte("sealed fixture"), func([]byte) error { return nil }, func() error { return nil }))
+	for _, kind := range []string{"settings_changed", "passkeys_reset"} {
 		must(t, fresh.RecordLocal(kind, t0))
 	}
 	put(t, fresh, mergeRequest())

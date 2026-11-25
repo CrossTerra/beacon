@@ -3,6 +3,7 @@ package approvalserve
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/review"
+	"github.com/CrossTerra/beacon/internal/supervisor"
 )
 
 type dispatcher struct {
@@ -42,6 +44,7 @@ func (d *dispatcher) controls(p *actionexec.Providers) review.Actions {
 			return approval.Resolved{}, approval.Refusal{Code: "not_configured"}
 		},
 		Approve: d.submit, ReadBack: d.readBack, Targets: targets,
+		CanReadBack: func(a approval.Action) bool { _, ok := d.handlers[a].(actionexec.ReadBack); return ok },
 		Save: func(ctx context.Context, service string, read, write keychain.Secret, key []byte) error {
 			if !d.inFlight.TryLock() {
 				return approval.Refusal{Code: "busy"}
@@ -60,7 +63,8 @@ func (d *dispatcher) controls(p *actionexec.Providers) review.Actions {
 
 // submit is the only live path from a verified assertion to a start. Check every exact binding and open its
 // sealed write token before approving anything, then give the worker only scoped credentials, not the vault key.
-func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, key []byte) error {
+// A local run has no write token, but still takes the verified assertion and an exclusive checkout reservation.
+func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, key []byte, pin io.Closer) error {
 	if d.ctx.Err() != nil || len(credentialID) == 0 || len(key) != 32 || len(items) == 0 || len(items) > 10 {
 		return approval.ErrTransition
 	}
@@ -73,7 +77,11 @@ func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, ke
 	}
 	secrets := make(map[dispatchKey]keychain.Secret)
 	work := make([]readyAction, 0, len(items))
+	var releaseReservation func()
 	clearAndRelease := func() {
+		if releaseReservation != nil {
+			releaseReservation()
+		}
 		for _, s := range secrets {
 			s.Clear()
 		}
@@ -106,6 +114,13 @@ func (d *dispatcher) submit(items []approval.Frozen, credentialID, challenge, ke
 				return err
 			}
 			secrets[b] = token
+		}
+		if local, ok := h.(*actionexec.RunHandler); ok {
+			directory, _ := pin.(*supervisor.Directory)
+			releaseReservation, err = local.Reserve(&f, directory)
+			if err != nil {
+				return err
+			}
 		}
 		work = append(work, readyAction{f.ID, h, token})
 	}

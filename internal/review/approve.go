@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
+	"maps"
 	"net/http"
 	"time"
 
@@ -17,12 +19,24 @@ import (
 )
 
 type held struct {
-	session    string
+	selection
 	challenge  []byte
 	credential []byte
 	items      []approval.Frozen
 	target     string // nonempty only for a separate settings assertion
 	expires    time.Time
+	pin        io.Closer
+}
+
+func (h held) close() {
+	if h.pin != nil {
+		_ = h.pin.Close()
+	}
+}
+
+type selection struct {
+	sid      string
+	revision uint64
 }
 
 type approvalCard struct {
@@ -35,6 +49,11 @@ type approvalCard struct {
 }
 
 func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
+	revision, ok := s.beginSelection(r)
+	if !ok {
+		http.Error(w, "passkey unavailable", http.StatusUnauthorized)
+		return
+	}
 	if s.state == "" || s.actions.Resolve == nil {
 		http.Error(w, "approval unavailable", http.StatusConflict)
 		return
@@ -76,6 +95,14 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "selection no longer pending", http.StatusConflict)
 		return
 	}
+	selected := ""
+	if models, ok := r.PostForm["model"]; ok {
+		if len(proposals) != 1 || proposals[0].Type != approval.Run || len(models) != 1 || models[0] == "" {
+			http.Error(w, "model selection refused", http.StatusBadRequest)
+			return
+		}
+		selected = models[0]
+	}
 	creds, err := passkey.List(s.state)
 	if err != nil || len(creds) == 0 {
 		refused(w, "Resolve approval", approval.Refusal{Code: "no_passkey"})
@@ -84,15 +111,29 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 	var item held
+	defer func() { item.close() }()
 	var cards []approvalCard
 	var hashes []string
 	for _, p := range proposals {
-		resolved, err := s.actions.Resolve(ctx, p)
+		candidate := p
+		if selected != "" {
+			candidate.Params = maps.Clone(p.Params)
+			candidate.Params["model"] = selected
+		}
+		resolved, err := s.actions.Resolve(ctx, candidate)
 		if err != nil {
 			refused(w, "Resolve approval", err)
 			return
 		}
-		f, err := approval.Freeze(p, resolved.Binding, "")
+		if resolved.Pin != nil {
+			if p.Type != approval.Run || len(proposals) != 1 {
+				_ = resolved.Pin.Close()
+				refused(w, "Resolve approval", approval.ErrTransition)
+				return
+			}
+			item.pin = resolved.Pin
+		}
+		f, err := approval.Freeze(p, resolved.Binding, selected)
 		if err != nil {
 			refused(w, "Resolve approval", err)
 			return
@@ -110,13 +151,15 @@ func (s *Site) freeze(w http.ResponseWriter, r *http.Request) {
 			SlackPreview: slackDraft(p.Type, f.Params)})
 	}
 	page := ceremonyPage{Action: "/approve", Title: "Approve these frozen actions", Button: "Approve with passkey", Cards: cards}
-	s.challenge(w, r, creds[0], item, page, func(instance string, nonce []byte) ([]byte, error) {
+	s.challenge(w, creds[0], revision, item, page, func(instance string, nonce []byte) ([]byte, error) {
 		return passkey.ApprovalChallenge(s.origin.URL(), instance, nonce, hashes)
 	})
+	item.pin = nil // challenge either owns it now or has closed it
 }
 
-func (s *Site) challenge(w http.ResponseWriter, r *http.Request, cred passkey.Stored, item held, page ceremonyPage,
+func (s *Site) challenge(w http.ResponseWriter, cred passkey.Stored, rev selection, item held, page ceremonyPage,
 	build func(instance string, nonce []byte) ([]byte, error)) {
+	defer func() { item.close() }()
 	j, ok := s.journal.(interface{ ID() string })
 	if !ok {
 		http.Error(w, "passkey unavailable", http.StatusServiceUnavailable)
@@ -141,25 +184,65 @@ func (s *Site) challenge(w http.ResponseWriter, r *http.Request, cred passkey.St
 		return
 	}
 	at := s.now()
-	sess, ok := s.sessions.lookup(r, s.origin, at)
+	item.selection, item.challenge, item.credential, item.expires = rev, challenge, cred.ID, at.Add(2*time.Minute)
+	s.sessions.mu.Lock()
+	sess, ok := s.currentSelection(rev, at)
 	if !ok {
-		http.Error(w, "passkey unavailable", http.StatusUnauthorized)
+		s.sessions.mu.Unlock()
+		http.Error(w, "selection no longer current", http.StatusConflict)
 		return
 	}
-	item.session, item.challenge, item.credential, item.expires = sessionID(r, s.origin), challenge, cred.ID, at.Add(2*time.Minute)
-	s.sessions.mu.Lock()
 	if s.held == nil {
 		s.held = make(map[string]held)
 	}
-	for k, h := range s.held {
-		if !at.Before(h.expires) || h.session == item.session {
-			delete(s.held, k)
-		}
-	}
 	s.held[key] = item
+	item.pin = nil
 	s.sessions.mu.Unlock()
 	page.JSON, page.CSRF = template.JS(opts), sess.csrf
 	render(w, "ceremony", http.StatusOK, page)
+}
+
+// Revoke as soon as an authenticated selection begins, including one that cannot resolve.
+func (s *Site) beginSelection(r *http.Request) (selection, bool) {
+	id, at := sessionID(r, s.origin), s.now()
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	sess, ok := s.sessions.active[id]
+	if s.closing || !ok || !at.Before(sess.expires) {
+		return selection{}, false
+	}
+	s.pruneHeld(at, id)
+	sess.revision++
+	s.sessions.active[id] = sess
+	return selection{id, sess.revision}, true
+}
+
+func (s *Site) currentSelection(rev selection, at time.Time) (session, bool) {
+	sess, ok := s.sessions.active[rev.sid]
+	return sess, !s.closing && ok && at.Before(sess.expires) && sess.revision == rev.revision
+}
+
+// pruneHeld runs with sessions.mu held. An empty sid prunes expired items only.
+func (s *Site) pruneHeld(at time.Time, sid string) {
+	for k, h := range s.held {
+		if _, current := s.currentSelection(h.selection, at); !current || h.sid == sid || !at.Before(h.expires) {
+			delete(s.held, k)
+			h.close()
+		}
+	}
+}
+
+func (s *Site) ExpireChallenges(at time.Time) {
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	s.pruneHeld(at, "")
+}
+
+func (s *Site) CloseChallenges() {
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	s.closing = true
+	s.pruneHeld(s.now(), "")
 }
 
 func (s *Site) takeChallenge(r *http.Request, settings bool) (held, bool) {
@@ -167,13 +250,9 @@ func (s *Site) takeChallenge(r *http.Request, settings bool) (held, bool) {
 	key, sid := r.PostForm.Get("nonce"), sessionID(r, s.origin)
 	s.sessions.mu.Lock()
 	defer s.sessions.mu.Unlock()
-	for k, h := range s.held {
-		if !at.Before(h.expires) {
-			delete(s.held, k)
-		}
-	}
+	s.pruneHeld(at, "")
 	item, ok := s.held[key]
-	if !ok || item.session != sid || settings != (item.target != "") {
+	if !ok || item.sid != sid || settings != (item.target != "") {
 		return held{}, false
 	}
 	delete(s.held, key)
@@ -186,6 +265,7 @@ func (s *Site) openAssertion(w http.ResponseWriter, r *http.Request, settings bo
 		http.Error(w, "passkey challenge refused", http.StatusConflict)
 		return held{}, nil
 	}
+	defer func() { item.close() }()
 	creds, err := passkey.List(s.state)
 	if err != nil {
 		http.Error(w, "passkey assertion refused", http.StatusConflict)
@@ -219,7 +299,17 @@ func (s *Site) openAssertion(w http.ResponseWriter, r *http.Request, settings bo
 			return held{}, nil
 		}
 		if err == nil {
-			return item, key
+			s.sessions.mu.Lock()
+			_, current := s.currentSelection(item.selection, s.now())
+			s.sessions.mu.Unlock()
+			if !current {
+				clear(key)
+				http.Error(w, "selection no longer current", http.StatusConflict)
+				return held{}, nil
+			}
+			authorized := item
+			item.pin = nil
+			return authorized, key
 		}
 		break
 	}
@@ -232,28 +322,40 @@ func (s *Site) consume(w http.ResponseWriter, r *http.Request) {
 	if key == nil {
 		return
 	}
+	defer item.close()
 	defer clear(key)
+	if err := s.commitApproval(item, key); err != nil {
+		refused(w, "Approve actions", err)
+		return
+	}
+	render(w, "submitted", http.StatusOK, item.items)
+}
+
+// A new selection and a verified assertion must agree on which operation won.
+// Hold the same lock as beginSelection until the approval is durable. The handler
+// may unseal credentials here, but launches and provider writes happen off this lock.
+func (s *Site) commitApproval(item held, key []byte) error {
+	s.sessions.mu.Lock()
+	defer s.sessions.mu.Unlock()
+	at := s.now()
+	if _, current := s.currentSelection(item.selection, at); !current || !at.Before(item.expires) {
+		return approval.ErrStale
+	}
 	batchChallenge := []byte(nil)
 	if len(item.items) > 1 {
 		batchChallenge = item.challenge
 	}
 	if s.actions.Approve != nil {
-		if err := s.actions.Approve(item.items, item.credential, batchChallenge, key); err != nil {
-			refused(w, "Approve actions", err)
-			return
-		}
-	} else {
-		// A trusted resolver with no dispatcher can only record an approval. The live service never supplies
-		// a resolver for a missing handler, including agent.run until the supervisor joins it.
-		j, ok := s.journal.(interface {
-			ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
-		})
-		if !ok || j.ApproveAll(item.items, item.credential, batchChallenge, s.now()) != nil {
-			http.Error(w, "approval refused", http.StatusConflict)
-			return
-		}
+		return s.actions.Approve(item.items, item.credential, batchChallenge, key, item.pin)
 	}
-	render(w, "submitted", http.StatusOK, item.items)
+	// A trusted resolver with no dispatcher can only record an approval.
+	j, ok := s.journal.(interface {
+		ApproveAll([]approval.Frozen, []byte, []byte, time.Time) error
+	})
+	if !ok {
+		return approval.ErrTransition
+	}
+	return j.ApproveAll(item.items, item.credential, batchChallenge, at)
 }
 
 func refused(w http.ResponseWriter, operation string, err error) {
