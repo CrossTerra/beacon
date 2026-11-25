@@ -171,7 +171,9 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Site) headers(h http.Header) {
 	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` on a form POST, which
+	// allowForm refuses. Referrers still never leave the origin.
+	h.Set("Referrer-Policy", "same-origin")
 	h.Set("Cache-Control", "no-store")
 	if s.origin.Secure() {
 		h.Set("Strict-Transport-Security", "max-age=31536000")
