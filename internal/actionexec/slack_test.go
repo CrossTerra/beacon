@@ -208,7 +208,7 @@ type slackFixture struct {
 func slackTest(t *testing.T) *slackFixture {
 	t.Helper()
 	s := &slackFixture{t: t, at: time.Unix(1_800_000_000, 0)}
-	s.f = &fakeSlack{t: t, readScopes: strings.Join(slackReadScopes, ","), writeScopes: "chat:write," + strings.Join(slackReadScopes, ","),
+	s.f = &fakeSlack{t: t, readScopes: "identify," + strings.Join(slackReadScopes, ","), writeScopes: "chat:write," + strings.Join(slackReadScopes, ","),
 		members: []string{fixtureUser, "U0OTHER", "U0FOX"}, names: map[string]string{"U0OTHER": "Dana Scully", "U0FOX": "Fox Mulder"}}
 	dir := filepath.Join(t.TempDir(), "state")
 	var err error

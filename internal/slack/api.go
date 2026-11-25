@@ -416,7 +416,8 @@ func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, er
 		}
 	}
 	for _, s := range id.Scopes {
-		if !need[s] {
+		// Slack adds identify to every user token it issues; it reads only the user's own identity.
+		if !need[s] && s != "identify" {
 			id.Extra = append(id.Extra, s)
 		}
 	}
