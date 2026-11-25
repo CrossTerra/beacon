@@ -22,8 +22,9 @@ blocking findings and evidence with file paths. Do not use the person's real cre
 
 Runtime dependencies added for the Go service: `golang.org/x/sys` for peer credentials, process tables and
 `F_FULLFSYNC`; `fxamacker/cbor/v2` for WebAuthn; `godbus/dbus/v5` for Linux Secret Service and notifications;
-and `tobischo/gokeepasslib/v3` for KDBX. The latter is pinned at v3.6.1 with the narrow local in-memory-key-file
-backport described in `third_party/gokeepasslib/`. Its Argon2 dependencies are `golang.org/x/crypto` and
+and `tobischo/gokeepasslib/v3` for KDBX. Go stays pinned at 1.24.3. The KDBX library is pinned at v3.6.1 with
+the local Argon2id key derivation patch in [`third_party/gokeepasslib/NOTICE`](../third_party/gokeepasslib/NOTICE).
+Its Argon2 dependencies are `golang.org/x/crypto` and
 `tobischo/argon2` (including Argon2d). The independent `go-webauthn/webauthn` and Chrome driver are test-only.
 There is no dependency for the served pages. Offline migration uses macOS's `/usr/bin/sqlite3`. Details and
 operator checks are in [installation and cutover](install.md).

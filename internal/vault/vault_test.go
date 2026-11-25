@@ -27,7 +27,13 @@ func TestKeyFileIsPrivateAndAChangedFileIsNotOverwritten(t *testing.T) {
 	if err != nil || got != "secret-one" {
 		t.Fatalf("get %q %v", got, err)
 	}
-	beforeSave = func() {
+	beforeReplace = func() {
+		staged, err := filepath.Glob(filepath.Join(dir, "."+dbName+"-*"))
+		if err != nil || len(staged) != 1 {
+			t.Errorf("candidate was not staged before the final check: %v, %v", staged, err)
+		} else if info, err := os.Stat(staged[0]); err != nil || info.Size() == 0 {
+			t.Errorf("candidate was not written before the final check: %v", err)
+		}
 		body, err := os.ReadFile(filepath.Join(dir, dbName))
 		if err != nil {
 			t.Error(err)
@@ -37,7 +43,7 @@ func TestKeyFileIsPrivateAndAChangedFileIsNotOverwritten(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	t.Cleanup(func() { beforeSave = nil })
+	t.Cleanup(func() { beforeReplace = nil })
 	if err := Put(dir, b, "secret-two"); err != ErrConflict {
 		t.Fatalf("overwrote a changed vault: %v", err)
 	}
@@ -57,7 +63,7 @@ func TestCreateDoesNotOverwriteAnExistingKeyFileOrVault(t *testing.T) {
 	if err := os.WriteFile(keyPath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Create(dir); err != ErrExists {
+	if err := Setup(t.Context(), dir); err != ErrPartial {
 		t.Fatalf("overwrote an existing key file: %v", err)
 	}
 	got, err := os.ReadFile(keyPath)
@@ -77,7 +83,7 @@ func TestCreateDoesNotOverwriteAnExistingKeyFileOrVault(t *testing.T) {
 	if err := os.WriteFile(dbPath, dbOriginal, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Create(other); err != ErrExists {
+	if err := Setup(t.Context(), other); err != ErrKeyMissing {
 		t.Fatalf("overwrote an existing vault: %v", err)
 	}
 	got, err = os.ReadFile(dbPath)
@@ -108,6 +114,29 @@ func TestCreateDoesNotOverwriteAnExistingKeyFileOrVault(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(fresh, dbName)); err != nil || !bytes.Equal(got, db) {
 		t.Fatal("second create replaced the vault")
+	}
+}
+
+func TestSetupRefusesASecretServiceReferenceWithoutADatabase(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := approval.PrivateDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	ref := filepath.Join(dir, keyRef)
+	id := []byte("0123456789abcdef0123456789abcdef")
+	if err := os.WriteFile(ref, id, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Setup(t.Context(), dir); err != ErrPartial {
+		t.Fatalf("a partial setup was not refused: %v", err)
+	}
+	if got, err := os.ReadFile(ref); err != nil || !bytes.Equal(got, id) {
+		t.Fatal("setup replaced the Secret Service reference")
+	}
+	for _, name := range []string{dbName, keyName} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup must not create %s beside the existing reference", name)
+		}
 	}
 }
 
@@ -201,7 +230,7 @@ func TestConflictRetriesOnceWhenTheEntryIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	var once bool
-	beforeSave = func() {
+	beforeReplace = func() {
 		if once {
 			return
 		}
@@ -244,7 +273,7 @@ func TestConflictRetriesOnceWhenTheEntryIsUnchanged(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	t.Cleanup(func() { beforeSave = nil })
+	t.Cleanup(func() { beforeReplace = nil })
 	if err := Put(dir, a, "secret-a2"); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +294,7 @@ func TestChangedEntryIsNotRetriedAndReadBackMustMatch(t *testing.T) {
 	if err := Put(dir, b, "secret-one"); err != nil {
 		t.Fatal(err)
 	}
-	beforeSave = func() {
+	beforeReplace = func() {
 		key, err := os.ReadFile(filepath.Join(dir, keyName))
 		if err != nil {
 			t.Error(err)
@@ -299,11 +328,11 @@ func TestChangedEntryIsNotRetriedAndReadBackMustMatch(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	t.Cleanup(func() { beforeSave = nil })
+	t.Cleanup(func() { beforeReplace = nil })
 	if err := Put(dir, b, "secret-two"); err != ErrConflict {
 		t.Fatalf("overwrote a changed entry: %v", err)
 	}
-	beforeSave = nil
+	beforeReplace = nil
 	if got, err := Get(dir, b); err != nil || got != "other-writer" {
 		t.Fatalf("entry %q %v", got, err)
 	}

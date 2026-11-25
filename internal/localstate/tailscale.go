@@ -54,6 +54,7 @@ type serveStatus struct {
 		Handlers map[string]struct{ Proxy, Path, Text string }
 	}
 	AllowFunnel map[string]bool
+	Foreground  map[string]*serveStatus
 }
 
 func readServe(ctx context.Context, run TailCommand) (serveStatus, error) {
@@ -69,6 +70,13 @@ func (s serveStatus) ready(o approval.Origin) (bool, error) {
 	host := o.Host() + ":443"
 	if s.AllowFunnel[host] {
 		return false, errors.New("Tailscale Funnel is on for this origin; disable it first")
+	}
+	for _, fg := range s.Foreground {
+		if fg != nil {
+			if _, mapped := fg.Web[host]; mapped {
+				return false, errors.New("a foreground Tailscale Serve session uses the Beacon origin; stop it first")
+			}
+		}
 	}
 	for route, web := range s.Web {
 		if s.AllowFunnel[route] {
@@ -87,6 +95,9 @@ func (s serveStatus) ready(o approval.Origin) (bool, error) {
 	root, ok := web.Handlers["/"]
 	if !head.HTTPS || head.TCPForward != "" || !ok || strings.TrimSuffix(root.Proxy, "/") != proxy || root.Path != "" || root.Text != "" {
 		return false, errors.New("Tailscale Serve port 443 does not proxy this origin to Beacon; existing configuration was not changed")
+	}
+	if len(web.Handlers) != 1 {
+		return false, errors.New("the Beacon origin must route exclusively to Beacon; remove the other Tailscale Serve paths on this origin")
 	}
 	return true, nil
 }

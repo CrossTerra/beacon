@@ -50,7 +50,6 @@ func slackApp(t *testing.T, srv *slacktest.Server, store keychain.Store, rec **e
 
 func TestSourceAddSlack(t *testing.T) {
 	srv := slacktest.New(t)
-	srv.Scopes = slacktest.AllScopes + ",chat:write"
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 	must(t, os.WriteFile(cfg, []byte(strings.Replace(slackConfig, "  identities:\n    slack: slack:user:U0WINTON\n", "", 1)+"  []\n"), 0o600))
@@ -75,6 +74,16 @@ func TestSourceAddSlack(t *testing.T) {
 	if _, err := store.Get(keychain.SlackAccount(slacktest.Workspace, slacktest.User)); err == nil {
 		t.Fatal("a refused token was stored")
 	}
+	for _, scopes := range []string{slacktest.AllScopes + ",chat:write", ""} {
+		srv.Scopes = scopes
+		if code := add(slacktest.Token, "--channel", "C0REVIEW"); code == 0 || !strings.Contains(errOut.String(), "read") {
+			t.Fatalf("setup accepted a broad or unreported Slack grant: %d\n%s", code, errOut.String())
+		}
+		if _, err := store.Get(keychain.SlackAccount(slacktest.Workspace, slacktest.User)); err == nil {
+			t.Fatal("the unverified grant was stored")
+		}
+	}
+	srv.Scopes = slacktest.AllScopes
 
 	if code := add(slacktest.Token, "--channel", "C0REVIEW"); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
@@ -83,7 +92,7 @@ func TestSourceAddSlack(t *testing.T) {
 	if strings.Contains(text, slacktest.Token) || strings.Contains(text, "tokenvalue") {
 		t.Fatalf("the token was printed:\n%s", text)
 	}
-	for _, want := range []string{"slack:T0ACME:U0WINTON", "chat:write", "person.identities.slack: slack:user:U0WINTON"} {
+	for _, want := range []string{"slack:T0ACME:U0WINTON", "person.identities.slack: slack:user:U0WINTON"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output misses %q:\n%s", want, text)
 		}

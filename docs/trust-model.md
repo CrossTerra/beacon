@@ -109,10 +109,14 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
    collector and app Signal keys are in `unattended.kdbx`, not plaintext configuration. The key is a private
    file on macOS, and on Linux is in Secret Service when setup finds it, otherwise a private file. An existing
    vault never receives a replacement key. Same-user processes can read this vault. KeePassXC edits are picked
-   up without a restart; writes check the prior file hash and do not knowingly overwrite a conflicting edit.
+   up without a restart; writes sync a candidate first, then check the prior file hash immediately before rename.
+   That does not close the last check-to-rename race against KeePassXC. Partial setup fails rather than replacing
+   the key or silently using an incomplete vault.
    Credentials redact in output and are not stored in the journal, passed to an agent, or logged. The only
    OS Keychain access is the person's explicit one-time collector import; it copies only configured collector
-   items, without updating or deleting them. Google tokens are exchanged using PKCE and checked `state`; access
+   items, without updating or deleting them. GitHub and Slack imports refuse grants not reported to be read-only.
+   GitHub fine-grained tokens without a reported grant must be newly issued read-only tokens entered directly by
+   the operator, who checks those permissions at issuance. Google tokens are exchanged using PKCE and checked `state`; access
    tokens are kept only in memory. Signal must use HTTPS except for a loopback test endpoint. No daemon runs as root.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
@@ -143,7 +147,8 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
 11. **Reproducible, not signed.** The [installer](install.md) builds from the audited `git archive`, refuses
     tracked edits and checks the commit in the executable. User service managers start it at login. The exact
     commit and the person's supply chain are trusted, not a code signature. Cutover archives a fully drained
-    Swift SQLite journal, never replays it, and starts a strictly newer journal with Signal sequence 1.
+    Swift SQLite journal, never replays it, and starts a strictly newer journal with Signal sequence 1. A retry
+    rechecks both the archive checksum and the closed source, including committed WAL, before handing off.
 12. **Services end with the service.** The [Go reaper](supervision.md) cancels restarts and stops each process
     group and tracked descendant even after a service crash. It retains the instance lock through cleanup;
     an unconfirmed sweep must be recovered before accepting proposals. A copied session cannot sweep the
@@ -175,6 +180,7 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
      Slack's `provided` list are not. Saving the token checks `X-OAuth-Scopes` against the scopes Beacon needs.
 16. **Enrollment does not grant a usable write key to an edited credential list.** The HTTP listeners stay on
      loopback. They enforce the canonical Host and, behind a private Tailscale proxy, the configured login header.
+     Setup verifies that the canonical origin serves only Beacon, with no other Serve handlers on that origin.
      A browser needs a memory-only session to see proposals. The login header does not identify local processes;
      cookies can be received by another port on the same host. `beacon setup` prints a one-time passkey code and
      refuses while the service is running. `/passkeys/new` registers one passkey from that code. It stores
@@ -254,8 +260,8 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 - **Slack read scopes are broad, and the token is the person's.** `channels:history` can read every public channel,
   `search:read` everything the person can find, and `users:read` every member's profile. Beacon calls nine read methods and reads the conversations its
-  collection names, but the token itself is not narrower, and a token the person reuses may hold write scopes Beacon
-  never calls. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
+  collection names, but the token itself is not narrower. Setup refuses extra scopes; a later out-of-band grant change
+  is outside that check. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
   [api.slack.com/apps](https://api.slack.com/apps).
 - **Slack approval checks are snapshots.** Visibility, membership, permissions and the root can change after
   the final read; Slack alone enforces its rules when it accepts a post. A channel made private after intake keeps

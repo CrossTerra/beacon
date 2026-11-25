@@ -31,15 +31,34 @@ installed_origin() {
 	esac
 }
 
+macctl() { LC_ALL=C /bin/launchctl "$@"; }
+
+launchd_loaded() {
+	local reply
+	if reply=$(macctl print "$1" 2>&1); then return 0; fi
+	if [[ "$reply" == *'Could not find service "'* ]]; then return 1; fi
+	printf 'Could not inspect launchd service %s.\n' "$1" >&2
+	return 2
+}
+
 service_loaded() {
 	local state
 	if [[ "$platform" == Darwin ]]; then
-		/bin/launchctl print "$domain" >/dev/null || return 2
-		if /bin/launchctl print "$domain/dev.beacon.serve" >/dev/null 2>&1; then return 0; fi
-		return 1
+		macctl print "$domain" >/dev/null || return 2
+		launchd_loaded "$domain/dev.beacon.serve"
+		return
 	fi
-	state=$(systemctl --user show -p LoadState --value beacon.service) || return 2
-	case "$state" in loaded|masked|error|bad-setting) return 0 ;; not-found) return 1 ;; *) return 2 ;; esac
+	state=$(systemctl --user show -p LoadState -p ActiveState beacon.service) || return 2
+	case "$(sed -n 's/^ActiveState=//p' <<< "$state")" in
+		active|activating|deactivating|reloading|refreshing|maintenance) return 0 ;;
+		inactive|failed) ;;
+		*) return 2 ;;
+	esac
+	case "$(sed -n 's/^LoadState=//p' <<< "$state")" in
+		loaded|masked|error|bad-setting) return 0 ;;
+		not-found) return 1 ;;
+		*) return 2 ;;
+	esac
 }
 
 stop_service() {
@@ -47,7 +66,7 @@ stop_service() {
 	service_loaded || status=$?
 	case $status in
 		1) return 0 ;;
-		0) if [[ "$platform" == Darwin ]]; then /bin/launchctl bootout "$domain/dev.beacon.serve"
+		0) if [[ "$platform" == Darwin ]]; then macctl bootout "$domain/dev.beacon.serve"
 			else systemctl --user stop beacon.service; fi ;;
 		*) return 1 ;;
 	esac
@@ -55,7 +74,7 @@ stop_service() {
 
 start_service() {
 	if [[ "$platform" == Darwin ]]; then
-		/bin/launchctl enable "$domain/dev.beacon.serve" && /bin/launchctl bootstrap "$domain" "$unit"
+		macctl enable "$domain/dev.beacon.serve" && macctl bootstrap "$domain" "$unit"
 	else
 		systemctl --user daemon-reload && systemctl --user enable --now beacon.service
 	fi
@@ -72,7 +91,7 @@ wait_ready() {
 
 service_running() {
 	if [[ "$platform" == Darwin ]]; then
-		/bin/launchctl print "$domain/dev.beacon.serve" 2>/dev/null | grep -E '^[[:space:]]*state = running$' >/dev/null
+		macctl print "$domain/dev.beacon.serve" 2>/dev/null | grep -E '^[[:space:]]*state = running$' >/dev/null
 	else
 		systemctl --user is-active --quiet beacon.service
 	fi
@@ -127,14 +146,86 @@ check_unit() {
 }
 
 # This is a guard, not a quit path. Do not signal or start Swift or the retired collector.
-swift_stopped() {
+swift_pgrep() { /usr/bin/pgrep -U "${domain#gui/}" -x 'Beacon(\.disabled)?'; }
+
+legacy_stopped() {
 	local status=0
-	/usr/bin/pgrep -U "$(id -u)" -x Beacon >/dev/null || status=$?
-	[[ "$status" == 1 ]] || die "Quit Beacon.app from its menu before cutover (or could not verify it stopped)."
-	if [[ -e "$home/Library/LaunchAgents/dev.beacon.agent.plist" || -L "$home/Library/LaunchAgents/dev.beacon.agent.plist" ]] ||
-		/bin/launchctl print "$domain/dev.beacon.agent" >/dev/null 2>&1; then
-		die "Unload and remove the retired dev.beacon.agent LaunchAgent before cutover. See docs/install.md."
+	swift_pgrep >/dev/null || status=$?
+	if [[ "$status" != 1 ]]; then
+		echo "Quit Beacon.app from its menu before cutover (or could not verify it stopped)." >&2
+		return 1
 	fi
+	macctl print "$domain" >/dev/null || return 1
+	local target
+	for target in "$domain/dev.beacon.agent" "user/${domain#gui/}/dev.beacon.agent"; do
+		status=0
+		launchd_loaded "$target" || status=$?
+		case $status in
+			0) printf 'Unload the retired %s LaunchAgent before cutover. See docs/install.md.\n' "$target" >&2; return 1 ;;
+			1) ;;
+			*) return 1 ;;
+		esac
+	done
+}
+
+park_legacy() {
+	local disabled="$home/Library/dev.beacon.agent.plist.disabled"
+	if [[ -e "$legacy_plist" || -L "$legacy_plist" ]]; then
+		[[ -f "$legacy_plist" && ! -L "$legacy_plist" && ! -L "${legacy_plist%/*}" && ! -e "$disabled" && ! -L "$disabled" ]] ||
+			die "Move $legacy_plist out of LaunchAgents yourself before continuing."
+		mv "$legacy_plist" "$disabled"
+		printf 'Disabled the retired LaunchAgent plist: %s\n' "$disabled"
+	fi
+	if [[ -e "$swift_exec" || -L "$swift_exec" ]]; then
+		[[ "$migrate" == true && -f "$swift_exec" && ! -L "$swift_exec" && ! -L "$home/Applications/Beacon.app" &&
+			! -L "$home/Applications" && ! -L "${swift_exec%/*}" && ! -L "${swift_exec%/MacOS/Beacon}" &&
+			! -e "$swift_exec.disabled" && ! -L "$swift_exec.disabled" ]] ||
+			die "Disable the old Beacon.app startup path or use --migrate-swift with the stopped, installed bundle. See docs/install.md."
+		# Login Items can follow a moved bundle. Disable its executable instead; leave the old helper and data alone.
+		mv "$swift_exec" "$swift_exec.disabled"
+		printf 'Disabled the stopped Swift executable: %s.disabled\n' "$swift_exec"
+	fi
+}
+
+legacy_clear() {
+	legacy_stopped || return 1
+	if [[ -e "$state/tether.session" || -L "$state/tether.session" ]]; then
+		echo "Swift tether cleanup is unconfirmed. Finish its sweep before cutover." >&2
+		return 1
+	fi
+	if [[ -e "$legacy_plist" || -L "$legacy_plist" || -e "$swift_exec" || -L "$swift_exec" ]]; then
+		echo "A legacy Beacon startup path is still enabled. The Go service was not started." >&2
+		return 1
+	fi
+}
+
+artifact_hash() {
+	if command -v sha256sum >/dev/null; then sha256sum < "$1" | cut -d ' ' -f1
+	else shasum -a 256 < "$1" | cut -d ' ' -f1; fi
+}
+
+uninstall_beacon() {
+	local installed_hash
+	stop_service || die "Could not confirm Beacon stopped; nothing removed."
+	if [[ "$platform" == Linux ]]; then
+		if [[ -f "$unit" ]]; then systemctl --user disable beacon.service; fi
+		# Disable may refuse a missing unit file. Clear only the enable link made for this unit.
+		local link="${unit%/*}/default.target.wants/beacon.service" target
+		if [[ -L "$link" ]]; then
+			target=$(readlink "$link")
+			if [[ "$target" == "$unit" || "$target" == ../beacon.service ]]; then rm -f "$link"; fi
+		fi
+	fi
+	rm -f "$unit"
+	[[ "$platform" != Linux ]] || systemctl --user daemon-reload
+	if [[ -f "$bin" && ! -L "$bin" && -f "$receipt" && ! -L "$receipt" ]] &&
+		installed_hash=$(cat "$receipt") && [[ "$installed_hash" =~ ^[0-9a-f]{64}$ && "$(artifact_hash "$bin")" == "$installed_hash" ]]; then
+		rm -f "$bin"
+	elif [[ -e "$bin" || -L "$bin" ]]; then
+		printf 'Left %s in place: not the binary recorded by this installer.\n' "$bin"
+	fi
+	if [[ -f "$receipt" && ! -L "$receipt" ]]; then rm -f "$receipt"; fi
+	printf 'Uninstalled Beacon service. State and credentials kept at %s.\n' "$state"
 }
 
 offer_path() {
@@ -152,7 +243,8 @@ offer_path() {
 main() {
 	local platform home prefix='' origin='' previous='' dry=false migrate=false uninstall=false
 	local state config unit bin domain tmp candidate sha had_unit=false stopped=false changed=false good=false
-	local binary_stage='' unit_stage='' lock='' answer p
+	local binary_stage='' unit_stage='' receipt_stage='' lock='' answer p
+	local receipt legacy_plist swift_exec verify_swift=false
 	while (($#)); do
 		case "$1" in
 			--origin) origin=${2:?--origin needs localhost or tailscale}; shift ;;
@@ -186,6 +278,9 @@ main() {
 	fi
 	domain="gui/$(id -u)"
 	bin="$home/.local/bin/beacon"
+	receipt="${bin%/*}/.beacon-installed.sha256"
+	legacy_plist="$home/Library/LaunchAgents/dev.beacon.agent.plist"
+	swift_exec="$home/Applications/Beacon.app/Contents/MacOS/Beacon"
 	if [[ "$platform" == Darwin ]]; then
 		state="$home/Library/Application Support/beacon"
 		config="$state/config.yaml"
@@ -202,16 +297,13 @@ main() {
 	[[ "$config" == /* && "$state$unit$bin$config" != *$'\n'* && "$state$unit$bin$config" != *$'\r'* ]] || die "Use absolute paths without line breaks."
 	[[ ! -L "$state" && ! -L "$unit" && ! -d "$bin" ]] || die "Unexpected symlink or directory in the install destination."
 	if [[ "$uninstall" == true ]]; then
-		if [[ -f "$unit" ]]; then
-			stop_service || die "Could not stop Beacon; nothing removed."
-			if [[ "$platform" == Linux ]]; then
-				systemctl --user disable beacon.service
-			fi
-			rm -f "$unit"
-			[[ "$platform" != Linux ]] || systemctl --user daemon-reload
-			[[ -L "$bin" ]] || rm -f "$bin"
-		fi
-		printf 'Uninstalled Beacon service. State and credentials kept at %s.\n' "$state"
+		(
+			mkdir -p "${bin%/*}"
+			uninstall_lock="${bin%/*}/.beacon-install.lock"
+			mkdir "$uninstall_lock" || die "Another Beacon install is in progress (or left $uninstall_lock)."
+			trap 'rmdir "$uninstall_lock"' EXIT
+			uninstall_beacon
+		)
 		return
 	fi
 	if [[ -e "$state/settings.json" || -L "$state/settings.json" ]]; then
@@ -245,8 +337,17 @@ main() {
 						if [[ "$platform" == Linux ]]; then systemctl --user disable beacon.service || true; fi
 						rm -f "$unit"
 					fi
+					if [[ -f "$tmp/old-receipt" ]]; then
+						cp "$tmp/old-receipt" "$receipt_stage" && mv -f "$receipt_stage" "$receipt"
+					else rm -f "$receipt"; fi
 				fi
-				if [[ "$had_unit" == true ]]; then start_service || printf 'Could not restart the previous Go service.\n' >&2; fi
+				if [[ "$had_unit" == true ]]; then
+					if [[ "$platform" != Darwin ]] || legacy_clear; then
+						start_service || printf 'Could not restart the previous Go service.\n' >&2
+					else
+						printf 'The previous Go service was left stopped.\n' >&2
+					fi
+				fi
 			else
 				printf 'New service could not be stopped; previous files are in %s.\n' "$tmp" >&2
 				tmp=
@@ -254,6 +355,7 @@ main() {
 		fi
 		[[ -z "$binary_stage" ]] || rm -f "$binary_stage"
 		[[ -z "$unit_stage" ]] || rm -f "$unit_stage"
+		[[ -z "$receipt_stage" ]] || rm -f "$receipt_stage"
 		[[ -z "$lock" ]] || rmdir "$lock"
 		[[ -z "$tmp" ]] || rm -rf "$tmp"
 	}
@@ -275,18 +377,34 @@ main() {
 	mkdir "$want_lock" || die "Another Beacon install is in progress (or left $want_lock)."
 	lock=$want_lock
 	[[ ! -e "$bin" && ! -L "$bin" ]] || cp -P "$bin" "$tmp/old-bin"
+	if [[ -e "$receipt" || -L "$receipt" ]]; then
+		[[ -f "$receipt" && ! -L "$receipt" ]] || die "Unexpected install receipt at $receipt."
+		cp "$receipt" "$tmp/old-receipt"
+	fi
 	if [[ -e "$unit" ]]; then cp "$unit" "$tmp/old-unit"; had_unit=true; fi
 	binary_stage=$(mktemp "${bin%/*}/.beacon.XXXXXXXX")
 	unit_stage=$(mktemp "${unit%/*}/.beacon.XXXXXXXX")
+	receipt_stage=$(mktemp "${bin%/*}/.beacon-receipt.XXXXXXXX")
 	install -m 755 "$candidate" "$binary_stage"
+	artifact_hash "$binary_stage" > "$receipt_stage"
 	render_unit > "$unit_stage"
 	check_unit "$unit_stage"
 	if [[ "$dry" == false ]]; then
-		if [[ "$platform" == Darwin && ( "$migrate" == true || -L "$bin" ) ]]; then swift_stopped; fi
+		if [[ "$platform" == Darwin ]]; then legacy_stopped; fi
 		stop_service || die "Could not stop the previous service; nothing replaced."
 		stopped=true
 		if [[ -n "$previous" ]]; then "$candidate" setup --state-dir "$state" --check-stopped; fi
-		if [[ "$migrate" == true ]]; then "$candidate" migrate-swift --state-dir "$state"; fi
+		if [[ "$platform" == Darwin ]]; then
+			park_legacy
+			legacy_clear
+			if [[ "$migrate" == true ]]; then
+				"$candidate" migrate-swift --state-dir "$state"
+				verify_swift=true
+			elif [[ -e "$state/app/journal.sqlite" || -L "$state/app/journal.sqlite" || -e "$state/act.json" || -L "$state/act.json" ]]; then
+				[[ -d "$state/swift-archive" ]] || die "A Swift journal has not been archived. Use --migrate-swift."
+				verify_swift=true
+			fi
+		fi
 	fi
 	if [[ -z "$previous" ]]; then
 		if [[ "$dry" == true ]]; then
@@ -296,10 +414,16 @@ main() {
 			"$candidate" setup --state-dir "$state" --origin "$origin"
 		fi
 	fi
+	if [[ "$dry:$platform" == false:Darwin ]]; then
+		legacy_clear
+		if [[ "$verify_swift" == true ]]; then "$candidate" migrate-swift --state-dir "$state"; fi
+	fi
 	changed=true
 	mv -f "$binary_stage" "$bin"
 	mv -f "$unit_stage" "$unit"
+	mv -f "$receipt_stage" "$receipt"
 	if [[ "$dry" == false ]]; then
+		if [[ "$platform" == Darwin ]]; then legacy_clear; fi
 		if ! start_service || ! wait_ready; then die "Beacon did not become ready; restoring the previous install."; fi
 	fi
 	good=true

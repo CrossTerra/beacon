@@ -257,26 +257,10 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := keychain.SlackUserToken(token); err != nil {
-		return err
-	}
-	transport := a.transport
-	if transport == nil {
-		transport = egress.Transport
-	}
-	base := a.slackBase
-	if base == "" {
-		base = slack.Base
-	}
-	id, err := slack.Verify(ctx, limited.HTTPClient(transport(slack.Hosts(base))), base, token)
+	defer token.Clear()
+	id, err := a.checkSlackReadGrant(ctx, token)
 	if err != nil {
-		if errors.Is(err, source.ErrUnauthorized) {
-			return errors.New("slack refused the token, or it is not a user token; nothing was stored")
-		}
 		return err
-	}
-	if missing := append(append([]string(nil), id.Missing...), id.MissingNames...); len(missing) > 0 {
-		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(missing, ", "))
 	}
 	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: config.SlackChannels(channels)}
 	if src.Name == "slack" {
@@ -299,9 +283,6 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(a.stdout, "Stored the Slack token in the unattended vault (%s)\nEnabled source %s (workspace %s, user %s)\n",
 		account, src.SourceName(), id.Workspace, id.User)
-	if len(id.Extra) > 0 {
-		fmt.Fprintf(a.stdout, "The token also holds %s. Beacon never calls a method that uses them; a token with only the read scopes is safer.\n", strings.Join(id.Extra, ", "))
-	}
 	if cfg.Person.Identities[src.SourceName()] == "" {
 		fmt.Fprintf(a.stdout, "Set person.identities.%s: slack:user:%s so your own messages carry by.\n", src.SourceName(), id.User)
 	}
@@ -438,9 +419,13 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 	host := fs.String("host", "", "GitHub API host (default api.github.com; an enterprise host uses /api/v3)")
 	name := fs.String("name", "github", "source name")
 	fromGH := fs.Bool("from-gh", false, "import the token `gh auth token` prints")
+	newRead := fs.Bool("new-read-token", false, "confirm direct entry of a newly issued fine-grained PAT with only read permissions")
 	yes := fs.Bool("yes", false, "confirm the import; required when input is not a terminal")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *fromGH && *newRead {
+		return errors.New("--new-read-token requires direct entry, not --from-gh")
 	}
 	cfg, err := a.loadConfig(*cfgPath)
 	if err != nil {
@@ -468,6 +453,10 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 		return err
 	}
 	account := keychain.SourceAccount(src.SourceName())
+	defer token.Clear()
+	if err := a.checkGitHubReadGrant(ctx, collectorBindings(cfg)[account].Origin, token, *newRead); err != nil {
+		return err
+	}
 	if err := store.Set(account, token); err != nil {
 		return err
 	}
@@ -522,7 +511,7 @@ func (a *app) readGitHubToken(ctx context.Context, fromGH bool, host string) (ke
 	if fromGH {
 		return keychain.ReadGitHubToken(ctx, host)
 	}
-	fmt.Fprint(a.stderr, "GitHub token (input hidden): ")
+	fmt.Fprint(a.stderr, "GitHub read-only token (input hidden): ")
 	s, err := keychain.ReadSecret(ctx, a.stdin)
 	fmt.Fprintln(a.stderr)
 	return s, err

@@ -109,7 +109,7 @@ func (a *app) cmdVault(ctx context.Context, args []string) error {
 		if !isTerminal(a.stdin) {
 			return errors.New("run the one-time Keychain import yourself in a terminal with the service stopped")
 		}
-		if err := a.confirm("Confirm the collector’s provider tokens are read-only and distinct from Swift’s write tokens. Import them? [y/N] ", false); err != nil {
+		if err := a.confirm("Import the configured collector items? GitHub and Slack must report read-only grants. [y/N] ", false); err != nil {
 			return err
 		}
 		read = keychain.LegacyRead
@@ -135,7 +135,24 @@ func (a *app) cmdVault(ctx context.Context, args []string) error {
 			failures++
 			continue
 		}
-		err = keychain.ImportBound(dir, bindings[slot], secret)
+		binding := bindings[slot]
+		switch binding.Service {
+		case "github-collector":
+			err = a.checkGitHubReadGrant(ctx, binding.Origin, secret, false)
+		case "slack-collector":
+			var id slack.Identity
+			id, err = a.checkSlackReadGrant(ctx, secret)
+			if err == nil && (id.Workspace != binding.Workspace || "slack:user:"+id.User != binding.Account) {
+				err = errors.New("the Slack token is for a different workspace or user")
+			}
+		}
+		if err != nil {
+			secret.Clear()
+			fmt.Fprintf(a.stderr, "Skipped collector item %s: %v.\n", slot, err)
+			failures++
+			continue
+		}
+		err = keychain.ImportBound(dir, binding, secret)
 		secret.Clear()
 		if err != nil {
 			return err

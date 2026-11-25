@@ -1,7 +1,9 @@
 package keychain
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -43,12 +45,15 @@ func ReadBound(dir string, b vault.Binding) (Secret, error) {
 	if err != nil {
 		return Secret{}, err
 	}
-	return FromString(s)
+	if err := checkBoundValue(b, s); err != nil {
+		return Secret{}, err
+	}
+	return Secret{value: []byte(s)}, nil
 }
 
 func StoreBound(dir string, b vault.Binding, secret Secret) error {
-	if secret.Empty() {
-		return ErrNotFound
+	if err := checkBoundValue(b, string(secret.value)); err != nil {
+		return err
 	}
 	if err := vault.Create(dir); err != nil && !errors.Is(err, vault.ErrExists) {
 		return err
@@ -57,10 +62,34 @@ func StoreBound(dir string, b vault.Binding, secret Secret) error {
 }
 
 func ImportBound(dir string, b vault.Binding, secret Secret) error {
-	if secret.Empty() {
-		return ErrNotFound
+	value := secret.value
+	if b.Service == "jira" && !bytes.ContainsRune(value, '\n') {
+		// security -w renders a value containing a line feed as hex. Decode only for the Jira pair;
+		// a single-line token made of hex characters is not an encoding.
+		encoded := bytes.TrimPrefix(value, []byte("0x"))
+		decoded := make([]byte, hex.DecodedLen(len(encoded)))
+		defer clear(decoded)
+		n, err := hex.Decode(decoded, encoded)
+		if err != nil {
+			return errors.New("could not decode the legacy Jira email/token pair")
+		}
+		value = decoded[:n]
 	}
-	return vault.PutMissing(dir, b, string(secret.value))
+	if err := checkBoundValue(b, string(value)); err != nil {
+		return err
+	}
+	return vault.PutMissing(dir, b, string(value))
+}
+
+func checkBoundValue(b vault.Binding, value string) error {
+	if b.Service == "jira" {
+		_, _, err := basicParts(value)
+		return err
+	}
+	if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "\r\n\x00") {
+		return errors.New("invalid unattended credential")
+	}
+	return nil
 }
 
 func InUnattended(dir string, secret Secret) (bool, error) { return vault.Contains(dir, secret.value) }
@@ -83,5 +112,10 @@ func LegacyRead(ctx context.Context, account string) (Secret, error) {
 	if len(b) > 64<<10 {
 		return Secret{}, errors.New("the Keychain item is too large")
 	}
-	return FromString(strings.TrimSuffix(string(b), "\n"))
+	// Remove the tool's output terminator, not whitespace belonging to the credential.
+	value := bytes.TrimSuffix(b, []byte("\n"))
+	if len(value) == 0 {
+		return Secret{}, ErrNotFound
+	}
+	return Secret{value: bytes.Clone(value)}, nil
 }

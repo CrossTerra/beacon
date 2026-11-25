@@ -59,6 +59,11 @@ func ActionSlackUserToken(s Secret) bool {
 	return true
 }
 
+// FineGrainedGitHubPAT recognizes the token form only. It says nothing about the permissions granted.
+func FineGrainedGitHubPAT(s Secret) bool {
+	return len(s.value) > len("github_pat_") && bytes.HasPrefix(s.value, []byte("github_pat_")) && ActionToken(s)
+}
+
 // ActionTokenFingerprint ties a short-lived, in-memory identity check to this exact credential. It must
 // not be logged or saved, and is never accepted in place of a token.
 func ActionTokenFingerprint(s Secret) [32]byte { return sha256.Sum256(s.value) }

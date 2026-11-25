@@ -205,9 +205,8 @@ Signal accepted, is not sent again.
 ## `beacon egress`
 
 Prints every host Beacon may contact under the current config, as `host:port` and why: the Signal host, and each
-enabled source's hosts. It also lists the configured approval provider and Signal record hosts
-(`~/Library/Application Support/beacon/app/settings.json`): the GitHub API origin it merges through, and the Signal
-origin it sends approval records to. A hosted
+enabled source's hosts. It also lists the configured approval provider and Signal record hosts from
+`action-providers.json` in the service state directory. A hosted
 classifier would be listed here (DEC-7); Phase 1 has none. Beacon's transport refuses every other host.
 
 ## `beacon rules check`
@@ -222,7 +221,7 @@ Stores a source credential in the unattended vault and enables the source in the
 not written to the config.
 
 ```bash
-beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh] [--yes]
+beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh --yes | --new-read-token]
 beacon source add jira --site SITE --project KEY [--project KEY]
 beacon source add google --account EMAIL [--client-file FILE] [--gmail] [--calendar] [--drive] [--bodies] [--open]
 beacon source add slack [--channel ID|member]... [--name NAME]
@@ -230,7 +229,12 @@ beacon source add slack [--channel ID|member]... [--name NAME]
 
 With `--from-gh`, the keychain package imports the output of `gh auth token`. With `--host`, that is
 `gh auth token --hostname <hostname>`, using the hostname portion of the flag. The command asks for confirmation.
-Use `--yes` to confirm when input is piped. Without `--from-gh`, enter the GitHub token at the hidden prompt. For Jira,
+Use `--yes` to confirm when input is piped. GitHub verification reads `X-OAuth-Scopes` from the configured API's
+`GET /user` (`/api/v3/user` on Enterprise) and refuses broad scopes such as `repo` and `public_repo`.
+An import cannot prove the scope of a fine-grained PAT from GitHub's endpoint-permission headers. If GitHub does
+not report the grant, create a **new** fine-grained PAT with only read permissions on the required repositories,
+and enter it at the hidden prompt with `--new-read-token` to confirm those permissions. This option is for direct
+entry only; it is never accepted with `--from-gh` and does not override reported non-read-only scopes. For Jira,
 enter the account email and API token. The keychain reader hides terminal token input and also accepts the two lines
 from a pipe. The credential slot is `source:<name>` at the source's origin. `--name` overrides the default,
 which is the kind.
@@ -251,8 +255,10 @@ through the egress guard to `oauth2.googleapis.com`; the browser, not Beacon, op
 `auth.test` through the egress guard to `slack.com`, and nothing else. If the token lacks one of the read scopes
 (`search:read`, `channels:history`, `groups:history`, `im:history`, `mpim:history`, `channels:read`, `groups:read`,
 `mpim:read`, `usergroups:read`, `users:read`, `im:read`), it names them and stores nothing. A token already stored
-without `users:read` and `im:read` still collects; see [`sources.md`](sources.md#slack). Otherwise it stores the token as `slack:<workspace id>:<user id>`, writes the source with that `workspace`
-and `user` and each `--channel` (`--channel member` reads every channel the person is in), names any other scopes the token holds (Beacon never uses them), and, when
+without `users:read` and `im:read` still collects; see [`sources.md`](sources.md#slack). Setup also refuses
+unreported grants and any scope outside that read-only list, including `chat:write`. On success it stores the token
+under the verified workspace and user, writes the source and each `--channel` (`--channel member` reads every
+channel the person is in), and, when
 `person.identities` has no entry for the source, prints the one to add. See [`sources.md`](sources.md#slack).
 
 ## `beacon seed FILE`

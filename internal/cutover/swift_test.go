@@ -2,6 +2,7 @@ package cutover
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -94,9 +95,8 @@ func TestDrainPreconditions(t *testing.T) {
 	}
 }
 
-func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
-	dir, sqlite, db := fixture(t, entry(1, "proposed", `{"type":"agent.run"}`, "delivered")+
-		entry(2, "executed", `{}`, "delivered"))
+func leaveCommittedWAL(t *testing.T, sqlite, db, events string) {
+	t.Helper()
 	// Copy the committed WAL before its writer closes. Leave it for the archive reader as after a crash.
 	cmd := exec.CommandContext(t.Context(), sqlite, "-batch", "-init", "/dev/null", db)
 	w, err := cmd.StdinPipe()
@@ -105,7 +105,7 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 	must(t, err)
 	must(t, cmd.Start())
 	defer func() { w.Close(); cmd.Wait() }()
-	_, err = io.WriteString(w, "PRAGMA journal_mode=WAL;\n"+entry(3, "runner_closed", `{}`, "delivered")+"\nSELECT 'ready';\n")
+	_, err = io.WriteString(w, "PRAGMA journal_mode=WAL;\n"+events+"\nSELECT 'ready';\n")
 	must(t, err)
 	reader := bufio.NewReader(r)
 	if a, _ := reader.ReadString('\n'); a != "wal\n" {
@@ -122,6 +122,12 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 	must(t, cmd.Wait())
 	must(t, os.WriteFile(db, main, 0o600))
 	must(t, os.WriteFile(db+"-wal", wal, 0o600))
+}
+
+func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
+	dir, sqlite, db := fixture(t, entry(1, "proposed", `{"type":"agent.run"}`, "delivered")+
+		entry(2, "executed", `{}`, "delivered"))
+	leaveCommittedWAL(t, sqlite, db, entry(3, "runner_closed", `{}`, "delivered"))
 	must(t, os.Mkdir(filepath.Join(dir, "run"), 0o700))
 	socket := filepath.Join(dir, "run", "act.sock")
 	old, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
@@ -135,6 +141,10 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 	if m.Journal != oldID || strings.TrimSpace(sql(t, sqlite, filepath.Join(dir, archiveName, "journal.sqlite"),
 		"SELECT kind FROM entries WHERE seq=3;")) != "runner_closed" {
 		t.Fatalf("archive missing the committed WAL: %+v", m)
+	}
+	sql(t, sqlite, db, "PRAGMA wal_checkpoint(TRUNCATE);")
+	if next, err := Migrate(t.Context(), dir, sqlite); err != nil || next.SnapshotSHA256 != m.SnapshotSHA256 {
+		t.Fatalf("a WAL checkpoint invalidated an unchanged retry: %v", err)
 	}
 	closeLock()
 	if j, err := approval.OpenJournal(dir, time.Unix(0, 0), m.Journal); !errors.Is(err, approval.ErrJournalAge) {
@@ -177,6 +187,55 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 	}))
 	if err != nil || posts != 1 || result.Sent != 1 {
 		t.Fatalf("new journal delivery: %v, %d, %v", result, posts, err)
+	}
+}
+
+func TestRetryRefusesChangedSwiftState(t *testing.T) {
+	for _, what := range []string{"source WAL", "archive", "archive metadata", "Signal binding"} {
+		t.Run(what, func(t *testing.T) {
+			dir, sqlite, db := fixture(t, entry(1, "proposed", `{"type":"slack.post"}`, "delivered")+
+				entry(2, "withdrawn", `{}`, "delivered"))
+			sql(t, sqlite, db, "PRAGMA journal_mode=WAL;")
+			lockDir(t, dir)
+			_, err := Migrate(t.Context(), dir, sqlite)
+			must(t, err)
+			archived := filepath.Join(dir, archiveName, "journal.sqlite")
+			if _, err := Migrate(t.Context(), dir, sqlite); err != nil {
+				t.Fatalf("unchanged retry: %v", err)
+			}
+			switch what {
+			case "source WAL":
+				main, err := os.ReadFile(db)
+				must(t, err)
+				// Even work drained again after Swift resumed is a different history.
+				leaveCommittedWAL(t, sqlite, db, strings.ReplaceAll(entry(3, "proposed", `{"type":"slack.post"}`, "delivered")+
+					entry(4, "withdrawn", `{}`, "delivered"), "'fixture'", "'after-first-cutover'"))
+				next, err := os.ReadFile(db)
+				must(t, err)
+				if !bytes.Equal(main, next) {
+					t.Fatal("fixture change was not confined to the WAL")
+				}
+			case "archive":
+				sql(t, sqlite, archived, "UPDATE outbox SET event_id='changed' WHERE seq=2;")
+			case "archive metadata":
+				path := filepath.Join(dir, archiveName, "migration.json")
+				metadata, err := os.ReadFile(path)
+				must(t, err)
+				must(t, os.WriteFile(path, bytes.ReplaceAll(metadata, []byte(oldID), []byte("jrn_01m6a6ft00e40r2081040g2082")), 0o600))
+			case "Signal binding":
+				must(t, os.WriteFile(filepath.Join(dir, "app", "settings.json"), []byte(`{"signal":null}`), 0o600))
+			}
+			before, err := os.ReadFile(archived)
+			must(t, err)
+			if _, err := Migrate(t.Context(), dir, sqlite); !errors.Is(err, ErrChanged) {
+				t.Fatalf("retry accepted changed Swift state: %v", err)
+			}
+			after, err := os.ReadFile(archived)
+			must(t, err)
+			if !bytes.Equal(before, after) {
+				t.Fatal("retry rewrote the old archive")
+			}
+		})
 	}
 }
 

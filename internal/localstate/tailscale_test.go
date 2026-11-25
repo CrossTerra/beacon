@@ -10,6 +10,7 @@ import (
 
 func TestConfigurePrivateServeAndCheckReadBack(t *testing.T) {
 	const correct = `{"TCP":{"443":{"HTTPS":true}},"Web":{"machine.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7317"}}}}}`
+	shared := strings.Replace(correct, `"/":`, `"/other":{"Proxy":"http://127.0.0.1:8989"},"/":`, 1)
 	const status = `{"BackendState":"Running","Self":{"DNSName":"machine.tail.ts.net.","UserID":9},"User":{"9":{"LoginName":"person@example.test"}}}`
 	for _, tc := range []struct {
 		name, initial, after, refusal string
@@ -19,6 +20,9 @@ func TestConfigurePrivateServeAndCheckReadBack(t *testing.T) {
 		{"installs", `{}`, correct, "", true},
 		{"does not overwrite", strings.ReplaceAll(correct, "7317", "1234"), correct, "does not proxy", false},
 		{"checks reply", `{}`, `{}`, "is not running", true},
+		{"rejects shared origin", shared, correct, "route exclusively", false},
+		{"rejects shared origin after setup", `{}`, shared, "route exclusively", true},
+		{"rejects foreground route", strings.TrimSuffix(correct, "}") + `,"Foreground":{"session":{"Web":{"machine.tail.ts.net:443":{"Handlers":{"/other":{"Text":"fixture"}}}}}}}`, correct, "foreground", false},
 		{"rejects funnel", strings.Replace(correct, `{"TCP"`, `{"AllowFunnel":{"machine.tail.ts.net:443":true},"TCP"`, 1), correct, "Funnel", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

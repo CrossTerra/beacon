@@ -17,6 +17,22 @@ import (
 	"github.com/CrossTerra/beacon/internal/webauthntest"
 )
 
+func TestSetupRefusesIncompleteUnattendedVault(t *testing.T) {
+	dir := previewTemp(t)
+	key := filepath.Join(dir, "unattended.keyx")
+	must(t, os.WriteFile(key, []byte("interrupted setup fixture"), 0o600))
+	a, out, stderr := previewCLI()
+	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir, "--origin", "localhost"}); code == 0 ||
+		out.Len() != 0 || !strings.Contains(stderr.String(), "incomplete unattended vault") {
+		t.Fatalf("partial vault looked ready (exit %d): %s", code, stderr)
+	}
+	for _, name := range []string{"unattended.kdbx", "settings.json", "setup-code.json"} {
+		if _, err := os.Lstat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("setup published %s with no database", name)
+		}
+	}
+}
+
 func TestSetupTailscaleThenSwitchOriginOnlyWithConsent(t *testing.T) {
 	dir := previewTemp(t)
 	a, _, stderr := previewCLI()

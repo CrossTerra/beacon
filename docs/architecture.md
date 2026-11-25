@@ -98,7 +98,7 @@ and a state snapshot when the coverage changes ([events](events.md#coverage)).
 | `internal/logs` | The log: JSON lines with fixed event names. |
 | `internal/service` | The last-pass record and the retired LaunchAgent's status and log rotation. It does not read a credential and it does not send. |
 | `internal/approvalserve`, `internal/approval`, `internal/review`, `internal/actsocket` | [Approvals](approvals.md), the append-only journal and outbox, verified passkey actions, and the same-user socket. The [Go reaper](supervision.md) controls child lifetime. |
-| `internal/peer` | `beacon act`'s check of the proposal socket's listener: the kernel audit token, this user, the configured code requirement. |
+| `internal/actsocket` peer checks | The client checks socket and directory ownership and permissions, then the listener's kernel UID on the connection that carries the request. The server checks the caller's UID before accepting any request. Neither checks code signatures. |
 
 Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rules),
 `internal/egress/egresstest` (a transport that fails the test on any host not on the egress list),
@@ -121,11 +121,11 @@ Test helpers: `internal/signal/signaltest` (a fake Signal with Signal's key rule
 | `retitled.json` | Subjects whose threads a send pass checked for a retitle and left alone, with a fixed reason (`not_opened`, `not_found`, `moved`, `renamed`, `same`, `unreadable`). No title | No |
 | `pass.json` | The last pass (with the source loops, the last source's pass; a personal source another pass withheld stays listed until its own next pass): time, outcome, whether this instance held the lease, and this instance's id when it did. A failed start records the reason here even when it did not send, and the failure streak that sets the backoff. Personal sources the pass withheld, with the prefix and a fixed reason. No item content. A successful dry run does not write it | No |
 | `coverage.json` | Each source's coverage from the send loop: its interval, its last pass and how long the collect took, its last success, its last failure and reason code, how many passes in a row have failed, the last pass's cut and rate-limit flags, Slack's channel counts and oldest read, and the last sleep. Names, times, counts, flags and fixed codes only. A dry run and `--once` do not write it | As coverage snapshots ([events](events.md#coverage)) |
-| `service.leaf` | The SHA-256 of the signing certificate recorded by the retired collector installer, if present. `beacon run` refuses a binary whose leaf does not match | No |
 | `service.stdout.log`, `service.stderr.log` | The retired LaunchAgent's logs. Standard error is the JSON log. Rotated by size, one generation kept | No |
 
-The supervised collector's pass summaries are outside the state directory, in `~/Library/Logs/Beacon/collector.log`
-and one previous file, `collector.log.1` ([supervision](supervision.md)).
+The supervised collector's pass summaries are in `collector.log` in the approval service's state directory,
+with one previous file, `collector.log.1` ([supervision](supervision.md)). No certificate pin protects the
+installed binary. The user audits the commit and controls the binary and its service definition.
 
 The directory is created `0700` and the files `0600`, and it is synced when a file in it is created. A writer holds
 an exclusive `flock` on the outbox, so two `beacon run` processes cannot share a state directory, and the queue

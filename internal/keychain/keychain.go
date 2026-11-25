@@ -93,12 +93,21 @@ func Pair(email, token string) (Secret, error) {
 
 // AuthorizeBasic sets a basic Authorization header from a secret stored by Pair.
 func (s Secret) AuthorizeBasic(h http.Header) error {
-	email, token, ok := strings.Cut(string(s.value), "\n")
-	if !ok || email == "" || token == "" || strings.Contains(token, "\n") {
-		return errors.New("keychain: credential is not an email and a token")
+	email, token, err := basicParts(string(s.value))
+	if err != nil {
+		return err
 	}
 	h.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(email+":"+token)))
 	return nil
+}
+
+func basicParts(s string) (email, token string, err error) {
+	email, token, ok := strings.Cut(s, "\n")
+	if !ok || strings.TrimSpace(email) == "" || strings.TrimSpace(token) == "" ||
+		strings.ContainsAny(email, ":\r\x00") || strings.ContainsAny(token, "\r\n\x00") {
+		return "", "", errors.New("keychain: credential is not an email and a token")
+	}
+	return email, token, nil
 }
 
 // String implements fmt.Stringer without revealing the value.

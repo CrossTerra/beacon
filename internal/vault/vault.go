@@ -35,6 +35,7 @@ var (
 	ErrAmbiguous  = errors.New("vault_ambiguous")
 	ErrUnreadable = errors.New("vault_unreadable")
 	ErrExists     = errors.New("vault already exists")
+	ErrPartial    = errors.New("incomplete unattended vault: a key exists but unattended.kdbx is missing; restore the matching database before setup")
 	ErrLocked     = errors.New("vault_locked")
 	ErrKeyMissing = errors.New("vault_key_missing")
 )
@@ -56,8 +57,26 @@ func Create(dir string) error {
 
 type saveSessionKey func(context.Context, string, []byte) (bool, error)
 
-// Setup chooses a key store once, before creating the database. Existing stores are never moved.
-func Setup(ctx context.Context, dir string) error { return create(ctx, dir, saveKeyToSession) }
+// Setup chooses a key store once, before creating the database. Check that a preexisting pair opens;
+// having two files on disk doesn't prove the Secret Service item still exists or the key matches.
+func Setup(ctx context.Context, dir string) error {
+	if err := create(ctx, dir, saveKeyToSession); !errors.Is(err, ErrExists) {
+		return err
+	}
+	key, err := readKeyFile(dir)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	body, _, err := readDB(dir)
+	if err != nil {
+		return err
+	}
+	if _, err := decode(body, key); err != nil {
+		return err
+	}
+	return ErrExists
+}
 
 func KeyStore(dir string) string {
 	if _, err := approval.CheckPrivate(filepath.Join(dir, keyRef), 0o600); err == nil {
@@ -78,12 +97,8 @@ func create(ctx context.Context, dir string, saveKey saveSessionKey) error {
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return err
 	}
-	for _, name := range []string{dbName, keyName, keyRef} {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
-			return ErrExists
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	if err := existingVault(dir); err != nil {
+		return err
 	}
 	key := make([]byte, 32)
 	defer clear(key)
@@ -95,6 +110,14 @@ func create(ctx context.Context, dir string, saveKey saveSessionKey) error {
 		return err
 	}
 	defer clear(xmlKey)
+	db, err := newDB(xmlKey)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := gokeepasslib.NewEncoder(&buf).Encode(db); err != nil {
+		return err
+	}
 	name := keyName
 	var id [16]byte
 	if saveKey != nil {
@@ -110,41 +133,56 @@ func create(ctx context.Context, dir string, saveKey saveSessionKey) error {
 		}
 	}
 	if name == keyRef {
-		if err := publishExclusive(dir, name, []byte(hex.EncodeToString(id[:]))); err != nil {
+		err = publishExclusive(dir, name, []byte(hex.EncodeToString(id[:])))
+	} else {
+		err = publishKeyFile(dir, xmlKey)
+	}
+	if err == nil {
+		// A failed publish may already have linked the database. Keep its original key even then.
+		err = publishExclusive(dir, dbName, buf.Bytes())
+	}
+	if errors.Is(err, ErrExists) { // a file appeared after the preflight
+		return ErrConflict
+	}
+	return err
+}
+
+func existingVault(dir string) error {
+	var present [3]bool
+	for i, name := range []string{dbName, keyName, keyRef} {
+		if _, err := approval.CheckPrivate(filepath.Join(dir, name), 0o600); err == nil {
+			present[i] = true
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-	} else if err := publishKeyFile(dir, xmlKey); err != nil {
-		return err
 	}
-	db, err := newDB(xmlKey)
-	if err != nil {
-		os.Remove(filepath.Join(dir, name))
-		return err
+	db, key, ref := present[0], present[1], present[2]
+	switch {
+	case key && ref:
+		return ErrAmbiguous
+	case db && !key && !ref:
+		return ErrKeyMissing
+	case !db && (key || ref):
+		return ErrPartial
+	case db:
+		return ErrExists
+	default:
+		return nil
 	}
-	var buf bytes.Buffer
-	if err := gokeepasslib.NewEncoder(&buf).Encode(db); err != nil {
-		os.Remove(filepath.Join(dir, name))
-		return err
-	}
-	if err := publishExclusive(dir, dbName, buf.Bytes()); err != nil {
-		os.Remove(filepath.Join(dir, name))
-		return err
-	}
-	return nil
 }
 
 // Put stores one secret. If the file changed and the target entry is unchanged, it re-reads and retries
 // once. A changed target entry, or a second conflict, writes nothing.
 func Put(dir string, b Binding, secret string) error {
-	return put(dir, b, secret, false, false)
+	return put(dir, b, secret, false, nil)
 }
 
 // PutMissing is for cutover. Do not overwrite an entry concurrently saved by KeePassXC.
 func PutMissing(dir string, b Binding, secret string) error {
-	return put(dir, b, secret, false, true)
+	return put(dir, b, secret, true, nil)
 }
 
-func put(dir string, b Binding, secret string, retried, onlyMissing bool) error {
+func put(dir string, b Binding, secret string, onlyMissing bool, retryBase *[32]byte) error {
 	key, err := readKeyFile(dir)
 	if err != nil {
 		return err
@@ -155,10 +193,6 @@ func put(dir string, b Binding, secret string, retried, onlyMissing bool) error 
 		return err
 	}
 	base := sha256.Sum256(body)
-	before, err := entrySecret(body, key, b)
-	if err != nil {
-		return err
-	}
 	db, err := decode(body, key)
 	if err != nil {
 		return ErrUnreadable
@@ -170,6 +204,18 @@ func put(dir string, b Binding, secret string, retried, onlyMissing bool) error 
 	matches := find(group, b)
 	if len(matches) > 1 {
 		return ErrAmbiguous
+	}
+	var before [32]byte // zero means the entry didn't exist
+	if len(matches) == 1 {
+		entry, err := xml.Marshal(matches[0])
+		if err != nil {
+			return ErrUnreadable
+		}
+		before = sha256.Sum256(entry)
+		clear(entry)
+	}
+	if retryBase != nil && before != *retryBase {
+		return ErrConflict
 	}
 	if len(matches) == 1 {
 		if onlyMissing {
@@ -194,35 +240,14 @@ func put(dir string, b Binding, secret string, retried, onlyMissing bool) error 
 	if err := db.LockProtectedEntries(); err != nil {
 		return err
 	}
-	current, info2, err := readDB(dir)
-	if err != nil {
+	if err := save(dir, db, base, info); errors.Is(err, errBaseChanged) {
+		if retryBase == nil {
+			return put(dir, b, secret, onlyMissing, &before)
+		}
+		return ErrConflict
+	} else {
 		return err
 	}
-	if sha256.Sum256(current) != base || !os.SameFile(info, info2) {
-		return retryPut(dir, b, secret, key, before, retried, onlyMissing)
-	}
-	if err := save(dir, db, &base); err != nil {
-		if !errors.Is(err, ErrConflict) {
-			return err
-		}
-		return retryPut(dir, b, secret, key, before, retried, onlyMissing)
-	}
-	return nil
-}
-
-func retryPut(dir string, b Binding, secret string, key []byte, before string, retried, onlyMissing bool) error {
-	if retried {
-		return ErrConflict
-	}
-	current, _, err := readDB(dir)
-	if err != nil {
-		return ErrConflict
-	}
-	again, err := entrySecret(current, key, b)
-	if err != nil || again != before {
-		return ErrConflict
-	}
-	return put(dir, b, secret, true, onlyMissing)
 }
 
 // ExportKey writes a private, exclusive copy for KeePassXC. A key is never printed.
@@ -233,24 +258,6 @@ func ExportKey(dir, dest string) error {
 	}
 	defer clear(key)
 	return publishExclusive(filepath.Dir(dest), filepath.Base(dest), key)
-}
-
-func entrySecret(body, key []byte, b Binding) (string, error) {
-	db, err := decode(body, key)
-	if err != nil {
-		return "", ErrUnreadable
-	}
-	if err := db.UnlockProtectedEntries(); err != nil {
-		return "", err
-	}
-	matches := find(beaconGroup(db), b)
-	if len(matches) > 1 {
-		return "", ErrAmbiguous
-	}
-	if len(matches) == 0 {
-		return "", nil
-	}
-	return matches[0].GetPassword(), nil
 }
 
 // Get returns the secret for one binding. Two entries with the same binding are unusable.
@@ -392,30 +399,34 @@ func decode(body, key []byte) (*gokeepasslib.Database, error) {
 	return db, nil
 }
 
-// beforeSave lets a test change the file after the base hash was taken.
-var beforeSave func()
+// beforeReplace lets a test save an external edit after our candidate was written and synced.
+var beforeReplace func()
 
 // afterRename lets a test change the file after it is published and before the read-back.
 var afterRename func(path string)
 
-func save(dir string, db *gokeepasslib.Database, base *[32]byte) error {
-	if beforeSave != nil {
-		beforeSave()
-	}
+var errBaseChanged = errors.New("vault changed before replace")
+
+func save(dir string, db *gokeepasslib.Database, base [32]byte, initial os.FileInfo) error {
 	var buf bytes.Buffer
 	if err := gokeepasslib.NewEncoder(&buf).Encode(db); err != nil {
 		return err
 	}
-	if base != nil {
-		current, _, err := readDB(dir)
-		if err != nil {
-			return err
+	return replacePrivate(dir, dbName, buf.Bytes(), func(path string) error {
+		if beforeReplace != nil {
+			beforeReplace()
 		}
-		if sha256.Sum256(current) != *base {
-			return ErrConflict
+		current, info, err := readDB(dir)
+		if err != nil || !os.SameFile(initial, info) || sha256.Sum256(current) != base {
+			return errBaseChanged
 		}
-	}
-	return writePrivate(dir, dbName, buf.Bytes())
+		// A rename during readDB leaves the file descriptor on the old inode. Check the path again.
+		latest, err := approval.CheckPrivate(path, 0o600)
+		if err != nil || !os.SameFile(info, latest) || info.Size() != latest.Size() || !info.ModTime().Equal(latest.ModTime()) {
+			return errBaseChanged
+		}
+		return nil
+	})
 }
 
 func readDB(dir string) ([]byte, os.FileInfo, error) {
@@ -563,6 +574,10 @@ func syncDir(dir string) error {
 }
 
 func writePrivate(dir, name string, body []byte) error {
+	return replacePrivate(dir, name, body, nil)
+}
+
+func replacePrivate(dir, name string, body []byte, check func(string) error) error {
 	path := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, "."+name+"-")
 	if err != nil {
@@ -571,6 +586,11 @@ func writePrivate(dir, name string, body []byte) error {
 	defer os.Remove(tmp.Name())
 	if err := writeTemp(tmp, body); err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(path); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err

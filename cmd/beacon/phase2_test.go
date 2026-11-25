@@ -44,13 +44,17 @@ printf '%s\n' `+tok)
 	var out, errOut strings.Builder
 	a := &app{
 		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
-		keychain: func() (keychain.Store, error) { return store, nil },
+		keychain:  func() (keychain.Store, error) { return store, nil },
+		transport: grantFixture(t, "api.github.com", "/user", tok, "read:user", "read:org"),
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh"}); code == 0 {
 		t.Fatal("import without --yes succeeded")
 	}
 	if _, err := store.Get("source:github"); err == nil {
 		t.Fatal("token stored without confirmation")
+	}
+	if code := a.main(t.Context(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh", "--yes", "--new-read-token"}); code == 0 {
+		t.Fatal("direct entry confirmation was allowed for a token from gh")
 	}
 	openStore := a.keychain
 	a.keychain = func() (keychain.Store, error) { return nil, errors.New("vault unavailable") }
@@ -63,6 +67,16 @@ printf '%s\n' `+tok)
 		t.Fatal("gh was called before the vault could be used")
 	}
 	a.keychain = openStore
+	for _, scopes := range [][]string{{"read:user", "repo"}, nil} {
+		a.transport = grantFixture(t, "api.github.com", "/user", tok, scopes...)
+		if code := a.main(t.Context(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--from-gh", "--yes"}); code == 0 {
+			t.Fatal("import accepted a broad or unreported grant")
+		}
+		if _, err := store.Get("source:github"); !errors.Is(err, keychain.ErrNotFound) {
+			t.Fatal("a rejected GitHub grant reached the store")
+		}
+	}
+	a.transport = grantFixture(t, "api.github.com", "/user", tok, "read:user", "read:org")
 	out.Reset()
 	errOut.Reset()
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--project", "ENG", "--from-gh", "--yes"}); code != 0 {
@@ -143,7 +157,8 @@ printf '%s\n' ghe-token`)
 	var out, errOut strings.Builder
 	a := &app{
 		stdin: strings.NewReader(""), stdout: &out, stderr: &errOut, now: time.Now,
-		keychain: func() (keychain.Store, error) { return store, nil },
+		keychain:  func() (keychain.Store, error) { return store, nil },
+		transport: grantFixture(t, "ghe.example.com:8443", "/api/v3/user", "ghe-token", "read:user"),
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "github", "--config", cfg, "--repo", "acme/app", "--host", "ghe.example.com:8443", "--from-gh", "--yes"}); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
@@ -154,12 +169,11 @@ func TestPipedJiraKeepsTheToken(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 	must(t, os.WriteFile(cfg, []byte("signal:\n  url: https://signal.example.com\nperson:\n  handle: \"@winton\"\nrules: rules.yaml\nstate: state\nmode: dry-run\nsources: []\n"), 0o600))
-	store := keychain.NewMemory()
 	const email, tok = "winton@example.com", "jira-piped-secret"
 	var out, errOut strings.Builder
 	a := &app{
 		stdin: strings.NewReader(email + "\n" + tok), stdout: &out, stderr: &errOut, now: time.Now,
-		keychain: func() (keychain.Store, error) { return store, nil },
+		vaultDir: filepath.Join(dir, "vault"),
 	}
 	if code := a.main(context.Background(), []string{"source", "add", "jira", "--config", cfg, "--site", "acme", "--project", "ENG"}); code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out.String(), errOut.String())
@@ -174,6 +188,10 @@ func TestPipedJiraKeepsTheToken(t *testing.T) {
 	if strings.Contains(string(data), tok) {
 		t.Fatal("the token was written to the config")
 	}
+	parsed, err := a.loadConfig(cfg)
+	must(t, err)
+	store, err := a.collectorStore(parsed, false)
+	must(t, err)
 	secret, err := store.Get("source:jira")
 	if err != nil {
 		t.Fatal(err)

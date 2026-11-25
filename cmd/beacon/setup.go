@@ -119,6 +119,13 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+	create := vault.Setup
+	if a.keychain != nil { // fixture, not a login service or a D-Bus session
+		create = func(_ context.Context, dir string) error { return vault.Create(dir) }
+	}
+	if err := create(ctx, dir); err != nil && !errors.Is(err, vault.ErrExists) {
+		return err
+	}
 	if next.Secure() && *origin == "tailscale" {
 		if err := localstate.EnsureServe(ctx, next, a.tailscale, confirm); err != nil {
 			return err
@@ -136,13 +143,6 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 				return err
 			}
 		}
-	}
-	create := vault.Setup
-	if a.keychain != nil { // fixture, not a login service or a D-Bus session
-		create = func(_ context.Context, dir string) error { return vault.Create(dir) }
-	}
-	if err := create(ctx, dir); err != nil && !errors.Is(err, vault.ErrExists) {
-		return err
 	}
 	code, err := passkey.IssueLocked(dir, a.now())
 	if err != nil {

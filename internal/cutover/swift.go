@@ -3,6 +3,8 @@ package cutover
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,8 +24,9 @@ import (
 const archiveName = "swift-archive"
 
 type Archive struct {
-	Journal string       `json:"journal"`
-	Signal  *SignalActor `json:"signal,omitempty"`
+	Journal        string       `json:"journal"`
+	SnapshotSHA256 string       `json:"snapshot_sha256"`
+	Signal         *SignalActor `json:"signal,omitempty"`
 }
 
 type SignalActor struct {
@@ -32,7 +35,10 @@ type SignalActor struct {
 	Person string `json:"person"`
 }
 
-var ErrDrain = errors.New("the Swift journal has pending work, a start without a result, an unclosed run, or an unacknowledged record; finish draining it before cutover")
+var (
+	ErrDrain   = errors.New("the Swift journal has pending work, a start without a result, an unclosed run, or an unacknowledged record; finish draining it before cutover")
+	ErrChanged = errors.New("the Swift journal or archive changed after the snapshot; leave both in place and do not cut over")
+)
 
 // Load returns the ordering floor. Refuse to start or set up Go over unmigrated Swift data.
 func Load(dir string) (Archive, error) {
@@ -47,12 +53,21 @@ func Load(dir string) (Archive, error) {
 	} else if err != nil {
 		return Archive{}, err
 	}
-	if _, err := approval.CheckPrivate(filepath.Join(path, "journal.sqlite"), 0o600); err != nil {
-		return Archive{}, err
-	}
 	var m Archive
-	if err := readJSON(filepath.Join(path, "migration.json"), &m); err != nil || !approval.ValidID(m.Journal, "jrn") || !validActor(m.Signal) {
+	if err := readJSON(filepath.Join(path, "migration.json"), &m); err != nil || !approval.ValidID(m.Journal, "jrn") ||
+		!digest(m.SnapshotSHA256) || !validActor(m.Signal) {
 		return Archive{}, errors.New("invalid Swift archive metadata; leave the service stopped")
+	}
+	snapshot := filepath.Join(path, "journal.sqlite")
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(snapshot + suffix); !errors.Is(err, os.ErrNotExist) {
+			return Archive{}, ErrChanged // a standalone archive must not have mutable SQLite sidecars
+		}
+	}
+	if sum, err := snapshotHash(snapshot); err != nil {
+		return Archive{}, err
+	} else if sum != m.SnapshotSHA256 {
+		return Archive{}, ErrChanged
 	}
 	return m, nil
 }
@@ -71,14 +86,14 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 	if err != nil {
 		return Archive{}, err
 	}
-	if lock != nil {
-		defer lock.Close()
-	}
+	defer lock.Close()
 	target := filepath.Join(dir, archiveName)
-	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
-		return Load(dir) // a completed archive is never replaced
+	_, err = os.Lstat(target)
+	retry := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Archive{}, err
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !retry && !errors.Is(err, os.ErrNotExist) {
 		return Archive{}, errors.New("a Go journal already exists without a Swift archive; nothing was changed")
 	}
 	app := filepath.Join(dir, "app")
@@ -86,14 +101,6 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 		return Archive{}, err
 	}
 	src := filepath.Join(app, "journal.sqlite")
-	if _, err := approval.CheckPrivate(src, 0o600); err != nil {
-		return Archive{}, err
-	}
-	for _, suffix := range []string{"-wal", "-shm"} {
-		if _, err := approval.CheckPrivate(src+suffix, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return Archive{}, err
-		}
-	}
 	var settings struct{ Signal *SignalActor }
 	if err := readJSON(filepath.Join(app, "settings.json"), &settings); err != nil && !errors.Is(err, os.ErrNotExist) || !validActor(settings.Signal) {
 		return Archive{}, errors.New("could not read the old Signal actor binding")
@@ -104,13 +111,31 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 	}
 	defer os.RemoveAll(stage)
 	snapshot := filepath.Join(stage, "journal.sqlite")
-	// VACUUM INTO takes one SQLite snapshot, including committed WAL, without checkpointing the source.
-	// It must not see the person's .sqliterc or print SQL errors with legacy content in them.
-	if _, err := query(ctx, sqlite, src, "VACUUM INTO '"+strings.ReplaceAll(snapshot, "'", "''")+"';"); err != nil {
+	if err := snapshotSwift(ctx, sqlite, src, snapshot); err != nil {
 		return Archive{}, err
 	}
-	if err := os.Chmod(snapshot, 0o600); err != nil {
-		return Archive{}, err
+	if retry {
+		m, err := Load(dir)
+		if err != nil {
+			return Archive{}, err
+		}
+		if !sameActor(m.Signal, settings.Signal) {
+			return Archive{}, ErrChanged
+		}
+		id, err := query(ctx, sqlite, snapshot, "SELECT value FROM meta WHERE name='journal_id';")
+		if err != nil {
+			return Archive{}, err
+		}
+		if id != m.Journal {
+			return Archive{}, ErrChanged
+		}
+		if err := matchSource(ctx, sqlite, snapshot, filepath.Join(target, "journal.sqlite")); err != nil {
+			return Archive{}, err
+		}
+		if err := socketFree(ctx, dir); err != nil {
+			return Archive{}, err
+		}
+		return Load(dir) // check the archive again; never refresh it or import an old action
 	}
 	id, hasRecords, err := verify(ctx, sqlite, snapshot)
 	if err != nil {
@@ -129,7 +154,11 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 	if err := socketFree(ctx, dir); err != nil {
 		return Archive{}, err
 	}
-	m := Archive{id, settings.Signal}
+	sum, err := snapshotHash(snapshot)
+	if err != nil {
+		return Archive{}, err
+	}
+	m := Archive{Journal: id, SnapshotSHA256: sum, Signal: settings.Signal}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return Archive{}, err
@@ -141,6 +170,105 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 		return Archive{}, err
 	}
 	return m, approval.FlushDirectory(dir)
+}
+
+// Some SQLite builds cannot open a read-only WAL-mode DB once its sidecars have been removed. Copy
+// the closed source and any committed WAL into a private subdirectory, then let SQLite create its
+// WAL index and checkpoint only the copy. Do not copy the old transient -shm index.
+func snapshotSwift(ctx context.Context, sqlite, src, dest string) error {
+	work, err := os.MkdirTemp(filepath.Dir(dest), ".source-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	copyDB := filepath.Join(work, "journal.sqlite")
+	files := make(map[string]os.FileInfo)
+	for _, suffix := range []string{"", "-wal", "-journal"} {
+		name := src + suffix
+		info, err := copyPrivate(name, copyDB+suffix)
+		if suffix != "" && errors.Is(err, os.ErrNotExist) {
+			files[name] = nil
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		files[name] = info
+	}
+	if _, err := sqliteQuery(ctx, sqlite, copyDB, "VACUUM INTO '"+strings.ReplaceAll(dest, "'", "''")+"';", false); err != nil {
+		return err
+	}
+	for name, old := range files {
+		current, err := approval.CheckPrivate(name, 0o600)
+		if old == nil && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || old == nil || !os.SameFile(old, current) || old.Size() != current.Size() || !old.ModTime().Equal(current.ModTime()) {
+			return ErrChanged
+		}
+	}
+	return os.Chmod(dest, 0o600)
+}
+
+func copyPrivate(src, dest string) (os.FileInfo, error) {
+	f, err := approval.OpenPrivate(src, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	w, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.Copy(w, f)
+	return info, errors.Join(err, w.Close())
+}
+
+func sameActor(a, b *SignalActor) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func snapshotHash(path string) (string, error) {
+	f, err := approval.OpenPrivate(path, os.O_RDONLY)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func digest(s string) bool {
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == sha256.Size
+}
+
+// The SQLite shell hashes logical rows and schema, including committed WAL. Comparing main-file bytes
+// could miss a WAL-only write; comparing WAL bytes would also mistake a harmless checkpoint for new work.
+func matchSource(ctx context.Context, sqlite, src, snapshot string) error {
+	const hashSQL = ".sha3sum --schema --sha3-256"
+	want, err := query(ctx, sqlite, snapshot, hashSQL)
+	if err != nil {
+		return err
+	}
+	got, err := query(ctx, sqlite, src, hashSQL)
+	if err != nil {
+		return err
+	}
+	if !digest(want) || !digest(got) || got != want {
+		return ErrChanged
+	}
+	return nil
 }
 
 func stopped(ctx context.Context, dir string) (*os.File, error) {
@@ -205,9 +333,17 @@ func readJSON(path string, v any) error {
 }
 
 func query(ctx context.Context, sqlite, db, sql string) (string, error) {
+	return sqliteQuery(ctx, sqlite, db, sql, true)
+}
+
+func sqliteQuery(ctx context.Context, sqlite, db, sql string, readOnly bool) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, sqlite, "-batch", "-noheader", "-bail", "-init", "/dev/null", "-readonly", db, sql).Output()
+	args := []string{"-batch", "-noheader", "-bail", "-init", "/dev/null"}
+	if readOnly {
+		args = append(args, "-readonly")
+	}
+	b, err := exec.CommandContext(ctx, sqlite, append(args, db, sql)...).Output()
 	if err != nil {
 		return "", errors.New("could not read or snapshot Swift's SQLite journal; it was not retired")
 	}
