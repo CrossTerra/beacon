@@ -57,16 +57,26 @@ stops the job by its service identity, even if its unit file was removed. It rem
 recorded by this installer; an unrecognized binary or symlink stays in place. It keeps state, credentials,
 configuration and Tailscale settings.
 
+### Approval handler inventory
+
+The Go service has these handlers. `beacon act types` lists the types enabled by the running service.
+
+| Type | How to enable it |
+| --- | --- |
+| `github.merge` | Configure the GitHub account in `action-providers.json` and save separate read and write credentials in [Settings](go-approvals.md#provider-credentials-and-github). |
+| `slack.post` | Configure the Slack workspace and user in `action-providers.json` and save separate read and write credentials in [Settings](go-approvals.md#slack-posts). |
+| `agent.run` | With the service stopped, create `agent-runs.json` (`0600`) in the service state directory with the absolute path to OpenCode, the allowed models, and the named checkouts. Restart the service to enable it. See the [example configuration](go-approvals.md#agent-runs-and-checkouts). Runs need their own passkey assertion, not a provider token. |
+
 ## One-time cutover from Beacon.app (D16)
 
 Leave the old signed CLI and app in place while draining. Do not run these steps against live services from CI
 or an agent session. Keep proposers paused until the last step.
 
 1. **Inventory the switched types while the old app and key still work.** Record the enabled types with the old
-   `beacon act types` and check which of them Bosun routes to Beacon. Check the audited Go build's actual handlers
-   and the required provider and run configuration before you proceed. A schema in `types` is not itself a
-   handler. In particular, if `agent.run` is switched, wait for an audited build containing #49's run handler.
-   Do not revoke the old Signal key if any required type is missing. **Pause new proposals** without changing
+   `beacon act types` and check which of `github.merge`, `slack.post`, and `agent.run` Bosun routes to Beacon.
+   Compare them with the audited Go build and the [handler inventory](#approval-handler-inventory); have the
+   required account and checkout configuration ready before proceeding. Do not revoke the old Signal key if any
+   required handler is missing. **Pause new proposals** without changing
    Bosun's route. Resolve or withdraw every pending request, finish
    started work and active runs, and reconcile unknown outcomes by reading back. Return final results to callers.
    Wait for Signal to acknowledge the last Swift record. If anything cannot drain, stay on Swift. Do not repeat
@@ -112,8 +122,9 @@ or an agent session. Keep proposers paused until the last step.
    macOS may ask once for each old item. Import does not read the Swift app's vault key or provider write
    credentials, replace a Go entry, or delete an old item. The old approval-app key is not imported; the new code
    is verified against the archived actor and person.
-5. Configure the same required types in `action-providers.json` and, for runs, `agent-runs.json` as described in
-   [approval setup](go-approvals.md). Stop the job to edit the provider or run bindings, then bootstrap it again.
+5. With the job stopped, configure the provider bindings in `action-providers.json` and, to enable `agent.run`, put
+   `agent-runs.json` in the same state directory, as described in the [handler inventory](#approval-handler-inventory).
+   Bootstrap the job again.
    Open Settings with `beacon open` and save distinct provider read and write tokens with an assertion. Importing
    collector credentials does not enable provider writes. The write tokens are re-entered after enrollment, not
    copied into the unattended vault.

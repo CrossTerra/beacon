@@ -66,7 +66,7 @@ the provider, origin and account under the passkey vault's data key. They cannot
 After a passkey reset, register again and re-save the write credential; the earlier ciphertext cannot open
 under the new key. The unattended read vault is not reset.
 
-The preview reads the PR, reviews, rules and checks with the read token. Every reported check and every
+Beacon reads the PR, reviews, rules and checks with the read token. Every reported check and every
 visible required check must pass; only the latest run for each check name and app counts. The frozen view
 names the approved head. After approval the write token is used for final reads, including one last PR
 read, and at most one `PUT` with the exact approved method and head SHA. The provider alone enforces
@@ -74,8 +74,8 @@ branch rules at the write. A lost or ambiguous reply is read back with the unatt
 requires the approved repository, base, head, this user, and a merge SHA. A merged pull request with a
 different actor, head, or base fails as `merged_otherwise` and is not read again. A merge that matches
 this account, head, and base but has no actor or merge SHA stays unknown: GitHub can omit the SHA briefly
-after Beacon's own merge. The Swift app fails that incomplete case as `merged_otherwise`; the Go preview
-does not, so it cannot record a false failure for its own write. An open PR settles as `not_merged` only
+after Beacon's own merge. Beacon does not record this incomplete case as `merged_otherwise`.
+An open PR settles as `not_merged` only
 after two eligible reads at least a minute apart, both at least a minute after the outcome became unknown.
 Automatic read-back keeps that one-minute cadence until then, then doubles the wait up to 15 minutes, so
 a read that never settles does not spend the recovery budget every minute. The sweep asks each handler
