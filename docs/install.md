@@ -17,9 +17,14 @@ Go socket when the job starts. If the replacement fails to start, it restores th
 
 ### Origin and passkeys
 
-On first install, choose `--origin localhost` or `--origin tailscale`. For Tailscale install it separately on
-both devices, enable MagicDNS and HTTPS certificates in your own tailnet, and agree to the printed Serve
-command. Setup reads the local device's login and name, rejects tags and Funnel, and requires the canonical
+On first install, choose `--origin localhost` or `--origin tailscale`. Install and connect Tailscale on both
+devices, enable MagicDNS and HTTPS certificates in your own tailnet, and confirm the Serve command in setup.
+On macOS, if `tailscale` is not on `PATH`, the installer and `beacon setup` look for the app's executable at
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, then `~/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
+The standalone or App Store app in either location needs no separate CLI installation. On Linux, put `tailscale`
+on `PATH`.
+
+Setup reads the local device's login and name, rejects tags and Funnel, and requires the canonical
 origin to serve Beacon exclusively: no other paths on that origin, even if `/` points at Beacon. It does not
 overwrite an unrelated proxy on port 443 and verifies the Serve configuration before saving it. There is no fallback to
 localhost for credentials registered on the tailnet name. Run `beacon status --review` to check Serve. Do not use

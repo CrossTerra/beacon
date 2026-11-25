@@ -3,10 +3,62 @@ package localstate
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestTailscaleCommandFindsMacAppCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name, platform string
+		pathCLI        bool
+		systemMode     os.FileMode
+		want           string
+	}{
+		{"PATH first", "darwin", true, 0o700, "path"},
+		{"system app first", "darwin", false, 0o700, "system"},
+		{"home app if system CLI is not executable", "darwin", false, 0o600, "home"},
+		{"no app fallback on Linux", "linux", false, 0o700, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "Test Home")
+			bin := filepath.Join(root, "bin")
+			t.Setenv("HOME", home)
+			t.Setenv("PATH", bin)
+			paths := map[string]string{
+				"path":   filepath.Join(bin, "tailscale"),
+				"system": filepath.Join(root, "Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+				"home":   filepath.Join(home, "Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+			}
+			writeCLI := func(path string, mode os.FileMode) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n"), mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.pathCLI {
+				writeCLI(paths["path"], 0o700)
+			}
+			writeCLI(paths["system"], tc.systemMode)
+			writeCLI(paths["home"], 0o700)
+			out, err := tailscaleCommand(t.Context(), tc.platform, paths["system"], "status", "--json").Output()
+			if tc.want == "" {
+				if !errors.Is(err, exec.ErrNotFound) {
+					t.Fatalf("expected PATH lookup failure, got %v", err)
+				}
+			} else if want := paths[tc.want] + "\nstatus\n--json\n"; err != nil || string(out) != want {
+				t.Fatalf("got %q, %v; want %q", out, err, want)
+			}
+		})
+	}
+}
 
 func TestConfigurePrivateServeAndCheckReadBack(t *testing.T) {
 	const correct = `{"TCP":{"443":{"HTTPS":true}},"Web":{"machine.tail.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:7317"}}}}}`

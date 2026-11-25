@@ -424,6 +424,7 @@ main() {
 			# A fixture must never create an item on the person's Linux session bus.
 			DBUS_SESSION_BUS_ADDRESS='' XDG_RUNTIME_DIR='' "$candidate" setup --state-dir "$state" --origin "$origin"
 		else
+			# Setup locates Tailscale itself, including the macOS app bundle when the CLI isn't on PATH.
 			"$candidate" setup --state-dir "$state" --origin "$origin"
 		fi
 	fi
