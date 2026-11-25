@@ -1,10 +1,10 @@
 # Go service supervision
 
 `beacon serve` starts a reaper from the same binary (`serve --reaper`, an internal mode with inherited
-descriptors). This is the Go replacement for the app's [tether](tether.md), not an installer or a switch to
-the Go service. The isolated review preview takes the lock and sweeps. It can launch separately approved
-[agent runs](go-approvals.md#agent-runs-and-checkouts), but starts no live collector or watch and reads
-no collector config or credentials. The signed app still uses C tether.
+descriptors). It owns the collector when a collector config exists, and owns separately approved
+[agent runs](go-approvals.md#agent-runs-and-checkouts). The
+[installer](install.md) runs `serve` in a user service, not as root. The worker processes take no environment
+from the service other than the explicit allow-list for that job.
 
 ## Startup, stop and recovery
 
@@ -22,9 +22,9 @@ no collector config or credentials. The signed app still uses C tether.
    before any jobs start. Neither this sweep nor journal replay restarts a prior approval.
 3. Each job is its own process group, with no inherited service environment. It receives the job's explicit
    environment plus `BEACON_SUPERVISOR=<session>:<job>`. A fixed job's standard input is a pipe whose only
-   writer is the reaper, as C tether does for the collector. The collector command sets `BEACON_TETHERED=1`
+   writer is the reaper. The collector command sets `BEACON_SUPERVISED=1`
    and exits on stdin EOF, the same guard as `beacon run`. That writer closes if the reaper dies, so a
-   tethered collector exits on EOF instead of surviving the reaper or exiting at once on `/dev/null`.
+   supervised collector exits on EOF instead of surviving the reaper or exiting at once on `/dev/null`.
    `Command.Stdin` is not used for a fixed job. A failed collector or watch restarts after its entire tree
    is gone, with 1, 2, 4, 8, 16, then at most 30 seconds between attempts. Clean exits and runs do not
    restart. A leader that exits stays unreaped until a later census has seen the tree gone, reserving the
@@ -56,10 +56,9 @@ time. A PID that still exists but cannot be read stays pending. The reaper does 
 no new network egress.
 
 The reaper has a separate process group so launchd's cleanup of the service group does not kill it first.
-On Linux, the planned systemd user unit uses `KillMode=control-group` and `TimeoutStopSec=30`. The cgroup
+On Linux, the systemd user unit uses `KillMode=control-group` and `TimeoutStopSec=30`. The cgroup
 also catches processes that escaped group and marker tracking. The reaper does not treat systemd's group-wide
-TERM as a clean exit: it still waits for the lifetime pipe. Part 5 writes and installs both user service
-definitions; this part changes neither the installer nor the currently installed app.
+TERM as a clean exit: it still waits for the lifetime pipe.
 
 ## Run handoff
 

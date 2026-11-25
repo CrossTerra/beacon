@@ -26,6 +26,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
 	"github.com/CrossTerra/beacon/internal/source"
+	"github.com/CrossTerra/beacon/internal/vault"
 )
 
 type fakeSource struct {
@@ -541,8 +542,8 @@ func TestClassify(t *testing.T) {
 		logs.ReasonCanceled:     context.Canceled,
 		logs.ReasonEgress:       &url.Error{Op: "Post", URL: "x", Err: &egress.DeniedError{Address: "a:1"}},
 		logs.ReasonLocked:       outbox.ErrLocked,
-		logs.ReasonKeychain:     keychain.ErrNotFound,
-		logs.ReasonKeychainRead: fmt.Errorf("source: %w", keychain.ErrReadRefused),
+		logs.ReasonCredential:   keychain.ErrNotFound,
+		logs.ReasonVaultLocked:  fmt.Errorf("source: %w", vault.ErrLocked),
 		logs.ReasonState:        &fs.PathError{Op: "open", Path: "/state/outbox.jsonl", Err: fs.ErrPermission},
 		logs.ReasonInternal:     errors.New(`outbox: key "fx:1" appended twice`),
 	}

@@ -1,11 +1,11 @@
-// Package keychain is the only code that reads, holds or writes a credential.
+// Package keychain provides redacting credentials and their vault bindings. Its name is historical;
+// only the explicit one-time collector import reads legacy Keychain items.
 //
 // A credential is a Secret. Its value never leaves this package except as an HTTP Authorization header set by
 // Authorize. Printing, formatting, logging or marshalling a Secret yields "[redacted]".
 package keychain
 
 import (
-	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -23,17 +23,6 @@ const Service = "beacon"
 
 // ErrNotFound is returned when no item exists for the account.
 var ErrNotFound = errors.New("keychain: item not found")
-
-// ErrReadRefused means macOS did not authorize a credential read. It is distinct from a missing item.
-var ErrReadRefused = errors.New("keychain: credential read refused")
-
-// ErrAdHocBuild is returned by NewSystem in a build that is not signed with a certificate: go build, go run and test
-// binaries are signed ad hoc. Such a build never touches the login keychain.
-var ErrAdHocBuild = errors.New("keychain: this beacon is not signed with a certificate (go build, go run and test binaries are ad hoc), so it does not use the login keychain; install it with scripts/install.sh")
-
-// TestKeychainEnv, set to 1, lets an ad-hoc test binary use the login keychain. Only TestSystem needs it, and only a
-// person at the keyboard sets it.
-const TestKeychainEnv = "BEACON_TEST_KEYCHAIN"
 
 // Secret holds a credential. The zero value is empty.
 type Secret struct {
@@ -104,12 +93,21 @@ func Pair(email, token string) (Secret, error) {
 
 // AuthorizeBasic sets a basic Authorization header from a secret stored by Pair.
 func (s Secret) AuthorizeBasic(h http.Header) error {
-	email, token, ok := strings.Cut(string(s.value), "\n")
-	if !ok || email == "" || token == "" || strings.Contains(token, "\n") {
-		return errors.New("keychain: credential is not an email and a token")
+	email, token, err := basicParts(string(s.value))
+	if err != nil {
+		return err
 	}
 	h.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(email+":"+token)))
 	return nil
+}
+
+func basicParts(s string) (email, token string, err error) {
+	email, token, ok := strings.Cut(s, "\n")
+	if !ok || strings.TrimSpace(email) == "" || strings.TrimSpace(token) == "" ||
+		strings.ContainsAny(email, ":\r\x00") || strings.ContainsAny(token, "\r\n\x00") {
+		return "", "", errors.New("keychain: credential is not an email and a token")
+	}
+	return email, token, nil
 }
 
 // String implements fmt.Stringer without revealing the value.
@@ -135,91 +133,6 @@ type Store interface {
 	Get(account string) (Secret, error)
 	Set(account string, s Secret) error
 	Delete(account string) error
-}
-
-// Lister is a Store that can list the accounts it holds under Service, without reading their values.
-type Lister interface {
-	Accounts() ([]string, error)
-}
-
-// repairPrefix names the copy Repair keeps of an item while it re-creates it, so an interrupted repair loses nothing.
-const repairPrefix = "repair:"
-
-// Repair re-creates every item under Service, so each one has the access a new item gets from this build (Set) and
-// none of what earlier builds added to it. It reads each value once, which is the one prompt per item, and writes it
-// back. Before it deletes an item it stores a copy under "repair:<account>" and checks the re-created item holds the
-// same bytes before it deletes the copy. A repair cut short is finished by the next one: a copy whose item is
-// missing is written back first. done is called with each account repaired. No value leaves this package.
-func Repair(s Store, done func(account string)) error {
-	l, ok := s.(Lister)
-	if !ok {
-		return errors.New("keychain: this keychain cannot list its items")
-	}
-	accounts, err := l.Accounts()
-	if err != nil {
-		return err
-	}
-	have := map[string]bool{}
-	for _, a := range accounts {
-		have[a] = true
-	}
-	var todo []string
-	for _, a := range accounts {
-		orig, isCopy := strings.CutPrefix(a, repairPrefix)
-		if !isCopy {
-			todo = append(todo, a)
-			continue
-		}
-		if !have[orig] {
-			v, err := s.Get(a)
-			if err != nil {
-				return fmt.Errorf("keychain: reading the copy of %s left by an earlier repair: %w", orig, err)
-			}
-			if err := s.Set(orig, v); err != nil {
-				return fmt.Errorf("keychain: restoring %s from the copy left by an earlier repair: %w", orig, err)
-			}
-			have[orig] = true
-			todo = append(todo, orig)
-		}
-		if err := s.Delete(a); err != nil && !errors.Is(err, ErrNotFound) {
-			return fmt.Errorf("keychain: removing the copy of %s left by an earlier repair: %w", orig, err)
-		}
-	}
-	sort.Strings(todo)
-	for _, a := range todo {
-		if err := repairOne(s, a); err != nil {
-			return err
-		}
-		if done != nil {
-			done(a)
-		}
-	}
-	return nil
-}
-
-func repairOne(s Store, account string) error {
-	v, err := s.Get(account)
-	if err != nil {
-		return fmt.Errorf("keychain: reading %s: %w", account, err)
-	}
-	backup := repairPrefix + account
-	if err := s.Set(backup, v); err != nil {
-		return fmt.Errorf("keychain: keeping a copy of %s: %w", account, err)
-	}
-	kept := fmt.Sprintf("; its value is kept as %s/%s, and beacon keychain repair restores it", Service, backup)
-	if err := s.Delete(account); err != nil {
-		return fmt.Errorf("keychain: removing %s to re-create it%s: %w", account, kept, err)
-	}
-	if err := s.Set(account, v); err != nil {
-		return fmt.Errorf("keychain: writing %s back%s: %w", account, kept, err)
-	}
-	if got, err := s.Get(account); err != nil || !bytes.Equal(got.value, v.value) {
-		return fmt.Errorf("keychain: %s did not read back the same%s", account, kept)
-	}
-	if err := s.Delete(backup); err != nil {
-		return fmt.Errorf("keychain: removing the copy of %s: %w", account, err)
-	}
-	return nil
 }
 
 // Memory is an in-memory Store for tests.

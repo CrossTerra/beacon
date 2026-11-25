@@ -14,69 +14,6 @@ import (
 	"github.com/CrossTerra/beacon/internal/signal/signaltest"
 )
 
-const testLeaf = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-
-type fakeLaunch struct {
-	mu       sync.Mutex
-	calls    []string
-	printOut string
-	printErr error
-	bootErr  error
-}
-
-func (f *fakeLaunch) Bootout(_ context.Context, target string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "bootout "+target)
-	return f.bootErr
-}
-
-func (f *fakeLaunch) Print(_ context.Context, target string) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "print "+target)
-	return f.printOut, f.printErr
-}
-
-func (f *fakeLaunch) joined() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return strings.Join(f.calls, "\n")
-}
-
-// serviceApp is an app whose service commands cannot touch the real LaunchAgents directory or launchd.
-func serviceApp(t *testing.T, h *harness, agents string, fl *fakeLaunch, signed bool) *app {
-	t.Helper()
-	a := h.app(nil)
-	a.agentsDir = func() (string, error) { return agents, nil }
-	a.launchctl = fl
-	a.uid = func() int { return 501 }
-	a.identify = func(context.Context, string) (service.Identity, error) {
-		if !signed {
-			return service.Identity{AdHoc: true, Identifier: "beacon"}, nil
-		}
-		return service.Identity{Authority: "Beacon Local Signing", Identifier: "dev.beacon.cli", Leaf: testLeaf}, nil
-	}
-	return a
-}
-
-func TestCollectorLaunchAgentInstallIsRetired(t *testing.T) {
-	h := newHarness(t)
-	agents := t.TempDir()
-	fl := &fakeLaunch{}
-	a := serviceApp(t, h, agents, fl, true)
-	if code := a.main(context.Background(), []string{"service", "install"}); code == 0 ||
-		!strings.Contains(h.stderr.String(), "retired") {
-		t.Fatalf("install: %d\n%s", code, h.stderr.String())
-	}
-	if fl.joined() != "" || len(h.server.Requests()) != 0 {
-		t.Fatal("retired installer called launchd or Signal")
-	}
-	if entries, err := os.ReadDir(agents); err != nil || len(entries) != 0 {
-		t.Fatalf("retired installer wrote files: %v, %v", entries, err)
-	}
-}
-
 func TestServiceRunPrintsOnlySummaries(t *testing.T) {
 	for _, mode := range []string{"send", "dry-run"} {
 		t.Run(mode, func(t *testing.T) {
@@ -122,54 +59,20 @@ func TestServiceRunPrintsOnlySummaries(t *testing.T) {
 	}
 }
 
-func TestServiceUninstallStopsAndRemoves(t *testing.T) {
-	h := newHarness(t)
-	dir := t.TempDir()
-	agents := t.TempDir()
-	fl := &fakeLaunch{}
-	a := serviceApp(t, h, agents, fl, true)
-	must(t, os.WriteFile(filepath.Join(agents, service.PlistName), []byte("legacy plist"), 0o600))
-	state := filepath.Join(dir, "state")
-	must(t, os.MkdirAll(state, 0o700))
-	if err := os.WriteFile(filepath.Join(state, "outbox.jsonl"), []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if code := a.main(context.Background(), []string{"service", "uninstall"}); code != 0 {
-		t.Fatalf("uninstall: %d\n%s", code, h.stderr.String())
-	}
-	if _, err := os.Stat(filepath.Join(agents, service.PlistName)); !os.IsNotExist(err) {
-		t.Fatal("plist still there")
-	}
-	if _, err := os.Stat(filepath.Join(state, "outbox.jsonl")); err != nil {
-		t.Fatal("uninstall deleted state")
-	}
-	if !strings.Contains(fl.joined(), "bootout gui/501/"+service.Label) {
-		t.Fatalf("calls:\n%s", fl.joined())
-	}
-	if !strings.Contains(h.stdout.String(), "Stopped and removed") {
-		t.Fatalf("stdout: %s", h.stdout.String())
-	}
-	// Idempotent.
-	if code := a.main(context.Background(), []string{"service", "uninstall"}); code != 0 || !strings.Contains(h.stdout.String(), "not installed") {
-		t.Fatalf("second uninstall: %d\n%s", code, h.stdout.String())
-	}
-}
-
 func TestServiceStatusParsing(t *testing.T) {
 	h := newHarness(t)
 	dir := t.TempDir()
 	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "st")
-	fl := &fakeLaunch{printOut: "gui/501/" + service.Label + " = {\n\tstate = running\n\tpid = 4242\n\tprogram = /Users/winton/.local/bin/beacon\n}\n"}
-	a := serviceApp(t, h, t.TempDir(), fl, true)
+	a := h.app(nil)
 	if err := service.WritePass(filepath.Join(dir, "state"), service.Pass{
 		At: time.Date(2026, 11, 10, 15, 4, 5, 0, time.UTC), Outcome: "ok", Lease: service.LeaseHeld, Holder: "0123456789abcdef",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+	if code := h.run(a, "status", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
-	want := "loaded: yes\nrunning: yes\npid: 4242\nlast_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\nidentity: none\n"
+	want := "last_pass: 2026-11-10T15:04:05Z\noutcome: ok\nlease: held\nholder: 0123456789abcdef\n"
 	if h.stdout.String() != want {
 		t.Fatalf("status:\n%s", h.stdout.String())
 	}
@@ -178,26 +81,21 @@ func TestServiceStatusParsing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "state", service.PassName), []byte("{\"at\":\"2026-11-10T15:04:05Z\",\"outcome\":\"ok\\nfixture:chat:1\",\"lease\":\"held\",\"holder\":\"not-an-id\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fl.printOut = "state = not running\n"
-	a = serviceApp(t, h, t.TempDir(), fl, true)
-	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+	if code := h.run(a, "status", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
 	out := h.stdout.String()
-	if strings.Contains(out, "fixture") || strings.Contains(out, "not-an-id") || !strings.Contains(out, "loaded: yes\nrunning: no\n") || !strings.Contains(out, "last_pass: unreadable\n") {
+	if strings.Contains(out, "fixture") || strings.Contains(out, "not-an-id") || !strings.Contains(out, "last_pass: unreadable\n") {
 		t.Fatalf("status:\n%s", out)
 	}
 
-	fl.printErr = os.ErrNotExist
-	fl.printOut = "Could not find service\n"
-	a = serviceApp(t, h, t.TempDir(), fl, true)
 	if err := os.Remove(filepath.Join(dir, "state", service.PassName)); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+	if code := h.run(a, "status", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
-	if !strings.Contains(h.stdout.String(), "loaded: no\nrunning: no\npid: none\nlast_pass: none\n") {
+	if !strings.Contains(h.stdout.String(), "last_pass: none\n") {
 		t.Fatalf("status:\n%s", h.stdout.String())
 	}
 }
@@ -218,42 +116,30 @@ func TestStatusAndLogsIgnoreBrokenRules(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(state, service.StderrName), []byte("{\"msg\":\"run_finished\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	fl := &fakeLaunch{printOut: "state = running\npid = 7\n"}
-	a := serviceApp(t, h, t.TempDir(), fl, true)
-	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
+	a := h.app(nil)
+	if code := h.run(a, "status", "--config", cfg); code != 0 {
 		t.Fatal(h.stderr.String())
 	}
 	if !strings.Contains(h.stdout.String(), "last_pass: 2026-11-10T15:04:05Z\n") || !strings.Contains(h.stdout.String(), "holder: another instance\n") {
 		t.Fatalf("status hid the pass:\n%s", h.stdout.String())
 	}
-	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("Items: 0 send\n"), 0o600))
-	a = serviceApp(t, h, t.TempDir(), fl, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "Items: 0 send\n" {
+	must(t, os.WriteFile(filepath.Join(h.logs, "collector.log"), []byte("Items: 0 send\n"), 0o600))
+	h.stdout.Reset()
+	if code := h.run(a, "logs"); code != 0 || h.stdout.String() != "Items: 0 send\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 }
 
 func TestServiceLogs(t *testing.T) {
 	h := newHarness(t)
-	dir := t.TempDir()
-	cfg, _ := writeSetup(t, dir, h.server.URL, "dry-run", "lg")
-	state := filepath.Join(dir, "state")
-	if err := os.MkdirAll(state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	must(t, os.WriteFile(filepath.Join(state, service.StdoutName), []byte("legacy-line\n"), 0o600))
-	a := serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "no collector log yet\n" {
+	a := h.app(nil)
+	if code := h.run(a, "logs"); code != 0 || h.stdout.String() != "no collector log yet\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
 	}
 	must(t, os.WriteFile(filepath.Join(h.logs, "collector.log"), []byte("collector-line\n"), 0o600))
-	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs"}); code != 0 || h.stdout.String() != "collector-line\n" {
+	h.stdout.Reset()
+	if code := h.run(a, "logs"); code != 0 || h.stdout.String() != "collector-line\n" {
 		t.Fatalf("logs: %d\n%s%s", code, h.stdout.String(), h.stderr.String())
-	}
-	a = serviceApp(t, h, t.TempDir(), &fakeLaunch{}, true)
-	if code := a.main(context.Background(), []string{"service", "logs", "--legacy", "--config", cfg}); code != 0 || h.stdout.String() != "legacy-line\n" {
-		t.Fatalf("legacy log: %d\n%s", code, h.stdout.String())
 	}
 }
 
@@ -596,46 +482,6 @@ func TestBackoffStopsOnSIGTERM(t *testing.T) {
 	pass, err := service.ReadPass(filepath.Join(dir, "state"))
 	if err != nil || pass.Outcome != "unauthorized" {
 		t.Fatalf("%+v %v", pass, err)
-	}
-}
-
-func TestPinnedIdentityRefused(t *testing.T) {
-	h := newHarness(t)
-	dir := t.TempDir()
-	cfg, _ := writeSetup(t, dir, h.server.URL, "send", "pin")
-	if err := service.WriteLeaf(filepath.Join(dir, "state"), testLeaf); err != nil {
-		t.Fatal(err)
-	}
-	other := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	a := h.app(h.egressList(cfg))
-	a.identify = func(context.Context, string) (service.Identity, error) {
-		return service.Identity{Authority: "Other", Leaf: other}, nil
-	}
-	if code := a.main(context.Background(), []string{"run", "--once", "--config", cfg}); code == 0 || !strings.Contains(h.stderr.String(), "signing identity") {
-		t.Fatalf("exit %d\n%s", code, h.stderr.String())
-	}
-	if len(h.server.Requests()) != 0 {
-		t.Fatalf("mismatched binary contacted Signal: %d", len(h.server.Requests()))
-	}
-	pass, err := service.ReadPass(filepath.Join(dir, "state"))
-	if err != nil || pass.Outcome != "signing_mismatch" {
-		t.Fatalf("%+v %v", pass, err)
-	}
-	agents := t.TempDir()
-	plist := []byte(`<plist><dict><key>ProgramArguments</key><array>
-<string>/Users/fixture/.local/bin/beacon</string><string>run</string></array></dict></plist>`)
-	if err := os.WriteFile(filepath.Join(agents, service.PlistName), plist, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a = serviceApp(t, h, agents, &fakeLaunch{}, true)
-	a.identify = func(context.Context, string) (service.Identity, error) {
-		return service.Identity{Authority: "Other", Leaf: other}, nil
-	}
-	if code := a.main(context.Background(), []string{"service", "status", "--config", cfg}); code != 0 {
-		t.Fatal(h.stderr.String())
-	}
-	if !strings.Contains(h.stdout.String(), "identity: mismatch\n") || strings.Contains(h.stdout.String(), testLeaf) || strings.Contains(h.stdout.String(), other) {
-		t.Fatalf("status:\n%s", h.stdout.String())
 	}
 }
 

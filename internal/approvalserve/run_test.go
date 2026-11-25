@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -169,6 +170,36 @@ func runOptions(t *testing.T) (Options, string, string) {
 	return opts, a, b
 }
 
+func TestServeAdvertisesAgentRunOnlyWithInstalledRunSettings(t *testing.T) {
+	opts, _, _ := runOptions(t)
+	opts.RequireHandlers = true // installed service, not the review-only fixture mode
+	path := filepath.Join(opts.StateDir, "agent-runs.json")
+	settings, err := os.ReadFile(path)
+	must(t, err)
+	must(t, os.Remove(path))
+	checkTypes := func(want ...approval.Action) {
+		t.Helper()
+		_, stop := signInBrowser(t, opts)
+		defer stop()
+		data, err := actsocket.Call(t.Context(), opts.StateDir, approval.Object{"op": "types"}, 0)
+		must(t, err)
+		var answer struct {
+			Types []struct{ Type approval.Action }
+		}
+		must(t, json.Unmarshal(data, &answer))
+		var kinds []approval.Action
+		for _, info := range answer.Types {
+			kinds = append(kinds, info.Type)
+		}
+		if !slices.Equal(kinds, want) {
+			t.Fatalf("advertised types %v, want %v", kinds, want)
+		}
+	}
+	checkTypes()
+	must(t, os.WriteFile(path, settings, 0o600))
+	checkTypes(approval.Run)
+}
+
 func (b browser) freezeRun(p runProposal, model string, status int) string {
 	b.t.Helper()
 	v := url.Values{"csrf": {b.csrf}, "id": {p.ID}}
@@ -206,6 +237,7 @@ func waitInvocation(t *testing.T, path string) invocation {
 
 func TestServeAgentRunsUseSeparateAssertionsAndPinnedCheckouts(t *testing.T) {
 	opts, a, b := runOptions(t)
+	opts.RequireHandlers = true
 	key, prf := registerFixturePasskey(t, opts.StateDir)
 	web, stop := signInBrowser(t, opts)
 	prompt := "  keep \"quotes\", --flags and 👍\n\n" + strings.Repeat("👍", 24_000) // larger than a pipe buffer

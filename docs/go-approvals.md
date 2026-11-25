@@ -1,15 +1,15 @@
-# Go approval service (13.01 preview)
+# Go approval service
 
-This is an opt-in [CLI preview](commands.md#go-review-preview) on macOS and Linux. Use a
-separate `--state-dir` for `beacon serve`, `beacon open` and the preview form of `beacon act`. Default
-`beacon act` (including `quit`) still uses the signed Beacon.app socket; neither route falls back to the other.
-The preview does not read collector config, Keychain items or the Swift journal. There is no installer cutover
-or migration. With no settings, proposals are review-only and no records leave the machine. GitHub merges,
-Slack posts, agent runs and Signal record delivery each require explicit configuration in this state directory.
+Install with [the user-service installer](install.md). `beacon serve`, `beacon open` and `beacon act` share
+the private state directory (`~/Library/Application Support/beacon` on macOS;
+`${XDG_STATE_HOME:-$HOME/.local/state}/beacon` on Linux). An explicit `--state-dir` selects another directory;
+there is no signed client or `quit` operation. The Swift [cutover](install.md#one-time-cutover-from-beaconapp-d16)
+requires a drained archive, not a replay of prior work.
+GitHub merges, Slack posts, agent runs and Signal record delivery each require explicit configuration.
 
 ## Passkey setup
 
-`beacon setup --state-dir DIR` prints a 10-minute, one-use code and does not store the code. It holds the
+`beacon setup` prints a 10-minute, one-use code and does not store the code. It holds the
 instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
 ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
 The output is not written. A second passkey is refused until a later assertion-gated path exists.
@@ -66,7 +66,7 @@ the provider, origin and account under the passkey vault's data key. They cannot
 After a passkey reset, register again and re-save the write credential; the earlier ciphertext cannot open
 under the new key. The unattended read vault is not reset.
 
-The preview reads the PR, reviews, rules and checks with the read token. Every reported check and every
+Beacon reads the PR, reviews, rules and checks with the read token. Every reported check and every
 visible required check must pass; only the latest run for each check name and app counts. The frozen view
 names the approved head. After approval the write token is used for final reads, including one last PR
 read, and at most one `PUT` with the exact approved method and head SHA. The provider alone enforces
@@ -74,8 +74,8 @@ branch rules at the write. A lost or ambiguous reply is read back with the unatt
 requires the approved repository, base, head, this user, and a merge SHA. A merged pull request with a
 different actor, head, or base fails as `merged_otherwise` and is not read again. A merge that matches
 this account, head, and base but has no actor or merge SHA stays unknown: GitHub can omit the SHA briefly
-after Beacon's own merge. The Swift app fails that incomplete case as `merged_otherwise`; the Go preview
-does not, so it cannot record a false failure for its own write. An open PR settles as `not_merged` only
+after Beacon's own merge. Beacon does not record this incomplete case as `merged_otherwise`.
+An open PR settles as `not_merged` only
 after two eligible reads at least a minute apart, both at least a minute after the outcome became unknown.
 Automatic read-back keeps that one-minute cadence until then, then doubles the wait up to 15 minutes, so
 a read that never settles does not spend the recovery budget every minute. The sweep asks each handler
@@ -141,7 +141,7 @@ cooldowns; none can resend a post.
 
 ## Agent runs and checkouts
 
-Stop `beacon serve` and put `agent-runs.json` (`0600`) in the preview state directory to enable runs:
+Stop `beacon serve` and put `agent-runs.json` (`0600`) in the service state directory to enable runs on the next start:
 
 ```json
 {
@@ -156,11 +156,11 @@ Stop `beacon serve` and put `agent-runs.json` (`0600`) in the preview state dire
 
 Choose the absolute path of the OpenCode executable you trust, and list the exact `provider/model` IDs to
 offer. On Linux, use the native binary (a symlink to it is fine), not a script wrapper: the reaper verifies
-the executable and its argument vector before confirming launch. The Go preview does not invoke a login
+the executable and its argument vector before confirming launch. Beacon does not invoke a login
 shell or start OpenCode to discover models during review.
 OpenCode uses its own configuration and sign-in under your home directory. The fixed environment includes
 the executable's directory, `~/.local/bin` and system directories on `PATH`, not the service's environment
-or credentials. **Settings** shows the configured checkouts; change the file with the preview stopped.
+or credentials. **Settings** shows the configured checkouts; change the file with the service stopped.
 
 The proposal names a checkout, not a path, with a model and exact prompt. `propose` returns `runner_id` for
 routing the report. The page shows the resolved path, branch and device/inode, and lets you change only the
@@ -180,8 +180,8 @@ or an unlinked file opened read-only for the child on macOS. `PWD` is set to the
 `OLDPWD` is not passed. Beacon
 does not run a checkout's `bin/run`. `--auto` allows permissions that OpenCode's configuration does not
 deny. This is **not a sandbox**: the agent acts as your user and may use your files, sign-in and network.
-Those connections are OpenCode's, not Beacon's. To use the preview proposal socket from a run, use
-`beacon act --state-dir DIR` as for other preview clients.
+Those connections are OpenCode's, not Beacon's. A run uses `beacon act` for the installed service; for a
+service started with an explicit `--state-dir DIR`, use that same flag before the `act` operation.
 
 Before acknowledging confirmed exec, the reaper syncs a local receipt revealing the nonce behind the
 journalled permit's hash commitment. Reading the permit alone does not prove exec.
@@ -203,15 +203,16 @@ without a permit is recovered as not launched; a permit alone is not evidence of
 
 ## Unattended vault
 
-`unattended.kdbx` is a KDBX 4 database opened by `unattended.keyx`, a KeePassXC XML v2.0 key file created
-`0600`. Create links both files into place and refuses if either name already exists; it does not replace
-a key file or a database. There is no master password. The cipher is ChaCha20. The KDF is Argon2id with 64 MiB of memory
+`unattended.kdbx` is a KDBX 4 database opened by a KeePassXC XML v2.0 key. On macOS the key is in `unattended.keyx`
+(`0600`, excluded from Time Machine). On Linux Beacon uses Secret Service if it answers at setup, otherwise
+the `0600` key file. An existing vault never changes key stores or gets a replacement key. `beacon vault key-file PATH`
+exports a copy for KeePassXC; remove it when done. There is no master password. The cipher is ChaCha20. The KDF is Argon2id with 64 MiB of memory
 and 2 iterations. Entries are found by `beacon.service`, `beacon.origin`, `beacon.account`,
 `beacon.workspace`, and `beacon.use`, not by title. A write that finds the file changed re-reads and
 retries once when the target entry is unchanged; a changed entry, or a second conflict, writes nothing
 (`vault_conflict`). After the rename it reads the file back and returns `vault_conflict` if the bytes
-differ. Linux Secret Service is not wired; both platforms use the key file. The preview does not yet
-read a collector token from this vault.
+differ. The collector, approval preflight and Signal record sender use this vault. Passkey-sealed write tokens
+stay separate; Beacon refuses to use a write token that already appears in the unattended vault.
 
 ## Journal and record delivery
 
@@ -232,7 +233,7 @@ directory rename that publishes a new journal is flushed on the directory descri
 is `F_FULLFSYNC`. If that call fails, Beacon calls `unix.Fsync` (`syscall.Fsync`) on the same descriptor.
 It does not call `os.File.Sync`: on macOS that is also `F_FULLFSYNC` and would fail the same way. Linux uses `unix.Fsync`. The flush reports which call reached the disk, `F_FULLFSYNC` or `fsync`.
 Proposals and any frozen snapshots are
-plaintext on disk. Keep the preview directory private and use synthetic proposals.
+plaintext on disk. Keep the directory private and use synthetic proposals in tests.
 
 An approval that did not start expires at restart or shutdown. A durable start without a result becomes
 `outcome_unknown` at restart; only a read-back result can settle it. Replay does not dispatch. A supplied
@@ -240,7 +241,7 @@ archive ID at the journal API is a lower bound for a new journal, not an import:
 after it. Pending proposals survive a restart until their 24-hour deadline. The service sweeps expiries even
 without a browser or socket read, waking waiters after the expiry is durable. The [reaper](supervision.md)
 sweeps the previous Go session under the instance lock before replay. Ctrl-C or SIGTERM stops the service,
-closes both listeners and the socket, cancels provider work and any fixture delivery, stops supervision, and
+closes both listeners and the socket, cancels provider work and delivery, stops supervision, and
 releases the instance lock. If the reaper is lost, the service stops serving and the next start must sweep again.
 
 An action frame fixes its Signal record sequence and replay nonce. Local markers and cursor changes consume
@@ -255,41 +256,21 @@ to Signal. Without a trusted Slack intake lookup, Slack records use the person's
 The delivery worker waits 30 seconds after a retryable failure, then doubles the delay up to 15 minutes. A
 longer `Retry-After` from a rate limit or server failure takes precedence (up to an hour). New proposals do not
 shorten the wait or clear a stop. After addressing a delivery refusal, run
-`beacon act --state-dir DIR resume-delivery`. It uses the same-user proposal socket and refuses connections
+`beacon act resume-delivery`. It uses the same-user proposal socket and refuses connections
 attributed to a run. For an operator it queues a resume of the stopped head, or bypasses backoff, including
 when requested during a send. It cannot approve or retry
 an action, skip a record or resend an acknowledged one.
 
-To opt into delivery, add `signal` to `action-providers.json` with your **test** approval app actor ID, its
-person's actor ID and handle, and the Signal origin. For example:
-
-```json
-{"signal":{"origin":"https://signal.example.com","actor_id":"act_01m6a6ft00e40r2081040g2082",
-           "person_id":"act_01m6a6ft00e40r2081040g2081","handle":"example"}}
-```
-
-With the service stopped, put the corresponding approval-app key in an entry in the vault's `Beacon` group
-using KeePassXC (the key is the entry's password). The `unattended.kdbx` entry needs these custom attributes:
-
-| Attribute | Value |
-| --- | --- |
-| `beacon.service` | `signal` |
-| `beacon.origin` | the exact configured Signal origin |
-| `beacon.account` | the app's `actor_id`, not the person's ID |
-| `beacon.workspace` | empty |
-| `beacon.use` | `records` |
-
-This is separate from the collector's Signal key. The preview does not set up an app actor, redeem a setup
-code, or migrate Swift's records. Do not point a preview journal at the app actor in live use by Swift. Signal
-enforces the app actor and person at `POST /api/app-records`. A missing or unreadable entry leaves the outbox
-pending. Use HTTPS (the literal loopback HTTP exception is for fakes). `beacon egress --state-dir DIR` lists
-this host alongside configured provider hosts, without opening the vault.
+To connect Signal, stop the service and run `beacon setup --signal`. Paste the setup code from Signal's `/beacon`
+page in hidden input. Setup verifies the app and its person and stores the key under the exact Signal/app binding
+in the unattended vault. A cutover must rotate the existing app actor's key, not create a different actor. The
+collector has a separate config, key and outbox. A missing or unreadable approval-app key leaves delivery pending.
 
 Run records use `agent-run:{handle}:{runner id without run_}`. The report or failure detail is sealed at
 `owner+agents` and marked `from: "runner"`: it is data for the session that requested the run, never an
 instruction or authorization. Checkout paths, the process group and the local launch permit are not record fields.
 The Go contract tests use the unmodified [Signal fixtures](../internal/approval/testdata/) and a fake Signal
-over loopback. The collector's outbox and egress are unchanged.
+over loopback.
 
 ## Proposal socket
 
@@ -298,8 +279,7 @@ the process dies before the following chmod. Restart removes that dead socket wh
 it does not remove a live socket, a symlink, a non-socket, or another user's socket. The client still
 requires exact `0600` before it connects. The listener admits only the service's own user ID from the
 kernel (`SO_PEERCRED` on Linux; `LOCAL_PEERCRED` and `LOCAL_PEERPID` on macOS). The client then checks
-the listener's kernel user ID. Neither check verifies code signatures. The signed Swift socket and client
-are unchanged.
+the listener's kernel user ID. Neither check verifies code signatures.
 
 The PID and executable path are local, unverified labels. The path lookup is best effort (`/proc/PID/exe`
 on Linux; the `proc_pidpath` kernel query on macOS without cgo). Neither reads arguments or environment.
@@ -321,8 +301,9 @@ hourly budget per provider.
 ## Browser review
 
 The review listeners bind only `127.0.0.1:7317` and `[::1]:7317`. Both must bind; there is no fallback
-port. The canonical `--origin` defaults to `http://localhost:7317`; one `https://{machine}.{tailnet}.ts.net`
-name can be configured together with `--tailscale-login`. The service does not set up, check or contact Tailscale.
+port. `beacon setup --origin localhost` sets `http://localhost:7317`. `beacon setup --origin tailscale` reads the
+local login and name, verifies or configures the private proxy, and records the canonical origin. The running
+service uses only the stored origin. `beacon status --review` checks the proxy, including that Funnel is off.
 In tailnet mode the existing private reverse proxy must preserve the canonical `Host` and pass the configured
 `Tailscale-User-Login`. This header filters proxy traffic;
 it does not authenticate a local process. Old `GET` links on `localhost:7317` redirect to the canonical

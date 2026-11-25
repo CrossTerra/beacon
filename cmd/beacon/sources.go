@@ -43,8 +43,8 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 		if s.IsGoogle() && auths[s.Account] == nil {
 			auth, err := google.NewAuth(google.AuthOptions{
 				TokenURL: a.google.tokenURL,
-				Client:   a.secretFunc(keychain.GoogleClientAccount(s.Account)),
-				Refresh:  a.secretFunc(keychain.GoogleRefreshAccount(s.Account)),
+				Client:   a.secretFunc(cfg, keychain.GoogleClientAccount(s.Account)),
+				Refresh:  a.secretFunc(cfg, keychain.GoogleRefreshAccount(s.Account)),
 				Now:      a.now,
 			})
 			if err != nil {
@@ -83,7 +83,7 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 				Name: s.SourceName(), Person: strings.TrimPrefix(cfg.Person.Handle, "@"),
 				Workspace: s.Workspace, User: s.User, Channels: s.Channels.IDs(), Member: s.Channels.Member(),
 				Identity: cfg.Person.Identities[s.SourceName()],
-				Token:    a.secretFunc(keychain.SlackAccount(s.Workspace, s.User)),
+				Token:    a.secretFunc(cfg, keychain.SlackAccount(s.Workspace, s.User)),
 				Cache:    filepath.Join(cfg.StatePath(), slack.CacheFile(s.SourceName())),
 				Base:     a.slackBase, Now: a.now, Sleep: a.sleep,
 			})
@@ -112,7 +112,7 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 			g, err := github.New(github.Options{
 				Name: s.SourceName(), Host: s.Host, Repos: s.Repos, Projects: projects,
 				Identity: cfg.Person.Identities[s.SourceName()],
-				Token:    a.secretFunc(keychain.SourceAccount(s.SourceName())),
+				Token:    a.secretFunc(cfg, keychain.SourceAccount(s.SourceName())),
 				Now:      a.now,
 			})
 			if err != nil {
@@ -123,7 +123,7 @@ func (a *app) buildSources(cfg *config.Config) ([]source.Source, error) {
 			j, err := jira.New(jira.Options{
 				Name: s.SourceName(), Site: s.Site, Projects: s.Projects,
 				Identity: cfg.Person.Identities[s.SourceName()],
-				Creds:    a.secretFunc(keychain.SourceAccount(s.SourceName())),
+				Creds:    a.secretFunc(cfg, keychain.SourceAccount(s.SourceName())),
 				Now:      a.now,
 			})
 			if err != nil {
@@ -160,12 +160,9 @@ func personal(sources []source.Source) map[string]string {
 	return out
 }
 
-func (a *app) secretFunc(account string) func() (keychain.Secret, error) {
+func (a *app) secretFunc(cfg *config.Config, account string) func() (keychain.Secret, error) {
 	return func() (keychain.Secret, error) {
-		if a.keychain == nil {
-			return keychain.Secret{}, keychain.ErrNotFound
-		}
-		store, err := a.keychain()
+		store, err := a.collectorStore(cfg, false)
 		if err != nil {
 			return keychain.Secret{}, err
 		}
@@ -260,26 +257,10 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := keychain.SlackUserToken(token); err != nil {
-		return err
-	}
-	transport := a.transport
-	if transport == nil {
-		transport = egress.Transport
-	}
-	base := a.slackBase
-	if base == "" {
-		base = slack.Base
-	}
-	id, err := slack.Verify(ctx, limited.HTTPClient(transport(slack.Hosts(base))), base, token)
+	defer token.Clear()
+	id, err := a.checkSlackReadGrant(ctx, token)
 	if err != nil {
-		if errors.Is(err, source.ErrUnauthorized) {
-			return errors.New("slack refused the token, or it is not a user token; nothing was stored")
-		}
 		return err
-	}
-	if missing := append(append([]string(nil), id.Missing...), id.MissingNames...); len(missing) > 0 {
-		return fmt.Errorf("the token lacks the scopes %s; add them as User Token Scopes, reinstall the app, and run this again. Nothing was stored", strings.Join(missing, ", "))
 	}
 	src := config.Source{Kind: "slack", Name: *name, Workspace: id.Workspace, User: id.User, Channels: config.SlackChannels(channels)}
 	if src.Name == "slack" {
@@ -289,7 +270,7 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -300,11 +281,8 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Stored the Slack token in the keychain as %s/%s\nEnabled source %s (workspace %s, user %s)\n",
-		keychain.Service, account, src.SourceName(), id.Workspace, id.User)
-	if len(id.Extra) > 0 {
-		fmt.Fprintf(a.stdout, "The token also holds %s. Beacon never calls a method that uses them; a token with only the read scopes is safer.\n", strings.Join(id.Extra, ", "))
-	}
+	fmt.Fprintf(a.stdout, "Stored the Slack token in the unattended vault (%s)\nEnabled source %s (workspace %s, user %s)\n",
+		account, src.SourceName(), id.Workspace, id.User)
 	if cfg.Person.Identities[src.SourceName()] == "" {
 		fmt.Fprintf(a.stdout, "Set person.identities.%s: slack:user:%s so your own messages carry by.\n", src.SourceName(), id.User)
 	}
@@ -316,7 +294,7 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 func (a *app) addGoogle(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("source add google")
 	account := fs.String("account", "", "the Google account to read, its primary address (required)")
-	clientFile := fs.String("client-file", "", "OAuth client JSON of a Desktop app from your Google Cloud project; stored in the keychain (default: the client already stored)")
+	clientFile := fs.String("client-file", "", "OAuth client JSON of a Desktop app, stored in the unattended vault (default: reuse the stored client)")
 	gmail := fs.Bool("gmail", false, "enable Gmail")
 	calendar := fs.Bool("calendar", false, "enable Calendar")
 	drive := fs.Bool("drive", false, "enable Drive comments and meeting notes")
@@ -356,7 +334,7 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 			names = append(names, s.SourceName())
 		}
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -369,7 +347,7 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 		if err := store.Set(keychain.GoogleClientAccount(email), client); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.stdout, "Stored the OAuth client in the keychain as %s/%s\n", keychain.Service, keychain.GoogleClientAccount(email))
+		fmt.Fprintf(a.stdout, "Stored the OAuth client in the unattended vault (%s)\n", keychain.GoogleClientAccount(email))
 	} else {
 		client, err = store.Get(keychain.GoogleClientAccount(email))
 		if errors.Is(err, keychain.ErrNotFound) {
@@ -410,8 +388,8 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Stored the Google refresh token in the keychain as %s/%s\nGranted read-only: %s\nEnabled sources %s\n",
-		keychain.Service, keychain.GoogleRefreshAccount(email), strings.Join(tok.Scopes, " "), strings.Join(names, ", "))
+	fmt.Fprintf(a.stdout, "Stored the Google refresh token in the unattended vault (%s)\nGranted read-only: %s\nEnabled sources %s\n",
+		keychain.GoogleRefreshAccount(email), strings.Join(tok.Scopes, " "), strings.Join(names, ", "))
 	return nil
 }
 
@@ -441,9 +419,13 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 	host := fs.String("host", "", "GitHub API host (default api.github.com; an enterprise host uses /api/v3)")
 	name := fs.String("name", "github", "source name")
 	fromGH := fs.Bool("from-gh", false, "import the token `gh auth token` prints")
+	newRead := fs.Bool("new-read-token", false, "confirm direct entry of a newly issued fine-grained PAT with only read permissions")
 	yes := fs.Bool("yes", false, "confirm the import; required when input is not a terminal")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *fromGH && *newRead {
+		return errors.New("--new-read-token requires direct entry, not --from-gh")
 	}
 	cfg, err := a.loadConfig(*cfgPath)
 	if err != nil {
@@ -458,12 +440,11 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 		return err
 	}
 	if *fromGH {
-		if err := a.confirm("Import the token from `gh auth token` into the keychain? [y/N] ", *yes); err != nil {
+		if err := a.confirm("Import the token from `gh auth token` into the unattended vault? [y/N] ", *yes); err != nil {
 			return err
 		}
 	}
-	// Refuse an ad-hoc build before gh can read its own credential store.
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -472,13 +453,17 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 		return err
 	}
 	account := keychain.SourceAccount(src.SourceName())
+	defer token.Clear()
+	if err := a.checkGitHubReadGrant(ctx, collectorBindings(cfg)[account].Origin, token, *newRead); err != nil {
+		return err
+	}
 	if err := store.Set(account, token); err != nil {
 		return err
 	}
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Stored the GitHub token in the keychain as %s/%s\nEnabled source %s\n", keychain.Service, account, src.SourceName())
+	fmt.Fprintf(a.stdout, "Stored the GitHub token in the unattended vault (%s)\nEnabled source %s\n", account, src.SourceName())
 	return nil
 }
 
@@ -503,7 +488,7 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -518,7 +503,7 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	if err := writeConfig(cfg); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Stored the Jira credential in the keychain as %s/%s\nEnabled source %s (%s.atlassian.net)\n", keychain.Service, account, src.SourceName(), *site)
+	fmt.Fprintf(a.stdout, "Stored the Jira credential in the unattended vault (%s)\nEnabled source %s (%s.atlassian.net)\n", account, src.SourceName(), *site)
 	return nil
 }
 
@@ -526,7 +511,7 @@ func (a *app) readGitHubToken(ctx context.Context, fromGH bool, host string) (ke
 	if fromGH {
 		return keychain.ReadGitHubToken(ctx, host)
 	}
-	fmt.Fprint(a.stderr, "GitHub token (input hidden): ")
+	fmt.Fprint(a.stderr, "GitHub read-only token (input hidden): ")
 	s, err := keychain.ReadSecret(ctx, a.stdin)
 	fmt.Fprintln(a.stderr)
 	return s, err

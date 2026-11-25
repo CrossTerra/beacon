@@ -24,6 +24,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/seed"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/source"
+	"github.com/CrossTerra/beacon/internal/vault"
 )
 
 // Runner runs one pass at a time.
@@ -909,10 +910,16 @@ func Classify(err error) logs.Reason {
 		return logs.ReasonEgress
 	case errors.Is(err, outbox.ErrLocked):
 		return logs.ReasonLocked
-	case errors.Is(err, keychain.ErrReadRefused):
-		return logs.ReasonKeychainRead
+	case errors.Is(err, vault.ErrLocked):
+		return logs.ReasonVaultLocked
+	case errors.Is(err, vault.ErrKeyMissing):
+		return logs.ReasonVaultKey
+	case errors.Is(err, vault.ErrAmbiguous):
+		return logs.ReasonVaultAmbiguous
+	case errors.Is(err, vault.ErrUnreadable):
+		return logs.ReasonVault
 	case errors.Is(err, keychain.ErrNotFound):
-		return logs.ReasonKeychain
+		return logs.ReasonCredential
 	case errors.Is(err, source.ErrRateLimited):
 		return logs.ReasonRateLimit
 	case errors.Is(err, source.ErrUnauthorized):

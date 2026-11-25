@@ -4,24 +4,15 @@ Beacon sits between accounts that belong to one person and a store that many peo
 says what Beacon protects, from whom, and how. Code that changes any of these properties changes this file in the
 same pull request.
 
-`Beacon.app`'s menu and shortcut open the approval window. When signed as `dev.beacon.app` with a certificate, it
-opens its vault key, its journal and the proposal socket ([approvals](approvals.md)). With a GitHub account added
-in Settings, it merges approved pull requests through that account's API origin. With Slack added, it reads
-destinations and posts approved messages at `https://slack.com`. With Signal added, it sends its journal's
-records to Signal's record API with its app actor's key. Those are its only network connections, and
-`beacon egress` lists them. It starts [tether](tether.md), a helper in its bundle that runs the bundled
-collector as the same user while the app is open. The app and `tether` share one socket pair that carries only a
-run's id when the app starts or stops an approved agent run, never a path, secret or item content. Tether's reply
-is that id, its process group and the outcome. The menu's collector health reads only the collector's `pass.json`
-and `coverage.json` (names, times and fixed codes); its keychain repair item opens Terminal on the bundled CLI and
-reads no credential itself ([tether](tether.md#collector-health-in-the-menu)).
+`beacon serve` owns the approval journal, the same-user proposal socket, and the review pages on loopback
+([approvals](approvals.md)). Presence and verification on your passkey bind the exact approval and release the
+write-vault key. Configured providers get only their own requests, and Signal gets ordered journal records with
+the approval app's key. `beacon egress` lists the hosts. The [supervisor](supervision.md) starts the collector as
+the same user; its pass records carry names, times and fixed codes.
 
-With a checkout in Settings, an approved `agent.run` starts opencode in that checkout through `tether`
-([agent runs](approvals.md#agent-runs)). The run is the person's agent, not part of Beacon: it works with the
-person's files, their login shell's environment (which may hold tokens their profile exports) and opencode's own
-sign-in, and it reaches whatever hosts the agent decides to, which `beacon egress` does not list. Beacon passes it
-none of the credentials Beacon holds, and every run uses `--auto`, so opencode approves any permission the
-checkout's opencode configuration does not deny.
+An approved `agent.run` uses the configured checkout, executable and model. A run inherits no service credentials,
+but can use the person's files, OpenCode's own sign-in and its network destinations. `beacon egress` lists only
+Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout; the run is not a sandbox.
 
 ## What crosses the boundary
 
@@ -114,25 +105,19 @@ checkout's opencode configuration does not deny.
    the channels the person is not in through Beacon. `beacon source add google` listens on `127.0.0.1` for one OAuth
    redirect; the person's browser, not Beacon, opens Google's consent page. There is no telemetry, no update check
    and no crash reporting.
-7. **Credentials stay in the keychain.** Only the keychain package reads them, when they are needed. They are
-   never written to disk, logs or the outbox; a credential prints as `[redacted]` however it is formatted.
-   During setup, the package reads hidden terminal input, both lines of a piped Jira credential, the output of
-   `gh auth token` and the Google Desktop client JSON. The CLI receives opaque secrets. A new
-   item lets code read it without asking only when it meets the designated requirement of the build that created
-   it (identifier `dev.beacon.cli` and that signing certificate) and its partition is on the item's list: the
-   team, for an Apple-issued certificate, otherwise that build's hash. Any other program, an older build or a
-   rebuild signed with a self-signed certificate included, makes macOS ask. A build that is not signed with a
-   certificate (`go build`, `go run`, test binaries) does not use the keychain at all, so it cannot prompt or add
-   itself to an item. `beacon keychain repair` re-creates each item with this access. The
-   Signal URL must be `https`, except to a loopback address. The collector never runs as root. Under `tether`
-   it runs in the person's login session and reads keys from the keychain when a pass sends, the same as a
-   terminal `beacon run`. `tether` reads no credential and no configuration. Google access is
-   read-only scopes on the person's own OAuth client (DEC-2). The client and the refresh token are in the keychain;
-   the keychain package builds the token requests, reads the authorisation code from the redirect (checking `state`,
-   with a PKCE verifier) and reads the token responses, so no other code holds a token's bytes. An access token is
-   kept in memory, not on disk. Slack access is a user token the person provides, from an app in their own workspace,
-   with read scopes only. `beacon source add slack` refuses anything that is not a user token (`xoxp-`) and a token
-   missing a read scope, and stores it under the workspace and user (`slack:<workspace>:<user>`).
+7. **Unattended credentials are bound in KDBX.** Read tokens, Google OAuth clients and refresh tokens, and the
+   collector and app Signal keys are in `unattended.kdbx`, not plaintext configuration. The key is a private
+   file on macOS, and on Linux is in Secret Service when setup finds it, otherwise a private file. An existing
+   vault never receives a replacement key. Same-user processes can read this vault. KeePassXC edits are picked
+   up without a restart; writes sync a candidate first, then check the prior file hash immediately before rename.
+   That does not close the last check-to-rename race against KeePassXC. Partial setup fails rather than replacing
+   the key or silently using an incomplete vault.
+   Credentials redact in output and are not stored in the journal, passed to an agent, or logged. The only
+   OS Keychain access is the person's explicit one-time collector import; it copies only configured collector
+   items, without updating or deleting them. GitHub and Slack imports refuse grants not reported to be read-only.
+   GitHub fine-grained tokens without a reported grant must be newly issued read-only tokens entered directly by
+   the operator, who checks those permissions at issuance. Google tokens are exchanged using PKCE and checked `state`; access
+   tokens are kept only in memory. Signal must use HTTPS except for a loopback test endpoint. No daemon runs as root.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
    supervised collector writes pass summaries to `~/Library/Logs/Beacon/collector.log`, rotated by size with
@@ -159,49 +144,25 @@ checkout's opencode configuration does not deny.
    message after it, or an ask in another day or conversation.
 10. **One sender per person.** Only the instance holding the lease sends (DEC-25), and no write outlasts the lease.
     Another instance collects and keeps its bodies pending.
-11. **Reproducible and signed.** Builds are reproducible from a commit (checked by `scripts/repro.sh` on every pull
-     request). `scripts/install.sh` builds the checked-out commit from `git archive`, refusing changes to tracked
-     files. It signs the app, the CLI and `tether` with the person's own identity, each pinned to its identifier and
-     that certificate, and verifies every signature before and after installing. The signature identifies the signer, not the source (13.00-D15). See
-     [installing and signing](signing.md). Notarized release builds and an SBOM would come in Phase 7.
-12. **Services end with the app.** `tether` runs only commands compiled into it, each in its own process group.
-    Quit or the app's death cancels pending restarts and stops every group and tracked descendant, including a
-    detached one, and `tether` confirms that none remain. A session that `tether` could not clean up is stopped by
-     the next one before it starts anything. The [limits](tether.md#limits) say what can still escape. Services
-     run as the person: supervision is not isolation.
-     The Go service's [reaper](supervision.md) uses the same group and descendant tracking and additionally
-     survives the service's death to clean up. It keeps the instance lock through cleanup and blocks a new
-     instance until recovery can be confirmed. The session ID is bound to that directory and lock, so a
-     copied state directory cannot sweep the original jobs. Linux's planned user unit adds a cgroup boundary.
-
-13. **Proposals arrive only over the authenticated local socket.** Beacon.app's proposal socket and `beacon act`
-    each check the other end with the kernel's audit token before sending anything. The app admits only the code
-    requirements configured at setup; the client sends only to the configured app's signature. The socket has no
-    operation that approves, lists or reads history. Its frames, waits and pending proposals are bounded
-    ([approvals](approvals.md)). The app writes the client's trust (`act.json`, its own designated requirement)
-    on first launch and refuses to open the socket if the file names another signature. An approval is one
-    click or keystroke on a snapshot frozen with the account, origin and destination, and it consumes that
-     proposal once. Tether resumes an approved run only after Beacon acknowledges recording its process group. Without
-     the acknowledgement tether kills the suspended process. `quit` requires the bundled CLI's code requirement.
-     The running app's own `Contents/Helpers/beacon` may quit without an external classification; a run that executes
-     that binary can quit the app, which the same user can already do with SIGTERM. A copy at another path must be
-     positively external. Runs, their known descendants and unclassified peers cannot quit through another path.
-     The interactive installer asks with the installed CLI, reports the reply, signals that bundle's executable,
-     and can send a Quit Apple event. A run's snapshot is dropped when its supervisor stops. After an unconfirmed
-     stop, known run
-    groups keep their ownership, and other peers cannot create, read or withdraw proposals until the sweep and
-    group checks confirm recovery. Quit and relaunch expire every approval that has no durable start, and a start
-    without a result is never dispatched again. The journal and outbox hold prompts and messages in plain text in
-    a `0700` directory.
-14. **Action credentials stay in the app's vault.** The vault is the app's counterpart of the keychain package. It
-    holds Beacon's own service credentials, encrypted under a Keychain key that only the signed `dev.beacon.app`
-    reads. Each credential is bound to one HTTPS origin, account and, for Slack, workspace, and is read only by
-     that binding. Nothing lists or prints a secret or passes one to a child process. The GitHub token is read by
-     the merge client's handler, the Slack user token by the post client's handler, and the Signal app key by the
-     record sender. The clients build paths from validated ids, refuse redirects, ignore proxies and do not retry
-     an action. The post client uses only `auth.test`, `conversations.info`, `conversations.members`, `users.info`,
-     `conversations.replies`, `conversations.history` and `chat.postMessage` at `https://slack.com`. The tests use
-     only fixture keys and fixture secrets.
+11. **Reproducible, not signed.** The [installer](install.md) builds from the audited `git archive`, refuses
+    tracked edits and checks the commit in the executable. User service managers start it at login. The exact
+    commit and the person's supply chain are trusted, not a code signature. Cutover archives a fully drained
+    Swift SQLite journal, never replays it, and starts a strictly newer journal with Signal sequence 1. A retry
+    rechecks both the archive checksum and the closed source, including committed WAL, before handing off.
+12. **Services end with the service.** The [Go reaper](supervision.md) cancels restarts and stops each process
+    group and tracked descendant even after a service crash. It retains the instance lock through cleanup;
+    an unconfirmed sweep must be recovered before accepting proposals. A copied session cannot sweep the
+    original jobs. Linux's user unit adds a cgroup boundary. Supervision is not isolation.
+13. **The socket grants no approval authority.** Kernel user IDs and private paths admit only the same user;
+    process labels are unverified except for a supervised run's attribution. No socket operation approves,
+    lists history, or quits. Approval requires a fresh PRF-capable passkey assertion over the frozen request.
+    Browser sessions can read and decline, not approve. Loopback, Host, Tailscale login and form checks do not
+    make a loopback header evidence of approval. The journal is private plaintext. A restart expires approvals
+    without a start and never redispatches a start without a result.
+14. **Provider writes use a different vault.** The encrypted write credentials are bound to HTTPS origin,
+    account and, for Slack, workspace. The data key comes from a verified passkey's PRF and is not passed to
+    children. A token shared with the unattended vault is refused. Clients disallow redirects and proxy
+    overrides; fresh provider checks run after the durable start, and lost replies permit only read-back.
 15. **Slack approval records use trusted visibility.** Beacon verifies the Slack user, workspace and visibility before
      writing `proposed`. Only a conversation Slack confirms as public gets a conversation subject; private channels,
      DMs and group DMs use the person's own Signal subject. Agent-supplied context cannot route records. The subject
@@ -217,17 +178,12 @@ checkout's opencode configuration does not deny.
      membership, or whether the proposal can be approved. The raw ids stay under Show exact parameters. A missing
      Slack scope is a scope name (`chat:write`), recorded in the result and shown in the window; the token and
      Slack's `provided` list are not. Saving the token checks `X-OAuth-Scopes` against the scopes Beacon needs.
-16. **Go actions require a passkey. Provider writes also require their bound credential.** `beacon serve`, `beacon open` and `beacon act --state-dir DIR`
-    are opt-in and use a private directory separate from Beacon.app. Default `beacon act`, including `quit`, still
-      takes the signed route above; there is no fallback. The service reads no login keychain item. It starts
-      its same-binary reaper, but no collector or watch. Provider calls and Signal journal delivery each need
-      explicit settings. Its socket trusts the kernel's user ID, not a code
-    signature. Anyone running as that user can submit, read the owner-only plaintext journal, or get a one-use
-    review link. The HTTP listeners stay on loopback. They enforce the canonical Host and, behind a private
-    Tailscale proxy, the configured login header. A browser needs a memory-only session to see proposals. The
-    login header does not identify local processes; cookies can be received by another port on the same host.
-     `beacon setup` prints a one-time passkey code and
-    refuses while the preview is running. `/passkeys/new` registers one passkey from that code. It stores
+16. **Enrollment does not grant a usable write key to an edited credential list.** The HTTP listeners stay on
+     loopback. They enforce the canonical Host and, behind a private Tailscale proxy, the configured login header.
+     Setup verifies that the canonical origin serves only Beacon, with no other Serve handlers on that origin.
+     A browser needs a memory-only session to see proposals. The login header does not identify local processes;
+     cookies can be received by another port on the same host. `beacon setup` prints a one-time passkey code and
+     refuses while the service is running. `/passkeys/new` registers one passkey from that code. It stores
     a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
      that data key. The live journal refuses a second active enrollment and records the hash of the bytes
      sealed by the first. A later assertion can record an approval only
@@ -265,12 +221,11 @@ checkout's opencode configuration does not deny.
 ## Known limits
 
 - **An agent run is not a sandbox (13.00-D12, D22).** It runs as the person, with `--auto` and their files, and can
-  do anything they can. The Swift app reads their login environment; the Go preview uses a fixed environment.
+  do anything they can. Beacon supplies a fixed environment, not their login environment.
   Approving it approves a launch in one checkout, not what the agent
   then does; a checkout's own `bin/run` guardrails are not applied. A descendant that leaves its process group in the
-  ways [tether](tether.md#limits) describes can outlive Stop and Quit. The run's output and errors stay in
-  `~/Library/Application Support/beacon/runs/`, readable by the person; its launch file (the login environment)
-  and prompt are deleted once tether answers, after a failed launch, and at the next launch after a crash.
+  ways [supervision](supervision.md) describes can outlive Stop on macOS. The run's output and error files stay
+  under `runs/`, readable by the person. They are not service logs.
 
 - **Signal cannot delete plaintext.** Events are immutable and redaction is not built. A rule that sends too much in
   plain cannot be undone after the send. New plain rules should start as `hold` until their output has been checked
@@ -305,8 +260,8 @@ checkout's opencode configuration does not deny.
   [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 - **Slack read scopes are broad, and the token is the person's.** `channels:history` can read every public channel,
   `search:read` everything the person can find, and `users:read` every member's profile. Beacon calls nine read methods and reads the conversations its
-  collection names, but the token itself is not narrower, and a token the person reuses may hold write scopes Beacon
-  never calls. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
+  collection names, but the token itself is not narrower. Setup refuses extra scopes; a later out-of-band grant change
+  is outside that check. A user token does not expire unless the app turns on token rotation. Revoke it from the app's page at
   [api.slack.com/apps](https://api.slack.com/apps).
 - **Slack approval checks are snapshots.** Visibility, membership, permissions and the root can change after
   the final read; Slack alone enforces its rules when it accepts a post. A channel made private after intake keeps
@@ -320,7 +275,7 @@ checkout's opencode configuration does not deny.
   20 a pass, so it can take longer when many asks are open. An edit that adds a mention in a message Beacon read
   only by history or replies, not search, is not seen.
 - **An installed app's OAuth secret is not secret to Google.** Google treats a Desktop app's client secret as
-  public; what protects the grant is the person's consent, PKCE and the refresh token, which stays in the keychain.
+  public; what protects the grant is the person's consent, PKCE and the refresh token in the unattended vault.
 - **Other people are attributed in metadata, not `by`.** Signal accepts `by` only for identities an actor already
   holds, so Beacon records other people in `metadata.actor` (DEC-27). Signal treats it as plain data: it does not
   link it to an actor or let a search by actor find it.
@@ -360,10 +315,11 @@ checkout's opencode configuration does not deny.
   than the send lease already shows. They say nothing about what was read.
 - **The lease follows the local clock.** A handover takes up to two lease periods, and machines whose clocks differ
   by more than a period may disagree on the current period.
-- **Beacon trusts the machine it runs on.** Anyone with your user account can read the outbox, the queue and the
-  keychain items Beacon uses. The supervised collector is that same user. A terminal dry run prints item keys,
-  rule names and projected bodies.
-- **Shutdown can interrupt a collect or send.** `tether` escalates from TERM to KILL after 15 seconds. An
+- **Beacon trusts the machine it runs on.** Your user's processes can read plaintext state and the unattended
+  vault, replace the executable, unit or proxy, or tamper with the browser. A passkey proves presence, not what a
+  compromised browser displayed. A memory read during approval can expose the data key or a PRF output. A backup
+  containing both the unattended database and key opens it. A terminal dry run can print private item content.
+- **Shutdown can interrupt a collect or send.** The reaper escalates from TERM to KILL after 15 seconds. An
   unfinished send is recovered by the collector's existing outbox rules. A failed collector can restart with
   backoff only while the app is running. Cleanup without a verified acknowledgement is
   unconfirmed. These guarantees cover app-supervised services, not an independent terminal run or legacy job.

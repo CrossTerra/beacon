@@ -28,6 +28,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/lease"
 	"github.com/CrossTerra/beacon/internal/limited"
+	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/outbox"
 	"github.com/CrossTerra/beacon/internal/project"
@@ -37,7 +38,6 @@ import (
 	"github.com/CrossTerra/beacon/internal/schedule"
 	"github.com/CrossTerra/beacon/internal/seal"
 	"github.com/CrossTerra/beacon/internal/seed"
-	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/signal"
 	"github.com/CrossTerra/beacon/internal/slack"
 	"github.com/CrossTerra/beacon/internal/source"
@@ -52,12 +52,14 @@ var (
 
 // app is the CLI with its outside world passed in, so tests run it in-process.
 type app struct {
-	stdin     io.Reader
-	stdout    io.Writer
-	stderr    io.Writer
-	keychain  func() (keychain.Store, error)
-	transport func(allowed []string) http.RoundTripper
-	now       func() time.Time
+	stdin      io.Reader
+	stdout     io.Writer
+	stderr     io.Writer
+	keychain   func() (keychain.Store, error)
+	vaultDir   string
+	legacyRead func(context.Context, string) (keychain.Secret, error) // fixture seam for explicit import
+	transport  func(allowed []string) http.RoundTripper
+	now        func() time.Time
 
 	// configureClient, when set, adjusts the Signal client (tests shorten its backoff).
 	configureClient func(*signal.Client)
@@ -69,19 +71,11 @@ type app struct {
 	interrupt context.Context
 	// term is closed on SIGTERM. Nil in tests unless a test is simulating it.
 	term context.Context
-	// euid, uid, agentsDir, launchctl and identify are set by tests. Nil uses the process and, on macOS, launchd.
-	euid      func() int
-	uid       func() int
-	agentsDir func() (string, error)
-	launchctl launcher
-	identify  func(context.Context, string) (service.Identity, error)
-	// actSettingsFile replaces ~/Library/Application Support/beacon/act.json. Tests set it.
-	actSettingsFile string
+	euid func() int // root refusal seam
 	// approvalListeners replaces the review port with ephemeral loopback listeners in tests.
 	approvalListeners func() ([]net.Listener, error)
-	// appSettingsFile replaces ~/Library/Application Support/beacon/app/settings.json. Tests set it.
-	appSettingsFile string
-	// collectorLog is the path tether writes the collector's output to. Tests set it; nil is service.CollectorLog.
+	tailscale         localstate.TailCommand // fixture seam
+	// collectorLog overrides the private collector log in fixtures.
 	collectorLog func() (string, error)
 	// sleep waits: the service's backoff, and a Slack source's spacing between calls. Nil sleeps on the clock. Tests
 	// record the duration and return.
@@ -100,8 +94,8 @@ type googleEndpoints struct {
 const usage = `usage: beacon <command> [flags]
 
 Commands:
-  init          write a config and an empty rules file, and store the Signal key in the keychain
-  key set       replace the Signal key in the keychain, after Signal accepts it
+  init          write a collector config and rules, and store its Signal key in the unattended vault
+  key set       replace the collector's Signal key after Signal accepts it
   run           collect, apply rules and projection; print what would be sent (dry run), or send
   explain KEY   show the matching rule, the classifier's answer and the exact body for one item
   outbox        list what was sent, with keys, times and Signal event ids
@@ -109,21 +103,20 @@ Commands:
   cursor reset  clear a source cursor so the next collect reads open state
   egress        print every host Beacon may contact under the current config
   rules check   validate the rules file and report rules that can never match
-  source add    store a source credential in the keychain and enable the source (github, jira, google, slack)
+  source add    store a read credential and enable a source (github, jira, google, slack)
   seed          import a seed file of subjects already decided never or send
   accept-first  allow sending for sources whose first run has been reviewed
   status        print the last pass; --coverage adds how well each source is being read
-  service       uninstall, status or logs of the retired per-user collector job
-  act           propose an action to Beacon.app, or get, wait on or withdraw a proposal it made
-  serve         run the Go approval service in a separate --state-dir
-  open          print a one-time browser sign-in link for that --state-dir
-  setup         print a one-time passkey setup code for that --state-dir
-  keychain repair  re-create each Beacon keychain item with this build's access, reading each value once
+  logs          print the supervised collector's summary log
+  act           propose an action, or get, wait on or withdraw an existing proposal
+  serve         run the review pages, proposal socket and supervised collector
+  open          print a one-time browser sign-in link
+  setup         configure the review origin and print a one-time passkey code
+  vault         export the unattended key file or import legacy collector items on macOS
   version       print the version, commit and build flags
   spike-passkey serve the passkey PRF spike on localhost:7317 (13.01 part 1)
 
-Every command but version, act, keychain repair, spike-passkey, serve, open and setup takes --config PATH (default:
-$BEACON_CONFIG, else the user config directory).
+Collector commands take --config PATH (default: $BEACON_CONFIG, else the user config directory).
 `
 
 type exitError struct{ code int }
@@ -168,11 +161,9 @@ func (a *app) main(ctx context.Context, args []string) int {
 	case "accept-first":
 		err = a.cmdAcceptFirst(rest)
 	case "status":
-		err = a.cmdStatus(rest)
-	case "service":
-		err = a.cmdService(ctx, rest)
-	case "keychain":
-		err = a.cmdKeychain(rest)
+		err = a.cmdStatus(ctx, rest)
+	case "logs":
+		err = a.cmdLogs(rest)
 	case "act":
 		err = a.cmdAct(ctx, rest)
 	case "serve":
@@ -180,7 +171,11 @@ func (a *app) main(ctx context.Context, args []string) int {
 	case "open":
 		err = a.cmdOpen(ctx, rest)
 	case "setup":
-		err = a.cmdSetup(rest)
+		err = a.cmdSetup(ctx, rest)
+	case "migrate-swift":
+		err = a.cmdMigrateSwift(ctx, rest)
+	case "vault":
+		err = a.cmdVault(ctx, rest)
 	case "version", "--version":
 		err = a.cmdVersion()
 	case "spike-passkey":
@@ -335,6 +330,13 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 		Mode:    config.DryRun,
 		Sources: []config.Source{},
 	}
+	if a.keychain == nil && *cfgPath == "" && os.Getenv("BEACON_CONFIG") == "" && runtime.GOOS == "linux" {
+		dir, err := localstate.DefaultDir()
+		if err != nil {
+			return err
+		}
+		cfg.State = filepath.Join(dir, "collector")
+	}
 	data, err := cfg.Marshal()
 	if err != nil {
 		return err
@@ -342,7 +344,7 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if _, err := config.Parse(data); err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -370,63 +372,8 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if err := store.Set(cfg.KeychainAccount(), secret); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Wrote %s\nRules: %s\nState: %s\nSignal key stored in the keychain as %s/%s\nMode: dry-run. Set mode: send in the config to start sending.\n",
-		path, cfg.RulesPath(), cfg.StatePath(), keychain.Service, cfg.KeychainAccount())
-	return nil
-}
-
-// --- keychain repair
-
-// cmdKeychain re-creates every Beacon item in the keychain, so each one carries the access a new item gets from this
-// build and none of the partitions earlier builds added. It reads each value once and prints only account names.
-func (a *app) cmdKeychain(args []string) error {
-	if len(args) == 1 && args[0] == "list" {
-		return a.keychainList()
-	}
-	if len(args) == 0 || args[0] != "repair" {
-		return errors.New("usage: beacon keychain repair | beacon keychain list")
-	}
-	if len(args) > 1 {
-		return errors.New("keychain repair takes no arguments")
-	}
-	store, err := a.keychain()
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(a.stderr, "macOS asks once for each Beacon item. Choose Always Allow.")
-	n := 0
-	err = keychain.Repair(store, func(account string) {
-		n++
-		fmt.Fprintf(a.stdout, "Repaired %s/%s\n", keychain.Service, account)
-	})
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		fmt.Fprintln(a.stdout, "No Beacon items in the keychain.")
-	}
-	return nil
-}
-
-// keychainList prints the account of every Beacon item, one per line, from the items' attributes: it reads no value,
-// so it never prompts. scripts/install.sh counts them to say how many prompts a repair asks.
-func (a *app) keychainList() error {
-	store, err := a.keychain()
-	if err != nil {
-		return err
-	}
-	l, ok := store.(keychain.Lister)
-	if !ok {
-		return errors.New("keychain: this keychain cannot list its items")
-	}
-	accounts, err := l.Accounts()
-	if err != nil {
-		return err
-	}
-	sort.Strings(accounts)
-	for _, account := range accounts {
-		fmt.Fprintln(a.stdout, account)
-	}
+	fmt.Fprintf(a.stdout, "Wrote %s\nRules: %s\nState: %s\nSignal key stored in the unattended vault (%s)\nMode: dry-run. Set mode: send in the config to start sending.\n",
+		path, cfg.RulesPath(), cfg.StatePath(), cfg.KeychainAccount())
 	return nil
 }
 
@@ -448,7 +395,7 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, true)
 	if err != nil {
 		return err
 	}
@@ -490,7 +437,7 @@ func (a *app) cmdKey(ctx context.Context, args []string) error {
 	if err := store.Set(e.cfg.KeychainAccount(), secret); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.stdout, "Signal key replaced in the keychain as %s/%s\n", keychain.Service, e.cfg.KeychainAccount())
+	fmt.Fprintf(a.stdout, "Signal key replaced in the unattended vault (%s)\n", e.cfg.KeychainAccount())
 	if me.Handle != "" {
 		h := me.Handle
 		if !strings.HasPrefix(h, "@") && !strings.HasPrefix(h, "act_") {
@@ -544,10 +491,14 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	first := fs.Bool("first", false, "dry run of open state, with a summary; sending stays off until beacon accept-first")
 	once := fs.Bool("once", false, "make one pass and exit")
 	bodies := fs.Bool("bodies", false, "print each decided item's body (the default for a dry run with item details)")
-	summary := fs.Bool("summary", false, "print pass summaries only (used by tether)")
+	summary := fs.Bool("summary", false, "print pass summaries only (used by supervision)")
+	vaultDir := fs.String("vault-dir", a.vaultDir, "service state directory for the unattended vault")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	original := a.vaultDir
+	a.vaultDir = *vaultDir
+	defer func() { a.vaultDir = original }()
 	log := logs.New(a.stderr)
 	interrupt := ctx
 	if a.interrupt != nil {
@@ -579,9 +530,6 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 		a.rotateServiceLogs(stateDir)
 	}
 	itemDetails := !*summary && !a.serviceStdout(stateDir)
-	if err := a.refusePinned(ctx, stateDir); err != nil {
-		return fail(logs.ReasonSigning, failText(logs.ReasonSigning, e))
-	}
 	var problems int
 	for _, p := range e.rules.Check(e.checkSources()) {
 		if p.Error() {
@@ -662,16 +610,13 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	if err != nil {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, false)
 	if err != nil {
-		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
+		return fail(logs.ReasonVault, "the unattended vault is not available")
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
-		reason := logs.ReasonKeychain
-		if errors.Is(err, keychain.ErrReadRefused) {
-			reason = logs.ReasonKeychainRead
-		}
+		reason := runner.Classify(err)
 		return fail(reason, failText(reason, e))
 	}
 	instance, err := lease.Instance(e.cfg.StatePath())
@@ -958,16 +903,18 @@ func failText(reason logs.Reason, e *env) string {
 		return "a request was refused because its host is not on the egress list; beacon egress lists the hosts"
 	case logs.ReasonLocked:
 		return "another beacon process holds the outbox in this state directory"
-	case logs.ReasonKeychain:
-		return fmt.Sprintf("the Signal key is not in the keychain as %s/%s; store it with beacon init", keychain.Service, e.cfg.KeychainAccount())
-	case logs.ReasonKeychainRead:
-		return "macOS refused to read the Signal key; run beacon keychain repair"
+	case logs.ReasonCredential:
+		return fmt.Sprintf("the unattended vault has no collector Signal key for %s; run beacon key set", e.cfg.KeychainAccount())
+	case logs.ReasonVaultLocked:
+		return "unlock your Secret Service collection to open the unattended vault"
+	case logs.ReasonVaultKey:
+		return "the unattended vault key is missing; restore its original key"
+	case logs.ReasonVault, logs.ReasonVaultAmbiguous:
+		return "the unattended vault could not be read or has conflicting entries; check it with KeePassXC"
 	case logs.ReasonState:
 		return "the state directory could not be read or written; beacon outbox shows the outbox"
 	case logs.ReasonCanceled:
 		return "interrupted"
-	case logs.ReasonSigning:
-		return "refusing to run a binary whose signing identity does not match the certificate recorded by the retired installer"
 	}
 	return "the pass failed (" + string(reason) + "); beacon outbox shows what was recorded"
 }
@@ -1346,13 +1293,14 @@ func (a *app) cmdOutboxRetry(ctx context.Context, args []string) error {
 		return fail(runner.Classify(err), failText(runner.Classify(err), e))
 	}
 	defer ob.Close()
-	store, err := a.keychain()
+	store, err := a.collectorStore(e.cfg, false)
 	if err != nil {
-		return fail(logs.ReasonKeychain, "there is no system keychain on this platform")
+		return fail(logs.ReasonVault, "the unattended vault is not available")
 	}
 	secret, err := store.Get(e.cfg.KeychainAccount())
 	if err != nil {
-		return fail(logs.ReasonKeychain, failText(logs.ReasonKeychain, e))
+		reason := runner.Classify(err)
+		return fail(reason, failText(reason, e))
 	}
 	instance, err := lease.Instance(e.cfg.StatePath())
 	if err != nil {
@@ -1481,7 +1429,7 @@ func (a *app) cmdEgress(args []string) error {
 		if *cfgPath != "" || fs.NArg() != 0 {
 			return errors.New("egress --state-dir does not take collector config or positional arguments")
 		}
-		dir, err := reviewStateDir(*state)
+		dir, err := localstate.Dir(*state, false)
 		if err != nil {
 			return err
 		}
@@ -1492,14 +1440,30 @@ func (a *app) cmdEgress(args []string) error {
 		return a.printEgress(settings.Hosts())
 	}
 	e, err := a.load(*cfgPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	var hosts []egress.Host
+	if e != nil {
+		hosts = e.egress()
+	} else if *cfgPath != "" {
+		return err
+	}
+	if a.keychain != nil {
+		return a.printEgress(hosts) // injected collector tests inspect only their fixture config
+	}
+	dir, err := localstate.Dir("", false)
+	if errors.Is(err, os.ErrNotExist) {
+		return a.printEgress(hosts)
+	}
 	if err != nil {
 		return err
 	}
-	app, err := a.appEgress()
+	settings, err := actionexec.LoadSettings(dir)
 	if err != nil {
 		return err
 	}
-	return a.printEgress(append(e.egress(), app...))
+	return a.printEgress(append(hosts, settings.Hosts()...))
 }
 
 func (a *app) printEgress(hosts []egress.Host) error {

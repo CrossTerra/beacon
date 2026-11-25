@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/localstate"
 )
 
 func previewCLI() (*app, *bytes.Buffer, *bytes.Buffer) {
@@ -38,8 +38,13 @@ func previewTemp(t *testing.T) string {
 	return d
 }
 
-func startPreview(t *testing.T, dir string, flags ...string) (*http.Client, func()) {
+func startPreview(t *testing.T, dir string, origins ...approval.Origin) (*http.Client, func()) {
 	t.Helper()
+	origin, _ := approval.ParseOrigin(approval.LocalOrigin, "")
+	if len(origins) > 0 {
+		origin = origins[0]
+	}
+	must(t, localstate.Save(dir, origin))
 	a, _, stderr := previewCLI()
 	ready := make(chan string, 1)
 	a.approvalListeners = func() ([]net.Listener, error) {
@@ -55,7 +60,7 @@ func startPreview(t *testing.T, dir string, flags ...string) (*http.Client, func
 	var code int
 	go func() {
 		defer close(done)
-		code = a.main(ctx, append([]string{"serve", "--state-dir", dir}, flags...))
+		code = a.main(ctx, []string{"serve", "--state-dir", dir})
 	}()
 	stop := sync.OnceFunc(func() {
 		cancel()
@@ -169,7 +174,9 @@ func TestGoPreviewCLIFromSocketToBrowserAndRestart(t *testing.T) {
 func TestGoPreviewUsesTheConfiguredTailnetOrigin(t *testing.T) {
 	const origin = "https://machine.tail123.ts.net"
 	dir := previewTemp(t)
-	client, _ := startPreview(t, dir, "--origin", origin, "--tailscale-login", "fixture@example.test")
+	o, err := approval.ParseOrigin(origin, "fixture@example.test")
+	must(t, err)
+	client, _ := startPreview(t, dir, o)
 	previewGET(t, client, approval.LocalOrigin+"/sign-in", http.StatusFound, nil)
 	a, stdout, stderr := previewCLI()
 	if code := a.main(t.Context(), []string{"open", "--state-dir", dir}); code != 0 ||
@@ -178,27 +185,14 @@ func TestGoPreviewUsesTheConfiguredTailnetOrigin(t *testing.T) {
 	}
 }
 
-func TestGoPreviewRefusesDefaultAndSignedState(t *testing.T) {
+func TestGoServiceRefusesAnUnconfiguredPathAndUnmigratedState(t *testing.T) {
 	// An isolated fake home also exercises the standard Darwin path without probing the real one.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	fakeLive := filepath.Join(home, "Library", "Application Support", "beacon")
-	if err := os.MkdirAll(fakeLive, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if runtime.GOOS == "darwin" {
-		if _, err := reviewStateDir(fakeLive); err == nil {
-			t.Fatal("allowed the standard signed app state")
-		}
-		if _, err := reviewStateDir(filepath.Join(fakeLive, "scratch")); err == nil {
-			t.Fatal("allowed a path inside the standard signed app state")
-		}
-	}
+	t.Setenv("XDG_STATE_HOME", home)
 	dir := previewTemp(t)
-	mark := filepath.Join(dir, "act.json")
-	if err := os.WriteFile(mark, []byte("not read"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Mkdir(filepath.Join(dir, "app"), 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, "app", "journal.sqlite"), []byte("not read"), 0o600))
 	a, _, stderr := previewCLI()
 	a.approvalListeners = func() ([]net.Listener, error) { panic("refused command must not start listeners") }
 	for _, args := range [][]string{{"serve"}, {"open"}, {"serve", "--state-dir", dir}, {"act", "--state-dir", dir, "types"}} {
@@ -206,15 +200,40 @@ func TestGoPreviewRefusesDefaultAndSignedState(t *testing.T) {
 			t.Fatalf("accepted %v: %s", args, stderr)
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("wrote to signed app state", err)
+	o, _ := approval.ParseOrigin(approval.LocalOrigin, "")
+	must(t, localstate.Save(dir, o))
+	for _, cmd := range []string{"setup", "serve"} {
+		stderr.Reset()
+		if code := a.main(t.Context(), []string{cmd, "--state-dir", dir}); code == 0 || !strings.Contains(stderr.String(), "--migrate-swift") {
+			t.Fatalf("%s with unmigrated Swift journal: %s", cmd, stderr)
+		}
 	}
-	// Opting into a missing Go listener never tries the signed settings on error.
-	a.actSettingsFile = filepath.Join(home, "missing.json")
-	stderr.Reset()
-	if code := a.main(t.Context(), []string{"act", "--state-dir", filepath.Join(home, "absent"), "types"}); code == 0 ||
-		strings.Contains(stderr.String(), "code requirement") {
-		t.Fatalf("Go request fell back to signed route: %s", stderr)
+	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("wrote a Go journal over unmigrated state", err)
+	}
+}
+
+func TestGoServiceIgnoresOrphanedActSettings(t *testing.T) {
+	dir := previewTemp(t)
+	legacy := filepath.Join(dir, "act.json")
+	const fixture = "old client trust settings; not read by Go"
+	must(t, os.WriteFile(legacy, []byte(fixture), 0o600))
+	a, _, stderr := previewCLI()
+	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir, "--origin", "localhost"}); code != 0 {
+		t.Fatalf("setup with only act.json exited %d: %s", code, stderr)
+	}
+	origin, err := localstate.Load(dir)
+	must(t, err)
+	client, stop := startPreview(t, dir, origin)
+	previewGET(t, client, approval.LocalOrigin+"/sign-in", 200, nil)
+	stop()
+	data, err := os.ReadFile(legacy)
+	must(t, err)
+	if string(data) != fixture {
+		t.Fatal("Go rewrote act.json")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "swift-archive")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected archive for orphaned act.json: %v", err)
 	}
 }
 

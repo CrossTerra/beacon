@@ -5,6 +5,7 @@ import (
 
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/vault"
 )
 
 // SignalSettings is explicit local opt-in to sending the journal, not a routing hint from a proposal.
@@ -24,6 +25,10 @@ func (s SignalSettings) identity() (approval.SignalIdentity, error) {
 		return approval.SignalIdentity{}, errSettings
 	}
 	return who, nil
+}
+
+func (s SignalSettings) binding() vault.Binding {
+	return vault.Binding{Service: "signal", Origin: s.Origin, Account: s.Actor, Use: "records"}
 }
 
 // RecordConnection reads the bound app key anew for each outbox drain. Nothing from the run or

@@ -8,6 +8,7 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20250403032234-65de8f5d025b
 	github.com/chromedp/chromedp v0.13.6
 	github.com/fxamacker/cbor/v2 v2.9.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/go-webauthn/webauthn v0.13.4
 	github.com/tobischo/gokeepasslib/v3 v3.6.1
 	go.yaml.in/yaml/v3 v3.0.6

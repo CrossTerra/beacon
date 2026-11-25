@@ -7,14 +7,13 @@ The trust model is the product. A change that weakens one of its properties is w
 
 - Default deny. Code that sends must go through the rules engine and the projection. There is no other path to
   the network for item content.
-- Nothing reads, logs or writes a credential except the keychain package. Logs never contain item content, rule
-  matches on content, tokens or request bodies.
+- Credential values stay behind redacting secrets and bound vault APIs. Logs never contain item content, rule
+  matches on content, tokens or request bodies. Do not pass credentials to children.
 - Every host Beacon contacts is declared where `beacon egress` reads it. Adding a host without adding it there is
   a bug.
-- Agents and scripts never touch the login keychain. Test with `go test` or a `go build` binary: an ad-hoc build
-  refuses the keychain. Do not run `scripts/install.sh` (only `--dry-run`), set `BEACON_TEST_KEYCHAIN`, or run the installed
-  `beacon` for a command that reads a credential; each can raise a prompt on the person's screen or add a build to
-  an item's access.
+- Agents and CI never read the person's Keychain, vault, or configuration, or start, stop or install a live service.
+  Use temporary directories, fixture secrets, and fake service managers. Only the person runs the real installer,
+  the one-time collector import, and the Swift cutover. The installer has a separate `--dry-run` with no live jobs.
 - No telemetry, update checks or crash reporting.
 - New dependencies need a reason in the pull request. Prefer the standard library.
 - Docs describe the code as it is. When behaviour changes, change the doc in the same pull request.

@@ -511,7 +511,7 @@ func TestPersonalPrefixesMustBeRestricted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := service.FormatStatus(service.Job{}, pass, nil, "none")
+	status := service.FormatPass(pass, nil)
 	if !strings.Contains(status, "withheld: gmail gmail:* prefix_unrestricted\n") || !strings.Contains(status, "withheld: drive drive:* prefix_unrestricted\n") || strings.Contains(status, "calendar") {
 		t.Fatalf("status:\n%s", status)
 	}

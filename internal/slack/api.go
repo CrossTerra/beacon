@@ -395,7 +395,7 @@ func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, er
 	}
 	id := Identity{Workspace: resp.TeamID, User: resp.UserID, URL: workspaceURL(resp.URL)}
 	have := map[string]bool{}
-	for _, s := range strings.Split(h.Get("X-OAuth-Scopes"), ",") {
+	for _, s := range strings.Split(strings.Join(h.Values("X-OAuth-Scopes"), ","), ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			have[s] = true
 			id.Scopes = append(id.Scopes, s)
@@ -420,7 +420,7 @@ func (a *api) identity(ctx context.Context, token keychain.Secret) (Identity, er
 			id.Extra = append(id.Extra, s)
 		}
 	}
-	if h.Get("X-OAuth-Scopes") == "" {
+	if len(id.Scopes) == 0 {
 		// Slack did not say. A missing scope then shows up as missing_scope on the method that needs it.
 		id.Missing, id.MissingNames = nil, nil
 	}

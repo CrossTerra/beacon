@@ -34,15 +34,5 @@ jobs:
             export BEACON_TEST_CHROME
           fi
           scripts/gates.sh
-      - name: Build and test Beacon.app
-        if: runner.os == 'macOS'
-        run: |
-          swift build --package-path mac --scratch-path "$RUNNER_TEMP/beacon-swift"
-          python3 scripts/test-swift.py --scratch-path "$RUNNER_TEMP/beacon-swift"
-          bash scripts/test-tether.sh
-      - name: Stage the unsigned Beacon.app
-        if: runner.os == 'macOS'
-        run: scripts/build-app.sh "$GITHUB_SHA"
-      - name: Install Beacon.app into a temporary prefix (dry run, ad-hoc signed)
-        if: runner.os == 'macOS'
-        run: /bin/bash scripts/test-install.sh
+      - name: Build the installer’s binary in a temporary prefix (no service manager)
+        run: scripts/install.sh --dry-run --prefix "$RUNNER_TEMP/beacon-install"

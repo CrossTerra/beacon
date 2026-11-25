@@ -4,9 +4,9 @@ A source yields items. Beacon has GitHub, Jira, Gmail, Google Calendar, Google D
 [fixture](configuration.md#fixture-source). Each has a fixed field list and a fixed state field list. A rule names
 what leaves; anything else stays.
 
-Credentials are in the keychain, under the service `beacon`: account `source:<name>` for GitHub and Jira, and
-`google:<address>:client` and `google:<address>:refresh` for the [Google grant](#google) a Google account's sources
-share, and `slack:<workspace id>:<user id>` for a [Slack](#slack) user token. They are read
+Credentials are in the [unattended vault](go-approvals.md#unattended-vault), bound to a configured source and origin.
+The Google client and refresh slots are shared by that account's Google sources. A Slack binding includes its
+workspace and user IDs. Credentials are read
 when a pass needs them and set only as an Authorization header (or, for the Google grant, sent only to Google's
 token endpoint). They are never written to the config, the log, or the outbox.
 
@@ -620,7 +620,7 @@ a Slack app they create in their own workspace (DEC-2). Beacon calls only read m
 **The app and the token.** At [api.slack.com/apps](https://api.slack.com/apps), create an app in the workspace (not
 distributed), add the *User Token Scopes* below, and install it. Copy the *User OAuth Token* from *OAuth &
 Permissions*, then run `beacon source add slack` and paste it. A bot or app token is refused: search needs a user
-token. The token is stored in the keychain as `slack:<workspace id>:<user id>`, the ids `auth.test` reports.
+token. The token is stored in the unattended vault under the workspace and user IDs `auth.test` reports.
 
 **Scopes.** All user scopes, all read-only:
 
@@ -635,13 +635,13 @@ token. The token is stored in the keychain as `slack:<workspace id>:<user id>`, 
 | `users:read` | `users.info`: a person's display name, for titles and `author_name` |
 | `im:read` | `conversations.info` on a direct message: who the other person is, for titles and `channel_name` |
 
-`auth.test` reports the token's scopes. A token missing one is refused by `source add`. A pass fails with
+`auth.test` reports the token's scopes. `source add` and the Keychain importer reject missing or unreported
+scopes and scopes outside this read-only list, including `chat:write`. A pass fails with
 `source_unauthorized` when the token lacks one of the first nine. Without `users:read` or `im:read` a pass still
 collects and sends: items carry no names and no `title`, so threads are named by their first event as before, and
 `run` says so once a pass (`names_unavailable`, reason `names_scope`). Add the scopes as *User Token Scopes* and
-reinstall the app: with token rotation off (the default) the token stays the same, so the one in the keychain gains
-them and nothing needs storing again. A token that also holds other scopes (say, a write scope from an app the person already had)
-is accepted, and `source add` names them; Beacon never calls a method that uses them. `conversations.unreads` is not
+reinstall the app: with token rotation off (the default) the stored token gains the added scopes without being
+re-entered. Use a separate app for posting. `conversations.unreads` is not
 used: with a user token it is slow and ignores its filters.
 
 **Host and methods.** `slack.com` only, listed by `beacon egress`. Every request is a `GET` to one of nine methods,

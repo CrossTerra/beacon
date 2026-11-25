@@ -132,6 +132,7 @@ func (s Settings) Hosts() []egress.Host {
 	}
 	if s.Signal != nil {
 		if host, err := approval.RecordEgress(s.Signal.Origin); err == nil {
+			host.Purpose += "; setup verifies the app and its person (GET /api/me and /api/actors/{id})"
 			hosts = append(hosts, host)
 		}
 	}

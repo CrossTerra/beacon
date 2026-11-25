@@ -10,8 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -149,43 +147,6 @@ func TestMemory(t *testing.T) {
 	}
 	if err := m.Delete("a"); !errors.Is(err, ErrNotFound) {
 		t.Fatal(err)
-	}
-}
-
-// TestSystem writes, reads and deletes an item in the login keychain. It runs only with BEACON_TEST_KEYCHAIN=1,
-// because the keychain may ask for permission.
-func TestSystem(t *testing.T) {
-	if os.Getenv(TestKeychainEnv) != "1" {
-		t.Skip("set BEACON_TEST_KEYCHAIN=1 to use the login keychain")
-	}
-	store, err := NewSystem()
-	if err != nil {
-		t.Fatal(err)
-	}
-	account := "beacon-test-" + strings.ReplaceAll(t.Name(), "/", "-")
-	_ = store.Delete(account)
-	if _, err := store.Get(account); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("before: %v", err)
-	}
-	if err := store.Set(account, secret()); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Set(account, Secret{value: []byte(value + "2")}); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	got, err := store.Get(account)
-	if err != nil || string(got.value) != value+"2" {
-		t.Fatalf("get: %v", err)
-	}
-	accounts, err := store.(Lister).Accounts()
-	if err != nil || !slices.Contains(accounts, account) {
-		t.Fatalf("accounts: %v", err)
-	}
-	if err := store.Delete(account); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Get(account); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("after: %v", err)
 	}
 }
 

@@ -6,54 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/coverage"
+	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/logs"
 	"github.com/CrossTerra/beacon/internal/runner"
 	"github.com/CrossTerra/beacon/internal/service"
 )
-
-const serviceUsage = `usage: beacon service uninstall [--config PATH]
-       beacon service status [--config PATH]
-       beacon service logs [--legacy [--config PATH]]
-`
-
-// launcher inspects and retires the legacy collector job. It cannot start one.
-type launcher interface {
-	Bootout(ctx context.Context, target string) error
-	Print(ctx context.Context, target string) (string, error)
-}
-
-type realLaunchctl struct{}
-
-func (realLaunchctl) Bootout(ctx context.Context, target string) error {
-	return runLaunchctl(ctx, "bootout", target)
-}
-
-func (realLaunchctl) Print(ctx context.Context, target string) (string, error) {
-	cmd := exec.CommandContext(ctx, "launchctl", "print", target)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
-}
-
-func runLaunchctl(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "launchctl", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.Join(strings.Fields(string(out)), " ")
-		if msg == "" {
-			return errors.New("launchd did not accept the agent")
-		}
-		return fmt.Errorf("launchd did not accept the agent: %s", msg)
-	}
-	return nil
-}
 
 func (a *app) refuseRoot() error {
 	euid := os.Geteuid
@@ -66,123 +29,30 @@ func (a *app) refuseRoot() error {
 	return nil
 }
 
-func (a *app) userID() int {
-	if a.uid != nil {
-		return a.uid()
-	}
-	return os.Getuid()
-}
-
-func (a *app) agentsDirectory() (string, error) {
-	if a.agentsDir != nil {
-		return a.agentsDir()
-	}
-	return service.AgentsDir()
-}
-
-func (a *app) launcher() (launcher, error) {
-	if a.launchctl != nil {
-		return a.launchctl, nil
-	}
-	if runtime.GOOS != "darwin" {
-		return nil, errors.New("the legacy collector LaunchAgent only exists on macOS")
-	}
-	return realLaunchctl{}, nil
-}
-
-func (a *app) cmdService(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		fmt.Fprint(a.stderr, serviceUsage)
-		return exitError{2}
-	}
-	if err := a.refuseRoot(); err != nil {
-		return err
-	}
-	switch args[0] {
-	case "install":
-		return errors.New("the collector LaunchAgent installer has been retired; see docs/tether.md")
-	case "uninstall":
-		return a.cmdServiceUninstall(ctx, args[1:])
-	case "status":
-		return a.cmdServiceStatus(ctx, args[1:])
-	case "logs":
-		return a.cmdServiceLogs(args[1:])
-	default:
-		fmt.Fprint(a.stderr, serviceUsage)
-		return exitError{2}
-	}
-}
-
-func (a *app) cmdServiceUninstall(ctx context.Context, args []string) error {
-	fs, _ := a.flags("service uninstall")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() > 0 {
-		return fmt.Errorf("usage: beacon service uninstall [--config PATH]")
-	}
-	lc, err := a.launcher()
-	if err != nil {
-		return err
-	}
-	target := service.Target(a.userID())
-	if bootErr := lc.Bootout(ctx, target); bootErr != nil {
-		// Do not remove the plist and report success if launchd still reports a loaded job.
-		if out, err := lc.Print(ctx, target); err == nil || service.ParsePrint(out).Loaded {
-			return bootErr
-		}
-	}
-	dir, err := a.agentsDirectory()
-	if err != nil {
-		return err
-	}
-	err = os.Remove(filepath.Join(dir, service.PlistName))
-	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintln(a.stdout, service.Label+" is not installed")
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(a.stdout, "Stopped and removed "+service.Label)
-	return nil
-}
-
-func (a *app) cmdServiceStatus(ctx context.Context, args []string) error {
-	fs, cfgPath := a.flags("service status")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	lc, err := a.launcher()
-	if err != nil {
-		return err
-	}
-	var job service.Job
-	if out, err := lc.Print(ctx, service.Target(a.userID())); err == nil {
-		job = service.ParsePrint(out)
-	}
-	var pass service.Pass
-	passErr := os.ErrNotExist
-	identity := "none"
-	// Status only needs the state directory. A rules or source error must not hide a pass that was recorded.
-	if cfg, err := a.loadConfig(*cfgPath); err == nil {
-		pass, passErr = service.ReadPass(cfg.StatePath())
-		identity = a.identityStatus(ctx, cfg.StatePath())
-	}
-	fmt.Fprint(a.stdout, service.FormatStatus(job, pass, passErr, identity))
-	return nil
-}
-
 // cmdStatus prints the last pass from pass.json and, with --coverage, each source's coverage from coverage.json. It
-// reads the state directory only: no keychain, no launchd, no Signal.
-func (a *app) cmdStatus(args []string) error {
+// never opens credentials. --review also checks the configured Tailscale Serve route.
+func (a *app) cmdStatus(ctx context.Context, args []string) error {
 	fs, cfgPath := a.flags("status")
 	cov := fs.Bool("coverage", false, "print each source's coverage: last success, last failure, flags, and Slack's channels")
+	review := fs.Bool("review", false, "print the review origin and check the Tailscale Serve route")
+	state := fs.String("state-dir", "", "service state directory for --review")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("usage: beacon status [--coverage] [--config PATH]")
+	}
+	if *review {
+		dir, err := localstate.Dir(*state, false)
+		if err != nil {
+			return err
+		}
+		o, err := localstate.Load(dir)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(a.stdout, "Review origin:", o.URL())
+		return localstate.CheckServe(ctx, o, a.tailscale)
 	}
 	cfg, err := a.loadConfig(*cfgPath)
 	if err != nil {
@@ -202,58 +72,27 @@ func (a *app) cmdStatus(args []string) error {
 	return nil
 }
 
-// identityStatus compares the plist binary with the leaf hash install recorded. It does not echo either.
-func (a *app) identityStatus(ctx context.Context, state string) string {
-	want, err := service.ReadLeaf(state)
-	if errors.Is(err, os.ErrNotExist) {
-		return "none"
-	}
-	if err != nil {
-		return "unreadable"
-	}
-	dir, err := a.agentsDirectory()
-	if err != nil {
-		return "mismatch"
-	}
-	data, err := os.ReadFile(filepath.Join(dir, service.PlistName))
-	if err != nil {
-		return "mismatch"
-	}
-	bin := service.BinaryFromPlist(data)
-	if bin == "" {
-		return "mismatch"
-	}
-	id, err := a.identityOf(ctx, bin)
-	if err != nil || !strings.EqualFold(id.Leaf, want) {
-		return "mismatch"
-	}
-	return "ok"
-}
-
-func (a *app) cmdServiceLogs(args []string) error {
-	fs, cfgPath := a.flags("service logs")
-	legacy := fs.Bool("legacy", false, "print the retired LaunchAgent's summary log from the state directory")
+func (a *app) cmdLogs(args []string) error {
+	fs, state := a.reviewFlags("logs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("usage: beacon service logs [--legacy [--config PATH]]")
+		return fmt.Errorf("usage: beacon logs [--state-dir DIR]")
 	}
 	var path string
-	if *legacy {
-		cfg, err := a.loadConfig(*cfgPath)
-		if err != nil {
-			return err
-		}
-		path = filepath.Join(cfg.StatePath(), service.StdoutName)
+	var err error
+	if *state == "" {
+		path, err = a.collectorLogPath()
 	} else {
-		p, err := a.collectorLogPath()
-		if err != nil {
-			return err
-		}
-		path = p
+		var dir string
+		dir, err = localstate.Dir(*state, false)
+		path = filepath.Join(dir, "collector.log")
 	}
-	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	f, err := approval.OpenPrivate(path, os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintln(a.stdout, "no collector log yet")
 		return nil
@@ -369,7 +208,15 @@ func (a *app) collectorLogPath() (string, error) {
 	if a.collectorLog != nil {
 		return a.collectorLog()
 	}
-	return service.CollectorLog()
+	dir := a.vaultDir
+	if dir == "" {
+		var err error
+		dir, err = localstate.DefaultDir()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Join(dir, "collector.log"), nil
 }
 
 // serviceStdout reports whether standard output is the collector log or the retired LaunchAgent's log.
@@ -384,38 +231,11 @@ func (a *app) serviceStdout(state string) bool {
 	return sameFile(filepath.Join(state, service.StdoutName), int(out.Fd()))
 }
 
-// refusePinned refuses to run when the retired installer recorded a certificate and this binary is not signed with it.
-func (a *app) refusePinned(ctx context.Context, dir string) error {
-	want, err := service.ReadLeaf(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	id, err := a.identityOf(ctx, exe)
-	if err != nil || !strings.EqualFold(id.Leaf, want) {
-		return errors.New("signing identity does not match")
-	}
-	return nil
-}
-
-func (a *app) identityOf(ctx context.Context, path string) (service.Identity, error) {
-	if a.identify != nil {
-		return a.identify(ctx, path)
-	}
-	return service.CodesignIdentity(ctx, path)
-}
-
-// rotateServiceLogs rotates a log when this process's standard output or error is that file, which is how tether
-// (and the retired LaunchAgent) runs the collector. A terminal run is left alone.
+// Rotate only a descriptor of this process that points to the collector's log, never terminal output.
 func (a *app) rotateServiceLogs(dir string) {
 	if p, err := a.collectorLogPath(); err == nil {
 		a.rotateIfOurs(p, a.stdout)
+		a.rotateIfOurs(p, a.stderr)
 	}
 	a.rotateIfOurs(filepath.Join(dir, service.StdoutName), a.stdout)
 	a.rotateIfOurs(filepath.Join(dir, service.StderrName), a.stderr)
