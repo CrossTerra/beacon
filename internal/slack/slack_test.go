@@ -588,7 +588,7 @@ func TestBadCursor(t *testing.T) {
 
 func TestVerify(t *testing.T) {
 	srv := slacktest.New(t)
-	srv.Scopes = slacktest.AllScopes + ",chat:write"
+	srv.Scopes = "identify," + slacktest.AllScopes + ",chat:write"
 	tok, _ := keychain.FromString(slacktest.Token)
 	id, err := Verify(context.Background(), srv.Client(), srv.URL, tok)
 	if err != nil {

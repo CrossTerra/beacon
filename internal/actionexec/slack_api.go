@@ -238,7 +238,8 @@ func checkSlackScopes(header http.Header, write bool) error {
 	}
 	if !write {
 		for scope := range have {
-			if scope != slackMetadataRead && !slices.Contains(slackReadScopes, scope) {
+			// Slack adds identify to every user token; it reads only the user's own identity.
+			if scope != slackMetadataRead && scope != "identify" && !slices.Contains(slackReadScopes, scope) {
 				return approval.Refusal{Code: "read_scope_not_allowed", Detail: "Use only the listed read scopes for the unattended Slack token."}
 			}
 		}
