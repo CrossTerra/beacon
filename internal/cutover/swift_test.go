@@ -72,6 +72,14 @@ func lockDir(t *testing.T, dir string) func() {
 	return close
 }
 
+func TestLoadRefusesUnconfirmedTetherWithoutJournal(t *testing.T) {
+	dir := t.TempDir()
+	must(t, os.WriteFile(filepath.Join(dir, "tether.session"), []byte("fixture"), 0o600))
+	if _, err := Load(dir); !errors.Is(err, errTetherUnconfirmed) {
+		t.Fatalf("unconfirmed tether without journal: %v", err)
+	}
+}
+
 func TestDrainPreconditions(t *testing.T) {
 	const post = `{"type":"slack.post"}`
 	for _, tc := range []struct{ name, events string }{

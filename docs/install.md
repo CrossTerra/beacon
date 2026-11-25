@@ -72,6 +72,11 @@ The Go service has these handlers. `beacon act types` lists the types enabled by
 Leave the old signed CLI and app in place while draining. Do not run these steps against live services from CI
 or an agent session. Keep proposers paused until the last step.
 
+If `~/Library/Application Support/beacon/act.json` remains but there is no Swift journal (`app/journal.sqlite`)
+or unfinished tether session, use the ordinary installer without `--migrate-swift`. Go leaves this old client
+trust file untouched; you can remove just `act.json` once the old CLI and app are retired. If a Swift journal is
+missing unexpectedly, recover it before switching.
+
 1. **Inventory the switched types while the old app and key still work.** Record the enabled types with the old
    `beacon act types` and check which of `github.merge`, `slack.post`, and `agent.run` Bosun routes to Beacon.
    Compare them with the audited Go build and the [handler inventory](#approval-handler-inventory); have the

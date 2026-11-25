@@ -18,6 +18,11 @@ source "${0%/*}/scripts/install.sh"
 [[ "$HOME" == "$FIXTURE"/home-* ]] || exit 99
 uname() { if [[ $1 == '-s' ]]; then printf '%s\n' "$OS"; else echo arm64; fi; }
 id() { echo 501; }
+mkdir() {
+	command mkdir "$@" || return
+	# Interrupt only this fixture driver, after mkdir succeeded but before lock ownership is recorded.
+	if [[ ${INTERRUPT_LOCK:-} == yes && "$1" == */.beacon-install.lock ]]; then kill -TERM "$$"; fi
+}
 check_unit() { grep -q 'serve' "$1"; }
 swift_pgrep() { [[ -f "$HOME/swift-running" ]]; }
 log_start() {
@@ -65,6 +70,7 @@ build_beacon() {
 set -euo pipefail
 if [[ \$1 == version ]]; then echo "commit:    $2"; exit; fi
 if [[ \$1 == migrate-swift ]]; then
+	[[ -f "\$3/app/journal.sqlite" ]]
 	[[ ! -e "\$HOME/Applications/Beacon.app/Contents/MacOS/Beacon" && ! -e "\$HOME/Library/LaunchAgents/dev.beacon.agent.plist" ]]
 	echo archive >> "\$trace"
 	mkdir -p "\$3/swift-archive"
@@ -86,7 +92,7 @@ EOF
 main "$@"
 SH
 
-export FIXTURE=$tmp
+export FIXTURE=$tmp TMPDIR=$tmp
 unset BEACON_CONFIG XDG_STATE_HOME XDG_CONFIG_HOME
 test_install() {
 	export OS=$1 HOME="$tmp/home-$1" trace="$tmp/$1.trace"
@@ -141,17 +147,32 @@ test_install() {
 }
 
 test_legacy() {
+	# Fake launchd on both hosts: Linux CI must exercise Bash 5's errexit here.
 	export OS=Darwin HOME="$tmp/home-legacy" trace="$tmp/legacy.trace"
 	local old_bin="$HOME/.local/bin/beacon" legacy="$HOME/Library/LaunchAgents/dev.beacon.agent.plist"
 	local executable="$HOME/Applications/Beacon.app/Contents/MacOS/Beacon"
+	local state="$HOME/Library/Application Support/beacon" output="$tmp/legacy.out" lock="${old_bin%/*}/.beacon-install.lock"
 	mkdir -p "${old_bin%/*}" "${legacy%/*}" "${executable%/*}"
 	printf 'legacy CLI\n' > "$old_bin" # the pre-Swift installer used a regular file
 	touch "$HOME/legacy-user"
-	if /bin/bash "$repo/driver" --origin localhost; then return 1; fi
+	if /bin/bash "$repo/driver" --origin localhost >"$output" 2>&1; then return 1; fi
+	if ! grep -Fq 'Unload the retired user/501/dev.beacon.agent LaunchAgent before cutover.' "$output" ||
+		grep -Fq 'unbound variable' "$output" || [[ -e "$lock" ]]; then
+		cat "$output" >&2
+		echo 'Legacy job refusal did not exit cleanly and release its lock.' >&2
+		return 1
+	fi
+	if INTERRUPT_LOCK=yes /bin/bash "$repo/driver" --origin localhost; then return 1; fi
+	[[ ! -e "$lock" ]]
+	mkdir "$lock" # a busy install's lock is not ours to remove
+	if /bin/bash "$repo/driver" --uninstall; then return 1; fi
+	rmdir "$lock"
 	grep -Fxq 'legacy CLI' "$old_bin"
 	if grep -q '^start ' "$trace"; then return 1; fi
 	rm "$HOME/legacy-user"
 	touch "$legacy" "$executable"
+	mkdir -p "$state/app"
+	touch "$state/app/journal.sqlite"
 	if SWIFT_RELAUNCH=yes /bin/bash "$repo/driver" --migrate-swift --origin localhost; then return 1; fi
 	[[ -f "$HOME/Library/dev.beacon.agent.plist.disabled" && -f "$executable.disabled" && ! -e "$legacy" && ! -e "$executable" ]]
 	grep -Fxq 'legacy CLI' "$old_bin"
@@ -163,7 +184,19 @@ test_legacy() {
 	/bin/bash "$repo/driver" --uninstall
 }
 
+test_orphaned_act() {
+	export OS=Darwin HOME="$tmp/home-orphaned-act" trace="$tmp/orphaned-act.trace"
+	local state="$HOME/Library/Application Support/beacon"
+	mkdir -p "$state"
+	printf 'old client trust settings\n' > "$state/act.json"
+	/bin/bash "$repo/driver" --origin localhost
+	[[ -f "$HOME/serve-running" && ! -e "$state/swift-archive" ]]
+	grep -Fxq 'old client trust settings' "$state/act.json"
+	/bin/bash "$repo/driver" --uninstall
+}
+
 test_install Darwin
 test_install Linux
 test_legacy
+test_orphaned_act
 echo "ok temporary launchd and systemd installs, upgrades, rollback and uninstall"

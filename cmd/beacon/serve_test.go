@@ -191,10 +191,8 @@ func TestGoServiceRefusesAnUnconfiguredPathAndUnmigratedState(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_STATE_HOME", home)
 	dir := previewTemp(t)
-	mark := filepath.Join(dir, "act.json")
-	if err := os.WriteFile(mark, []byte("not read"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Mkdir(filepath.Join(dir, "app"), 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, "app", "journal.sqlite"), []byte("not read"), 0o600))
 	a, _, stderr := previewCLI()
 	a.approvalListeners = func() ([]net.Listener, error) { panic("refused command must not start listeners") }
 	for _, args := range [][]string{{"serve"}, {"open"}, {"serve", "--state-dir", dir}, {"act", "--state-dir", dir, "types"}} {
@@ -202,13 +200,40 @@ func TestGoServiceRefusesAnUnconfiguredPathAndUnmigratedState(t *testing.T) {
 			t.Fatalf("accepted %v: %s", args, stderr)
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("wrote to signed app state", err)
-	}
 	o, _ := approval.ParseOrigin(approval.LocalOrigin, "")
 	must(t, localstate.Save(dir, o))
-	if code := a.main(t.Context(), []string{"serve", "--state-dir", dir}); code == 0 || !strings.Contains(stderr.String(), "Swift state") {
-		t.Fatalf("unmigrated legacy state: %s", stderr)
+	for _, cmd := range []string{"setup", "serve"} {
+		stderr.Reset()
+		if code := a.main(t.Context(), []string{cmd, "--state-dir", dir}); code == 0 || !strings.Contains(stderr.String(), "--migrate-swift") {
+			t.Fatalf("%s with unmigrated Swift journal: %s", cmd, stderr)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "journal.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("wrote a Go journal over unmigrated state", err)
+	}
+}
+
+func TestGoServiceIgnoresOrphanedActSettings(t *testing.T) {
+	dir := previewTemp(t)
+	legacy := filepath.Join(dir, "act.json")
+	const fixture = "old client trust settings; not read by Go"
+	must(t, os.WriteFile(legacy, []byte(fixture), 0o600))
+	a, _, stderr := previewCLI()
+	if code := a.main(t.Context(), []string{"setup", "--state-dir", dir, "--origin", "localhost"}); code != 0 {
+		t.Fatalf("setup with only act.json exited %d: %s", code, stderr)
+	}
+	origin, err := localstate.Load(dir)
+	must(t, err)
+	client, stop := startPreview(t, dir, origin)
+	previewGET(t, client, approval.LocalOrigin+"/sign-in", 200, nil)
+	stop()
+	data, err := os.ReadFile(legacy)
+	must(t, err)
+	if string(data) != fixture {
+		t.Fatal("Go rewrote act.json")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "swift-archive")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected archive for orphaned act.json: %v", err)
 	}
 }
 

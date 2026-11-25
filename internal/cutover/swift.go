@@ -38,17 +38,25 @@ type SignalActor struct {
 var (
 	ErrDrain   = errors.New("the Swift journal has pending work, a start without a result, an unclosed run, or an unacknowledged record; finish draining it before cutover")
 	ErrChanged = errors.New("the Swift journal or archive changed after the snapshot; leave both in place and do not cut over")
+
+	errTetherUnconfirmed = errors.New("the Swift tether cleanup is unconfirmed; reopen Swift to finish its sweep before cutting over")
 )
 
-// Load returns the ordering floor. Refuse to start or set up Go over unmigrated Swift data.
+// Load returns the ordering floor. Without an archive, refuse an unmigrated Swift journal or unconfirmed tether.
 func Load(dir string) (Archive, error) {
 	path := filepath.Join(dir, archiveName)
 	if _, err := approval.CheckPrivate(path, os.ModeDir|0o700); errors.Is(err, os.ErrNotExist) {
-		for _, p := range []string{"act.json", "tether.session", "app/journal.sqlite"} {
-			if _, err := os.Lstat(filepath.Join(dir, p)); !errors.Is(err, os.ErrNotExist) {
-				return Archive{}, errors.New("legacy Swift state is present; drain and quit Beacon.app and use install.sh --migrate-swift")
-			}
+		if _, err := os.Lstat(filepath.Join(dir, "tether.session")); err == nil {
+			return Archive{}, errTetherUnconfirmed
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Archive{}, err
 		}
+		if _, err := os.Lstat(filepath.Join(dir, "app", "journal.sqlite")); err == nil {
+			return Archive{}, errors.New("legacy Swift state is present; drain and quit Beacon.app and use install.sh --migrate-swift")
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return Archive{}, err
+		}
+		// act.json held client trust settings, not journal data. Go never uses it.
 		return Archive{}, nil
 	} else if err != nil {
 		return Archive{}, err
@@ -282,7 +290,7 @@ func stopped(ctx context.Context, dir string) (*os.File, error) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "tether.session")); !errors.Is(err, os.ErrNotExist) {
 		f.Close()
-		return nil, errors.New("the Swift tether cleanup is unconfirmed; reopen Swift to finish its sweep before cutting over")
+		return nil, errTetherUnconfirmed
 	}
 	if err := socketFree(ctx, dir); err != nil {
 		f.Close()

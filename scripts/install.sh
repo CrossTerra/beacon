@@ -240,11 +240,66 @@ offer_path() {
 	fi
 }
 
+acquire_lock() {
+	local want_lock="${bin%/*}/.beacon-install.lock" interrupted=false
+	# Defer interrupts until we know whether this process owns the lock.
+	trap 'interrupted=true' HUP INT TERM
+	(trap '' HUP INT TERM; mkdir "$want_lock") || die "Another Beacon install is in progress (or left $want_lock)."
+	lock=$want_lock
+	trap 'exit 1' HUP INT TERM
+	[[ "$interrupted" == false ]] || exit 1
+}
+
+restore_file() {
+	local backup=$1 stage=$2 dest=$3
+	if [[ -e "$backup" || -L "$backup" ]]; then
+		cp -P "$backup" "$stage" && mv -f "$stage" "$dest"
+	else
+		rm -f "$dest"
+	fi
+}
+
+rollback() {
+	stop_service || { printf 'Could not stop the new service for rollback.\n' >&2; return 1; }
+	if [[ "$changed" == true ]]; then
+		restore_file "$tmp/old-bin" "$binary_stage" "$bin" || return 1
+		if [[ "$platform" == Linux && "$had_unit" == false ]]; then systemctl --user disable beacon.service || true; fi
+		restore_file "$tmp/old-unit" "$unit_stage" "$unit" || return 1
+		restore_file "$tmp/old-receipt" "$receipt_stage" "$receipt" || return 1
+	fi
+	if [[ "$had_unit" == true ]]; then
+		if [[ "$platform" != Darwin ]] || legacy_clear; then
+			start_service || printf 'Could not restart the previous Go service.\n' >&2
+		else
+			printf 'The previous Go service was left stopped.\n' >&2
+		fi
+	fi
+}
+
+cleanup() {
+	local status=$1
+	trap '' HUP INT TERM
+	set +e # Rollback and cleanup failures must not skip lock release.
+	if [[ "$good" == false && "$stopped" == true ]] && ! rollback; then
+		printf 'Could not roll back; previous files are in %s.\n' "$tmp" >&2
+		tmp=
+		status=1
+	fi
+	[[ -z "$binary_stage" ]] || rm -f "$binary_stage" || status=1
+	[[ -z "$unit_stage" ]] || rm -f "$unit_stage" || status=1
+	[[ -z "$receipt_stage" ]] || rm -f "$receipt_stage" || status=1
+	[[ -z "$tmp" ]] || rm -rf "$tmp" || status=1
+	[[ -z "$lock" ]] || rmdir "$lock" || status=1
+	exit "$status"
+}
+
 main() {
-	local platform home prefix='' origin='' previous='' dry=false migrate=false uninstall=false
-	local state config unit bin domain tmp candidate sha had_unit=false stopped=false changed=false good=false
-	local binary_stage='' unit_stage='' receipt_stage='' lock='' answer p
-	local receipt legacy_plist swift_exec verify_swift=false
+	local prefix='' origin='' previous='' dry=false migrate=false uninstall=false
+	local config candidate sha answer p verify_swift=false
+	# main runs once in the installer shell. Bash may unwind its locals before running EXIT on a failure.
+	platform='' home='' state='' unit='' bin='' domain='' receipt='' legacy_plist='' swift_exec=''
+	tmp='' binary_stage='' unit_stage='' receipt_stage='' lock=''
+	had_unit=false stopped=false changed=false good=false
 	while (($#)); do
 		case "$1" in
 			--origin) origin=${2:?--origin needs localhost or tailscale}; shift ;;
@@ -296,14 +351,12 @@ main() {
 	[[ "$dry" == true || -z "${BEACON_CONFIG:-}" ]] || config=$BEACON_CONFIG
 	[[ "$config" == /* && "$state$unit$bin$config" != *$'\n'* && "$state$unit$bin$config" != *$'\r'* ]] || die "Use absolute paths without line breaks."
 	[[ ! -L "$state" && ! -L "$unit" && ! -d "$bin" ]] || die "Unexpected symlink or directory in the install destination."
+	trap 'cleanup "$?"' EXIT
+	trap 'exit 1' HUP INT TERM
 	if [[ "$uninstall" == true ]]; then
-		(
-			mkdir -p "${bin%/*}"
-			uninstall_lock="${bin%/*}/.beacon-install.lock"
-			mkdir "$uninstall_lock" || die "Another Beacon install is in progress (or left $uninstall_lock)."
-			trap 'rmdir "$uninstall_lock"' EXIT
-			uninstall_beacon
-		)
+		mkdir -p "${bin%/*}"
+		acquire_lock
+		uninstall_beacon
 		return
 	fi
 	if [[ -e "$state/settings.json" || -L "$state/settings.json" ]]; then
@@ -324,44 +377,6 @@ main() {
 	[[ -z $(git status --porcelain --untracked-files=no) ]] || die "Tracked changes found; commit or stash them before installing."
 	sha=$(git rev-parse --verify 'HEAD^{commit}')
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/beacon-build.XXXXXXXX")
-	cleanup() {
-		if [[ "$good" == false && "$stopped" == true ]]; then
-			if stop_service; then
-				if [[ "$changed" == true ]]; then
-					if [[ -e "$tmp/old-bin" || -L "$tmp/old-bin" ]]; then
-						cp -P "$tmp/old-bin" "$binary_stage" && mv -f "$binary_stage" "$bin"
-					else rm -f "$bin"; fi
-					if [[ "$had_unit" == true ]]; then
-						cp "$tmp/old-unit" "$unit_stage" && mv -f "$unit_stage" "$unit"
-					else
-						if [[ "$platform" == Linux ]]; then systemctl --user disable beacon.service || true; fi
-						rm -f "$unit"
-					fi
-					if [[ -f "$tmp/old-receipt" ]]; then
-						cp "$tmp/old-receipt" "$receipt_stage" && mv -f "$receipt_stage" "$receipt"
-					else rm -f "$receipt"; fi
-				fi
-				if [[ "$had_unit" == true ]]; then
-					if [[ "$platform" != Darwin ]] || legacy_clear; then
-						start_service || printf 'Could not restart the previous Go service.\n' >&2
-					else
-						printf 'The previous Go service was left stopped.\n' >&2
-					fi
-				fi
-			else
-				printf 'New service could not be stopped; previous files are in %s.\n' "$tmp" >&2
-				tmp=
-			fi
-		fi
-		[[ -z "$binary_stage" ]] || rm -f "$binary_stage"
-		[[ -z "$unit_stage" ]] || rm -f "$unit_stage"
-		[[ -z "$receipt_stage" ]] || rm -f "$receipt_stage"
-		[[ -z "$lock" ]] || rmdir "$lock"
-		[[ -z "$tmp" ]] || rm -rf "$tmp"
-	}
-	# The installer runs in its own shell (the fixture uses a subshell too).
-	trap 'cleanup' EXIT
-	trap 'exit 1' HUP INT TERM
 	mkdir "$tmp/src"
 	git archive "$sha" | tar -x -C "$tmp/src"
 	candidate="$tmp/beacon"
@@ -373,9 +388,7 @@ main() {
 		[[ "$expected" == "$previous" ]] || die "The installed origin changed during the build. Try again."
 	fi
 	mkdir -p "${bin%/*}" "${unit%/*}"
-	local want_lock="${bin%/*}/.beacon-install.lock"
-	mkdir "$want_lock" || die "Another Beacon install is in progress (or left $want_lock)."
-	lock=$want_lock
+	acquire_lock
 	[[ ! -e "$bin" && ! -L "$bin" ]] || cp -P "$bin" "$tmp/old-bin"
 	if [[ -e "$receipt" || -L "$receipt" ]]; then
 		[[ -f "$receipt" && ! -L "$receipt" ]] || die "Unexpected install receipt at $receipt."
@@ -400,7 +413,7 @@ main() {
 			if [[ "$migrate" == true ]]; then
 				"$candidate" migrate-swift --state-dir "$state"
 				verify_swift=true
-			elif [[ -e "$state/app/journal.sqlite" || -L "$state/app/journal.sqlite" || -e "$state/act.json" || -L "$state/act.json" ]]; then
+			elif [[ -e "$state/app/journal.sqlite" || -L "$state/app/journal.sqlite" ]]; then
 				[[ -d "$state/swift-archive" ]] || die "A Swift journal has not been archived. Use --migrate-swift."
 				verify_swift=true
 			fi
@@ -427,8 +440,6 @@ main() {
 		if ! start_service || ! wait_ready; then die "Beacon did not become ready; restoring the previous install."; fi
 	fi
 	good=true
-	trap - EXIT
-	cleanup
 	printf 'Installed %s at %s\n' "$sha" "$bin"
 	if [[ "$dry" == true ]]; then
 		printf 'Dry run: no user services were changed.\n'
