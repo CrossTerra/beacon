@@ -12,8 +12,11 @@ The installer refuses tracked edits, builds from `git archive`, and checks `beac
 It installs `~/.local/bin/beacon`. If it is not on `PATH`, use that absolute path or accept the offered profile
 line. On macOS it bootstraps `~/Library/LaunchAgents/dev.beacon.serve.plist` in your GUI domain. On Linux it
 enables `beacon.service` in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` with `KillMode=control-group`.
-Both start at login. An update builds first, stops the job, renames the new binary into place and checks the
-Go socket when the job starts. If the replacement fails to start, it restores the previous Go binary and job.
+Both start at login. An update builds first, requests a stop, and waits up to 60 seconds for the manager to
+report the job stopped, the service PID to exit, and the approval instance lock to become free. If it cannot
+confirm shutdown, it leaves the installed files unchanged. It checks the Go socket after starting the new
+job. If the replacement fails, rollback waits for the same checks before restoring and restarting the
+previous Go service. On macOS, bootstrap error 5 gets up to two retries with a short backoff.
 
 ### Origin and passkeys
 
@@ -113,7 +116,8 @@ missing unexpectedly, recover it before switching.
    `~/Library/Application Support/beacon/swift-archive/journal.sqlite`. The Go journal is strictly newer and
    starts with an empty outbox. No Swift proposal, approval, ID or action is imported or replayed. Before handoff
    and on retry the installer checks the archive checksum and compares it with the closed source including committed
-   WAL. If either changed, stop and keep both copies; do not discard the archive to force a retry.
+    WAL. Verification is silent on success; the archive notice appears only when a snapshot is first saved.
+    If either changed, stop and keep both copies; do not discard the archive to force a retry.
 4. Register the passkey with the printed link and code. **Before rotating**, confirm the Go build covers the type
    inventory in step 1 and that the required configuration is ready. Then in Signal `/beacon`, **rotate the key of
    the same app actor**, revoking the previous key. Stop the Go job, connect the new code in hidden input, and import the

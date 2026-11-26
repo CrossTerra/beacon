@@ -33,48 +33,106 @@ installed_origin() {
 
 macctl() { LC_ALL=C /bin/launchctl "$@"; }
 
-launchd_loaded() {
+launchd_job() {
 	local reply
-	if reply=$(macctl print "$1" 2>&1); then return 0; fi
+	if reply=$(macctl print "$1" 2>&1); then printf '%s\n' "$reply"; return 0; fi
 	if [[ "$reply" == *'Could not find service "'* ]]; then return 1; fi
 	printf 'Could not inspect launchd service %s.\n' "$1" >&2
 	return 2
 }
 
-service_loaded() {
-	local state
+# Print the main PID if known. Status 0 means loaded (launchd) or not stopped (systemd),
+# 1 means unloaded or stopped, and 2 is an inspection failure, not evidence of a stop.
+inspect_service() {
+	local info pid load
 	if [[ "$platform" == Darwin ]]; then
 		macctl print "$domain" >/dev/null || return 2
-		launchd_loaded "$domain/dev.beacon.serve"
-		return
+		info=$(launchd_job "$domain/dev.beacon.serve") || return "$?"
+		pid=$(sed -nE 's/^[[:space:]]*pid = ([1-9][0-9]*)[[:space:]]*$/\1/p' <<< "$info") || return 2
+		[[ -z "$pid" || "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+		printf '%s' "$pid"
+		return 0
 	fi
-	state=$(systemctl --user show -p LoadState -p ActiveState beacon.service) || return 2
-	case "$(sed -n 's/^ActiveState=//p' <<< "$state")" in
-		active|activating|deactivating|reloading|refreshing|maintenance) return 0 ;;
-		inactive|failed) ;;
+	info=$(systemctl --user show -p LoadState -p ActiveState -p MainPID beacon.service) || return 2
+	load=$(sed -n 's/^LoadState=//p' <<< "$info")
+	case "$load" in
+		loaded|masked|error|bad-setting|not-found) ;;
 		*) return 2 ;;
 	esac
-	case "$(sed -n 's/^LoadState=//p' <<< "$state")" in
-		loaded|masked|error|bad-setting) return 0 ;;
-		not-found) return 1 ;;
+	pid=$(sed -n 's/^MainPID=//p' <<< "$info")
+	if [[ "$load" == not-found && -z "$pid" ]]; then pid=0; fi
+	[[ "$pid" =~ ^(0|[1-9][0-9]*)$ ]] || return 2
+	case "$(sed -n 's/^ActiveState=//p' <<< "$info")" in
+		active|activating|deactivating|reloading|refreshing|maintenance) ;;
+		inactive|failed) [[ "$pid" != 0 ]] || return 1 ;;
 		*) return 2 ;;
 	esac
+	[[ "$pid" == 0 ]] || printf '%s' "$pid"
+}
+
+pid_alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; } # no signal is sent
+
+instance_free() {
+	local probe=$1
+	[[ -z "$probe" || ( ! -e "$state" && ! -L "$state" ) ]] ||
+		"$probe" setup --state-dir "$state" --check-stopped >/dev/null 2>&1
+}
+
+wait_stopped() {
+	local probe=$1 original_pid=$2 last_pid=$2 current status pending waiting=false deadline=$((SECONDS + 60))
+	while :; do
+		status=0
+		current=$(inspect_service) || status=$?
+		case $status in
+			0) last_pid=${current:-$last_pid}; pending='the service manager still reports the job stopping or running' ;;
+			1)
+				if pid_alive "$original_pid" || { [[ "$last_pid" != "$original_pid" ]] && pid_alive "$last_pid"; }; then
+					pending='the service process has not exited'
+				elif ! instance_free "$probe"; then
+					pending='the approval instance lock is not available'
+				else
+					return 0
+				fi ;;
+			*) return 1 ;;
+		esac
+		if ((SECONDS >= deadline)); then
+			printf 'Timed out after 60 seconds waiting for Beacon to stop: %s.\n' "$pending" >&2
+			return 1
+		fi
+		if [[ "$waiting" == false ]]; then
+			printf 'Waiting for Beacon to finish stopping (up to 60 seconds).\n' >&2
+			waiting=true
+		fi
+		sleep 1 || return 1
+	done
 }
 
 stop_service() {
-	local status=0
-	service_loaded || status=$?
+	local probe=$1 pid status=0
+	pid=$(inspect_service) || status=$?
 	case $status in
-		1) return 0 ;;
-		0) if [[ "$platform" == Darwin ]]; then macctl bootout "$domain/dev.beacon.serve"
-			else systemctl --user stop beacon.service; fi ;;
+		1) ;; # A previous bootout can have removed the label while the reaper still holds the lock.
+		0) if [[ "$platform" == Darwin ]]; then macctl bootout "$domain/dev.beacon.serve" || return 1
+			else systemctl --user stop beacon.service || return 1; fi ;;
 		*) return 1 ;;
 	esac
+	wait_stopped "$probe" "$pid"
 }
 
 start_service() {
 	if [[ "$platform" == Darwin ]]; then
-		macctl enable "$domain/dev.beacon.serve" && macctl bootstrap "$domain" "$unit"
+		local delay reply status
+		macctl enable "$domain/dev.beacon.serve" || return 1
+		for delay in 1 2 0; do
+			if reply=$(macctl bootstrap "$domain" "$unit" 2>&1); then return 0; else status=$?; fi
+			if [[ "$delay" == 0 || ( "$status" != 5 && "$reply" != *'Bootstrap failed: 5:'* ) ]]; then
+				printf '%s\n' "$reply" >&2
+				return "$status"
+			fi
+			printf 'launchd bootstrap returned error 5; retrying in %ss.\n' "$delay" >&2
+			sleep "$delay" || return 1
+			legacy_clear || return 1
+		done
 	else
 		systemctl --user daemon-reload && systemctl --user enable --now beacon.service
 	fi
@@ -159,7 +217,7 @@ legacy_stopped() {
 	local target
 	for target in "$domain/dev.beacon.agent" "user/${domain#gui/}/dev.beacon.agent"; do
 		status=0
-		launchd_loaded "$target" || status=$?
+		launchd_job "$target" >/dev/null || status=$?
 		case $status in
 			0) printf 'Unload the retired %s LaunchAgent before cutover. See docs/install.md.\n' "$target" >&2; return 1 ;;
 			1) ;;
@@ -204,9 +262,16 @@ artifact_hash() {
 	else shasum -a 256 < "$1" | cut -d ' ' -f1; fi
 }
 
-uninstall_beacon() {
+recorded_binary() {
 	local installed_hash
-	stop_service || die "Could not confirm Beacon stopped; nothing removed."
+	[[ -f "$bin" && ! -L "$bin" && -f "$receipt" && ! -L "$receipt" ]] &&
+		installed_hash=$(cat "$receipt") && [[ "$installed_hash" =~ ^[0-9a-f]{64}$ && "$(artifact_hash "$bin")" == "$installed_hash" ]]
+}
+
+uninstall_beacon() {
+	local probe=''
+	if recorded_binary; then probe=$bin; fi # Never execute an unrecognized binary during uninstall.
+	stop_service "$probe" || die "Could not confirm Beacon stopped; nothing removed."
 	if [[ "$platform" == Linux ]]; then
 		if [[ -f "$unit" ]]; then systemctl --user disable beacon.service; fi
 		# Disable may refuse a missing unit file. Clear only the enable link made for this unit.
@@ -218,8 +283,7 @@ uninstall_beacon() {
 	fi
 	rm -f "$unit"
 	[[ "$platform" != Linux ]] || systemctl --user daemon-reload
-	if [[ -f "$bin" && ! -L "$bin" && -f "$receipt" && ! -L "$receipt" ]] &&
-		installed_hash=$(cat "$receipt") && [[ "$installed_hash" =~ ^[0-9a-f]{64}$ && "$(artifact_hash "$bin")" == "$installed_hash" ]]; then
+	if recorded_binary; then
 		rm -f "$bin"
 	elif [[ -e "$bin" || -L "$bin" ]]; then
 		printf 'Left %s in place: not the binary recorded by this installer.\n' "$bin"
@@ -260,7 +324,7 @@ restore_file() {
 }
 
 rollback() {
-	stop_service || { printf 'Could not stop the new service for rollback.\n' >&2; return 1; }
+	stop_service "$candidate" || { printf 'Could not stop the new service for rollback.\n' >&2; return 1; }
 	if [[ "$changed" == true ]]; then
 		restore_file "$tmp/old-bin" "$binary_stage" "$bin" || return 1
 		if [[ "$platform" == Linux && "$had_unit" == false ]]; then systemctl --user disable beacon.service || true; fi
@@ -295,10 +359,10 @@ cleanup() {
 
 main() {
 	local prefix='' origin='' previous='' dry=false migrate=false uninstall=false
-	local config candidate sha answer p verify_swift=false
+	local config sha answer p verify_swift=false
 	# main runs once in the installer shell. Bash may unwind its locals before running EXIT on a failure.
 	platform='' home='' state='' unit='' bin='' domain='' receipt='' legacy_plist='' swift_exec=''
-	tmp='' binary_stage='' unit_stage='' receipt_stage='' lock=''
+	tmp='' candidate='' binary_stage='' unit_stage='' receipt_stage='' lock=''
 	had_unit=false stopped=false changed=false good=false
 	while (($#)); do
 		case "$1" in
@@ -404,9 +468,8 @@ main() {
 	check_unit "$unit_stage"
 	if [[ "$dry" == false ]]; then
 		if [[ "$platform" == Darwin ]]; then legacy_stopped; fi
-		stop_service || die "Could not stop the previous service; nothing replaced."
+		stop_service "$candidate" || die "Could not confirm the previous Beacon service stopped; nothing replaced."
 		stopped=true
-		if [[ -n "$previous" ]]; then "$candidate" setup --state-dir "$state" --check-stopped; fi
 		if [[ "$platform" == Darwin ]]; then
 			park_legacy
 			legacy_clear

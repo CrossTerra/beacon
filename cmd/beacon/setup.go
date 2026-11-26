@@ -186,7 +186,7 @@ func (a *app) cmdMigrateSwift(ctx context.Context, args []string) error {
 	}
 	defer approval.CloseInstance(dir, lock)
 	archive, err := cutover.Migrate(ctx, dir, "/usr/bin/sqlite3")
-	if err == nil {
+	if err == nil && archive.Journal != "" {
 		_, err = io.WriteString(a.stdout, "Archived "+archive.Journal+". No Swift actions will be replayed.\n")
 	}
 	return err
