@@ -37,9 +37,23 @@ fake_stop() {
 		yes) touch "$HOME/serve-loaded" "$HOME/serve-pid" "$HOME/instance-held" ;;
 		stuck) touch "$HOME/instance-held" ;;
 	esac
+	if [[ ${STOP_EXIT:-0} != 0 ]]; then
+		printf 'stop returned %s\n' "$STOP_EXIT" >> "$trace"
+		printf '%s stop is already in progress\n' "$1" >&2
+		return "$STOP_EXIT"
+	fi
+}
+inspect_fails() {
+	if [[ ${STOP_INSPECT:-} == transient && -f "$HOME/serve-loaded" ||
+		${STOP_INSPECT:-} == persistent && ! -f "$HOME/serve-running" ]]; then
+		echo 'manager inspection failed' >> "$trace"
+		echo 'Operation now in progress' >&2
+		return 0
+	fi
+	return 1
 }
 sleep() {
-	if [[ ${SLOW_STOP:-} == stuck ]]; then
+	if [[ ${SLOW_STOP:-} == stuck || ${STOP_INSPECT:-} == persistent || ${BROKEN_MANAGER:-} == yes ]]; then
 		SECONDS=$((SECONDS + 61)) # Exercise the deadline without spending a minute in CI.
 		return 0
 	fi
@@ -69,6 +83,7 @@ macctl() {
 	case "$1 $2" in
 		'print gui/501') return 0 ;;
 		'print gui/501/dev.beacon.serve')
+			if inspect_fails; then return 36; fi
 			if [[ -f "$HOME/serve-running" || -f "$HOME/serve-loaded" ]]; then
 				printf 'gui/501/dev.beacon.serve = {\n\tpid = %s\n}\n' "$fixture_pid"
 				return 0
@@ -95,6 +110,7 @@ systemctl() {
 	[[ "$1" == --user && ${BROKEN_MANAGER:-} != yes ]] || return 2
 	case "$2" in
 		show)
+			if inspect_fails; then return 1; fi
 			if [[ -f "$unit" ]]; then echo LoadState=loaded; else echo LoadState=not-found; fi
 			if [[ -f "$HOME/serve-running" ]]; then
 				printf 'ActiveState=active\nMainPID=%s\n' "$fixture_pid"
@@ -168,10 +184,11 @@ export FIXTURE=$tmp TMPDIR=$tmp
 unset BEACON_CONFIG XDG_STATE_HOME XDG_CONFIG_HOME
 test_install() {
 	export OS=$1 HOME="$tmp/home-$1" trace="$tmp/$1.trace"
-	local state unit initial now bin before f output="$tmp/$1.out"
+	local state unit initial now bin before f stop_exit=1 output="$tmp/$1.out"
 	mkdir "$HOME"
 	bin="$HOME/.local/bin/beacon"
 	if [[ "$OS" == Darwin ]]; then
+		stop_exit=36
 		state="$HOME/Library/Application Support/beacon"
 		unit="$HOME/Library/LaunchAgents/dev.beacon.serve.plist"
 	else
@@ -188,10 +205,13 @@ test_install() {
 	done
 	fixture_commit "$OS-upgrade"
 	now=$(git -C "$repo" rev-parse HEAD)
-	SLOW_STOP=yes /bin/bash "$repo/driver" >"$output" 2>&1 || { cat "$output" >&2; return 1; }
+	SLOW_STOP=yes STOP_EXIT=$stop_exit STOP_INSPECT=transient /bin/bash "$repo/driver" >"$output" 2>&1 || { cat "$output" >&2; return 1; }
 	grep -Fxq "start $now" "$trace"
 	grep -Fq 'Waiting for Beacon to finish stopping' "$output"
-	if grep -q 'another process holds' "$output" || grep -q 'checked lock too early' "$trace"; then return 1; fi
+	grep -Fxq "stop returned $stop_exit" "$trace"
+	grep -Fxq 'manager inspection failed' "$trace"
+	if grep -Eq 'another process holds|already in progress|Could not inspect' "$output" ||
+		grep -q 'checked lock too early' "$trace"; then return 1; fi
 	[[ $(grep -c '^pid still running$' "$trace") == 1 && $(grep -c '^lock still held$' "$trace") == 1 ]]
 	[[ $(grep -c '^setup ' "$trace") == 1 ]]
 	before=$(cat "$trace")
@@ -202,16 +222,18 @@ test_install() {
 	[[ $(cat "$trace") == "$before" ]]
 	git -C "$repo" show "$now:scripts/install.sh" > "$repo/scripts/install.sh"
 	fixture_commit "$OS-fail"
-	if SLOW_STOP=yes BAD_HEALTH=yes /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
+	if SLOW_STOP=yes STOP_EXIT=$stop_exit STOP_INSPECT=transient BAD_HEALTH=yes /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
 	"$bin" version | grep -Fq "$now"
 	[[ $(tail -1 "$trace") == "start $now" ]]
 	[[ $(grep -c '^pid still running$' "$trace") == 3 && $(grep -c '^lock still held$' "$trace") == 3 ]]
+	[[ $(grep -c '^manager inspection failed$' "$trace") == 3 ]]
 	if [[ "$OS" == Darwin ]]; then
 		[[ $(grep -c '^bootstrap error 5$' "$trace") == 1 ]]
 		grep -Fq 'launchd bootstrap returned error 5; retrying' "$output"
 	fi
 	rm "$unit" # manager still owns the live job
-	if BROKEN_MANAGER=yes /bin/bash "$repo/driver" --uninstall; then return 1; fi
+	if BROKEN_MANAGER=yes /bin/bash "$repo/driver" --uninstall >"$output" 2>&1; then return 1; fi
+	grep -Fq 'Timed out after 60 seconds waiting for Beacon to stop' "$output"
 	[[ -f "$bin" && -f "$HOME/serve-running" ]]
 	/bin/bash "$repo/driver" --uninstall
 	[[ ! -e "$HOME/serve-running" && ! -L "${unit%/*}/default.target.wants/beacon.service" ]]
@@ -227,17 +249,18 @@ test_install() {
 }
 
 test_stop_timeout() {
-	export OS=Darwin HOME="$tmp/home-stop-timeout" trace="$tmp/stop-timeout.trace"
-	local initial bin="$HOME/.local/bin/beacon" output="$tmp/stop-timeout.out"
+	local slow=$1 inspect=$2 reason=$3 name="stop-timeout-$2"
+	export OS=Darwin HOME="$tmp/home-$name" trace="$tmp/$name.trace"
+	local initial bin="$HOME/.local/bin/beacon" output="$tmp/$name.out"
 	mkdir "$HOME"
 	initial=$(git -C "$repo" rev-parse HEAD)
 	/bin/bash "$repo/driver" --origin localhost
-	fixture_commit stop-timeout
-	if SLOW_STOP=stuck /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
-	grep -Fq 'Timed out after 60 seconds waiting for Beacon to stop: the approval instance lock is not available.' "$output"
+	fixture_commit "$name"
+	if SLOW_STOP=$slow STOP_INSPECT=$inspect /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
+	grep -Fq "Timed out after 60 seconds waiting for Beacon to stop: $reason." "$output"
 	"$bin" version | grep -Fq "$initial"
 	[[ $(grep -c '^start ' "$trace") == 1 && ! -e "${bin%/*}/.beacon-install.lock" ]]
-	rm "$HOME/instance-held"
+	rm -f "$HOME/instance-held"
 	/bin/bash "$repo/driver" --uninstall
 }
 
@@ -297,7 +320,8 @@ test_orphaned_act() {
 
 test_install Darwin
 test_install Linux
-test_stop_timeout
+test_stop_timeout stuck normal 'the approval instance lock is not available'
+test_stop_timeout '' persistent 'the service manager could not confirm the job state'
 test_legacy
 test_orphaned_act
 echo "ok temporary launchd and systemd installs, upgrades, rollback and uninstall"

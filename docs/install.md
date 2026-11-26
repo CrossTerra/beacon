@@ -13,10 +13,11 @@ It installs `~/.local/bin/beacon`. If it is not on `PATH`, use that absolute pat
 line. On macOS it bootstraps `~/Library/LaunchAgents/dev.beacon.serve.plist` in your GUI domain. On Linux it
 enables `beacon.service` in `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` with `KillMode=control-group`.
 Both start at login. An update builds first, requests a stop, and waits up to 60 seconds for the manager to
-report the job stopped, the service PID to exit, and the approval instance lock to become free. If it cannot
-confirm shutdown, it leaves the installed files unchanged. It checks the Go socket after starting the new
-job. If the replacement fails, rollback waits for the same checks before restoring and restarting the
-previous Go service. On macOS, bootstrap error 5 gets up to two retries with a short backoff.
+report the job stopped, the service PID to exit, and the approval instance lock to become free. A stop command
+error (such as launchd's “Operation now in progress”) or a failed status check does not end the wait. If the
+installer cannot confirm shutdown, it leaves the installed files unchanged. It checks the Go socket after
+starting the new job. If the replacement fails, rollback waits for the same checks before restoring and
+restarting the previous Go service. On macOS, bootstrap error 5 gets up to two retries with a short backoff.
 
 ### Origin and passkeys
 

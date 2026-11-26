@@ -82,7 +82,7 @@ wait_stopped() {
 	local probe=$1 original_pid=$2 last_pid=$2 current status pending waiting=false deadline=$((SECONDS + 60))
 	while :; do
 		status=0
-		current=$(inspect_service) || status=$?
+		current=$(inspect_service 2>/dev/null) || status=$?
 		case $status in
 			0) last_pid=${current:-$last_pid}; pending='the service manager still reports the job stopping or running' ;;
 			1)
@@ -93,7 +93,7 @@ wait_stopped() {
 				else
 					return 0
 				fi ;;
-			*) return 1 ;;
+			*) pending='the service manager could not confirm the job state' ;;
 		esac
 		if ((SECONDS >= deadline)); then
 			printf 'Timed out after 60 seconds waiting for Beacon to stop: %s.\n' "$pending" >&2
@@ -108,15 +108,20 @@ wait_stopped() {
 }
 
 stop_service() {
-	local probe=$1 pid status=0
-	pid=$(inspect_service) || status=$?
-	case $status in
-		1) ;; # A previous bootout can have removed the label while the reaper still holds the lock.
-		0) if [[ "$platform" == Darwin ]]; then macctl bootout "$domain/dev.beacon.serve" || return 1
-			else systemctl --user stop beacon.service || return 1; fi ;;
-		*) return 1 ;;
-	esac
-	wait_stopped "$probe" "$pid"
+	local probe=$1 pid status=0 stop_reply=''
+	pid=$(inspect_service 2>/dev/null) || status=$?
+	if [[ "$status" != 1 ]]; then
+		# A nonzero stop result (e.g. launchd EBUSY/EINPROGRESS) can mean teardown is still in progress.
+		if [[ "$platform" == Darwin ]]; then
+			stop_reply=$(macctl bootout "$domain/dev.beacon.serve" 2>&1) || :
+		else
+			stop_reply=$(systemctl --user stop beacon.service 2>&1) || :
+		fi
+	fi
+	# Even an already unloaded job may have a reaper holding the lock. Require positive confirmation.
+	if wait_stopped "$probe" "$pid"; then return 0; fi
+	[[ -z "$stop_reply" ]] || printf '%s\n' "$stop_reply" >&2
+	return 1
 }
 
 start_service() {
