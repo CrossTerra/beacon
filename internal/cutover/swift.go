@@ -86,6 +86,7 @@ func validActor(s *SignalActor) bool {
 
 // Migrate is called offline with the Go instance lock held. The app and retired collector must already be stopped.
 // sqlite is the system CLI supplied by the macOS migration command; tests use the same CLI with private fixtures.
+// It returns the new archive, or a zero Archive if it only verified an existing one.
 func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 	if !approval.HoldsInstance(dir) {
 		return Archive{}, approval.ErrLocked
@@ -143,7 +144,8 @@ func Migrate(ctx context.Context, dir, sqlite string) (Archive, error) {
 		if err := socketFree(ctx, dir); err != nil {
 			return Archive{}, err
 		}
-		return Load(dir) // check the archive again; never refresh it or import an old action
+		_, err = Load(dir) // check the archive again; never refresh it or import an old action
+		return Archive{}, err
 	}
 	id, hasRecords, err := verify(ctx, sqlite, snapshot)
 	if err != nil {

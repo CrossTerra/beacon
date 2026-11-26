@@ -25,7 +25,56 @@ mkdir() {
 }
 check_unit() { grep -q 'serve' "$1"; }
 swift_pgrep() { [[ -f "$HOME/swift-running" ]]; }
+fixture_pid=4242
+pid_alive() {
+	[[ "$1" == "$fixture_pid" && -f "$HOME/serve-pid" ]] || return 1
+	echo 'pid still running' >> "$trace"
+}
+fake_stop() {
+	rm -f "$HOME/serve-running"
+	echo "stop $1" >> "$trace"
+	case ${SLOW_STOP:-} in
+		yes) touch "$HOME/serve-loaded" "$HOME/serve-pid" "$HOME/instance-held" ;;
+		stuck) touch "$HOME/instance-held" ;;
+	esac
+	if [[ ${STOP_EXIT:-0} != 0 ]]; then
+		printf 'stop returned %s\n' "$STOP_EXIT" >> "$trace"
+		printf '%s stop is already in progress\n' "$1" >&2
+		return "$STOP_EXIT"
+	fi
+}
+inspect_fails() {
+	if [[ ${STOP_INSPECT:-} == transient && -f "$HOME/serve-loaded" ||
+		${STOP_INSPECT:-} == persistent && ! -f "$HOME/serve-running" ]]; then
+		echo 'manager inspection failed' >> "$trace"
+		echo 'Operation now in progress' >&2
+		return 0
+	fi
+	return 1
+}
+sleep() {
+	if [[ ${SLOW_STOP:-} == stuck || ${STOP_INSPECT:-} == persistent || ${BROKEN_MANAGER:-} == yes ]]; then
+		SECONDS=$((SECONDS + 61)) # Exercise the deadline without spending a minute in CI.
+		return 0
+	fi
+	command sleep "$1"
+	# The manager can forget the job before the PID exits, and its reaper drains last.
+	if [[ -f "$HOME/serve-loaded" ]]; then
+		rm "$HOME/serve-loaded"
+		echo 'job unloaded' >> "$trace"
+	elif [[ -f "$HOME/serve-pid" ]]; then
+		rm "$HOME/serve-pid"
+		echo 'pid exited' >> "$trace"
+	elif [[ -f "$HOME/instance-held" ]]; then
+		rm "$HOME/instance-held"
+		echo 'lock released' >> "$trace"
+	fi
+}
 log_start() {
+	if [[ -e "$HOME/serve-loaded" || -e "$HOME/serve-pid" || -e "$HOME/instance-held" ]]; then
+		echo 'started before shutdown finished' >&2
+		return 99
+	fi
 	touch "$HOME/serve-running"
 	"$bin" version | sed -n 's/^commit:    /start /p' >> "$trace"
 }
@@ -33,12 +82,25 @@ macctl() {
 	[[ ${BROKEN_MANAGER:-} != yes ]] || return 2
 	case "$1 $2" in
 		'print gui/501') return 0 ;;
-		'print gui/501/dev.beacon.serve') if [[ -f "$HOME/serve-running" ]]; then return 0; fi ;;
+		'print gui/501/dev.beacon.serve')
+			if inspect_fails; then return 36; fi
+			if [[ -f "$HOME/serve-running" || -f "$HOME/serve-loaded" ]]; then
+				printf 'gui/501/dev.beacon.serve = {\n\tpid = %s\n}\n' "$fixture_pid"
+				return 0
+			fi ;;
 		'print gui/501/dev.beacon.agent') if [[ -f "$HOME/legacy-gui" ]]; then return 0; fi ;;
 		'print user/501/dev.beacon.agent') if [[ -f "$HOME/legacy-user" ]]; then return 0; fi ;;
-		'bootout gui/501/dev.beacon.serve') rm -f "$HOME/serve-running"; echo 'stop launchd' >> "$trace"; return ;;
+		'bootout gui/501/dev.beacon.serve') fake_stop launchd; return "$?" ;;
 		'enable gui/501/dev.beacon.serve') return 0 ;;
-		'bootstrap gui/501') [[ "$3" == "$unit" && -f "$unit" ]] || return 99; log_start; return ;;
+		'bootstrap gui/501')
+			[[ "$3" == "$unit" && -f "$unit" ]] || return 99
+			if [[ -f "$HOME/bootstrap-5" ]]; then
+				rm "$HOME/bootstrap-5"
+				echo 'bootstrap error 5' >> "$trace"
+				echo 'Bootstrap failed: 5: Input/output error' >&2
+				return 5
+			fi
+			log_start; return "$?" ;;
 		*) return 99 ;;
 	esac
 	printf 'Could not find service "fixture"\n' >&2
@@ -48,9 +110,16 @@ systemctl() {
 	[[ "$1" == --user && ${BROKEN_MANAGER:-} != yes ]] || return 2
 	case "$2" in
 		show)
+			if inspect_fails; then return 1; fi
 			if [[ -f "$unit" ]]; then echo LoadState=loaded; else echo LoadState=not-found; fi
-			if [[ -f "$HOME/serve-running" ]]; then echo ActiveState=active; else echo ActiveState=inactive; fi ;;
-		stop) [[ "$3" == beacon.service ]] || return 99; rm -f "$HOME/serve-running"; echo 'stop systemd' >> "$trace" ;;
+			if [[ -f "$HOME/serve-running" ]]; then
+				printf 'ActiveState=active\nMainPID=%s\n' "$fixture_pid"
+			elif [[ -f "$HOME/serve-loaded" ]]; then
+				printf 'ActiveState=deactivating\nMainPID=%s\n' "$fixture_pid"
+			else
+				printf 'ActiveState=inactive\nMainPID=0\n'
+			fi ;;
+		stop) [[ "$3" == beacon.service ]] || return 99; fake_stop systemd ;;
 		enable) [[ "$3" == --now && "$4" == beacon.service && -f "$unit" ]] || return 99
 			mkdir -p "${unit%/*}/default.target.wants"
 			ln -sfn ../beacon.service "${unit%/*}/default.target.wants/beacon.service"
@@ -61,7 +130,13 @@ systemctl() {
 		*) return 99 ;;
 	esac
 }
-wait_ready() { echo health >> "$trace"; [[ ${BAD_HEALTH:-} != yes ]]; }
+wait_ready() {
+	echo health >> "$trace"
+	if [[ ${BAD_HEALTH:-} == yes ]]; then
+		if [[ "$OS" == Darwin ]]; then touch "$HOME/bootstrap-5"; fi
+		return 1
+	fi
+}
 build_beacon() {
 	[[ ! -e "$1/untracked" && -f "$1/scripts/install.sh" ]] || return 99
 	printf 'build %s\n' "$2" >> "$trace"
@@ -72,13 +147,26 @@ if [[ \$1 == version ]]; then echo "commit:    $2"; exit; fi
 if [[ \$1 == migrate-swift ]]; then
 	[[ -f "\$3/app/journal.sqlite" ]]
 	[[ ! -e "\$HOME/Applications/Beacon.app/Contents/MacOS/Beacon" && ! -e "\$HOME/Library/LaunchAgents/dev.beacon.agent.plist" ]]
-	echo archive >> "\$trace"
-	mkdir -p "\$3/swift-archive"
+	if [[ -d "\$3/swift-archive" ]]; then
+		echo verify >> "\$trace"
+	else
+		mkdir "\$3/swift-archive"
+		echo archive >> "\$trace"
+		echo 'Archived jrn_fixture. No Swift actions will be replayed.'
+	fi
 	exit
 fi
 [[ \$1 == setup && \$2 == --state-dir ]]
 if [[ \$4 == --show-origin ]]; then sed -nE 's/^  "origin": "([a-z0-9.:/-]+)",?$/\1/p' "\$3/settings.json"; exit; fi
-if [[ \$4 == --check-stopped ]]; then exit; fi
+if [[ \$4 == --check-stopped ]]; then
+	if [[ -e "\$HOME/serve-loaded" || -e "\$HOME/serve-pid" ]]; then echo 'checked lock too early' >> "\$trace"; fi
+	if [[ -e "\$HOME/instance-held" ]]; then
+		echo 'lock still held' >> "\$trace"
+		echo 'beacon: another process holds the approval instance lock' >&2
+		exit 1
+	fi
+	exit
+fi
 [[ \$4 == --origin ]]
 printf 'setup %s\n' "\$5" >> "\$trace"
 mkdir -p "\$3"
@@ -96,10 +184,11 @@ export FIXTURE=$tmp TMPDIR=$tmp
 unset BEACON_CONFIG XDG_STATE_HOME XDG_CONFIG_HOME
 test_install() {
 	export OS=$1 HOME="$tmp/home-$1" trace="$tmp/$1.trace"
-	local state unit initial now bin before f
+	local state unit initial now bin before f stop_exit=1 output="$tmp/$1.out"
 	mkdir "$HOME"
 	bin="$HOME/.local/bin/beacon"
 	if [[ "$OS" == Darwin ]]; then
+		stop_exit=36
 		state="$HOME/Library/Application Support/beacon"
 		unit="$HOME/Library/LaunchAgents/dev.beacon.serve.plist"
 	else
@@ -116,8 +205,14 @@ test_install() {
 	done
 	fixture_commit "$OS-upgrade"
 	now=$(git -C "$repo" rev-parse HEAD)
-	/bin/bash "$repo/driver" --origin tailscale
+	SLOW_STOP=yes STOP_EXIT=$stop_exit STOP_INSPECT=transient /bin/bash "$repo/driver" >"$output" 2>&1 || { cat "$output" >&2; return 1; }
 	grep -Fxq "start $now" "$trace"
+	grep -Fq 'Waiting for Beacon to finish stopping' "$output"
+	grep -Fxq "stop returned $stop_exit" "$trace"
+	grep -Fxq 'manager inspection failed' "$trace"
+	if grep -Eq 'another process holds|already in progress|Could not inspect' "$output" ||
+		grep -q 'checked lock too early' "$trace"; then return 1; fi
+	[[ $(grep -c '^pid still running$' "$trace") == 1 && $(grep -c '^lock still held$' "$trace") == 1 ]]
 	[[ $(grep -c '^setup ' "$trace") == 1 ]]
 	before=$(cat "$trace")
 	if /bin/bash "$repo/driver" --origin localhost; then return 1; fi
@@ -127,11 +222,18 @@ test_install() {
 	[[ $(cat "$trace") == "$before" ]]
 	git -C "$repo" show "$now:scripts/install.sh" > "$repo/scripts/install.sh"
 	fixture_commit "$OS-fail"
-	if BAD_HEALTH=yes /bin/bash "$repo/driver"; then return 1; fi
+	if SLOW_STOP=yes STOP_EXIT=$stop_exit STOP_INSPECT=transient BAD_HEALTH=yes /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
 	"$bin" version | grep -Fq "$now"
 	[[ $(tail -1 "$trace") == "start $now" ]]
+	[[ $(grep -c '^pid still running$' "$trace") == 3 && $(grep -c '^lock still held$' "$trace") == 3 ]]
+	[[ $(grep -c '^manager inspection failed$' "$trace") == 3 ]]
+	if [[ "$OS" == Darwin ]]; then
+		[[ $(grep -c '^bootstrap error 5$' "$trace") == 1 ]]
+		grep -Fq 'launchd bootstrap returned error 5; retrying' "$output"
+	fi
 	rm "$unit" # manager still owns the live job
-	if BROKEN_MANAGER=yes /bin/bash "$repo/driver" --uninstall; then return 1; fi
+	if BROKEN_MANAGER=yes /bin/bash "$repo/driver" --uninstall >"$output" 2>&1; then return 1; fi
+	grep -Fq 'Timed out after 60 seconds waiting for Beacon to stop' "$output"
 	[[ -f "$bin" && -f "$HOME/serve-running" ]]
 	/bin/bash "$repo/driver" --uninstall
 	[[ ! -e "$HOME/serve-running" && ! -L "${unit%/*}/default.target.wants/beacon.service" ]]
@@ -144,6 +246,22 @@ test_install() {
 		grep -Fxq "keep $f" "$state/$f"
 	done
 	[[ $(grep -c '^setup ' "$trace") == 1 ]]
+}
+
+test_stop_timeout() {
+	local slow=$1 inspect=$2 reason=$3 name="stop-timeout-$2"
+	export OS=Darwin HOME="$tmp/home-$name" trace="$tmp/$name.trace"
+	local initial bin="$HOME/.local/bin/beacon" output="$tmp/$name.out"
+	mkdir "$HOME"
+	initial=$(git -C "$repo" rev-parse HEAD)
+	/bin/bash "$repo/driver" --origin localhost
+	fixture_commit "$name"
+	if SLOW_STOP=$slow STOP_INSPECT=$inspect /bin/bash "$repo/driver" >"$output" 2>&1; then return 1; fi
+	grep -Fq "Timed out after 60 seconds waiting for Beacon to stop: $reason." "$output"
+	"$bin" version | grep -Fq "$initial"
+	[[ $(grep -c '^start ' "$trace") == 1 && ! -e "${bin%/*}/.beacon-install.lock" ]]
+	rm -f "$HOME/instance-held"
+	/bin/bash "$repo/driver" --uninstall
 }
 
 test_legacy() {
@@ -173,14 +291,19 @@ test_legacy() {
 	touch "$legacy" "$executable"
 	mkdir -p "$state/app"
 	touch "$state/app/journal.sqlite"
-	if SWIFT_RELAUNCH=yes /bin/bash "$repo/driver" --migrate-swift --origin localhost; then return 1; fi
+	if SWIFT_RELAUNCH=yes /bin/bash "$repo/driver" --migrate-swift --origin localhost >"$output" 2>&1; then return 1; fi
 	[[ -f "$HOME/Library/dev.beacon.agent.plist.disabled" && -f "$executable.disabled" && ! -e "$legacy" && ! -e "$executable" ]]
 	grep -Fxq 'legacy CLI' "$old_bin"
 	[[ $(grep -c '^archive$' "$trace") == 1 ]]
+	[[ $(grep -c '^Archived jrn_' "$output") == 1 ]]
 	if grep -q '^start ' "$trace"; then return 1; fi
 	rm "$HOME/swift-running"
-	/bin/bash "$repo/driver" --migrate-swift
-	[[ $(grep -c '^archive$' "$trace") == 3 && -f "$HOME/serve-running" ]]
+	/bin/bash "$repo/driver" --migrate-swift >"$output" 2>&1
+	[[ $(grep -c '^verify$' "$trace") == 2 && -f "$HOME/serve-running" ]]
+	if grep -q '^Archived ' "$output"; then return 1; fi
+	/bin/bash "$repo/driver" >"$output" 2>&1
+	[[ $(grep -c '^verify$' "$trace") == 3 && -f "$HOME/serve-running" ]]
+	if grep -q '^Archived ' "$output"; then return 1; fi
 	/bin/bash "$repo/driver" --uninstall
 }
 
@@ -197,6 +320,8 @@ test_orphaned_act() {
 
 test_install Darwin
 test_install Linux
+test_stop_timeout stuck normal 'the approval instance lock is not available'
+test_stop_timeout '' persistent 'the service manager could not confirm the job state'
 test_legacy
 test_orphaned_act
 echo "ok temporary launchd and systemd installs, upgrades, rollback and uninstall"

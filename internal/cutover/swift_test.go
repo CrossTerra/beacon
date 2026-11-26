@@ -151,8 +151,8 @@ func TestTakeoverArchivesCommittedWALAndNeverImportsARecord(t *testing.T) {
 		t.Fatalf("archive missing the committed WAL: %+v", m)
 	}
 	sql(t, sqlite, db, "PRAGMA wal_checkpoint(TRUNCATE);")
-	if next, err := Migrate(t.Context(), dir, sqlite); err != nil || next.SnapshotSHA256 != m.SnapshotSHA256 {
-		t.Fatalf("a WAL checkpoint invalidated an unchanged retry: %v", err)
+	if next, err := Migrate(t.Context(), dir, sqlite); err != nil || next != (Archive{}) {
+		t.Fatalf("verification after a WAL checkpoint should not report a new archive: %+v, %v", next, err)
 	}
 	closeLock()
 	if j, err := approval.OpenJournal(dir, time.Unix(0, 0), m.Journal); !errors.Is(err, approval.ErrJournalAge) {
