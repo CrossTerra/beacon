@@ -167,9 +167,11 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
      writing `proposed`. Only a conversation Slack confirms as public gets a conversation subject; private channels,
      DMs and group DMs use the person's own Signal subject. Agent-supplied context cannot route records. The subject
      stays fixed because Signal requires exact equality throughout the proposal. Beacon checks visibility, membership
-     and the thread root before it enables Approve and again at the write. A lost reply only permits read-back, never
-     another post. Without one message carrying the operation UUID (as `beacon_post` metadata or `client_msg_id`),
-     with exact text, the approved user and destination in the bounded time window, the outcome stays unknown.
+     and the thread root before it enables Approve and again at the write. Beacon sends the exact frozen text.
+     An unclear or lost receipt only permits read-back, never another post. Without one message carrying the
+     operation UUID (as readable `beacon_post` metadata or `client_msg_id`), with the exact text (allowing
+     Slack's equivalent `&amp;` escape), approved user and destination in the bounded time window, the outcome
+     stays unknown. Text alone never confirms delivery.
      Intake lookups, window preflights and read-back each have their own read budget and their own 429 deadlines,
      so a proposer cannot spend the window's reads. The window's names (the workspace from `auth.test`, a channel's
      name, a direct message's other person, a group direct message's members) are display. They are resolved at

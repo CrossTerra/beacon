@@ -102,7 +102,9 @@ for this user in this workspace. Use separate app grants so the unattended token
 
 - `channels:read`, `groups:read`, `im:read`, `mpim:read`, `users:read`
 - `channels:history`, `groups:history`, `im:history`, `mpim:history`
-- Optionally `metadata.message:read` for read-back, if the workspace requires it
+
+Slack's implicit `identify` is allowed. `metadata.message:read` is not required: read-back can use
+`client_msg_id` when Slack hides all or part of the metadata. The scope is allowed if already granted.
 
 The write token needs the required reads plus `chat:write`. Use **Provider credentials → Set slack tokens**
 with a separate settings assertion. Beacon checks each token's user and workspace with `auth.test` and
@@ -125,19 +127,23 @@ text and destination IDs. Drafts over 4,000 UTF-16 code units cannot be approved
 
 After approval and durable start, Beacon repeats the checks with the unsealed write token and makes at
 most one `chat.postMessage` with the frozen text and unfurls off. The start's operation UUID goes in both
-`client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. The provider alone
-enforces permissions at the write. A definite refusal is terminal; a `429` respects `Retry-After` but never
-retries the post. Stopping or cancelling before that post is claimed fails as `stopped` (`pre_dispatch`)
-when the journal can still record, so restart does not treat an unsent draft as a lost reply. A journal
-that had already failed is left unchanged. If appending that stop record fails, shutdown reports the failure.
+`client_msg_id` and `beacon_post` message metadata, not in the text or Signal records. An `ok: true` reply
+with a valid message `ts` confirms the post unless it contradicts the approved destination or identity.
+The reply need not echo text or metadata. The provider alone enforces permissions at the write. A definite
+refusal is terminal; a `429` respects `Retry-After` but never retries the post. Stopping or cancelling before
+that post is claimed fails as `stopped` (`pre_dispatch`) when the journal can still record, so restart does
+not treat an unsent draft as a lost reply. An already failed journal is left unchanged. If appending that
+stop record fails, shutdown reports the failure.
 
 A lost or unclear reply triggers only read-back with the unattended token. It searches up to four pages of 15
 messages in the approved conversation or thread, from one minute before to at most five minutes after the
-original start. It confirms only one unambiguous match for the UUID, exact text, user, destination and time.
-Missing or conflicting evidence stays `outcome_unknown`. Automatic read-back runs at startup and after a lost
-reply, backing off from 15 to 120 seconds until a minute after the search window ends. **Read again** can
-still search that same window. Intake, review and recovery have separate read budgets and Slack method
-cooldowns; none can resend a post.
+original start. It needs one unambiguous message with the operation UUID in `client_msg_id` or readable
+`beacon_post` metadata, the approved text (allowing Slack's `&amp;` escape), and the approved user in that
+destination and time window. A user-authored message can carry app attribution; a bot or another user does
+not qualify. Text alone never confirms delivery. Missing or conflicting evidence stays `outcome_unknown`.
+Automatic read-back runs at startup and after a lost reply, backing off from 15 to 120 seconds until a minute
+after the search window ends. **Read again** can still search that same window. Intake, review and recovery
+have separate read budgets and Slack method cooldowns; none can resend a post.
 
 ## Agent runs and checkouts
 

@@ -69,7 +69,7 @@ The Go service has these handlers. `beacon act types` lists the types enabled by
 | Type | How to enable it |
 | --- | --- |
 | `github.merge` | Configure the GitHub account in `action-providers.json` and save separate read and write credentials in [Settings](go-approvals.md#provider-credentials-and-github). |
-| `slack.post` | Configure the Slack workspace and user in `action-providers.json` and save separate read and write credentials in [Settings](go-approvals.md#slack-posts). |
+| `slack.post` | Configure the Slack workspace and user in `action-providers.json` and save separate read and write credentials in [Settings](go-approvals.md#slack-posts). The read token does not need `metadata.message:read`. |
 | `agent.run` | With the service stopped, create `agent-runs.json` (`0600`) in the service state directory with the absolute path to OpenCode, the allowed models, and the named checkouts. Restart the service to enable it. See the [example configuration](go-approvals.md#agent-runs-and-checkouts). Runs need their own passkey assertion, not a provider token. |
 
 ## One-time cutover from Beacon.app (D16)

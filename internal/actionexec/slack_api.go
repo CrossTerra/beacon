@@ -410,7 +410,6 @@ func (a slackAPI) userName(ctx context.Context, id string) (string, error) {
 type slackMessage struct {
 	Type     string          `json:"type"`
 	Subtype  *string         `json:"subtype"`
-	BotID    *string         `json:"bot_id"`
 	Channel  *string         `json:"channel"`
 	User     *string         `json:"user"`
 	TS       string          `json:"ts"`
@@ -495,19 +494,27 @@ func (a slackAPI) post(ctx context.Context, d slackDraft, user, op string) postR
 	}
 	var posted struct {
 		slackEnvelope
-		Channel string        `json:"channel"`
-		TS      string        `json:"ts"`
-		Message *slackMessage `json:"message"`
+		Channel string          `json:"channel"`
+		TS      string          `json:"ts"`
+		Message json.RawMessage `json:"message"`
 	}
 	if json.Unmarshal(res.body, &posted) == nil && posted.OK != nil {
 		if !*posted.OK {
 			if err := slackRejection(posted.slackEnvelope); err != nil {
 				return postReply{refused: err}
 			}
-		} else if res.status < 300 && posted.Channel == d.channel && slackTS.MatchString(posted.TS) && posted.TS != d.thread {
-			m := posted.Message
-			if m == nil || (m.TS == "" || m.TS == posted.TS) && absentOr(m.Channel, d.channel) && absentOr(m.User, user) &&
-				absentOr(m.Thread, threadOrSelf(d.thread, posted.TS)) && m.BotID == nil {
+		} else if res.status < 300 && (posted.Channel == "" || posted.Channel == d.channel) && slackTS.MatchString(posted.TS) && posted.TS != d.thread {
+			// The receipt acknowledges our one-shot request. The message echo need not have
+			// a particular shape, but explicit contradictions still require read-back.
+			var echo struct {
+				TS      string  `json:"ts"`
+				Channel *string `json:"channel"`
+				User    *string `json:"user"`
+				Thread  *string `json:"thread_ts"`
+			}
+			_ = json.Unmarshal(posted.Message, &echo)
+			if (echo.TS == "" || echo.TS == posted.TS) && absentOr(echo.Channel, d.channel) && absentOr(echo.User, user) &&
+				absentOr(echo.Thread, threadOrSelf(d.thread, posted.TS)) {
 				return postReply{ts: posted.TS}
 			}
 		}

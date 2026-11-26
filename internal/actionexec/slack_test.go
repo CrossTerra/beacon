@@ -26,6 +26,9 @@ const (
 	fixtureRoot    = "1799999800.000001"
 	fixturePosted  = "1800000000.000200"
 	fixtureDraft   = "*Follow up* on <https://example.test|docs> for <@U0OTHER|Not their name>\nCafe\u0301 <!here>\t👍"
+	fixtureDM      = "D0DANA"
+	fixtureDMDraft = "One more thought…\n\nHere is a plain paragraph about tea & coffee."
+	fixtureDMEcho  = "One more thought…\n\nHere is a plain paragraph about tea &amp; coffee."
 	slackReadToken = "xoxp-fixture-read"
 	slackPostToken = "xoxp-fixture-write"
 )
@@ -49,7 +52,7 @@ type fakeSlack struct {
 	namesRefused, noRoot                    bool
 	mode, needed                            string
 	pages                                   func(url.Values, []approval.Object) approval.Object
-	echo                                    approval.Object
+	echo, receipt                           approval.Object
 	hide                                    bool
 	rateMethod                              slackMethod
 	rateBackOnly                            bool
@@ -159,7 +162,13 @@ func (f *fakeSlack) handle(r *http.Request) (*http.Response, error) {
 				if post.Thread != "" {
 					msg["thread_ts"] = post.Thread
 				}
-				maps.Copy(msg, f.echo)
+				for key, value := range f.echo {
+					if value == nil {
+						delete(msg, key)
+					} else {
+						msg[key] = value
+					}
+				}
 				messages = append(messages, msg)
 			}
 		}
@@ -189,6 +198,9 @@ func (f *fakeSlack) handle(r *http.Request) (*http.Response, error) {
 			return slackOK(approval.Object{"channel": p.Channel, "ts": fixturePosted,
 				"message": approval.Object{"thread_ts": "1799999800.000009"}})
 		default:
+			if f.receipt != nil {
+				return slackOK(maps.Clone(f.receipt))
+			}
 			return slackOK(approval.Object{"channel": p.Channel, "ts": fixturePosted})
 		}
 	}
@@ -558,6 +570,76 @@ func TestSlackRepliesAndLostReplyAreOneShot(t *testing.T) {
 	}
 }
 
+func TestSlackTopLevelDMConfirmsFromReceiptWithoutEchoEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		receipt approval.Object
+	}{
+		{"only ok and ts", approval.Object{"ts": fixturePosted}},
+		{"user message with app attribution", approval.Object{"ts": fixturePosted, "channel": fixtureDM,
+			"message": approval.Object{"type": "message", "ts": fixturePosted, "user": fixtureUser,
+				"bot_id": "B0APP", "text": fixtureDMEcho}}},
+		{"echo shape is not a receipt", approval.Object{"ts": fixturePosted, "channel": fixtureDM,
+			"message": approval.Object{"client_msg_id": false, "text": fixtureDMDraft}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := slackTest(t)
+			s.f.conversation = approval.Object{"is_im": true, "user": "U0OTHER"}
+			s.f.receipt = tc.receipt
+			r := requestPost(fixtureDM, nil)
+			r.Params["text"] = fixtureDMDraft
+			v := s.start(s.propose(r, ""))
+			s.run(v)
+			s.want(v.ID, "executed", "reply", "")
+			if callCount(s.f.calls, slackHistory) != 0 || len(s.f.posts) != 1 ||
+				s.f.posts[0].Text != fixtureDMDraft || s.f.posts[0].Thread != "" {
+				t.Fatal("expected the exact top-level draft to be sent once and confirmed without history")
+			}
+		})
+	}
+}
+
+func TestSlackTopLevelDMReadBackWithoutMetadataGrant(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		echo approval.Object
+	}{
+		{"metadata absent and ampersand escaped", approval.Object{"metadata": nil, "text": fixtureDMEcho}},
+		{"metadata payload omitted", approval.Object{"metadata": approval.Object{"event_type": "beacon_post"}}},
+		{"metadata payload null", approval.Object{"metadata": approval.Object{"event_type": "beacon_post", "event_payload": nil}}},
+		{"user message with app attribution", approval.Object{"metadata": nil, "bot_id": "B0APP"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := slackTest(t) // the separate read token has no metadata.message:read
+			s.f.conversation = approval.Object{"is_im": true, "user": "U0OTHER"}
+			s.f.receipt = approval.Object{"channel": fixtureDM} // ok, but no usable timestamp
+			s.f.echo = tc.echo
+			s.f.echo["channel"] = nil // conversations.history need not echo the requested channel
+			r := requestPost(fixtureDM, nil)
+			r.Params["text"] = fixtureDMDraft
+			v := s.start(s.propose(r, ""))
+			s.f.hide = true // not visible to the first read-back
+			s.run(v)
+			s.want(v.ID, "outcome_unknown", "", "")
+			s.at = v.StartedAt.Add(11 * time.Minute)
+			s.restart()
+			if !s.h.Due(s.view(v.ID)) {
+				t.Fatal("the unknown post was not due for recovery at startup")
+			}
+			s.f.hide = false
+			requireOK(t, s.h.Reconcile(t.Context(), s.j, v.ID))
+			s.want(v.ID, "executed", "read_back", "")
+			if len(s.f.posts) != 1 || s.f.posts[0].ClientID != v.SlackOperation || s.f.posts[0].Text != fixtureDMDraft {
+				t.Fatal("recovery did not confirm the single frozen write")
+			}
+			last := s.f.calls[len(s.f.calls)-1]
+			if last.method != string(slackHistory) || last.query.Get("channel") != fixtureDM || last.query.Has("ts") {
+				t.Fatal("recovery did not read the approved DM history")
+			}
+		})
+	}
+}
+
 func TestSlackDefiniteRefusalsDoNotSearchOrResend(t *testing.T) {
 	s := slackTest(t)
 	for _, tc := range []struct{ slack, code string }{
@@ -686,7 +768,7 @@ func TestSlackRecoveryBacksOffAndKeepsRateLimitsSeparate(t *testing.T) {
 	}
 }
 
-func TestSlackRecoveryRequiresUniqueExactEvidence(t *testing.T) {
+func TestSlackRecoveryRequiresUniqueBoundOperation(t *testing.T) {
 	otherOp := approval.Object{"event_type": "beacon_post", "event_payload": approval.Object{"op": "different-operation"}}
 	for _, tc := range []struct {
 		name string
@@ -695,9 +777,12 @@ func TestSlackRecoveryRequiresUniqueExactEvidence(t *testing.T) {
 		{"text only", approval.Object{"client_msg_id": nil, "metadata": nil}},
 		{"other operation", approval.Object{"client_msg_id": nil, "metadata": otherOp}},
 		{"conflicting ids", approval.Object{"metadata": otherOp}},
+		{"malformed metadata payload", approval.Object{"metadata": approval.Object{"event_type": "beacon_post", "event_payload": "not a payload"}}},
+		{"different text despite client ID", approval.Object{"metadata": nil, "text": "A different message."}},
 		{"normalized text", approval.Object{"text": strings.Replace(fixtureDraft, "e\u0301", "é", 1)}},
 		{"wrong author", approval.Object{"user": "U0OTHER"}},
-		{"bot", approval.Object{"bot_id": "B0APP"}},
+		{"bot without the approved user", approval.Object{"user": nil, "bot_id": "B0APP"}},
+		{"bot message subtype", approval.Object{"subtype": "bot_message", "bot_id": "B0APP"}},
 		{"wrong conversation", approval.Object{"channel": "C0OTHER"}},
 		{"wrong thread", approval.Object{"thread_ts": fixtureRoot}},
 		{"out of window", approval.Object{"ts": "1800001000.000200"}},

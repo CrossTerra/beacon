@@ -145,27 +145,38 @@ func (a slackAPI) find(ctx context.Context, d slackDraft, user, op string, start
 }
 
 func (m slackMessage) markedBy(op string) (match, conflict bool) {
-	// Slack can assign its own client_msg_id. Prefer Beacon metadata when present; another Beacon
-	// operation with our client_msg_id is conflicting evidence. Other apps' metadata is irrelevant.
+	// Slack can assign its own client_msg_id. Prefer a Beacon metadata ID if readable;
+	// an event_type without its payload does not contradict the client_msg_id.
 	var meta struct {
 		Type    string          `json:"event_type"`
 		Payload json.RawMessage `json:"event_payload"`
 	}
-	if json.Unmarshal(m.Metadata, &meta) == nil && meta.Type == slackEventType {
+	if json.Unmarshal(m.Metadata, &meta) == nil && meta.Type == slackEventType && len(meta.Payload) != 0 {
 		var payload struct {
 			Op string `json:"op"`
 		}
-		if json.Unmarshal(meta.Payload, &payload) == nil && payload.Op == op {
-			return true, false
+		if err := json.Unmarshal(meta.Payload, &payload); err != nil {
+			return false, m.ClientID == op
 		}
-		return false, m.ClientID == op
+		if payload.Op != "" {
+			return payload.Op == op, m.ClientID == op && payload.Op != op
+		}
 	}
 	return m.ClientID == op, false
 }
 
+// Slack can escape bare ampersands in the returned mrkdwn. Compare that representation without
+// decoding existing entities or changing links, mentions, Unicode, or whitespace.
+var slackAmpersands = strings.NewReplacer("&amp;", "&amp;", "&lt;", "&lt;", "&gt;", "&gt;", "&", "&amp;")
+
 func (m slackMessage) matches(d slackDraft, user string, oldest, latest time.Time) bool {
-	if m.Type != "message" || m.Subtype != nil || m.BotID != nil || m.User == nil || *m.User != user ||
-		m.TS == d.thread || !slackTS.MatchString(m.TS) || !absentOr(m.Channel, d.channel) || m.Text == nil || *m.Text != d.text {
+	// An app attribution is not a bot author when Slack attests to the approved user
+	// on an ordinary message. Auth still requires a user token, not a bot token.
+	if m.Type != "message" || m.Subtype != nil || m.User == nil || *m.User != user ||
+		m.TS == d.thread || !slackTS.MatchString(m.TS) || !absentOr(m.Channel, d.channel) || m.Text == nil {
+		return false
+	}
+	if *m.Text != d.text && *m.Text != slackAmpersands.Replace(d.text) {
 		return false
 	}
 	if d.thread != "" && m.Thread == nil || !absentOr(m.Thread, threadOrSelf(d.thread, m.TS)) {
