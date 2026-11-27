@@ -20,8 +20,11 @@ type SignalIdentity struct {
 }
 
 func (s SignalIdentity) Valid() bool {
-	return ValidID(s.Person, "act") && actorHandle.matches(s.Handle)
+	return ValidID(s.Person, "act") && ValidSignalHandle(s.Handle)
 }
+
+// ValidSignalHandle checks the handle without its leading @.
+func ValidSignalHandle(handle string) bool { return actorHandle.matches(handle) }
 
 type Result struct {
 	ConfirmedBy string `json:"confirmed_by"`

@@ -2,6 +2,9 @@
 
 package keychain
 
-import "io"
+import (
+	"errors"
+	"os"
+)
 
-func noEcho(io.Reader) func() { return func() {} }
+func hideEcho(*os.File) (func(), error) { return nil, errors.New("hidden terminal input unavailable") }

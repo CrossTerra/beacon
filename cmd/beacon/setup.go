@@ -20,6 +20,9 @@ import (
 )
 
 func (a *app) cmdSetup(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == "verify-signal" {
+		return a.cmdVerifySignal(ctx, args[1:])
+	}
 	fs, path := a.reviewFlags("setup")
 	reset := fs.Bool("reset-passkeys", false, "record a passkey reset and remove the passkey list and write vault")
 	origin := fs.String("origin", "", "localhost or tailscale (default: preserve existing origin, else localhost)")
