@@ -44,9 +44,9 @@ rules:
       type: review_requested
       addressed: true
       fields:
-        repository: acme/app
+        repo: acme/app
     tier: hold
-    fields: [url, repository]
+    fields: [url, repo]
     ask: me
     priority: high
 

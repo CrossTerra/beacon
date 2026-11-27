@@ -120,7 +120,7 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
    tokens are kept only in memory. Signal must use HTTPS except for a loopback test endpoint. No daemon runs as root.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
-   supervised collector writes pass summaries to `~/Library/Logs/Beacon/collector.log`, rotated by size with
+   supervised collector writes pass summaries to `collector.log` in the service state directory (`~/Library/Application Support/beacon/collector.log` on macOS), rotated by size with
    one previous file kept. The retired LaunchAgent's logs are readable for migration. Logs exclude item content, rule matches, keys,
    bodies, tokens and error text. `beacon run` prints a fixed message for each reason.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
