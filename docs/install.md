@@ -1,8 +1,11 @@
 # Install Beacon on macOS or Linux
 
-Use macOS 14 or newer, or Linux with a systemd user manager, on arm64 or x86-64. Install **Go 1.24.3** from
-[go.dev/dl](https://go.dev/dl/). Clone your fork and check out the full audited commit in Terminal. There is
-no signing identity, Homebrew, or `sudo` in this setup.
+Use macOS 14 or newer, or Linux with a systemd user manager, on arm64 or x86-64. Put **Go 1.21 or newer** on
+`PATH`; a newer Go you already have is fine. The installer builds with **Go 1.24.3**. Go downloads that exact
+toolchain if needed and verifies it through its checksum database (`sum.golang.org` by default). If the
+download is unavailable (for example offline or with `GOPROXY=off`), install **Go 1.24.3** from
+[go.dev/dl](https://go.dev/dl/) and put it on `PATH`. An offline build also needs the module dependencies cached.
+Clone your fork and check out the full audited commit in Terminal. No signing, Homebrew, or `sudo` is required.
 
 ```sh
 ./scripts/install.sh --origin localhost
@@ -34,11 +37,29 @@ overwrite an unrelated proxy on port 443 and verifies the Serve configuration be
 localhost for credentials registered on the tailnet name. Run `beacon status --review` to check Serve. Do not use
 Funnel. Limit access to the machine's port 443 to your devices in a shared tailnet.
 
-Use the printed code at `/passkeys/new` within ten minutes. For Winton, save the Touch ID passkey in iCloud
-Keychain and sign in with the same passkey from the iPhone over Tailscale. With the service stopped, `beacon
-setup` will issue another code only before enrollment or after a reset. Updates never run setup again. To
-change the origin, stop the service and run `beacon setup --origin …` explicitly. Confirming removes every
-passkey and the write vault, but not the journal, unattended credentials or Signal key. After restarting,
+Use the printed code at `/passkeys/new` within ten minutes. For approval from a phone over Tailscale,
+use the same PRF-capable passkey synced to both devices. If the setup code expired or was already used
+and no passkey is enrolled, run this from the audited Beacon checkout in a terminal on the host:
+
+```sh
+./scripts/install.sh --reissue-code
+```
+
+This is recovery only: it requires a matching, unmodified installer-managed service and a binary that supports
+offline reissue. It refuses an enrolled installation. It briefly stops and restarts a running, enabled service;
+open review sessions end. It does not start or enable a previously stopped service. Enter the replacement code
+at the printed address; do not redirect or log it. If the restart cannot be confirmed, the helper reports the
+failure and does not display the code. For an expired **sign-in link**, run `beacon open` instead.
+
+If the helper cannot verify a custom unit but the binary supports reissue, use
+`beacon setup --reissue-code` only after deliberately stopping that service. Start it again when ready to register.
+
+When passkey registration fails, the page shows the browser's error name and message, PRF status, and browser
+user agent. Only a fixed reason code is logged to `serve.log` on macOS (the systemd user journal on Linux).
+
+Updates never run setup again. To change the origin, stop the service and run `beacon setup --origin …`
+explicitly. Confirming removes every passkey and the write vault, but not the journal, unattended credentials
+or Signal key. After restarting,
 register again and re-enter the write credentials. Changing to localhost does not delete other Tailscale routes.
 
 `beacon open` prints a temporary sign-in link; open it yourself. The collector's `beacon init` and

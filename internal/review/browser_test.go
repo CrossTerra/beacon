@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +35,8 @@ func TestBrowserRegistersThroughThePageCSP(t *testing.T) {
 	t.Cleanup(func() { j.Close() })
 	s := New(makeOrigin(t, approval.LocalOrigin, ""), j, time.Now)
 	s.SetState(dir)
+	reports := make(reportLines, 4)
+	s.SetDiagnostics(reports)
 	srv := &httpServer{s}
 	for _, ln := range lns {
 		go srv.Serve(ln)
@@ -62,6 +65,10 @@ func TestBrowserRegistersThroughThePageCSP(t *testing.T) {
 	if err := chromedp.Run(taskCtx, chromedp.ActionFunc(addVirtualAuthenticator)); err != nil {
 		t.Fatal(err)
 	}
+	must(t, chromedp.Run(taskCtx, chromedp.Navigate("http://localhost:7317/sign-in")))
+	must(t, waitFor(taskCtx, `document.getElementById("ceremony-error").textContent.includes("not used for this sign-in") &&
+		document.getElementById("ceremony-error").textContent.includes("PRF returned: not requested") &&
+		document.getElementById("ceremony-error").textContent.includes(navigator.userAgent)`))
 	if err := chromedp.Run(taskCtx, chromedp.Navigate("http://localhost:7317/passkeys/new")); err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +84,48 @@ func TestBrowserRegistersThroughThePageCSP(t *testing.T) {
 	if err := waitFor(taskCtx, `document.getElementById("ceremony-go") !== null`); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(taskCtx, chromedp.ActionFunc(func(ctx context.Context) error {
-		_, _, err := runtime.Evaluate(`document.getElementById("ceremony-go").click()`).WithUserGesture(true).Do(ctx)
-		return err
-	})); err != nil {
-		t.Fatal(err)
+	click := func(before string) {
+		t.Helper()
+		must(t, chromedp.Run(taskCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+			_, _, err := runtime.Evaluate(before + `document.getElementById("ceremony-go").click()`).WithUserGesture(true).Do(ctx)
+			return err
+		})))
 	}
+	checkFailure := func(text, reason string) {
+		t.Helper()
+		must(t, waitFor(taskCtx, `document.getElementById("ceremony-error").textContent.includes(`+strconv.Quote(text)+`) &&
+			document.getElementById("ceremony-error").textContent.includes(navigator.userAgent) &&
+			document.getElementById("ceremony-error").childElementCount === 0`))
+		select {
+		case line := <-reports:
+			if strings.TrimSpace(line) != "passkey.register.failed reason="+reason {
+				t.Fatal("browser diagnostics did not report only the fixed reason")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("browser diagnostic did not reach the service")
+		}
+	}
+	click(`(function () {
+		const create = navigator.credentials.create;
+		navigator.credentials.create = function () {
+			navigator.credentials.create = create;
+			throw new DOMException("<b>fixture browser error</b>", "NotAllowedError");
+		};
+	})();`)
+	checkFailure("NotAllowedError: <b>fixture browser error</b>", "NotAllowedError")
+	click(`(function () {
+		const create = navigator.credentials.create, get = navigator.credentials.get;
+		navigator.credentials.create = function () {
+			navigator.credentials.create = create;
+			return Promise.resolve({rawId: new Uint8Array(16), getClientExtensionResults: () => ({prf: {enabled: true}})});
+		};
+		navigator.credentials.get = function () {
+			navigator.credentials.get = get;
+			return Promise.resolve({getClientExtensionResults: () => ({})});
+		};
+	})();`)
+	checkFailure("PRF available: yes · PRF returned: no", "prf_missing")
+	click("")
 	if err := waitFor(taskCtx, `document.getElementById("registered") !== null`); err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +135,16 @@ func TestBrowserRegistersThroughThePageCSP(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, "write-vault.json")); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type reportLines chan string
+
+func (lines reportLines) Write(b []byte) (int, error) {
+	select {
+	case lines <- string(b):
+	default:
+	}
+	return len(b), nil
 }
 
 type httpServer struct{ h *Site }

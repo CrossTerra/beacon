@@ -92,6 +92,104 @@ func TestSetupPrintsAOneUseCode(t *testing.T) {
 	}
 }
 
+func TestSetupReissuesOnlyUnderTheOfflineLock(t *testing.T) {
+	dir := previewTemp(t)
+	dir, err := filepath.EvalSymlinks(dir)
+	must(t, err)
+	now := time.Now()
+	oldCode, err := passkey.Issue(dir, now)
+	must(t, err)
+	origin, err := approval.ParseOrigin(approval.LocalOrigin, "")
+	must(t, err)
+	must(t, localstate.Save(dir, origin))
+	j, err := approval.OpenJournal(dir, now, "")
+	must(t, err)
+	defer j.Close()
+	rp := webauthn.RelyingParty{ID: "localhost", Origin: approval.LocalOrigin}
+	_, _, _, err = passkey.Begin(dir, rp, oldCode, now)
+	must(t, err) // model a used code with an unfinished ceremony
+	a, out, stderr := previewCLI()
+	args := []string{"setup", "--state-dir", dir, "--reissue-code"}
+	check := []string{"setup", "--state-dir", dir, "--check-reissue-code"}
+	if exit := a.main(t.Context(), check); exit != 0 || out.Len() != 0 {
+		t.Fatal("the read-only eligibility check should work without issuing while the service owns the lock")
+	}
+	if exit := a.main(t.Context(), args); exit == 0 || out.Len() != 0 || !strings.Contains(stderr.String(), approval.ErrLocked.Error()) {
+		t.Fatal("reissue did not refuse the held instance lock")
+	}
+	must(t, j.Close())
+	stderr.Reset()
+	// Recovery must not clean up or replace even an orphaned write vault.
+	writeVault := filepath.Join(dir, "write-vault.json")
+	const debris = "preserve this fixture"
+	must(t, os.WriteFile(writeVault, []byte(debris), 0o600))
+	if exit := a.main(t.Context(), args); exit == 0 || out.Len() != 0 {
+		t.Fatal("reissue accepted state with an unresolved vault")
+	}
+	got, err := os.ReadFile(writeVault)
+	must(t, err)
+	if string(got) != debris {
+		t.Fatal("reissue changed the vault")
+	}
+	must(t, os.Remove(writeVault))
+	settings := filepath.Join(dir, "settings.json")
+	settingsBefore, err := os.ReadFile(settings)
+	must(t, err)
+	journalBefore, err := os.ReadFile(filepath.Join(dir, "journal.log"))
+	must(t, err)
+	stderr.Reset()
+	if exit := a.main(t.Context(), args); exit != 0 {
+		t.Fatalf("offline reissue failed: %d: %s", exit, stderr)
+	}
+	newCode := strings.TrimSpace(out.String())
+	if newCode == "" || newCode == oldCode || strings.Contains(stderr.String(), newCode) {
+		t.Fatal("expected a fresh code on stdout only")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "register-pending.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unfinished ceremony was not invalidated: %v", err)
+	}
+	for file, want := range map[string][]byte{settings: settingsBefore, filepath.Join(dir, "journal.log"): journalBefore} {
+		got, err := os.ReadFile(file)
+		must(t, err)
+		if string(got) != string(want) {
+			t.Fatal("reissue changed settings or the journal")
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "unattended.kdbx")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reissue created an unattended vault: %v", err)
+	}
+	create, assert, _, err := passkey.Begin(dir, rp, newCode, time.Now())
+	must(t, err)
+	key, err := webauthntest.Generate(webauthntest.AlgES256)
+	must(t, err)
+	reg, err := key.Register(rp.ID, rp.Origin, create)
+	must(t, err)
+	asserted, err := key.Assert(rp.ID, rp.Origin, assert, false)
+	must(t, err)
+	live, err := approval.OpenJournal(dir, time.Now(), "")
+	must(t, err)
+	defer live.Close()
+	must(t, passkey.Finish(dir, rp, passkey.Ceremony{
+		ClientDataJSON: reg.ClientDataJSON, AttestationObject: reg.AttestationObject, PRFEnabled: true,
+	}, passkey.Ceremony{
+		CredentialID: reg.CredentialID, ClientDataJSON: asserted.ClientDataJSON, AuthenticatorData: asserted.AuthenticatorData,
+		Signature: asserted.Signature, PRFOutput: make([]byte, 32),
+	}, time.Now()))
+	out.Reset()
+	stderr.Reset()
+	if exit := a.main(t.Context(), check); exit == 0 || out.Len() != 0 || !strings.Contains(stderr.String(), passkey.ErrRegistered.Error()) {
+		t.Fatal("an enrolled install passed the advisory check")
+	}
+	must(t, live.Close())
+	// The journal, not just the file checked in the normal case, says a passkey is enrolled.
+	must(t, os.Remove(filepath.Join(dir, "passkeys.json")))
+	must(t, os.Remove(writeVault))
+	stderr.Reset()
+	if exit := a.main(t.Context(), args); exit == 0 || out.Len() != 0 || !strings.Contains(stderr.String(), passkey.ErrRegistered.Error()) {
+		t.Fatalf("reissue did not refuse an enrolled passkey: %d: %s", exit, stderr)
+	}
+}
+
 func TestResetPasskeysThenRegister(t *testing.T) {
 	dir := previewTemp(t)
 	now := time.Now().UTC()

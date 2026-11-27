@@ -22,14 +22,25 @@
 {{define "register"}}
 {{template "head" "Register passkey"}}
 <h1>Register a passkey</h1>
-<p>This needs the one-time code from <code>beacon setup --state-dir DIR</code>. Scripts are required for the passkey.</p>
+{{if .}}<p role="alert">{{.}}</p>{{end}}
+<p>Enter the one-time code printed by Beacon setup.</p>
+{{template "setup-code-help"}}
 <noscript><p>Turn scripts on to register a passkey. <code>navigator.credentials</code> is only reachable from script.</p></noscript>
+{{template "passkey-diagnostics" "register"}}
 <form method="post" action="/passkeys/new">
 <label>Setup code <input name="code" autocomplete="off" required></label>
 <button type="submit">Continue</button>
 </form>
 <script src="/static/passkey.js"></script>
 {{template "end"}}
+{{end}}
+
+{{define "setup-code-help"}}
+<p>If no passkey is enrolled and your code expired or was used, run <code>./scripts/install.sh --reissue-code</code> from the audited Beacon checkout in a terminal. This briefly restarts a running service. Enter the new code at <a href="/passkeys/new">Register passkey</a> within ten minutes.</p>
+{{end}}
+
+{{define "passkey-diagnostics"}}
+<p id="ceremony-error" role="status" data-flow="{{.}}">Browser diagnostics require scripts.</p>
 {{end}}
 
 {{define "ceremony"}}
@@ -70,7 +81,12 @@
 {{if eq .Target.Service "slack"}}<p>Use Slack User OAuth Tokens (<code>xoxp-…</code>) and only the read scopes for the unattended token. The write token also needs <code>chat:write</code>.</p>{{end}}
 {{end}}
 <noscript><p>Turn scripts on. The passkey API is only reachable from script.</p></noscript>
-<p id="ceremony-error"></p>
+{{if eq .Action "/passkeys"}}
+{{template "passkey-diagnostics" "register"}}
+{{template "setup-code-help"}}
+{{else}}
+{{template "passkey-diagnostics" "assert"}}
+{{end}}
 <form id="ceremony-form" method="post" action="{{.Action}}">
 {{if .Target}}
 <p><label>Read token <input type="password" name="read_token" autocomplete="off" required maxlength="2048"></label></p>
@@ -139,7 +155,10 @@
 {{template "head" "Sign in"}}
 <h1>Sign in to Beacon</h1>
 {{if .}}<p>This sign-in link could not be used. It may have expired or already been used.</p>{{end}}
-<p>Run <code>beacon open --state-dir DIR</code> on the machine running Beacon for a one-time review link.</p>
+<p>Run <code>beacon open</code> on the machine running Beacon for a one-time review link. A passkey is used for approval, not for this sign-in.</p>
+<p>First time here? <a href="/passkeys/new">Register a passkey</a>.</p>
+{{template "passkey-diagnostics" "sign-in"}}
+<script src="/static/passkey.js"></script>
 {{template "end"}}
 {{end}}
 

@@ -26,11 +26,19 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 	show := fs.Bool("show-origin", false, "print the configured browser origin without changing it")
 	connect := fs.Bool("signal", false, "verify the Signal approval-app setup code in hidden input (service stopped)")
 	stopped := fs.Bool("check-stopped", false, "check the instance lock without changing settings")
+	reissue := fs.Bool("reissue-code", false, "issue a new passkey setup code without changing settings (service stopped)")
+	checkReissue := fs.Bool("check-reissue-code", false, "check whether an existing install can reissue a code, without issuing one")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 0 || (*show || *stopped || *connect) && (*reset || *origin != "" || *show && (*connect || *stopped) || *connect && *stopped) {
-		return errors.New("use setup --show-origin, --check-stopped or --signal separately")
+	var exclusive int
+	for _, enabled := range []bool{*show, *stopped, *connect, *reissue, *checkReissue} {
+		if enabled {
+			exclusive++
+		}
+	}
+	if fs.NArg() != 0 || exclusive > 1 || exclusive == 1 && (*reset || *origin != "") {
+		return errors.New("use setup --show-origin, --check-stopped, --signal, --check-reissue-code or --reissue-code separately")
 	}
 	if err := a.refuseRoot(); err != nil {
 		return err
@@ -38,8 +46,25 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 	if *origin != "" && *origin != "localhost" && *origin != "tailscale" {
 		return errors.New("setup --origin must be localhost or tailscale")
 	}
-	dir, err := localstate.Dir(*path, !(*show || *connect || *stopped))
+	dir, err := localstate.Dir(*path, exclusive == 0)
 	if err != nil {
+		return err
+	}
+	if *checkReissue || *reissue {
+		if _, err := localstate.Load(dir); err != nil {
+			return err
+		}
+		if _, err := cutover.Load(dir); err != nil {
+			return err
+		}
+		if *checkReissue {
+			return passkey.CheckReissue(dir)
+		}
+		code, err := passkey.Reissue(dir, a.now())
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(a.stdout, code)
 		return err
 	}
 	if *show {

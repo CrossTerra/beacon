@@ -7,8 +7,8 @@ Agents can propose actions over a local socket; only you can approve them, with 
 ## Install or update
 
 Use your own fork. Audit the exact commit and keep configurations, credentials and state outside the checkout.
-Install **Go 1.24.3** from [go.dev/dl](https://go.dev/dl/) if needed. No signing identity, Xcode project, Homebrew,
-or root installation is needed.
+Put **Go 1.21 or newer** on `PATH`. The installer builds with **Go 1.24.3**, which Go fetches and verifies if
+needed. No signing identity, Xcode project, Homebrew, or root installation is needed.
 
 ```sh
 ./scripts/install.sh --origin localhost

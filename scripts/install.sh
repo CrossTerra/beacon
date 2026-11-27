@@ -4,12 +4,20 @@ set -euo pipefail
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
-build_beacon() {
-	local src=$1 commit=$2 target=$3
-	[[ $(GOTOOLCHAIN=local go env GOVERSION) == go1.24.3 ]] || die "Install Go 1.24.3 from https://go.dev/dl/ (or put it on PATH)."
-	(cd "$src" && GOTOOLCHAIN=local CGO_ENABLED=0 GOFLAGS='' GOOS='' GOARCH='' go build -trimpath -buildvcs=false \
-		-ldflags "-X main.commit=$commit" -o "$target" ./cmd/beacon)
-}
+build_beacon() (
+	local src=$1 commit=$2 target=$3 local_go toolchain=go1.24.3
+	local_go=$(GOTOOLCHAIN=local go env GOVERSION 2>/dev/null) || local_go=''
+	if [[ ! "$local_go" =~ ^go([0-9]+)\.([0-9]+)($|[.-]|rc|beta) ]] ||
+		(( BASH_REMATCH[1] < 1 || BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 21 )); then
+		die "Put Go 1.21 or newer on PATH (https://go.dev/dl/)."
+	fi
+	cd "$src"
+	export GOTOOLCHAIN=$toolchain CGO_ENABLED=0 GOFLAGS='' GOOS='' GOARCH=''
+	# Select or download the exact compiler separately so build failures retain their diagnostics.
+	[[ $(go env GOVERSION 2>/dev/null) == "$toolchain" ]] ||
+		die "Could not load Go 1.24.3; install Go 1.24.3 from https://go.dev/dl/ and put it on PATH."
+	go build -trimpath -buildvcs=false -ldflags "-X main.commit=$commit" -o "$target" ./cmd/beacon
+)
 
 same_origin_mode() {
 	case "$1:$2" in
@@ -43,17 +51,19 @@ launchd_job() {
 
 # Print the main PID if known. Status 0 means loaded (launchd) or not stopped (systemd),
 # 1 means unloaded or stopped, and 2 is an inspection failure, not evidence of a stop.
+# Recovery also verifies the unit identity and refuses to stop a job it cannot safely restore.
 inspect_service() {
-	local info pid load
+	local mode=${1:-any} info pid load active
 	if [[ "$platform" == Darwin ]]; then
 		macctl print "$domain" >/dev/null || return 2
 		info=$(launchd_job "$domain/dev.beacon.serve") || return "$?"
+		if [[ "$mode" == recovery ]]; then recovery_launchd_job "$info" || return 2; fi
 		pid=$(sed -nE 's/^[[:space:]]*pid = ([1-9][0-9]*)[[:space:]]*$/\1/p' <<< "$info") || return 2
 		[[ -z "$pid" || "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
 		printf '%s' "$pid"
 		return 0
 	fi
-	info=$(systemctl --user show -p LoadState -p ActiveState -p MainPID beacon.service) || return 2
+	info=$(systemctl --user show -p LoadState -p ActiveState -p MainPID -p FragmentPath -p DropInPaths -p NeedDaemonReload beacon.service) || return 2
 	load=$(sed -n 's/^LoadState=//p' <<< "$info")
 	case "$load" in
 		loaded|masked|error|bad-setting|not-found) ;;
@@ -62,7 +72,9 @@ inspect_service() {
 	pid=$(sed -n 's/^MainPID=//p' <<< "$info")
 	if [[ "$load" == not-found && -z "$pid" ]]; then pid=0; fi
 	[[ "$pid" =~ ^(0|[1-9][0-9]*)$ ]] || return 2
-	case "$(sed -n 's/^ActiveState=//p' <<< "$info")" in
+	active=$(sed -n 's/^ActiveState=//p' <<< "$info")
+	if [[ "$mode" == recovery ]]; then recovery_systemd_job "$info" "$active" "$pid" || return 2; fi
+	case "$active" in
 		active|activating|deactivating|reloading|refreshing|maintenance) ;;
 		inactive|failed) [[ "$pid" != 0 ]] || return 1 ;;
 		*) return 2 ;;
@@ -109,11 +121,17 @@ wait_stopped() {
 
 stop_service() {
 	local probe=$1 pid status=0 stop_reply=''
-	pid=$(inspect_service 2>/dev/null) || status=$?
+	if [[ $# == 2 ]]; then
+		pid=$2 # A recovery preflight already captured the live service PID.
+	else
+		pid=$(inspect_service 2>/dev/null) || status=$?
+	fi
 	if [[ "$status" != 1 ]]; then
 		# A nonzero stop result (e.g. launchd EBUSY/EINPROGRESS) can mean teardown is still in progress.
 		if [[ "$platform" == Darwin ]]; then
 			stop_reply=$(macctl bootout "$domain/dev.beacon.serve" 2>&1) || :
+		elif [[ $# == 2 ]]; then
+			stop_reply=$(systemctl --user stop --no-block beacon.service 2>&1) || :
 		else
 			stop_reply=$(systemctl --user stop beacon.service 2>&1) || :
 		fi
@@ -125,9 +143,10 @@ stop_service() {
 }
 
 start_service() {
+	local mode=${1:-install}
 	if [[ "$platform" == Darwin ]]; then
 		local delay reply status
-		macctl enable "$domain/dev.beacon.serve" || return 1
+		if [[ "$mode" == install ]]; then macctl enable "$domain/dev.beacon.serve" || return 1; fi
 		for delay in 1 2 0; do
 			if reply=$(macctl bootstrap "$domain" "$unit" 2>&1); then return 0; else status=$?; fi
 			if [[ "$delay" == 0 || ( "$status" != 5 && "$reply" != *'Bootstrap failed: 5:'* ) ]]; then
@@ -138,6 +157,8 @@ start_service() {
 			sleep "$delay" || return 1
 			legacy_clear || return 1
 		done
+	elif [[ "$mode" == existing ]]; then
+		systemctl --user start --no-block beacon.service
 	else
 		systemctl --user daemon-reload && systemctl --user enable --now beacon.service
 	fi
@@ -273,6 +294,87 @@ recorded_binary() {
 		installed_hash=$(cat "$receipt") && [[ "$installed_hash" =~ ^[0-9a-f]{64}$ && "$(artifact_hash "$bin")" == "$installed_hash" ]]
 }
 
+valid_recovery_install() {
+	[[ -x "$bin" && -O "$bin" && -O "$receipt" && -f "$unit" && ! -L "$unit" && -O "$unit" ]] &&
+		recorded_binary && render_unit | cmp -s "$unit" -
+}
+
+recovery_enabled() {
+	if [[ "$platform" == Darwin ]]; then
+		local disabled setting
+		disabled=$(macctl print-disabled "$domain") || return 1
+		grep -Eq '^[[:space:]]*disabled services = \{' <<< "$disabled" || return 1
+		setting=$(grep -F '"dev.beacon.serve"' <<< "$disabled") || [[ $? == 1 ]] || return 1
+		[[ -z "$setting" || "$setting" =~ ^[[:space:]]*\"dev\.beacon\.serve\"[[:space:]]*=\>[[:space:]]*(enabled|false)[[:space:]]*$ ]]
+	else
+		[[ $(systemctl --user is-enabled beacon.service) == enabled ]]
+	fi
+}
+
+recovery_launchd_job() {
+	local info args
+	# shellcheck disable=SC2001 # strip indentation on every line, not just the first
+	info=$(sed 's/^[[:space:]]*//' <<< "$1") || return 1
+	grep -Fxq "path = $unit" <<< "$info" && grep -Fxq "program = $bin" <<< "$info" &&
+		grep -Fxq 'state = running' <<< "$info" || return 1
+	args=$(sed -n '/^arguments = {$/,/^}$/p' <<< "$info") || return 1
+	[[ "$args" == "$(printf 'arguments = {\n%s\nserve\n--state-dir\n%s\n--config\n%s\n}' "$bin" "$state" "$config")" ]] && recovery_enabled
+}
+
+recovery_systemd_job() {
+	local info=$1 active=$2 pid=$3 fragment dropins
+	fragment=$(sed -n 's/^FragmentPath=//p' <<< "$info") || return 1
+	dropins=$(sed -n 's/^DropInPaths=//p' <<< "$info") || return 1
+	[[ -z "$dropins" && ( -z "$fragment" || "$fragment" == "$unit" ) ]] || return 1
+	if [[ "$active" == inactive || "$active" == failed ]]; then [[ "$pid" == 0 ]]; return "$?"; fi
+	[[ "$active" == active && "$fragment" == "$unit" ]] && grep -Fxq 'NeedDaemonReload=no' <<< "$info" && recovery_enabled
+}
+
+restore_recovery_service() {
+	[[ "$recovery_drained" == true ]] || wait_stopped "$bin" "$recovery_restart_pid" || return 1
+	valid_recovery_install && recovery_enabled || return 1
+	if [[ "$platform" == Darwin ]]; then legacy_clear || return 1; fi
+	printf 'Restarting the previously running Beacon service.\n' >&2
+	start_service existing && wait_ready
+}
+
+operator_terminal() { [[ -t 0 && -t 1 ]]; }
+
+reissue_code() {
+	local pid status=0
+	operator_terminal || die "Run --reissue-code directly in a terminal without redirecting its output."
+	[[ -d "${bin%/*}" ]] || die "There is no installed Beacon service to recover."
+	acquire_lock
+	trap 'die "Code recovery was interrupted; no setup code was displayed."' HUP INT TERM
+	valid_recovery_install || die "Code recovery requires an unchanged Beacon binary and service file from the installer."
+	if [[ "$platform" == Darwin ]]; then legacy_clear || die "The legacy Beacon startup checks did not pass; nothing was stopped."; fi
+	recovery_origin=$("$bin" setup --state-dir "$state" --show-origin) || die "Could not validate the installed Beacon origin."
+	"$bin" setup --state-dir "$state" --check-reissue-code || die "Cannot reissue a setup code for this installation; nothing was stopped."
+	pid=$(inspect_service recovery) || status=$?
+	case $status in
+		0)
+			[[ -n "$pid" ]] || die "Could not identify the running Beacon process; nothing was stopped."
+			printf 'Briefly stopping Beacon to issue a setup code. Browser sessions will end.\n' >&2
+			# Finish the bounded drain even if interrupted during the stop request. The EXIT
+			# trap restores the service; no issuance should run for an interrupted stop.
+			trap 'recovery_interrupted=true' HUP INT TERM
+			recovery_restart_pid=$pid
+			(trap '' HUP INT TERM; stop_service "$bin" "$pid") || die "Could not confirm Beacon stopped; no setup code was issued."
+			recovery_drained=true
+			trap 'die "Code recovery was interrupted; no setup code was displayed."' HUP INT TERM
+			[[ "$recovery_interrupted" == false ]] || die "Code recovery was interrupted; no setup code was issued."
+			;;
+		1) ;; # Do not start or enable a previously stopped service.
+		*) die "Could not verify an enabled installer-managed Beacon job or a stopped service; nothing was stopped." ;;
+	esac
+
+	# Never allow xtrace to print the captured code. The child independently takes the instance lock.
+	set +ax
+	export -n recovery_code
+	if ! recovery_code=$("$bin" setup --state-dir "$state" --reissue-code); then die "No setup code was issued."; fi
+	[[ "$recovery_code" =~ ^[A-Za-z0-9_-]{43}$ ]] || die "Beacon did not return a setup code."
+}
+
 uninstall_beacon() {
 	local probe=''
 	if recorded_binary; then probe=$bin; fi # Never execute an unrecognized binary during uninstall.
@@ -349,6 +451,10 @@ cleanup() {
 	local status=$1
 	trap '' HUP INT TERM
 	set +e # Rollback and cleanup failures must not skip lock release.
+	if [[ -n "$recovery_restart_pid" ]] && ! restore_recovery_service; then
+		printf 'Could not restore the previously running Beacon service. See docs/install.md for service controls.\n' >&2
+		status=1
+	fi
 	if [[ "$good" == false && "$stopped" == true ]] && ! rollback; then
 		printf 'Could not roll back; previous files are in %s.\n' "$tmp" >&2
 		tmp=
@@ -359,15 +465,23 @@ cleanup() {
 	[[ -z "$receipt_stage" ]] || rm -f "$receipt_stage" || status=1
 	[[ -z "$tmp" ]] || rm -rf "$tmp" || status=1
 	[[ -z "$lock" ]] || rmdir "$lock" || status=1
+	if [[ "$status" == 0 && -n "$recovery_code" ]]; then
+		if [[ -z "$recovery_restart_pid" ]]; then
+			printf 'Beacon was stopped and remains stopped. Start it when ready to register.\n' >&2
+		fi
+		printf 'Register at %s/passkeys/new within ten minutes.\n' "$recovery_origin" >&2
+		printf '%s\n' "$recovery_code" || status=1
+	fi
 	exit "$status"
 }
 
 main() {
-	local prefix='' origin='' previous='' dry=false migrate=false uninstall=false
-	local config sha answer p verify_swift=false
+	local prefix='' origin='' previous='' dry=false migrate=false uninstall=false reissue=false
+	local sha answer p checkout_status verify_swift=false
 	# main runs once in the installer shell. Bash may unwind its locals before running EXIT on a failure.
-	platform='' home='' state='' unit='' bin='' domain='' receipt='' legacy_plist='' swift_exec=''
+	platform='' home='' state='' config='' unit='' bin='' domain='' receipt='' legacy_plist='' swift_exec=''
 	tmp='' candidate='' binary_stage='' unit_stage='' receipt_stage='' lock=''
+	recovery_restart_pid='' recovery_drained=false recovery_interrupted=false recovery_origin='' recovery_code=''
 	had_unit=false stopped=false changed=false good=false
 	while (($#)); do
 		case "$1" in
@@ -376,7 +490,8 @@ main() {
 			--dry-run) dry=true ;;
 			--prefix) prefix=${2:?--prefix needs a directory}; shift ;;
 			--uninstall) uninstall=true ;;
-			*) die 'usage: scripts/install.sh [--origin localhost|tailscale] [--migrate-swift] | --uninstall | --dry-run [--prefix DIR]' ;;
+			--reissue-code) reissue=true ;;
+			*) die 'usage: scripts/install.sh [--origin localhost|tailscale] [--migrate-swift] | --uninstall | --reissue-code | --dry-run [--prefix DIR]' ;;
 		esac
 		shift
 	done
@@ -387,6 +502,7 @@ main() {
 	case "$origin" in ''|localhost|tailscale) ;; *) die "Choose localhost or tailscale." ;; esac
 	[[ -z "$prefix" || "$dry" == true ]] || die "--prefix is for --dry-run only."
 	[[ "$uninstall" == false || "$dry:$migrate:$origin" == false:false: ]] || die "--uninstall takes no other options."
+	[[ "$reissue" == false || "$uninstall:$dry:$migrate:$origin" == false:false:false: ]] || die "--reissue-code takes no other options."
 	[[ "$migrate" == false || "$platform:$dry" == Darwin:false ]] || die "--migrate-swift is for a real macOS cutover."
 	umask 077
 	home=$HOME
@@ -428,6 +544,13 @@ main() {
 		uninstall_beacon
 		return
 	fi
+	cd "$(dirname "${BASH_SOURCE[0]}")/.."
+	checkout_status=$(git status --porcelain --untracked-files=no) || die "Run this script from an audited Git checkout."
+	[[ -z "$checkout_status" ]] || die "Tracked changes found; commit or stash them before proceeding."
+	if [[ "$reissue" == true ]]; then
+		reissue_code
+		return
+	fi
 	if [[ -e "$state/settings.json" || -L "$state/settings.json" ]]; then
 		previous=$(installed_origin "$state/settings.json") || exit 1
 		if [[ -n "$origin" ]] && ! same_origin_mode "$origin" "$previous"; then
@@ -442,8 +565,6 @@ main() {
 		origin=${answer:-localhost}
 		[[ "$origin" == localhost || "$origin" == tailscale ]] || die 'Choose localhost or tailscale.'
 	fi
-	cd "$(dirname "${BASH_SOURCE[0]}")/.."
-	[[ -z $(git status --porcelain --untracked-files=no) ]] || die "Tracked changes found; commit or stash them before installing."
 	sha=$(git rev-parse --verify 'HEAD^{commit}')
 	tmp=$(mktemp -d "${TMPDIR:-/tmp}/beacon-build.XXXXXXXX")
 	mkdir "$tmp/src"

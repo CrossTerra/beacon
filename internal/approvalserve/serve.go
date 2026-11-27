@@ -4,6 +4,7 @@ package approvalserve
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ type Options struct {
 	Origin        approval.Origin
 	Now           func() time.Time
 	Notify        func(context.Context, string)
+	Diagnostics   io.Writer // fixed-code registration diagnostics, never request content
 	// Only list types the live service has configured. Review-only fixtures opt out.
 	RequireHandlers bool
 	// ConnectRecords can replace the configured delivery connection in tests.
@@ -145,6 +147,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 	desk := review.New(opts.Origin, j, opts.Now)
 	defer desk.CloseChallenges()
 	desk.SetState(opts.StateDir)
+	desk.SetDiagnostics(opts.Diagnostics)
 	var dispatch *dispatcher
 	var dispatchFailed <-chan error
 	handlers := providers.Handlers()

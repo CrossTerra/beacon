@@ -286,6 +286,9 @@ it does not need a restart.
 `beacon serve` runs the local approval pages, socket, reaper and configured collector under the user service
 manager. `beacon setup --origin localhost|tailscale` sets the origin and prints a registration code. It must run
 with the service stopped. `beacon setup --reset-passkeys` destroys the write vault and prints a replacement code.
+Before enrollment, `./scripts/install.sh --reissue-code` from the audited checkout replaces an expired or used
+registration code. It briefly restarts a running service; the underlying `beacon setup --reissue-code` refuses
+unless it can take the instance lock. Neither the browser nor the socket issues a registration code.
 `beacon setup --signal` verifies a new Signal app setup code in hidden input and does not change the origin.
 `beacon status --review` checks the configured origin and Tailscale proxy. `beacon logs` prints the collector's
 bounded summary log. See [installs, updates and service controls](install.md).
