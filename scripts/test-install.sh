@@ -16,6 +16,7 @@ cat > "$repo/driver" <<'SH'
 #!/bin/bash
 source "${0%/*}/scripts/install.sh"
 [[ "$HOME" == "$FIXTURE"/home-* ]] || exit 99
+export FIXTURE_DRIVER_PID=$$
 uname() { if [[ $1 == '-s' ]]; then printf '%s\n' "$OS"; else echo arm64; fi; }
 id() { echo 501; }
 mkdir() {
@@ -25,6 +26,7 @@ mkdir() {
 }
 check_unit() { grep -q 'serve' "$1"; }
 swift_pgrep() { [[ -f "$HOME/swift-running" ]]; }
+operator_terminal() { [[ ${NO_TERMINAL:-} != yes ]]; } # The driver captures a fixture code, never a real one.
 fixture_pid=4242
 pid_alive() {
 	[[ "$1" == "$fixture_pid" && -f "$HOME/serve-pid" ]] || return 1
@@ -37,6 +39,8 @@ fake_stop() {
 		yes) touch "$HOME/serve-loaded" "$HOME/serve-pid" "$HOME/instance-held" ;;
 		stuck) touch "$HOME/instance-held" ;;
 	esac
+	if [[ ${ENROLL_DURING_STOP:-} == yes ]]; then touch "$state/passkeys.json"; fi
+	if [[ ${INTERRUPT_RECOVERY_STOP:-} == yes ]]; then kill -TERM "$$"; fi # Only this fixture driver.
 	if [[ ${STOP_EXIT:-0} != 0 ]]; then
 		printf 'stop returned %s\n' "$STOP_EXIT" >> "$trace"
 		printf '%s stop is already in progress\n' "$1" >&2
@@ -82,16 +86,23 @@ macctl() {
 	[[ ${BROKEN_MANAGER:-} != yes ]] || return 2
 	case "$1 $2" in
 		'print gui/501') return 0 ;;
+		'print-disabled gui/501')
+			echo 'disabled services = {'
+			if [[ -f "$HOME/service-disabled" ]]; then echo '"dev.beacon.serve" => disabled'; else echo '"dev.beacon.serve" => enabled'; fi
+			echo '}'; return 0 ;;
 		'print gui/501/dev.beacon.serve')
 			if inspect_fails; then return 36; fi
 			if [[ -f "$HOME/serve-running" || -f "$HOME/serve-loaded" ]]; then
-				printf 'gui/501/dev.beacon.serve = {\n\tpid = %s\n}\n' "$fixture_pid"
+				local loaded_unit=$unit
+				if [[ ${WRONG_SERVICE:-} == yes ]]; then loaded_unit+='.other'; fi
+				printf 'gui/501/dev.beacon.serve = {\n\tpid = %s\n\tstate = running\n\tpath = %s\n\tprogram = %s\n\targuments = {\n\t\t%s\n\t\tserve\n\t\t--state-dir\n\t\t%s\n\t\t--config\n\t\t%s\n\t}\n}\n' \
+					"$fixture_pid" "$loaded_unit" "$bin" "$bin" "$state" "$config"
 				return 0
 			fi ;;
 		'print gui/501/dev.beacon.agent') if [[ -f "$HOME/legacy-gui" ]]; then return 0; fi ;;
 		'print user/501/dev.beacon.agent') if [[ -f "$HOME/legacy-user" ]]; then return 0; fi ;;
 		'bootout gui/501/dev.beacon.serve') fake_stop launchd; return "$?" ;;
-		'enable gui/501/dev.beacon.serve') return 0 ;;
+		'enable gui/501/dev.beacon.serve') echo 'enable launchd' >> "$trace"; return 0 ;;
 		'bootstrap gui/501')
 			[[ "$3" == "$unit" && -f "$unit" ]] || return 99
 			if [[ -f "$HOME/bootstrap-5" ]]; then
@@ -112,6 +123,9 @@ systemctl() {
 		show)
 			if inspect_fails; then return 1; fi
 			if [[ -f "$unit" ]]; then echo LoadState=loaded; else echo LoadState=not-found; fi
+			local loaded_unit=$unit
+			if [[ ${WRONG_SERVICE:-} == yes ]]; then loaded_unit+='.other'; fi
+			printf 'FragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\n' "$loaded_unit"
 			if [[ -f "$HOME/serve-running" ]]; then
 				printf 'ActiveState=active\nMainPID=%s\n' "$fixture_pid"
 			elif [[ -f "$HOME/serve-loaded" ]]; then
@@ -119,8 +133,13 @@ systemctl() {
 			else
 				printf 'ActiveState=inactive\nMainPID=0\n'
 			fi ;;
-		stop) [[ "$3" == beacon.service ]] || return 99; fake_stop systemd ;;
+		stop) [[ "$3" == beacon.service || "$3 $4" == '--no-block beacon.service' ]] || return 99; fake_stop systemd ;;
+		start) [[ "$3 $4" == '--no-block beacon.service' ]] || return 99; log_start ;;
+		is-enabled)
+			if [[ -f "$HOME/service-disabled" ]]; then echo disabled; return 1; fi
+			echo enabled ;;
 		enable) [[ "$3" == --now && "$4" == beacon.service && -f "$unit" ]] || return 99
+			echo 'enable systemd' >> "$trace"
 			mkdir -p "${unit%/*}/default.target.wants"
 			ln -sfn ../beacon.service "${unit%/*}/default.target.wants/beacon.service"
 			log_start ;;
@@ -131,6 +150,7 @@ systemctl() {
 	esac
 }
 wait_ready() {
+	[[ -z $(/usr/bin/printenv recovery_code || :) ]] || return 99
 	echo health >> "$trace"
 	if [[ ${BAD_HEALTH:-} == yes ]]; then
 		if [[ "$OS" == Darwin ]]; then touch "$HOME/bootstrap-5"; fi
@@ -167,6 +187,21 @@ if [[ \$4 == --check-stopped ]]; then
 	fi
 	exit
 fi
+if [[ \$4 == --check-reissue-code || \$4 == --reissue-code ]]; then
+	[[ \$# == 4 && -f "\$3/settings.json" ]]
+	if [[ \$4 == --reissue-code ]]; then
+		echo 'offline issue' >> "\$trace"
+		[[ ! -e "\$HOME/serve-running" && ! -e "\$HOME/instance-held" && ! -e "\$HOME/serve-pid" && ! -e "\$HOME/serve-loaded" ]]
+	fi
+	if [[ -f "\$3/passkeys.json" ]]; then echo 'beacon: a passkey is already registered' >&2; exit 1; fi
+	if [[ \$4 == --reissue-code ]]; then
+		if [[ \${ISSUE_FAIL:-} == yes ]]; then echo 'fixture issuance failed' >&2; exit 1; fi
+		if [[ \${INTERRUPT_ISSUE:-} == yes ]]; then kill -TERM "\$FIXTURE_DRIVER_PID"; exit 1; fi
+		echo 'fixture-only code hash' > "\$3/setup-code.json"
+		echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+	fi
+	exit
+fi
 [[ \$4 == --origin ]]
 printf 'setup %s\n' "\$5" >> "\$trace"
 mkdir -p "\$3"
@@ -182,6 +217,52 @@ SH
 
 export FIXTURE=$tmp TMPDIR=$tmp
 unset BEACON_CONFIG XDG_STATE_HOME XDG_CONFIG_HOME
+
+test_toolchain() {
+	local tools="$tmp/tools" src="$tmp/go-src" target="$tmp/go-beacon" output="$tmp/go.out"
+	mkdir -p "$tools" "$src"
+	cat > "$tools/go" <<'SH'
+#!/bin/bash
+set -euo pipefail
+case "$1" in
+	env)
+		[[ "$2" == GOVERSION ]]
+		case "$GOTOOLCHAIN" in
+			local) echo "$FAKE_GO_VERSION" ;;
+			go1.24.3)
+				if [[ ${GOPROXY:-} == off && "$FAKE_GO_VERSION" != go1.24.3 ]]; then
+					echo 'fixture toolchain download failure' >&2
+					exit 1
+				fi
+				echo go1.24.3 ;;
+			*) exit 99 ;;
+		esac ;;
+	build)
+		[[ "$PWD" == "$FAKE_GO_SRC" && "$GOTOOLCHAIN:$CGO_ENABLED:$GOFLAGS:$GOOS:$GOARCH" == go1.24.3:0::: ]]
+		[[ $# == 8 && "$2:$3:$4:$5:$6:$8" == '-trimpath:-buildvcs=false:-ldflags:-X main.commit=fixture:-o:./cmd/beacon' ]]
+		touch "$7" ;;
+	*) exit 99 ;;
+esac
+SH
+	chmod +x "$tools/go"
+	# shellcheck disable=SC2016 # these are the inner bash's positional arguments
+	local run='source "$1"; build_beacon "$2" fixture "$3"'
+	local version
+	for version in go1.21.0 go1.24.3 go1.27.1; do
+		PATH="$tools:$PATH" FAKE_GO_VERSION=$version FAKE_GO_SRC=$src GOPROXY=fixture \
+			/bin/bash -u -c "$run" fixture "$repo/scripts/install.sh" "$src" "$target"
+		[[ -f "$target" ]]
+		rm "$target"
+	done
+	if PATH="$tools:$PATH" FAKE_GO_VERSION=go1.20.14 FAKE_GO_SRC=$src \
+		/bin/bash -u -c "$run" fixture "$repo/scripts/install.sh" "$src" "$target" >"$output" 2>&1; then return 1; fi
+	grep -Fq 'Put Go 1.21 or newer on PATH' "$output"
+	if PATH="$tools:$PATH" FAKE_GO_VERSION=go1.27.1 FAKE_GO_SRC=$src GOPROXY=off \
+		/bin/bash -u -c "$run" fixture "$repo/scripts/install.sh" "$src" "$target" >"$output" 2>&1; then return 1; fi
+	grep -Fq 'install Go 1.24.3 from https://go.dev/dl/' "$output"
+	[[ $(wc -l < "$output") -eq 1 && ! -e "$target" ]]
+}
+
 test_install() {
 	export OS=$1 HOME="$tmp/home-$1" trace="$tmp/$1.trace"
 	local state unit initial now bin before f stop_exit=1 output="$tmp/$1.out"
@@ -264,6 +345,75 @@ test_stop_timeout() {
 	/bin/bash "$repo/driver" --uninstall
 }
 
+test_reissue() {
+	export OS=$1 HOME="$tmp/home-reissue-$1" trace="$tmp/reissue-$1.trace"
+	local bin="$HOME/.local/bin/beacon" state unit before flags stdout="$tmp/reissue-$1.out" stderr="$tmp/reissue-$1.err"
+	local fixture_code=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+	mkdir "$HOME"
+	if /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+	[[ ! -e "$HOME/.local" && ! -s "$stdout" ]]
+	/bin/bash "$repo/driver" --origin localhost > /dev/null
+	if [[ "$OS" == Darwin ]]; then
+		state="$HOME/Library/Application Support/beacon"
+		unit="$HOME/Library/LaunchAgents/dev.beacon.serve.plist"
+	else
+		state="$HOME/.local/state/beacon"
+		unit="$HOME/.config/systemd/user/beacon.service"
+	fi
+	local receipt="${bin%/*}/.beacon-installed.sha256" lock="${bin%/*}/.beacon-install.lock" name
+	before=$(cat "$trace")
+	mkdir "$tmp/reissue-$OS-before"
+	for name in "$bin" "$unit" "$receipt" "$state/settings.json"; do cp "$name" "$tmp/reissue-$OS-before/"; done
+
+	touch "$state/passkeys.json"
+	if /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+	grep -Fq 'a passkey is already registered' "$stderr"
+	[[ $(cat "$trace") == "$before" && ! -s "$stdout" && ! -e "$lock" && -e "$HOME/serve-running" ]]
+	rm "$state/passkeys.json"
+	for flags in NO_TERMINAL WRONG_SERVICE; do
+		if env "$flags=yes" /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+		[[ $(cat "$trace") == "$before" && ! -s "$stdout" && ! -e "$lock" && -e "$HOME/serve-running" ]]
+	done
+	printf '\n# modified service\n' >> "$unit"
+	if /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+	[[ $(cat "$trace") == "$before" && ! -s "$stdout" && ! -e "$lock" ]]
+	cp "$tmp/reissue-$OS-before/${unit##*/}" "$unit"
+
+	# The trap restores the running service on a failed issuance, an enrollment that wins the race,
+	# and a signal during either the stop or the offline command.
+	local starts=1 slow
+	for flags in ISSUE_FAIL ENROLL_DURING_STOP INTERRUPT_RECOVERY_STOP INTERRUPT_ISSUE; do
+		slow=''
+		if [[ "$flags" == INTERRUPT_RECOVERY_STOP ]]; then slow=yes; fi
+		if SLOW_STOP=$slow env "$flags=yes" /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+		starts=$((starts + 1))
+		if [[ $(grep -c '^start ' "$trace") != "$starts" || -s "$stdout" || -e "$lock" || ! -e "$HOME/serve-running" ]]; then
+			cat "$stderr" >&2
+			return 1
+		fi
+		rm -f "$state/passkeys.json"
+	done
+	[[ $(grep -c '^offline issue$' "$trace") == 3 ]] # Interrupted stop must not issue.
+	# Even with shell tracing and an exported variable of the same name, the code goes only to the terminal.
+	if [[ "$OS" == Darwin ]]; then touch "$HOME/bootstrap-5"; fi
+	recovery_code=placeholder /bin/bash -ux "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"
+	[[ $(<"$stdout") == "$fixture_code" && $(grep -c '^start ' "$trace") == 6 ]]
+	if [[ "$OS" == Darwin ]]; then grep -Fxq 'bootstrap error 5' "$trace"; fi
+	if grep -Fq "$fixture_code" "$stderr" "$trace"; then return 1; fi
+
+	touch "$HOME/service-disabled"
+	before=$(cat "$trace")
+	if /bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"; then return 1; fi
+	[[ ! -s "$stdout" && $(cat "$trace") == "$before" && -e "$HOME/serve-running" ]]
+	rm "$HOME/serve-running"
+	/bin/bash "$repo/driver" --reissue-code >"$stdout" 2>"$stderr"
+	[[ $(<"$stdout") == "$fixture_code" && ! -e "$HOME/serve-running" && -e "$HOME/service-disabled" ]]
+	grep -Fq 'remains stopped' "$stderr"
+	[[ $(grep -c '^start ' "$trace") == 6 && $(grep -c '^enable ' "$trace") == 1 && $(grep -c '^build ' "$trace") == 1 ]]
+	[[ $(grep -c '^setup ' "$trace") == 1 && ! -e "$lock" ]]
+	for name in "$bin" "$unit" "$receipt" "$state/settings.json"; do cmp -s "$name" "$tmp/reissue-$OS-before/${name##*/}"; done
+}
+
 test_legacy() {
 	# Fake launchd on both hosts: Linux CI must exercise Bash 5's errexit here.
 	export OS=Darwin HOME="$tmp/home-legacy" trace="$tmp/legacy.trace"
@@ -318,10 +468,13 @@ test_orphaned_act() {
 	/bin/bash "$repo/driver" --uninstall
 }
 
+test_toolchain
 test_install Darwin
 test_install Linux
+test_reissue Darwin
+test_reissue Linux
 test_stop_timeout stuck normal 'the approval instance lock is not available'
 test_stop_timeout '' persistent 'the service manager could not confirm the job state'
 test_legacy
 test_orphaned_act
-echo "ok temporary launchd and systemd installs, upgrades, rollback and uninstall"
+echo "ok temporary launchd and systemd installs, upgrades, rollback, code recovery and uninstall"

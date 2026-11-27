@@ -103,6 +103,11 @@ func TestResumeDeliveryRequiresAnUnattributedSameUserPeer(t *testing.T) {
 	}
 }
 
+func TestSocketCannotIssueEnrollmentCodes(t *testing.T) {
+	dir, _ := fixture(t, Options{}, socketLimits, false)
+	want(t, connect(t, dir).call(object{"op": "reissue-code"}), invalid("/op"))
+}
+
 type wire struct {
 	*net.UnixConn
 	r *bufio.Reader

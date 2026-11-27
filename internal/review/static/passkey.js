@@ -20,7 +20,7 @@ function setField(form, name, value) {
   if (el) el.value = value;
 }
 
-function run() {
+function run(diagnostics) {
   var el = document.getElementById("ceremony");
   var form = document.getElementById("ceremony-form");
   var button = document.getElementById("ceremony-go");
@@ -30,7 +30,9 @@ function run() {
   button.addEventListener("click", function () {
     if (!form.reportValidity()) return;
     button.disabled = true;
-    var op = opts.kind === "assert" ? approve(opts) : register(opts);
+    diagnostics.error = null;
+    show(diagnostics);
+    var op = opts.kind === "assert" ? approve(opts, diagnostics) : register(opts, diagnostics);
     op.then(function (fields) {
       Object.keys(fields).forEach(function (name) { setField(form, name, fields[name]); });
       var params = new URLSearchParams(new FormData(form));
@@ -40,43 +42,97 @@ function run() {
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": location.origin },
         body: params.toString(),
         credentials: "same-origin"
-      }).then(function (res) { return res.text(); }).then(function (html) {
-        document.open();
-        document.write(html);
-        document.close();
+      }).then(async function (res) {
+        var body = await res.text();
+        if (!res.ok && opts.kind !== "assert") {
+          // The server already logged the fixed reason. Keep the browser's PRF and UA visible.
+          diagnostics.error = problem("Registration refused", body);
+          show(diagnostics);
+          button.disabled = false;
+        } else {
+          replacePage(body);
+        }
       });
-    }).catch(function (err) { button.disabled = false; show(err); });
+    }).catch(function (err) { button.disabled = false; failed(diagnostics, err); });
   });
 }
 
-function show(err) {
-  var out = document.getElementById("ceremony-error");
-  if (out) out.textContent = err && err.name ? err.name : "error";
+function problem(name, message) {
+  var err = new Error(message);
+  err.name = name;
+  return err;
 }
 
-function approve(opts) {
-  return navigator.credentials.get({ publicKey: {
+function webAuthnAvailable() {
+  return window.isSecureContext && !!window.PublicKeyCredential && !!navigator.credentials;
+}
+
+function show(diagnostics) {
+  if (!diagnostics.out) return;
+  var err = diagnostics.error;
+  var note = err ? (err.name || "Error") + ": " + (err.message || "No error message.").trim() :
+    diagnostics.out.dataset.flow === "sign-in" ? "WebAuthn is not used for this sign-in." : "No passkey error yet.";
+  diagnostics.out.textContent = note.slice(0, 512) + " · PRF available: " + diagnostics.available +
+    " · PRF returned: " + diagnostics.returned + " · Browser: " + navigator.userAgent.slice(0, 512);
+}
+
+function failed(diagnostics, err) {
+  diagnostics.error = err || problem("Error", "No error message.");
+  show(diagnostics);
+  if (!diagnostics.out || diagnostics.out.dataset.flow !== "register") return;
+  var names = ["NotAllowedError", "InvalidStateError", "SecurityError", "NotSupportedError", "AbortError",
+    "ConstraintError", "UnknownError", "TypeError", "prf_unavailable", "prf_missing", "webauthn_unavailable"];
+  // Do not serialize the error or any part of the ceremony. Only send a fixed reason to Beacon.
+  var reason = names.includes(diagnostics.error.name) ? diagnostics.error.name : "other";
+  fetch("/passkeys/report", {
+    method: "POST", headers: { "Content-Type": "text/plain" }, body: reason,
+    credentials: "omit", referrerPolicy: "origin", keepalive: true
+  }).catch(function () {});
+}
+
+function requireWebAuthn() {
+  if (!webAuthnAvailable()) {
+    throw problem("webauthn_unavailable", "This browser or page does not offer the WebAuthn API.");
+  }
+}
+
+function prfOutput(cred, diagnostics) {
+  var ext = cred && cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
+  var prf = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+  if (!prf || prf.byteLength !== 32) {
+    diagnostics.returned = prf ? "invalid length" : "no";
+    throw problem("prf_missing", "The passkey did not return the required PRF result.");
+  }
+  diagnostics.available = diagnostics.returned = "yes";
+  diagnostics.authenticator = true;
+  return bytesToB64url(prf);
+}
+
+async function approve(opts, diagnostics) {
+  requireWebAuthn();
+  diagnostics.returned = "no";
+  var cred = await navigator.credentials.get({ publicKey: {
     challenge: b64urlToBytes(opts.challenge),
     rpId: opts.rpId,
     allowCredentials: [{ type: "public-key", id: b64urlToBytes(opts.id) }],
     userVerification: "required",
     timeout: 120000,
     extensions: { prf: { eval: { first: b64urlToBytes(opts.salt) } } }
-  } }).then(function (cred) {
-    var got = cred.getClientExtensionResults ? cred.getClientExtensionResults() : {};
-    var prf = got && got.prf && got.prf.results && got.prf.results.first ? bytesToB64url(got.prf.results.first) : "";
-    return {
-      nonce: opts.nonce,
-      credential_id: bytesToB64url(cred.rawId),
-      client_data_json: bytesToB64url(cred.response.clientDataJSON),
-      authenticator_data: bytesToB64url(cred.response.authenticatorData),
-      signature: bytesToB64url(cred.response.signature),
-      prf_output: prf
-    };
-  });
+  } });
+  var prf = prfOutput(cred, diagnostics);
+  return {
+    nonce: opts.nonce,
+    credential_id: bytesToB64url(cred.rawId),
+    client_data_json: bytesToB64url(cred.response.clientDataJSON),
+    authenticator_data: bytesToB64url(cred.response.authenticatorData),
+    signature: bytesToB64url(cred.response.signature),
+    prf_output: prf
+  };
 }
 
-function register(opts) {
+async function register(opts, diagnostics) {
+  requireWebAuthn();
+  diagnostics.returned = "not requested";
   var publicKey = {
     rp: { id: opts.rpId, name: "Beacon" },
     user: { id: b64urlToBytes(opts.userId), name: "beacon", displayName: "Beacon" },
@@ -91,38 +147,41 @@ function register(opts) {
     timeout: 120000,
     extensions: { prf: {} }
   };
-  return navigator.credentials.create({ publicKey: publicKey }).then(function (created) {
-    var ext = created.getClientExtensionResults ? created.getClientExtensionResults() : {};
-    var enabled = ext && ext.prf && ext.prf.enabled === true;
-    if (!enabled) {
-      return { credential_id: bytesToB64url(created.rawId), create_client_data: bytesToB64url(created.response.clientDataJSON),
-        attestation_object: bytesToB64url(created.response.attestationObject), prf_enabled: "false" };
-    }
-    return navigator.credentials.get({ publicKey: {
-      challenge: b64urlToBytes(opts.assert),
-      rpId: opts.rpId,
-      allowCredentials: [{ type: "public-key", id: created.rawId }],
-      userVerification: "required",
-      timeout: 120000,
-      extensions: { prf: { eval: { first: b64urlToBytes(opts.salt) } } }
-    } }).then(function (asserted) {
-      var got = asserted.getClientExtensionResults ? asserted.getClientExtensionResults() : {};
-      var prf = got && got.prf && got.prf.results && got.prf.results.first ? bytesToB64url(got.prf.results.first) : "";
-      return {
-        credential_id: bytesToB64url(created.rawId),
-        create_client_data: bytesToB64url(created.response.clientDataJSON),
-        assert_client_data: bytesToB64url(asserted.response.clientDataJSON),
-        attestation_object: bytesToB64url(created.response.attestationObject),
-        prf_enabled: "true",
-        authenticator_data: bytesToB64url(asserted.response.authenticatorData),
-        signature: bytesToB64url(asserted.response.signature),
-        prf_output: prf
-      };
-    });
-  });
+  var created = await navigator.credentials.create({ publicKey: publicKey });
+  var ext = created && created.getClientExtensionResults ? created.getClientExtensionResults() : {};
+  var enabled = ext && ext.prf && ext.prf.enabled === true;
+  diagnostics.authenticator = true;
+  diagnostics.available = enabled ? "yes" : "no";
+  if (!enabled) throw problem("prf_unavailable", "This passkey did not enable PRF during registration.");
+  diagnostics.returned = "no";
+  var asserted = await navigator.credentials.get({ publicKey: {
+    challenge: b64urlToBytes(opts.assert),
+    rpId: opts.rpId,
+    allowCredentials: [{ type: "public-key", id: created.rawId }],
+    userVerification: "required",
+    timeout: 120000,
+    extensions: { prf: { eval: { first: b64urlToBytes(opts.salt) } } }
+  } });
+  var prf = prfOutput(asserted, diagnostics);
+  return {
+    credential_id: bytesToB64url(created.rawId),
+    create_client_data: bytesToB64url(created.response.clientDataJSON),
+    assert_client_data: bytesToB64url(asserted.response.clientDataJSON),
+    attestation_object: bytesToB64url(created.response.attestationObject),
+    prf_enabled: "true",
+    authenticator_data: bytesToB64url(asserted.response.authenticatorData),
+    signature: bytesToB64url(asserted.response.signature),
+    prf_output: prf
+  };
 }
 
-function bindSetup() {
+function replacePage(html) {
+  document.open();
+  document.write(html);
+  document.close();
+}
+
+function bindSetup(diagnostics) {
   var form = document.querySelector('form[action="/passkeys/new"]');
   if (!form) return;
   form.dataset.bound = "1";
@@ -134,17 +193,32 @@ function bindSetup() {
       headers: { "Content-Type": "application/x-www-form-urlencoded", "Origin": location.origin },
       body: new URLSearchParams({ code: code }).toString(),
       credentials: "same-origin"
-    }).then(function (res) { return res.text(); }).then(function (html) {
-      document.open();
-      document.write(html);
-      document.close();
-    }).catch(show);
+    }).then(function (res) { return res.text(); }).then(replacePage).catch(function (err) { failed(diagnostics, err); });
   });
 }
 
 function start() {
-  bindSetup();
-  run();
+  var diagnostics = {
+    out: document.getElementById("ceremony-error"),
+    available: webAuthnAvailable() ? "unknown" : "no (WebAuthn unavailable)",
+    returned: "not requested"
+  };
+  show(diagnostics);
+  if (diagnostics.out && webAuthnAvailable() && typeof PublicKeyCredential.getClientCapabilities === "function") {
+    Promise.resolve().then(function () { return PublicKeyCredential.getClientCapabilities(); }).then(function (caps) {
+      if (!diagnostics.authenticator && caps && typeof caps["extension:prf"] === "boolean") {
+        diagnostics.available = caps["extension:prf"] ? "yes (browser)" : "no (browser)";
+        show(diagnostics);
+      }
+    }).catch(function (err) {
+      if (!diagnostics.authenticator && !diagnostics.error) {
+        diagnostics.error = err;
+        show(diagnostics);
+      }
+    });
+  }
+  bindSetup(diagnostics);
+  run(diagnostics);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);

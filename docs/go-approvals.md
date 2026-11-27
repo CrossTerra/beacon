@@ -10,8 +10,14 @@ GitHub merges, Slack posts, agent runs and Signal record delivery each require e
 ## Passkey setup
 
 `beacon setup` prints a 10-minute, one-use code and does not store the code. It holds the
-instance lock, so it refuses while `beacon serve` is running. The code starts a registration: a create
-ceremony that must report PRF, then an assertion whose 32-byte PRF output wraps a new write-vault data key.
+instance lock, so it refuses while `beacon serve` is running. To replace an expired or used code on an
+unenrolled install, use [`./scripts/install.sh --reissue-code`](install.md#origin-and-passkeys) from the audited
+checkout. It briefly restarts a running service so offline setup can obtain that same lock. Only the terminal
+prints the replacement code; the socket and HTTP routes cannot issue one. Reissue invalidates an unfinished
+ceremony without resetting passkeys or changing the origin, vaults, credentials or installed files.
+
+The code starts a registration: a create ceremony that must report PRF, then an assertion whose 32-byte PRF
+output wraps a new write-vault data key.
 The output is not written. A second passkey is refused until a later assertion-gated path exists.
 `/passkeys/new` takes that code. The script registers with PRF and posts both ceremonies. Registration
 takes the instance lock, so it cannot run beside `serve` unless this process already holds that lock.
@@ -30,6 +36,11 @@ another first registration while a recorded passkey exists. `beacon setup --rese
 stopped) opens the journal and records `passkeys_reset`. A later setup code is bound to that frame's
 position in the journal, not to the clock, including when the reset marker file is missing. A ceremony started before the reset cannot finish. A vault
 left behind with no `passkey_added` is failed-registration debris and is removed.
+
+Registration errors show their browser name and message, PRF status and user agent as plain text in the page.
+The same-origin failure report sends only an allow-listed reason (`other` for an unknown name); the service
+logs `passkey.register.failed reason=<code>` locally. Reports do not contain the error message, user agent,
+setup code, or credential data. The sign-in page shows browser capability but uses `beacon open`, not WebAuthn.
 
 A signed-in browser can freeze a proposal only when a handler resolves its account and destination. One
 assertion covers that frozen hash, or a batch of at most 10 merges or posts in their pending-list order.

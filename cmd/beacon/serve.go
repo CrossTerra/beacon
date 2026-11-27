@@ -64,7 +64,7 @@ func (a *app) cmdServe(ctx context.Context, args []string) error {
 		}
 	}
 	return approvalserve.Run(ctx, approvalserve.Options{StateDir: dir, Origin: o, Now: a.now,
-		AfterJournal: archive.Journal, ArchiveSignal: archive.Signal, Notify: notify, RequireHandlers: a.approvalListeners == nil,
+		AfterJournal: archive.Journal, ArchiveSignal: archive.Signal, Notify: notify, Diagnostics: a.stderr, RequireHandlers: a.approvalListeners == nil,
 		Supervision: &supervisor.Options{Jobs: jobs}, ListenReview: a.approvalListeners})
 }
 

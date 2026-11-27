@@ -73,7 +73,7 @@ func Issue(dir string, now time.Time) (string, error) {
 	return IssueLocked(dir, now)
 }
 
-// IssueLocked lets offline setup commit settings and issue a code in the same instance-lock scope.
+// IssueLocked lets offline setup issue a code under the caller's instance lock.
 func IssueLocked(dir string, now time.Time) (string, error) {
 	if !approval.HoldsInstance(dir) {
 		return "", approval.ErrLocked
@@ -83,12 +83,55 @@ func IssueLocked(dir string, now time.Time) (string, error) {
 	if err := clearDebris(dir); err != nil {
 		return "", err
 	}
-	resetIndex, block, err := priorPasskeys(dir)
+	return issueCode(dir, now)
+}
+
+// CheckReissue is read-only, so the installer can refuse an existing enrollment without a restart.
+// Its answer while the service runs is advisory. Reissue repeats the check under the instance lock.
+func CheckReissue(dir string) error {
+	if _, err := approval.CheckPrivate(filepath.Join(dir, "journal.log"), 0o600); err != nil {
+		return err
+	}
+	_, err := codeResetIndex(dir)
+	return err
+}
+
+// Reissue changes only the setup-code hash and pending registration. Do not repair or create a vault,
+// replay the journal, or reuse a lock owned by a running service.
+func Reissue(dir string, now time.Time) (string, error) {
+	lock, err := approval.LockInstance(dir)
 	if err != nil {
 		return "", err
 	}
+	defer approval.CloseInstance(dir, lock)
+	if _, err := approval.CheckPrivate(filepath.Join(dir, "journal.log"), 0o600); err != nil {
+		return "", err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return issueCode(dir, now)
+}
+
+func codeResetIndex(dir string) (int, error) {
+	if _, err := os.Lstat(filepath.Join(dir, "passkeys.json")); err == nil {
+		return 0, ErrRegistered
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return 0, err
+	}
+	resetIndex, block, err := priorPasskeys(dir)
+	if err != nil {
+		return 0, err
+	}
 	if block && resetIndex == 0 {
-		return "", ErrRegistered
+		return 0, ErrRegistered
+	}
+	return resetIndex, nil
+}
+
+func issueCode(dir string, now time.Time) (string, error) {
+	resetIndex, err := codeResetIndex(dir)
+	if err != nil {
+		return "", err
 	}
 	raw := make([]byte, tokenBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -100,10 +143,12 @@ func IssueLocked(dir string, now time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := os.Remove(filepath.Join(dir, "register-pending.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
 	if err := writeNew(dir, "setup-code.json", body); err != nil {
 		return "", err
 	}
-	_ = os.Remove(filepath.Join(dir, "register-pending.json"))
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 

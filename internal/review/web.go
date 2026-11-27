@@ -32,14 +32,15 @@ type proposals interface {
 }
 
 type Site struct {
-	origin   approval.Origin
-	journal  proposals
-	state    string
-	actions  Actions
-	now      func() time.Time
-	sessions sessions
-	held     map[string]held
-	closing  bool // guarded by sessions.mu, alongside held
+	origin      approval.Origin
+	journal     proposals
+	state       string
+	actions     Actions
+	now         func() time.Time
+	sessions    sessions
+	held        map[string]held
+	closing     bool // guarded by sessions.mu, alongside held
+	diagnostics passkeyDiagnostics
 }
 
 func New(origin approval.Origin, j proposals, now func() time.Time) *Site {
@@ -79,12 +80,16 @@ func (s *Site) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "request refused", http.StatusForbidden)
 		return
 	}
-	if r.Method == http.MethodPost && (r.URL.Path == "/passkeys/new" || r.URL.Path == "/passkeys") {
+	if r.Method == http.MethodPost && (r.URL.Path == "/passkeys/new" || r.URL.Path == "/passkeys" || r.URL.Path == "/passkeys/report") {
 		if !s.allowOrigin(r) {
 			http.Error(w, "form refused", http.StatusForbidden)
 			return
 		}
-		s.register(w, r)
+		if r.URL.Path == "/passkeys/report" {
+			s.registrationReport(w, r)
+		} else {
+			s.register(w, r)
+		}
 		return
 	}
 	if r.Method == http.MethodPost {

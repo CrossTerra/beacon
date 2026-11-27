@@ -122,7 +122,9 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
    supervised collector writes pass summaries to `collector.log` in the service state directory (`~/Library/Application Support/beacon/collector.log` on macOS), rotated by size with
    one previous file kept. The retired LaunchAgent's logs are readable for migration. Logs exclude item content, rule matches, keys,
-   bodies, tokens and error text. `beacon run` prints a fixed message for each reason.
+   bodies, tokens and error text. `beacon run` prints a fixed message for each reason. Passkey registration
+   diagnostics log only allow-listed reason codes, with a rate limit; browser error text, PRF values, and user
+   agent strings never enter the log. The browser's detailed diagnostics are shown locally, not sent to Signal.
 9. **Personal subjects stay personal.** Subjects under `gmail:`, `calendar:`, `drive:` and `slack:dm:` carry the
    person's handle (`gmail:<handle>:…`, DEC-10). `slack:dm:` holds Slack direct messages, group direct messages and
    private channels; a Slack channel is public only when Slack says so (`is_private: false`), and any other is
@@ -155,7 +157,8 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
     original jobs. Linux's user unit adds a cgroup boundary. Supervision is not isolation.
 13. **The socket grants no approval authority.** Kernel user IDs and private paths admit only the same user;
     process labels are unverified except for a supervised run's attribution. No socket operation approves,
-    lists history, or quits. Approval requires a fresh PRF-capable passkey assertion over the frozen request.
+    lists history, quits, or issues a passkey enrollment code. Approval requires a fresh PRF-capable passkey
+    assertion over the frozen request.
     Browser sessions can read and decline, not approve. Loopback, Host, Tailscale login and form checks do not
     make a loopback header evidence of approval. The journal is private plaintext. A restart expires approvals
     without a start and never redispatches a start without a result.
@@ -185,7 +188,9 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
      Setup verifies that the canonical origin serves only Beacon, with no other Serve handlers on that origin.
      A browser needs a memory-only session to see proposals. The login header does not identify local processes;
      cookies can be received by another port on the same host. `beacon setup` prints a one-time passkey code and
-     refuses while the service is running. `/passkeys/new` registers one passkey from that code. It stores
+     refuses while the service is running. The installer can briefly restart an existing service to reissue a
+     code in the operator's terminal under the exclusive instance lock. A socket peer is not operator authority.
+     `/passkeys/new` registers one passkey from that code. It stores
     a public key and a data key wrapped under a PRF output, not the output, plus a key-check sealed under
      that data key. The live journal refuses a second active enrollment and records the hash of the bytes
      sealed by the first. A later assertion can record an approval only

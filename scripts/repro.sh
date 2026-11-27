@@ -4,6 +4,7 @@
 #
 #   scripts/repro.sh [REF]     default HEAD; uncommitted changes are not part of the build
 set -euo pipefail
+export GOTOOLCHAIN=go1.24.3
 
 ref=${1:-HEAD}
 sha=$(git rev-parse --verify "$ref^{commit}")

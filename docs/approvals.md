@@ -9,7 +9,8 @@ name via private Tailscale Serve. The listener stays on loopback. There is no me
 `beacon act` uses the proposal socket at `run/act.sock` in Beacon's private state directory. The client checks
 file ownership and the kernel peer user ID; no signature or `act.json` is used. The server admits only your user.
 It records the PID and executable as unverified labels. A proposal from a verified supervised run belongs to
-that run. `get`, `wait` and `withdraw` do not cross run ownership. There is no operation to approve, list, or quit.
+that run. `get`, `wait` and `withdraw` do not cross run ownership. There is no operation to approve, list, quit,
+or issue a passkey enrollment code. `beacon open` uses the socket for a sign-in link only.
 
 `types` lists the configured types and their schemas. `propose` answers with an ID, version, status, parameter
 hash, and `review_url` on the canonical origin. A run proposal also returns `runner_id` for routing its report.
