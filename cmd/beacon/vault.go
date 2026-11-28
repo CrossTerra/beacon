@@ -20,7 +20,7 @@ import (
 func collectorBindings(cfg *config.Config) map[string]vault.Binding {
 	u, _ := config.SignalURL(cfg.Signal.URL)
 	account := cfg.KeychainAccount() // historical account name is also the collector's stable slot
-	out := map[string]vault.Binding{account: {Service: "signal-collector", Origin: u.Scheme + "://" + u.Host, Account: account, Use: "signal"}}
+	out := map[string]vault.Binding{account: vault.SignalCollectorBinding(u.Scheme+"://"+u.Host, account)}
 	for _, s := range cfg.Sources {
 		if s.IsGoogle() {
 			for _, slot := range []string{keychain.GoogleClientAccount(s.Account), keychain.GoogleRefreshAccount(s.Account)} {
@@ -47,6 +47,23 @@ func collectorBindings(cfg *config.Config) map[string]vault.Binding {
 }
 
 func (a *app) collectorStore(cfg *config.Config, create bool) (keychain.Store, error) {
+	if dir, ok := localstate.SignalCollectorDir(cfg.Path); ok {
+		if create {
+			return nil, errSignalStarter
+		}
+		if a.vaultDir != "" {
+			requested, err := localstate.Dir(a.vaultDir, false)
+			if err != nil || requested != dir {
+				return nil, vault.ErrConflict
+			}
+		}
+		prep, err := localstate.LoadSignalPreparation(dir)
+		if err != nil || prep == nil || cfg.Person.Handle != "@"+prep.Handle || cfg.Signal.URL != prep.Origin {
+			return nil, vault.ErrConflict
+		}
+		pair := prep.Pair()
+		return keychain.Unattended{Dir: dir, Bindings: collectorBindings(cfg), Signal: &pair}, nil
+	}
 	if a.keychain != nil { // in-memory fixtures, never the system Keychain
 		return a.keychain()
 	}
@@ -55,6 +72,20 @@ func (a *app) collectorStore(cfg *config.Config, create bool) (keychain.Store, e
 		return nil, err
 	}
 	return keychain.Unattended{Dir: dir, Bindings: collectorBindings(cfg)}, nil
+}
+
+var errSignalStarter = errors.New("the paired Signal collector starter is read-only")
+
+func checkSignalStarterPath(path string) error {
+	if _, starter := localstate.SignalCollectorDir(path); starter {
+		return errSignalStarter
+	}
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		if _, starter := localstate.SignalCollectorDir(target); starter {
+			return errSignalStarter
+		}
+	}
+	return nil
 }
 
 func (a *app) cmdVault(ctx context.Context, args []string) error {
@@ -91,6 +122,9 @@ func (a *app) cmdVault(ctx context.Context, args []string) error {
 	cfg, err := a.loadConfig(*configPath)
 	if err != nil {
 		return err
+	}
+	if _, ok := localstate.SignalCollectorDir(cfg.Path); ok {
+		return errSignalStarter
 	}
 	dir, err := localstate.Dir(*path, false)
 	if err != nil {

@@ -10,16 +10,45 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 
 	"github.com/CrossTerra/beacon/internal/approval"
+	"github.com/CrossTerra/beacon/internal/localstate"
+	"github.com/CrossTerra/beacon/internal/vault"
 )
 
-// Match Signal's KEY_TOKEN in src/credentials.ts, without changing the legacy v1 setup reader.
-var signalAPIKey = regexp.MustCompile(`^sig_[0-9a-hjkmnp-tv-z]{26}_[A-Za-z0-9_-]{43}$`)
-
 // SignalAPIKey checks the wire format only. The API must still verify the key and its authority.
-func SignalAPIKey(s Secret) bool { return signalAPIKey.Match(s.value) }
+func SignalAPIKey(s Secret) bool { return vault.SignalKeyFormat(s.value) }
+
+// StoreSignalPair hands both secrets to the offline vault transaction without exposing their bytes.
+// The caller is responsible for verifying the actor/person bindings and for any configuration changes.
+func StoreSignalPair(ctx context.Context, dir string, pair vault.SignalPair, app, collector Secret) error {
+	if !SignalAPIKey(app) || !SignalAPIKey(collector) || app.Same(collector) {
+		return errors.New("invalid Signal credential pair")
+	}
+	return vault.PutSignalPair(ctx, dir, pair, app.value, collector.value)
+}
+
+// CommitSignalPair applies a pair under the already-owned offline lock without exposing secret bytes.
+func CommitSignalPair(ctx context.Context, update *vault.SignalPairUpdate, pair vault.SignalPair, app, collector Secret, c vault.SignalPairCommit) (bool, error) {
+	return update.Commit(ctx, pair, app.value, collector.value, c)
+}
+
+// ReadPreparedSignal opens only the requested slot after both slots and the current private
+// preparation, origin and journal attachment have been checked. It never falls back to a single slot.
+func ReadPreparedSignal(dir string, pair vault.SignalPair, slot vault.Binding) (Secret, error) {
+	p, err := localstate.LoadSignalPreparation(dir)
+	if err != nil || p == nil || p.Pair() != pair || p.CheckInstance(dir) != nil {
+		return Secret{}, vault.ErrConflict
+	}
+	value, err := vault.ReadSignalPair(dir, pair, slot)
+	if errors.Is(err, os.ErrNotExist) {
+		return Secret{}, ErrNotFound
+	}
+	if err != nil {
+		return Secret{}, err
+	}
+	return Secret{value: []byte(value)}, nil
+}
 
 // ReadSignalSetup takes the /beacon setup code from hidden input. Its bytes never reach a caller.
 func ReadSignalSetup(ctx context.Context, r io.Reader) (string, Secret, error) {

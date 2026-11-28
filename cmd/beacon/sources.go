@@ -244,7 +244,7 @@ func (a *app) addSlack(ctx context.Context, args []string) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("usage: beacon source add slack [--channel ID]... [--name NAME]")
 	}
-	cfg, err := a.loadConfig(*cfgPath)
+	cfg, err := loadEditableCollectorConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
@@ -310,7 +310,7 @@ func (a *app) addGoogle(ctx context.Context, args []string) error {
 	if email == "" {
 		return errors.New("pass --account with the Google account's address")
 	}
-	cfg, err := a.loadConfig(*cfgPath)
+	cfg, err := loadEditableCollectorConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
@@ -427,7 +427,7 @@ func (a *app) addGitHub(ctx context.Context, args []string) error {
 	if *fromGH && *newRead {
 		return errors.New("--new-read-token requires direct entry, not --from-gh")
 	}
-	cfg, err := a.loadConfig(*cfgPath)
+	cfg, err := loadEditableCollectorConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
@@ -476,7 +476,7 @@ func (a *app) addJira(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := a.loadConfig(*cfgPath)
+	cfg, err := loadEditableCollectorConfig(*cfgPath)
 	if err != nil {
 		return err
 	}

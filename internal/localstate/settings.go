@@ -2,6 +2,7 @@
 package localstate
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -69,23 +70,30 @@ type settings struct {
 }
 
 func Load(dir string) (approval.Origin, error) {
+	o, _, err := LoadSnapshot(dir)
+	return o, err
+}
+
+// LoadSnapshot returns the origin and the digest of exactly the bytes validated.
+func LoadSnapshot(dir string) (approval.Origin, [32]byte, error) {
 	f, err := approval.OpenPrivate(filepath.Join(dir, settingsFile), os.O_RDONLY)
 	if err != nil {
-		return approval.Origin{}, err
+		return approval.Origin{}, [32]byte{}, err
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil || len(b) > 4096 {
-		return approval.Origin{}, errors.New("could not read settings.json")
+		return approval.Origin{}, [32]byte{}, errors.New("could not read settings.json")
 	}
-	if obj, err := approval.ParseObject(b); err != nil || len(obj) > 2 {
-		return approval.Origin{}, errors.New("invalid settings.json")
+	if obj, err := approval.ParseObject(b); err != nil || approval.CheckKeys(obj, "", "origin", "tailscale_login") != nil {
+		return approval.Origin{}, [32]byte{}, errors.New("invalid settings.json")
 	}
 	var s settings
 	if err := json.Unmarshal(b, &s); err != nil {
-		return approval.Origin{}, errors.New("invalid settings.json")
+		return approval.Origin{}, [32]byte{}, errors.New("invalid settings.json")
 	}
-	return approval.ParseOrigin(s.Origin, s.Login)
+	o, err := approval.ParseOrigin(s.Origin, s.Login)
+	return o, sha256.Sum256(b), err
 }
 
 // Save writes the fixed settings shape, including the origin on a separate line for the installer's preflight.

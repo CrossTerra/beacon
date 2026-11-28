@@ -20,8 +20,13 @@ import (
 )
 
 func (a *app) cmdSetup(ctx context.Context, args []string) error {
-	if len(args) > 0 && args[0] == "verify-signal" {
-		return a.cmdVerifySignal(ctx, args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "verify-signal":
+			return a.cmdVerifySignal(ctx, args[1:])
+		case "apply-signal":
+			return a.cmdApplySignal(ctx, args[1:])
+		}
 	}
 	fs, path := a.reviewFlags("setup")
 	reset := fs.Bool("reset-passkeys", false, "record a passkey reset and remove the passkey list and write vault")
@@ -98,6 +103,11 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 			return err
 		}
 		defer approval.CloseInstance(dir, lock)
+		if p, err := localstate.LoadSignalPreparation(dir); err != nil {
+			return err
+		} else if p != nil {
+			return errors.New("paired Signal setup does not support single-key enrollment or rotation")
+		}
 		fmt.Fprint(a.stderr, "Paste the new code from Signal’s /beacon page (input hidden): ")
 		origin, key, err := keychain.ReadSignalSetup(ctx, a.stdin)
 		fmt.Fprintln(a.stderr)
@@ -111,7 +121,24 @@ func (a *app) cmdSetup(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.stdout, "Signal approval app verified. Start the service to resume delivery.")
 		return nil
 	}
-	j, err := approval.OpenJournal(dir, a.now(), archive.Journal)
+	var beforeReplay func(*os.File) error
+	if *origin == "tailscale" {
+		check := func() error {
+			if paired, err := localstate.HasSignalPreparation(dir); err != nil {
+				return err
+			} else if paired {
+				return errors.New("paired Signal setup requires localhost; cannot switch the review origin to Tailscale")
+			}
+			return nil
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		// Apply may have published the preparation since the read-only preflight. Recheck
+		// under the instance lock and before replay can repair or append to the journal.
+		beforeReplay = func(*os.File) error { return check() }
+	}
+	j, err := approval.OpenJournalBeforeReplay(dir, a.now(), archive.Journal, beforeReplay)
 	if err != nil {
 		return err
 	}

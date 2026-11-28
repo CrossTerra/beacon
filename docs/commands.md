@@ -12,6 +12,8 @@ beacon init --signal-url https://signal.example.com --handle @winton
 Writes the config (mode `dry-run`, no sources), an empty rules file beside it and the state directory, and stores
 the Signal key, read from standard input, in the unattended vault. Echo is off while it reads from a terminal, and Ctrl+C
 restores it and ends `init` without writing anything. It refuses to overwrite a config without `--force`.
+An instance with [paired Signal setup](install.md#connect-signal-offline-on-a-new-localhost-installation)
+refuses `init` before it asks for the key or creates files, even with `--force` or another config path.
 `--keychain-account` is the historical option for the collector's credential slot; it does not use Keychain.
 
 ## `beacon key set`
@@ -218,7 +220,8 @@ personal subject can take, and, as warnings, plaintext personal content in `send
 ## `beacon source add`
 
 Stores a source credential in the unattended vault and enables the source in the config. The token is not printed and is
-not written to the config.
+not written to the config. The read-only paired Signal starter refuses all source adds before any prompt or
+provider request.
 
 ```bash
 beacon source add github --repo owner/name [--repo owner/*] [--project KEY] [--host HOST] [--from-gh --yes | --new-read-token]
@@ -286,12 +289,16 @@ it does not need a restart.
 `beacon serve` runs the local approval pages, socket, reaper and configured collector under the user service
 manager. `beacon setup --origin localhost|tailscale` sets the origin and prints a registration code. It must run
 with the service stopped. `beacon setup --reset-passkeys` destroys the write vault and prints a replacement code.
+An instance with paired Signal setup refuses `--origin tailscale` before discovery or any local changes.
 Before enrollment, `./scripts/install.sh --reissue-code` from the audited checkout replaces an expired or used
 registration code. It briefly restarts a running service; the underlying `beacon setup --reissue-code` refuses
 unless it can take the instance lock. Neither the browser nor the socket issues a registration code.
 `beacon setup --signal` verifies a new Signal app setup code in hidden input and does not change the origin.
 [`beacon setup verify-signal`](install.md#verify-signal-credentials-for-localhost-beacon) checks both Signal
 credentials at a trusted origin for one localhost installation. It does not save or apply anything.
+[`beacon setup apply-signal`](install.md#connect-signal-offline-on-a-new-localhost-installation) repeats
+those checks offline and saves both keys together on a previously unbound localhost installation. It does
+not start the service or enable collection.
 `beacon status --review` checks the configured origin and Tailscale proxy. `beacon logs` prints the collector's
 bounded summary log. See [installs, updates and service controls](install.md).
 

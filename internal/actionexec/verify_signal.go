@@ -19,8 +19,8 @@ import (
 
 // SignalCheckTarget comes from the operator and local configuration, never from a credential.
 type SignalCheckTarget struct {
-	Origin, PersonID, Handle, ApprovalActor string
-	RelayIdentities                         []string // configured own-activity identities the collector must be allowed to relay
+	Origin, PersonID, Handle, ApprovalActor, CollectorActor string
+	RelayIdentities                                         []string // configured own-activity identities the collector must be allowed to relay
 }
 
 // PinPerson adds an independent selector. An ID and a handle can coexist; Signal must confirm both.
@@ -54,38 +54,51 @@ func SignalVerificationEgress(origin string) (egress.Host, error) {
 // VerifySignalPair uses only documented reads at the independently pinned origin. It does not open
 // local credentials or save anything, and does not use the collector key to test a write.
 func VerifySignalPair(ctx context.Context, t SignalCheckTarget, app, collector keychain.Secret, transport func([]string) http.RoundTripper) error {
+	_, err := CheckSignalPair(ctx, t, app, collector, transport)
+	return err
+}
+
+// VerifiedSignal contains only the verified nonsecret identity bindings.
+type VerifiedSignal struct {
+	Person, Handle, ApprovalActor, CollectorActor string
+}
+
+func CheckSignalPair(ctx context.Context, t SignalCheckTarget, app, collector keychain.Secret, transport func([]string) http.RoundTripper) (VerifiedSignal, error) {
 	host, err := SignalVerificationEgress(t.Origin)
 	if err != nil {
-		return err
+		return VerifiedSignal{}, err
 	}
 	if t.PersonID == "" && t.Handle == "" {
-		return errors.New("the intended Signal person must be pinned before verification")
+		return VerifiedSignal{}, errors.New("the intended Signal person must be pinned before verification")
 	}
 	if !keychain.SignalAPIKey(app) || !keychain.SignalAPIKey(collector) || app.Same(collector) {
-		return errors.New("provide two distinct, well-formed Signal API keys; no credentials were sent")
+		return VerifiedSignal{}, errors.New("provide two distinct, well-formed Signal API keys; no credentials were sent")
 	}
 	v := newSignalCheck(t.Origin, host, transport)
 	defer v.client.CloseIdleConnections()
 	approvalApp, err := v.integration(ctx, app, t.PersonID, t.ApprovalActor, true)
 	if err != nil {
-		return fmt.Errorf("approval app: %w", err)
+		return VerifiedSignal{}, fmt.Errorf("approval app: %w", err)
 	}
 	var person signalCheckActor
 	if err := v.get(ctx, app, "/api/actors/"+approvalApp.Actor.WorksFor, &person); err != nil {
-		return fmt.Errorf("intended person: %w", err)
+		return VerifiedSignal{}, fmt.Errorf("intended person: %w", err)
 	}
 	if person.ID != approvalApp.Actor.WorksFor || person.Type != "human" || string(person.Deactivated) != "null" ||
 		!approval.ValidSignalHandle(person.Handle) || t.Handle != "" && person.Handle != t.Handle {
-		return errors.New("the approval app does not work for the intended active human")
+		return VerifiedSignal{}, errors.New("the approval app does not work for the intended active human")
 	}
-	relay, err := v.integration(ctx, collector, person.ID, "", false)
+	relay, err := v.integration(ctx, collector, person.ID, t.CollectorActor, false)
 	if err != nil {
-		return fmt.Errorf("collector: %w", err)
+		return VerifiedSignal{}, fmt.Errorf("collector: %w", err)
 	}
 	if relay.Actor.ID == approvalApp.Actor.ID {
-		return errors.New("the approval app and collector must be separate Signal integrations")
+		return VerifiedSignal{}, errors.New("the approval app and collector must be separate Signal integrations")
 	}
-	return v.relayGrant(ctx, collector, relay, person.Identities, t.RelayIdentities)
+	if err := v.relayGrant(ctx, collector, relay, person.Identities, t.RelayIdentities); err != nil {
+		return VerifiedSignal{}, err
+	}
+	return VerifiedSignal{person.ID, person.Handle, approvalApp.Actor.ID, relay.Actor.ID}, nil
 }
 
 type signalCheck struct {

@@ -73,6 +73,9 @@ func collectorJob(dir, configFile string) (*supervisor.FixedJob, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, ok := localstate.SignalCollectorDir(path); ok {
+		return nil, nil // the paired starter is an explicit dry run, not a supervised job
+	}
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, nil // approvals can run before the collector is set up
 	} else if err != nil {

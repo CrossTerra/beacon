@@ -89,14 +89,11 @@ func create(ctx context.Context, dir string, saveKey saveSessionKey) error {
 	if err := approval.PrivateDir(dir); err != nil {
 		return err
 	}
-	lock, err := approval.OpenPrivate(filepath.Join(dir, "unattended.init.lock"), os.O_RDWR|os.O_CREATE)
+	lock, err := lockDatabase(dir)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return err
-	}
 	if err := existingVault(dir); err != nil {
 		return err
 	}
@@ -218,24 +215,12 @@ func put(dir string, b Binding, secret string, onlyMissing bool, retryBase *[32]
 		return ErrConflict
 	}
 	if len(matches) == 1 {
-		if onlyMissing {
+		if onlyMissing || matches[0].Get(pairCommit) != nil {
 			return ErrConflict
 		}
 		setPassword(matches[0], secret)
 	} else {
-		entry := gokeepasslib.NewEntry()
-		entry.Values = append(entry.Values,
-			gokeepasslib.ValueData{Key: "Title", Value: gokeepasslib.V{Content: b.Service}},
-			protectedPassword(secret),
-			gokeepasslib.ValueData{Key: "beacon.service", Value: gokeepasslib.V{Content: b.Service}},
-			gokeepasslib.ValueData{Key: "beacon.origin", Value: gokeepasslib.V{Content: b.Origin}},
-			gokeepasslib.ValueData{Key: "beacon.account", Value: gokeepasslib.V{Content: b.Account}},
-			gokeepasslib.ValueData{Key: "beacon.use", Value: gokeepasslib.V{Content: b.Use}},
-		)
-		if b.Workspace != "" {
-			entry.Values = append(entry.Values, gokeepasslib.ValueData{Key: "beacon.workspace", Value: gokeepasslib.V{Content: b.Workspace}})
-		}
-		group.Entries = append(group.Entries, entry)
+		group.Entries = append(group.Entries, newBoundEntry(b, secret))
 	}
 	if err := db.LockProtectedEntries(); err != nil {
 		return err
@@ -284,6 +269,9 @@ func Get(dir string, b Binding) (string, error) {
 	}
 	if len(matches) > 1 {
 		return "", ErrAmbiguous
+	}
+	if matches[0].Get(pairCommit) != nil {
+		return "", ErrConflict // paired slots are never exposed by the legacy single-slot reader
 	}
 	return matches[0].GetPassword(), nil
 }
@@ -340,6 +328,21 @@ func protectedPassword(secret string) gokeepasslib.ValueData {
 	return gokeepasslib.ValueData{Key: "Password", Value: gokeepasslib.V{Content: secret, Protected: wrappers.NewBoolWrapper(true)}}
 }
 
+func entryValue(name, value string) gokeepasslib.ValueData {
+	return gokeepasslib.ValueData{Key: name, Value: gokeepasslib.V{Content: value}}
+}
+
+func newBoundEntry(b Binding, secret string) gokeepasslib.Entry {
+	e := gokeepasslib.NewEntry()
+	e.Values = append(e.Values, entryValue("Title", b.Service), protectedPassword(secret),
+		entryValue("beacon.service", b.Service), entryValue("beacon.origin", b.Origin),
+		entryValue("beacon.account", b.Account), entryValue("beacon.use", b.Use))
+	if b.Workspace != "" {
+		e.Values = append(e.Values, entryValue("beacon.workspace", b.Workspace))
+	}
+	return e
+}
+
 func beaconGroup(db *gokeepasslib.Database) *gokeepasslib.Group {
 	root := &db.Content.Root.Groups[0]
 	for i := range root.Groups {
@@ -357,13 +360,17 @@ func find(g *gokeepasslib.Group, b Binding) []*gokeepasslib.Entry {
 	var out []*gokeepasslib.Entry
 	for i := range g.Entries {
 		e := &g.Entries[i]
-		if e.GetContent("beacon.service") == b.Service && e.GetContent("beacon.origin") == b.Origin &&
-			e.GetContent("beacon.account") == b.Account && e.GetContent("beacon.workspace") == b.Workspace &&
-			e.GetContent("beacon.use") == b.Use {
+		if matchesBinding(e, b) {
 			out = append(out, e)
 		}
 	}
 	return out
+}
+
+func matchesBinding(e *gokeepasslib.Entry, b Binding) bool {
+	return e.GetContent("beacon.service") == b.Service && e.GetContent("beacon.origin") == b.Origin &&
+		e.GetContent("beacon.account") == b.Account && e.GetContent("beacon.workspace") == b.Workspace &&
+		e.GetContent("beacon.use") == b.Use
 }
 
 func newDB(key []byte) (*gokeepasslib.Database, error) {
@@ -407,26 +414,67 @@ var afterRename func(path string)
 
 var errBaseChanged = errors.New("vault changed before replace")
 
+// The existing init lock also serializes the final check and publication by Beacon writers.
+// External editors do not participate; keep the on-disk stale-base check as well.
+func lockDatabase(dir string) (*os.File, error) {
+	f, err := approval.OpenPrivate(filepath.Join(dir, "unattended.init.lock"), os.O_RDWR|os.O_CREATE)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, unix.EWOULDBLOCK) {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
 func save(dir string, db *gokeepasslib.Database, base [32]byte, initial os.FileInfo) error {
+	return saveChecked(dir, db, base, initial, nil, nil)
+}
+
+func saveChecked(dir string, db *gokeepasslib.Database, base [32]byte, initial os.FileInfo, check, renamed func() error) error {
+	// An encrypted candidate can survive an interruption. Never reuse the outer IV across versions.
+	iv := make([]byte, len(db.Header.FileHeaders.EncryptionIV))
+	if _, err := rand.Read(iv); err != nil {
+		return err
+	}
+	db.Header.FileHeaders.EncryptionIV = iv
 	var buf bytes.Buffer
 	if err := gokeepasslib.NewEncoder(&buf).Encode(db); err != nil {
 		return err
 	}
-	return replacePrivate(dir, dbName, buf.Bytes(), func(path string) error {
+	lock, err := lockDatabase(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	return replacePrivate(dir, dbName, buf.Bytes(), func(string) error {
 		if beforeReplace != nil {
 			beforeReplace()
 		}
-		current, info, err := readDB(dir)
-		if err != nil || !os.SameFile(initial, info) || sha256.Sum256(current) != base {
-			return errBaseChanged
+		if check != nil {
+			if err := check(); err != nil {
+				return err
+			}
 		}
-		// A rename during readDB leaves the file descriptor on the old inode. Check the path again.
-		latest, err := approval.CheckPrivate(path, 0o600)
-		if err != nil || !os.SameFile(info, latest) || info.Size() != latest.Size() || !info.ModTime().Equal(latest.ModTime()) {
-			return errBaseChanged
-		}
-		return nil
-	})
+		return checkDatabaseBase(dir, base, initial)
+	}, renamed)
+}
+
+func checkDatabaseBase(dir string, base [32]byte, initial os.FileInfo) error {
+	current, info, err := readDB(dir)
+	if err != nil || !os.SameFile(initial, info) || sha256.Sum256(current) != base {
+		return errBaseChanged
+	}
+	// A rename during readDB leaves the file descriptor on the old inode. Check the path again.
+	latest, err := approval.CheckPrivate(filepath.Join(dir, dbName), 0o600)
+	if err != nil || !os.SameFile(info, latest) || info.Size() != latest.Size() || !info.ModTime().Equal(latest.ModTime()) {
+		return errBaseChanged
+	}
+	return nil
 }
 
 func readDB(dir string) ([]byte, os.FileInfo, error) {
@@ -557,7 +605,7 @@ func writeTemp(tmp *os.File, body []byte) error {
 		tmp.Close()
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := approval.SyncPrivateFile(tmp); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -574,10 +622,10 @@ func syncDir(dir string) error {
 }
 
 func writePrivate(dir, name string, body []byte) error {
-	return replacePrivate(dir, name, body, nil)
+	return replacePrivate(dir, name, body, nil, nil)
 }
 
-func replacePrivate(dir, name string, body []byte, check func(string) error) error {
+func replacePrivate(dir, name string, body []byte, check func(string) error, renamed func() error) error {
 	path := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, "."+name+"-")
 	if err != nil {
@@ -598,12 +646,22 @@ func replacePrivate(dir, name string, body []byte, check func(string) error) err
 	if afterRename != nil {
 		afterRename(path)
 	}
-	written, err := os.ReadFile(path)
+	if renamed != nil {
+		if err := renamed(); err != nil {
+			return err // the rename may already be durable; do not roll it back
+		}
+	}
+	f, err := approval.OpenPrivate(path, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	written, err := io.ReadAll(io.LimitReader(f, int64(len(body))+1))
 	if err != nil {
 		return err
 	}
 	if !bytes.Equal(written, body) {
 		return ErrConflict
 	}
-	return syncDir(dir)
+	return approval.FlushDirectory(dir)
 }

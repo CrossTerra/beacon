@@ -41,25 +41,36 @@ func appendFrame(f *os.File, entry frame) error {
 
 func readFrame(r *bufio.Reader) (frame, int64, error) {
 	var entry frame
+	b, err := readFrameBody(r)
+	if err != nil {
+		return entry, 0, err
+	}
+	if json.Unmarshal(b, &entry) != nil {
+		return entry, 0, ErrCorrupt
+	}
+	return entry, headerSize + int64(len(b)) + checksumLen, nil
+}
+
+func readFrameBody(r *bufio.Reader) ([]byte, error) {
 	var header [headerSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return entry, 0, err
+		return nil, err
 	}
 	n := binary.BigEndian.Uint32(header[4:8])
 	if string(header[:4]) != magic || n == 0 || n > maxFrame || binary.BigEndian.Uint32(header[8:]) != ^n {
-		return entry, 0, ErrCorrupt
+		return nil, ErrCorrupt
 	}
 	b := make([]byte, int(n)+checksumLen)
 	if _, err := io.ReadFull(r, b); err != nil {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF // the header itself was not short
 		}
-		return entry, 0, err
+		return nil, err
 	}
-	if crc32.ChecksumIEEE(b[:n]) != binary.BigEndian.Uint32(b[n:]) || json.Unmarshal(b[:n], &entry) != nil {
-		return entry, 0, ErrCorrupt
+	if crc32.ChecksumIEEE(b[:n]) != binary.BigEndian.Uint32(b[n:]) {
+		return nil, ErrCorrupt
 	}
-	return entry, headerSize + int64(n) + checksumLen, nil
+	return b[:n], nil
 }
 
 // Publish a complete, synced header by rename under the instance lock. An empty existing journal is never
