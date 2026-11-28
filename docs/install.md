@@ -70,6 +70,39 @@ KeePassXC. Delete that copy when done. See [the vault instructions](go-approvals
 If setup reports an incomplete vault, restore the matching database or key before continuing; setup will not
 generate a replacement beside the remaining file.
 
+### Verify Signal credentials for localhost Beacon
+
+Before first setup or on an existing localhost installation, run this in a terminal:
+
+```sh
+beacon setup verify-signal --signal-origin https://signal.example.com --person @your-handle
+```
+
+Use the HTTPS origin and your own Signal handle (or `act_…` person ID) from your trusted Signal account,
+not from either credential. Paste the `beacon-setup:v1:` code from Signal’s `/beacon` page and then the
+separately provisioned collector key at the hidden prompts. The raw collector key contains no origin; only
+paste one provisioned for the origin you supplied. If the setup code names a different origin, neither key
+is sent. Both keys must match Signal’s API-key format and be different before Beacon makes any request.
+Format alone does not verify ownership or scopes. Existing approval and collector settings must agree with
+the supplied origin and person.
+Use `--state-dir DIR` or `--config PATH` if this installation uses nondefault paths.
+
+The approval-app integration must hold exactly `read` and `write`. The collector must be a different
+integration for the same active person with exactly `read`, `write`, and `relay`. `read` lets Beacon find
+the supplied key’s grant in Signal’s key list. The relay grant must list exact identities attached to that
+person (`github:user:`, `jira:account:`, `slack:user:`, or `email:`), not wildcard prefixes. Neither
+integration may be an executor, reconciler, or directory integration. Beacon reads only the pinned Signal
+origin; `beacon egress --signal-origin https://signal.example.com` lists those reads without contacting it.
+
+The grant must cover each nonempty `person.identities` binding for an enabled provider source, keyed by
+the source’s configured name. Unused entries and test fixtures are not checked. With no such bindings,
+success verifies ownership and the grant only, not readiness for an unconfigured data source.
+
+This command **only verifies the credentials you enter**. It does not open the vault, save credentials,
+create a collector config, change a passkey, or activate delivery. You can repeat the check without stopping
+the service. `beacon init` and `beacon setup --signal` remain separate configuration commands; the verifier
+does not run either one.
+
 ### Service controls
 
 On macOS, from Terminal:

@@ -290,6 +290,8 @@ Before enrollment, `./scripts/install.sh --reissue-code` from the audited checko
 registration code. It briefly restarts a running service; the underlying `beacon setup --reissue-code` refuses
 unless it can take the instance lock. Neither the browser nor the socket issues a registration code.
 `beacon setup --signal` verifies a new Signal app setup code in hidden input and does not change the origin.
+[`beacon setup verify-signal`](install.md#verify-signal-credentials-for-localhost-beacon) checks both Signal
+credentials at a trusted origin for one localhost installation. It does not save or apply anything.
 `beacon status --review` checks the configured origin and Tailscale proxy. `beacon logs` prints the collector's
 bounded summary log. See [installs, updates and service controls](install.md).
 

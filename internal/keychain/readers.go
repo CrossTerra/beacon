@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -48,6 +49,15 @@ func ReadJiraCredential(ctx context.Context, r io.Reader, prompts io.Writer) (Se
 // echoOff turns terminal echo off for r and returns the function that restores it. Tests replace it.
 var echoOff = noEcho
 
+func noEcho(r io.Reader) func() {
+	if f, ok := r.(*os.File); ok {
+		if restore, err := hideEcho(f); err == nil {
+			return restore
+		}
+	}
+	return func() {}
+}
+
 // ReadSecret reads one line from r as a secret, trimming surrounding space. When r is a terminal, echo is off while
 // it reads, and is restored before ReadSecret returns, also when ctx ends first (an interrupt): then it returns the
 // context's error without waiting for the line. An empty line is an error.
@@ -58,6 +68,10 @@ func ReadSecret(ctx context.Context, r io.Reader) (Secret, error) {
 func readSecret(ctx context.Context, r io.Reader, in *bufio.Reader) (Secret, error) {
 	restore := echoOff(r)
 	defer restore()
+	return readSecretLine(ctx, in)
+}
+
+func readSecretLine(ctx context.Context, in *bufio.Reader) (Secret, error) {
 	type read struct {
 		line string
 		err  error

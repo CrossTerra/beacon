@@ -1,26 +1,21 @@
 package keychain
 
 import (
-	"io"
 	"os"
 
 	"golang.org/x/sys/unix"
 )
 
-func noEcho(r io.Reader) func() {
-	f, ok := r.(*os.File)
-	if !ok {
-		return func() {}
-	}
+func hideEcho(f *os.File) (func(), error) {
 	fd := int(f.Fd())
 	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
 	if err != nil {
-		return func() {}
+		return nil, err
 	}
 	quiet := *old
 	quiet.Lflag &^= unix.ECHO
 	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &quiet); err != nil {
-		return func() {}
+		return nil, err
 	}
-	return func() { _ = unix.IoctlSetTermios(fd, unix.TCSETS, old) }
+	return func() { _ = unix.IoctlSetTermios(fd, unix.TCSETS, old) }, nil
 }

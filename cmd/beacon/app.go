@@ -111,7 +111,7 @@ Commands:
   act           propose an action, or get, wait on or withdraw an existing proposal
   serve         run the review pages, proposal socket and supervised collector
   open          print a one-time browser sign-in link
-  setup         configure the review origin and print a one-time passkey code
+  setup         configure review and passkeys; setup verify-signal checks two Signal keys
   vault         export the unattended key file or import legacy collector items on macOS
   version       print the version, commit and build flags
   spike-passkey serve the passkey PRF spike on localhost:7317 (13.01 part 1)
@@ -1422,8 +1422,19 @@ func (a *app) cmdCursor(args []string) error {
 func (a *app) cmdEgress(args []string) error {
 	fs, cfgPath := a.flags("egress")
 	state := fs.String("state-dir", "", "list egress for this Go approval service instead")
+	verify := fs.String("signal-origin", "", "list egress for setup verify-signal at this trusted HTTPS origin")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *verify != "" {
+		if *cfgPath != "" || *state != "" || fs.NArg() != 0 {
+			return errors.New("egress --signal-origin does not take config, state-dir, or positional arguments")
+		}
+		host, err := actionexec.SignalVerificationEgress(*verify)
+		if err != nil {
+			return err
+		}
+		return a.printEgress([]egress.Host{host})
 	}
 	if *state != "" {
 		if *cfgPath != "" || fs.NArg() != 0 {
