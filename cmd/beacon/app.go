@@ -562,9 +562,12 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fail := func(reason logs.Reason, text string) error {
 		return a.failLoop(*once || *first, stateDir, poll, interrupt, log, reason, text, false)
 	}
-	// A rules or source error fails load, but the config is already readable. Take the state directory and rotate
-	// before that failure, so status can show the reason and the service log stays capped.
+	// Use the validated config for failure status and backoff, even if activation, rules or sources fail.
+	// Rotate only this process's service log before any such failure is logged.
 	if cfg, err := a.loadConfig(*cfgPath); err == nil {
+		stateDir = cfg.StatePath()
+		poll = cfg.PollInterval()
+		a.rotateServiceLogs(stateDir)
 		if _, starter := localstate.SignalCollectorDir(cfg.Path); starter {
 			store, err := a.collectorStore(cfg, false)
 			if err != nil {
@@ -576,9 +579,6 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 				return fail(logs.ReasonVault, "paired Signal activation is unavailable")
 			}
 		}
-		stateDir = cfg.StatePath()
-		poll = cfg.PollInterval()
-		a.rotateServiceLogs(stateDir)
 	}
 	e, err := a.load(*cfgPath)
 	if err != nil {

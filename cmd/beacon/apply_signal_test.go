@@ -22,6 +22,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/keychain"
 	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/passkey"
+	"github.com/CrossTerra/beacon/internal/service"
 	"github.com/CrossTerra/beacon/internal/vault"
 	"github.com/CrossTerra/beacon/internal/webauthn"
 	"github.com/CrossTerra/beacon/internal/webauthntest"
@@ -564,6 +565,77 @@ func TestApplySignalFailureLeavesInertPreparationOrCompletedPair(t *testing.T) {
 			assertSignalOriginalFiles(t, dir, before)
 		})
 	}
+}
+
+func TestPairedStarterActivationFailureRecordsPassAndBacksOff(t *testing.T) {
+	dir, _ := signalApplyFixture(t)
+	args, input := applyArgs(dir, "@fixture"), applyInput(t)
+	if exit, _, _ := runSignalApply(t.Context(), t, signalVerificationFixture(t), args, input, func(step string) error {
+		if step == signalConfigSynced {
+			return errors.New("fixture interrupts before vault publication")
+		}
+		return nil
+	}); exit == 0 {
+		t.Fatal("fixture did not interrupt apply")
+	}
+	prep, err := localstate.LoadSignalPreparation(dir)
+	must(t, err)
+	if prep == nil {
+		t.Fatal("fixture did not publish its preparation")
+	}
+	cfg := prep.CollectorConfig(dir)
+	state := cfg.StatePath()
+	oldDB := readSignalFixture(t, dir, signalDB)
+	must(t, os.Mkdir(state, 0o700))
+	owned := filepath.Join(state, service.StderrName)
+	other := filepath.Join(state, service.StdoutName)
+	oldLog := bytes.Repeat([]byte("old summary\n"), service.LogMaxBytes/12+1)
+	for _, path := range []string{owned, other} {
+		must(t, os.WriteFile(path, oldLog, 0o600))
+	}
+	logFile, err := os.OpenFile(owned, os.O_WRONLY|os.O_APPEND, 0o600)
+	must(t, err)
+	defer logFile.Close()
+
+	// Exercise both a missing activation in the correct vault and a rejected vault selection.
+	for i, vaultDir := range []string{"", t.TempDir()} {
+		a, out, _ := previewCLI()
+		a.euid = func() int { return 501 }
+		a.stderr = logFile
+		a.transport = func([]string) http.RoundTripper {
+			t.Fatal("activation failure reached provider setup")
+			return nil
+		}
+		var waits []time.Duration
+		a.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+		if exit := a.main(t.Context(), []string{"run", "--config", cfg.Path, "--vault-dir", vaultDir}); exit == 0 || out.Len() != 0 {
+			t.Fatal("an unavailable starter activation ran the collector")
+		}
+		p, err := service.ReadPass(state)
+		if err != nil || p.Outcome != "vault_unreadable" || p.Failures != i+1 || p.Lease != "" {
+			t.Fatalf("pass = %+v, err = %v", p, err)
+		}
+		if want := cfg.PollInterval() << i; len(waits) != 1 || waits[0] != want {
+			t.Fatalf("backoff = %v, want %v", waits, want)
+		}
+	}
+	if !bytes.Equal(mustRead(t, owned+".1"), oldLog) || !bytes.Equal(mustRead(t, other), oldLog) {
+		t.Fatal("only the process-owned log should rotate")
+	}
+	text := string(mustRead(t, owned))
+	if len(text) >= service.LogMaxBytes || strings.Count(text, `"reason":"vault_unreadable"`) != 2 ||
+		strings.Count(text, "beacon: paired Signal activation is unavailable\n") != 2 {
+		t.Fatal("activation failures were not logged with the fixed reason in the capped log")
+	}
+	assertSignalRedacted(t, text+string(mustRead(t, filepath.Join(state, service.PassName))))
+	if !bytes.Equal(oldDB, readSignalFixture(t, dir, signalDB)) {
+		t.Fatal("diagnostics changed the uncommitted vault")
+	}
+	assertSignalApplyReaders(t, dir, false)
+	if exit, _, _ := runSignalApply(t.Context(), t, signalVerificationFixture(t), args, input, nil); exit != 0 {
+		t.Fatal("activation diagnostics stranded the interrupted setup retry")
+	}
+	assertSignalApplyReaders(t, dir, true)
 }
 
 func TestApplySignalRechecksAfterVerificationAndBeforeCommit(t *testing.T) {

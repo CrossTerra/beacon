@@ -36,7 +36,8 @@ Collects, applies rules and projection, and records what it decided.
 
 - With `mode: dry-run`, or with `--dry-run`, or with `--first`, it prints each item's tier, the rule that decided
   it and the body it would send, and writes nothing except `--first`, which records in `first.json` which sources
-  completed that summary. It may contact source APIs to collect. It does not contact Signal.
+  completed that summary. A failure can still record status as described below; a later successful dry run does
+  not replace that record. A dry run may contact source APIs to collect. It does not contact Signal.
 - `--first` is that dry run with a summary by source and type. A source with no cursor reads open state (DEC-23).
   Sending for that source stays off until `beacon accept-first`. A collect that failed is not written to `first.json`.
 - With `mode: send`, it appends send items to the outbox, holds and drops the rest locally, takes the lease, and
@@ -71,8 +72,8 @@ which can name item keys or rule patterns. An unreachable Signal is not an error
 pass.
 
 Without `--once` or `--first`, that non-zero exit waits first. The wait is one `poll_interval`, then double that, up
-to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon status` shows it. A rules or
-source error still has a config, so that record uses the state directory and the configured interval. Tether's
+to 30 minutes, and the reason is in `pass.json` before the wait, so `beacon status` shows it. After the config
+loads, rules, source, and paired activation failures use its state directory and poll interval. Tether's
 restart backoff is on top of that wait. SIGTERM during the wait exits 0. SIGINT does not: the failure is still
 reported. `--once` and `--first` do not wait.
 
