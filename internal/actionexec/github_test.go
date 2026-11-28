@@ -491,6 +491,80 @@ func TestMergePreviewNamesTheApprovedHead(t *testing.T) {
 	}
 }
 
+func TestMergePreviewNamesTheFailedReadWithoutResponseContent(t *testing.T) {
+	const pull = fixtureRepo + "/pulls/140"
+	const commit = fixtureRepo + "/commits/" + fixtureHead
+	const private = "fixture diagnostic must never be displayed"
+	for _, tc := range []struct {
+		path, want string
+		status     int
+	}{
+		{"/user", "GitHub account: HTTP 401", 401},
+		{pull, "GitHub pull request: HTTP 404", 404},
+		{pull + "/reviews", "GitHub reviews: HTTP 403", 403},
+		{fixtureRepo + "/rules/branches/main", "GitHub branch rules: HTTP 503", 503},
+		{fixtureRepo + "/branches/main", "GitHub base branch: HTTP 502", 502},
+		{commit + "/check-runs", "GitHub check runs: incomplete or invalid response", 200},
+		{commit + "/status", "GitHub commit statuses: HTTP 429", 429},
+		{pull + "/reviews", "GitHub reviews: no complete response", 0},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			m := mergeTest(t)
+			next := m.h.client.Transport
+			m.h.client.Transport = tripFunc(func(r *http.Request) (*http.Response, error) {
+				if r.URL.Path != tc.path {
+					return next.RoundTrip(r)
+				}
+				if tc.status == 0 {
+					return nil, errors.New(private)
+				}
+				resp := jsonReply(tc.status, private)
+				resp.Header.Set("X-Fixture", private)
+				return resp, nil
+			})
+			_, err := m.h.Resolve(t.Context(), m.p)
+			code, detail := reason(err)
+			if code != "unavailable" || detail != tc.want {
+				t.Fatalf("got refusal %q / %q, want unavailable / %q", code, detail, tc.want)
+			}
+			m.want("pending", "", "", 0)
+		})
+	}
+}
+
+func TestMergePreviewExpiredDeadlineDoesNotClaimAnHTTPFailure(t *testing.T) {
+	m := mergeTest(t)
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := m.h.Resolve(ctx, m.p)
+	if code, detail := reason(err); code != "unavailable" || detail != "GitHub account: the read deadline expired" || m.f.requests != 0 {
+		t.Fatalf("expired deadline: %q / %q with %d requests", code, detail, m.f.requests)
+	}
+	m.want("pending", "", "", 0)
+}
+
+func TestMergePreviewStillChecksAllReportedRunsWithHiddenRules(t *testing.T) {
+	m := mergeTest(t)
+	next := m.h.client.Transport
+	m.h.client.Transport = tripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case fixtureRepo + "/rules/branches/main":
+			return jsonReply(403, nil), nil
+		case fixtureRepo + "/branches/main":
+			return jsonReply(404, nil), nil
+		}
+		return next.RoundTrip(r)
+	})
+	_, err := m.h.Resolve(t.Context(), m.p)
+	requireOK(t, err)
+	m.f.runs[0].Conclusion = "failure"
+	_, err = m.h.Resolve(t.Context(), m.p)
+	if code, _ := reason(err); code != "checks_not_green" {
+		t.Fatalf("missing reported check failure: %v", err)
+	}
+	m.want("pending", "", "", 0)
+}
+
 func TestMergeReadBackFailsUnlessThisUserMergedWithACommit(t *testing.T) {
 	for _, tc := range []struct {
 		name string

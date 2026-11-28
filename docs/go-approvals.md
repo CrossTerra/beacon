@@ -72,6 +72,11 @@ against `GET /user`, refusing bots and a different account. Choose a least-privi
 metadata, pull requests, checks, commit statuses and the available rules) and grant merge permission only
 to the write token. Identity validation does not establish that a GitHub token is read-only.
 
+If **Resolve and review** cannot finish a GitHub read, the refusal names the step (for example, reviews or
+check runs) and, when known, the HTTP status or a read deadline. It does not display GitHub’s response body,
+headers or credentials. No passkey assertion or merge is made by that failed review. Reopen the same
+pending proposal to review it again; do not submit a second one or refresh the `/freeze` form.
+
 The read token goes in `unattended.kdbx`. The write token goes in `write-github.sealed`, authenticated with
 the provider, origin and account under the passkey vault's data key. They cannot be the same credential.
 After a passkey reset, register again and re-save the write credential; the earlier ciphertext cannot open

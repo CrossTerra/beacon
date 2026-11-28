@@ -137,11 +137,11 @@ func (a githubAPI) get(ctx context.Context, path string, q url.Values) (answer, 
 func (h *mergeHandler) identify(ctx context.Context, a githubAPI) (githubUser, error) {
 	var user githubUser
 	ans, err := a.get(ctx, "/user", nil)
-	if err != nil {
-		return user, err
+	if err == nil {
+		err = ans.decode(&user)
 	}
-	if err := ans.decode(&user); err != nil {
-		return user, err
+	if err != nil {
+		return user, ghAccountRead.explain(ctx, ans.status, err)
 	}
 	if user.Type != "User" {
 		return user, refusal("not_a_user")
@@ -155,15 +155,15 @@ func (h *mergeHandler) identify(ctx context.Context, a githubAPI) (githubUser, e
 func (a githubAPI) pull(ctx context.Context, m pinnedMerge) (githubPull, error) {
 	var p githubPull
 	ans, err := a.get(ctx, m.pullPath(), nil)
-	if err != nil {
-		return p, err
+	if err == nil {
+		err = ans.decode(&p)
 	}
-	if err := ans.decode(&p); err != nil {
-		return p, err
+	if err != nil {
+		return p, ghPullRead.explain(ctx, ans.status, err)
 	}
 	if p.Base.Repo.ID <= 0 || p.Base.Repo.ID > 1<<53-1 || p.Merged == nil ||
 		p.Base.Ref == "" || !sha40.MatchString(p.Head.SHA) || (p.State != "open" && p.State != "closed") {
-		return p, refusal("unavailable")
+		return p, ghPullRead.unavailable("incomplete or invalid response")
 	}
 	return p, nil
 }
