@@ -139,6 +139,7 @@
 <nav><a href="/">Pending proposals</a></nav>
 <h1>{{.Operation}}</h1>
 <p>Refused: <code>{{visible .Code}}</code>{{if .Detail}} · <bdi>{{visible .Detail}}</bdi>{{end}}.</p>
+{{if and (eq .Operation "Resolve approval") (eq .Code "unavailable")}}<p>This review did not approve or execute anything. Open the same proposal from Pending proposals to review it again.</p>{{end}}
 {{template "end"}}
 {{end}}
 

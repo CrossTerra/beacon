@@ -333,6 +333,36 @@ func addPost(t *testing.T, s *Site) approval.Proposal {
 	return p
 }
 
+func TestUnavailableFreezeShowsReadDetailAndLeavesProposalPending(t *testing.T) {
+	s, cookie, _, _ := registeredPreview(t)
+	j := s.journal.(*approval.Journal)
+	p, err := j.Add(approval.Request{Type: approval.Merge, Reason: "Fixture.", Agent: "fixture", Params: approval.Object{
+		"repo": "acme/fixture", "number": int64(23), "base": "main", "head": strings.Repeat("a", 40), "method": "squash",
+	}}, approval.PeerLabel{}, start)
+	must(t, err)
+	const detail = "GitHub reviews: the read deadline expired"
+	s.SetResolver(func(approval.Proposal) (approval.Binding, error) {
+		return approval.Binding{}, approval.Refusal{Code: "unavailable", Detail: detail}
+	})
+	form := url.Values{"csrf": {s.sessions.active[cookie.Value].csrf}, "id": {p.ID}}
+	r := s.request("POST", "/freeze", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("Origin", s.origin.URL())
+	r.AddCookie(cookie)
+	w := request(s, r)
+	expectStatus(t, w, http.StatusConflict)
+	page := w.Body.String()
+	if !strings.Contains(page, detail) || !strings.Contains(page, "did not approve or execute anything") ||
+		strings.Contains(page, `action="/approve"`) || len(s.held) != 0 {
+		t.Fatal("refusal did not explain the failed read or advertised an approval")
+	}
+	v, _, err := j.Get(p.ID, start)
+	must(t, err)
+	if v.Status != "pending" || v.Version != p.Version {
+		t.Fatal("a failed freeze changed the proposal")
+	}
+}
+
 func freezeNonce(t *testing.T, s *Site, cookie *http.Cookie, id string) ceremonyOpts {
 	t.Helper()
 	form := url.Values{"csrf": {s.sessions.active[cookie.Value].csrf}, "id": {id}}

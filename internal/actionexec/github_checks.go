@@ -2,6 +2,7 @@ package actionexec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/CrossTerra/beacon/internal/approval"
 )
 
 const (
@@ -16,27 +19,66 @@ const (
 	mergePageLimit = 10
 )
 
+// These labels are local display text, never URLs or strings taken from a GitHub response.
+type githubReadStep string
+
+const (
+	ghAccountRead githubReadStep = "account"
+	ghPullRead    githubReadStep = "pull request"
+	ghReviewsRead githubReadStep = "reviews"
+	ghRulesRead   githubReadStep = "branch rules"
+	ghBranchRead  githubReadStep = "base branch"
+	ghChecksRead  githubReadStep = "check runs"
+	ghStatusRead  githubReadStep = "commit statuses"
+)
+
+func (s githubReadStep) unavailable(why string) approval.Refusal {
+	return approval.Refusal{Code: "unavailable", Detail: "GitHub " + string(s) + ": " + why}
+}
+
+// Add evidence to an otherwise opaque read failure. Keep the journal code, permission exceptions,
+// quotas and refusal decisions unchanged. Never render an error, response body, path or header.
+func (s githubReadStep) explain(ctx context.Context, status int, err error) error {
+	var r approval.Refusal
+	if !errors.As(err, &r) || r.Code != "unavailable" || r.Detail != "" {
+		return err
+	}
+	switch {
+	case status >= 300:
+		// A definite HTTP refusal is better evidence than a timer racing local decoding.
+		return s.unavailable(fmt.Sprintf("HTTP %d", status))
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return s.unavailable("the read deadline expired")
+	case errors.Is(ctx.Err(), context.Canceled):
+		return s.unavailable("the read was canceled")
+	case status == 0:
+		return s.unavailable("no complete response")
+	default:
+		return s.unavailable("incomplete or invalid response")
+	}
+}
+
 // Build page numbers locally. A Link can signal that the list continues, but never tells us where to send a token.
-func githubPages(read func(url.Values) (answer, error), use func(answer) (int, bool, error)) error {
+func githubPages(ctx context.Context, step githubReadStep, read func(url.Values) (answer, error), use func(answer) (int, bool, error)) error {
 	for page := 1; page <= mergePageLimit; page++ {
 		a, err := read(url.Values{"page": {strconv.Itoa(page)}, "per_page": {strconv.Itoa(mergePageSize)}})
 		if err != nil {
-			return err
+			return step.explain(ctx, a.status, err)
 		}
 		n, more, err := use(a)
 		if err != nil {
-			return err
+			return step.explain(ctx, a.status, err)
 		}
 		if n < mergePageSize && !more && !strings.Contains(strings.Join(a.header.Values("Link"), ","), `rel="next"`) {
 			return nil
 		}
 	}
-	return refusal("unavailable") // An incomplete list cannot establish that every check is green.
+	return step.unavailable("the page limit was reached before the list was complete")
 }
 
 func (a githubAPI) reviews(ctx context.Context, m pinnedMerge) error {
 	latest := make(map[int64]string)
-	err := githubPages(func(q url.Values) (answer, error) {
+	err := githubPages(ctx, ghReviewsRead, func(q url.Values) (answer, error) {
 		return a.get(ctx, m.pullPath()+"/reviews", q)
 	}, func(ans answer) (int, bool, error) {
 		var reviews []struct {
@@ -89,7 +131,7 @@ func (a githubAPI) requiredChecks(ctx context.Context, m pinnedMerge) (map[strin
 		return nil
 	}
 	// 403/404 may mean the account cannot see the rules; GitHub still enforces them at the PUT.
-	err := githubPages(func(q url.Values) (answer, error) {
+	err := githubPages(ctx, ghRulesRead, func(q url.Values) (answer, error) {
 		return a.get(ctx, m.repoPath()+"/rules/branches/"+base, q)
 	}, func(ans answer) (int, bool, error) {
 		if ans.status == 403 || ans.status == 404 {
@@ -121,7 +163,7 @@ func (a githubAPI) requiredChecks(ctx context.Context, m pinnedMerge) (map[strin
 	}
 	ans, err := a.get(ctx, m.repoPath()+"/branches/"+base, nil)
 	if err != nil {
-		return nil, err
+		return nil, ghBranchRead.explain(ctx, ans.status, err)
 	}
 	if ans.status == 403 || ans.status == 404 {
 		return required, nil
@@ -135,15 +177,15 @@ func (a githubAPI) requiredChecks(ctx context.Context, m pinnedMerge) (map[strin
 		} `json:"protection"`
 	}
 	if ans.decode(&branch) != nil || branch == nil {
-		return nil, refusal("unavailable")
+		return nil, ghBranchRead.explain(ctx, ans.status, refusal("unavailable"))
 	}
 	for _, name := range branch.Protection.Required.Contexts {
 		if name == "" {
-			return nil, refusal("unavailable")
+			return nil, ghBranchRead.unavailable("incomplete or invalid response")
 		}
 		required[name] = true
 	}
-	return required, add(branch.Protection.Required.Checks)
+	return required, ghBranchRead.explain(ctx, ans.status, add(branch.Protection.Required.Checks))
 }
 
 type githubRun struct {
@@ -231,7 +273,7 @@ func (a githubAPI) checks(ctx context.Context, m pinnedMerge, required map[strin
 	}
 	latest := make(map[checkKey]githubRun)
 	runsRead := 0
-	err := githubPages(func(q url.Values) (answer, error) {
+	err := githubPages(ctx, ghChecksRead, func(q url.Values) (answer, error) {
 		q.Set("filter", "all")
 		return a.get(ctx, path+"/check-runs", q)
 	}, func(ans answer) (int, bool, error) {
@@ -262,7 +304,7 @@ func (a githubAPI) checks(ctx context.Context, m pinnedMerge, required map[strin
 		worst[k.name] = max(worst[k.name], r.rank())
 	}
 	statusesRead := 0
-	err = githubPages(func(q url.Values) (answer, error) {
+	err = githubPages(ctx, ghStatusRead, func(q url.Values) (answer, error) {
 		return a.get(ctx, path+"/status", q)
 	}, func(ans answer) (int, bool, error) {
 		var combined struct {
