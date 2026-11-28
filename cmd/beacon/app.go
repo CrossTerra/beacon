@@ -65,6 +65,8 @@ type app struct {
 	configureClient func(*signal.Client)
 	// afterAppend is passed to the runner (tests stop the process there).
 	afterAppend func(key string)
+	// signalApplyBoundary is a fixture seam around durable offline publication.
+	signalApplyBoundary func(string) error
 
 	// interrupt cancels an in-flight send. Nil means the context passed to main does. main sets it to SIGINT only,
 	// so SIGTERM can finish the current send.
@@ -111,7 +113,7 @@ Commands:
   act           propose an action, or get, wait on or withdraw an existing proposal
   serve         run the review pages, proposal socket and supervised collector
   open          print a one-time browser sign-in link
-  setup         configure review and passkeys; setup verify-signal checks two Signal keys
+  setup         configure review and passkeys; verify-signal checks keys, apply-signal connects offline
   vault         export the unattended key file or import legacy collector items on macOS
   version       print the version, commit and build flags
   spike-passkey serve the passkey PRF spike on localhost:7317 (13.01 part 1)
@@ -220,6 +222,32 @@ func (a *app) loadConfig(p string) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if dir, ok := localstate.SignalCollectorDir(path); ok {
+		dir, err := localstate.Dir(dir, false)
+		if err != nil {
+			return nil, err
+		}
+		prep, err := localstate.LoadSignalPreparation(dir)
+		if err != nil {
+			return nil, err
+		}
+		if prep == nil {
+			return nil, os.ErrNotExist
+		}
+		return prep.CollectorConfig(dir), nil
+	}
+	return config.Load(path)
+}
+
+// Collector edits never load the read-only starter as a mutable config.
+func loadEditableCollectorConfig(p string) (*config.Config, error) {
+	path, err := configPath(p)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSignalStarterPath(path); err != nil {
+		return nil, err
+	}
 	return config.Load(path)
 }
 
@@ -319,6 +347,26 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkSignalStarterPath(path); err != nil {
+		return err
+	}
+	var dir string
+	if a.keychain == nil {
+		dir, err = localstate.Dir(a.vaultDir, true)
+		if err != nil {
+			return err
+		}
+		lock, err := localstate.LockCollectorSetup(dir)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		if paired, err := localstate.HasSignalPreparation(dir); err != nil {
+			return err
+		} else if paired {
+			return errors.New("beacon init cannot be used on an instance with paired Signal setup")
+		}
+	}
 	if _, err := os.Stat(path); err == nil && !*force {
 		return fmt.Errorf("%s exists; pass --force to overwrite it", path)
 	}
@@ -330,11 +378,7 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 		Mode:    config.DryRun,
 		Sources: []config.Source{},
 	}
-	if a.keychain == nil && *cfgPath == "" && os.Getenv("BEACON_CONFIG") == "" && runtime.GOOS == "linux" {
-		dir, err := localstate.DefaultDir()
-		if err != nil {
-			return err
-		}
+	if dir != "" && *cfgPath == "" && os.Getenv("BEACON_CONFIG") == "" && runtime.GOOS == "linux" {
 		cfg.State = filepath.Join(dir, "collector")
 	}
 	data, err := cfg.Marshal()
@@ -344,9 +388,14 @@ func (a *app) cmdInit(ctx context.Context, args []string) error {
 	if _, err := config.Parse(data); err != nil {
 		return err
 	}
-	store, err := a.collectorStore(cfg, true)
-	if err != nil {
-		return err
+	var store keychain.Store
+	if dir != "" {
+		store = keychain.Unattended{Dir: dir, Bindings: collectorBindings(cfg)}
+	} else {
+		store, err = a.keychain() // in-memory fixtures
+		if err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(a.stderr, "Signal key for %s (input hidden): ", cfg.Signal.URL)
 	secret, err := keychain.ReadSecret(ctx, a.stdin)
@@ -513,12 +562,23 @@ func (a *app) cmdRun(ctx context.Context, args []string) error {
 	fail := func(reason logs.Reason, text string) error {
 		return a.failLoop(*once || *first, stateDir, poll, interrupt, log, reason, text, false)
 	}
-	// A rules or source error fails load, but the config is already readable. Take the state directory and rotate
-	// before that failure, so status can show the reason and the service log stays capped.
+	// Use the validated config for failure status and backoff, even if activation, rules or sources fail.
+	// Rotate only this process's service log before any such failure is logged.
 	if cfg, err := a.loadConfig(*cfgPath); err == nil {
 		stateDir = cfg.StatePath()
 		poll = cfg.PollInterval()
 		a.rotateServiceLogs(stateDir)
+		if _, starter := localstate.SignalCollectorDir(cfg.Path); starter {
+			store, err := a.collectorStore(cfg, false)
+			if err != nil {
+				return fail(logs.ReasonVault, "paired Signal activation is unavailable")
+			}
+			key, err := store.Get(cfg.KeychainAccount())
+			key.Clear()
+			if err != nil {
+				return fail(logs.ReasonVault, "paired Signal activation is unavailable")
+			}
+		}
 	}
 	e, err := a.load(*cfgPath)
 	if err != nil {
@@ -1422,7 +1482,7 @@ func (a *app) cmdCursor(args []string) error {
 func (a *app) cmdEgress(args []string) error {
 	fs, cfgPath := a.flags("egress")
 	state := fs.String("state-dir", "", "list egress for this Go approval service instead")
-	verify := fs.String("signal-origin", "", "list egress for setup verify-signal at this trusted HTTPS origin")
+	verify := fs.String("signal-origin", "", "list egress for verify-signal and apply-signal at this trusted HTTPS origin")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

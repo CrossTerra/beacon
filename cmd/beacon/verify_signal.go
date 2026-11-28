@@ -84,6 +84,7 @@ func checkSignalPins(t *actionexec.SignalCheckTarget, state, collector string) e
 			if err := t.PinPerson("@" + s.Signal.Handle); err != nil {
 				return err
 			}
+			t.CollectorActor = s.Signal.CollectorActor()
 		}
 		archive, err := cutover.Load(dir)
 		if err != nil {

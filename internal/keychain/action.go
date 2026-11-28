@@ -77,7 +77,7 @@ func ReadAction(dir string, b vault.Binding) (Secret, error) {
 // ReadRecordKey opens only the unattended app-records key for this Signal origin and app actor.
 // It is not a provider write credential and never comes from a proposal or the service environment.
 func ReadRecordKey(dir, origin, actor string) (Secret, error) {
-	s, err := readBound(dir, vault.Binding{Service: "signal", Origin: origin, Account: actor, Use: "records"})
+	s, err := readBound(dir, vault.SignalRecordBinding(origin, actor))
 	if err != nil || !bytes.HasPrefix(s.value, []byte("sig_")) || len(s.value) == 4 {
 		s.Clear()
 		return Secret{}, errActionCredential

@@ -29,6 +29,9 @@ func RegisterSignal(ctx context.Context, dir, origin string, key keychain.Secret
 	if err != nil {
 		return err
 	}
+	if s.Signal.Paired() {
+		return errors.New("paired Signal setup does not support single-key enrollment or rotation")
+	}
 	if old == nil && s.Signal != nil {
 		old = &cutover.SignalActor{Origin: s.Signal.Origin, Actor: s.Signal.Actor, Person: s.Signal.Person}
 	}

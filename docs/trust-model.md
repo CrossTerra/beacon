@@ -23,6 +23,7 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
 | The Signal key's bearer header, to the configured Signal host | Items the rules dropped or that are waiting for review |
 | `beacon key set`: `GET /api/me`, which sends the new key and nothing else, and only stores it if Signal accepts it | |
 | `beacon setup verify-signal`: two distinct credentials that match Signal’s API-key format, in separate Authorization headers, only for identity and grant reads at the independently selected HTTPS origin | The verifier checks configured relay identities locally against the reported grant, saves nothing, and makes no write request |
+| `beacon setup apply-signal`: the same read-only Signal verification under the offline instance lock | Private nonsecret preparation and two bound vault entries; the preparation contains no keys, relay identities or journal records |
 | Requests to the source APIs, made with your credentials, including on a dry run, and to Google's token endpoint | The rules file, the review queue, the outbox (the stored decision keeps listed fields and the event title, not an unlisted body), the cursors, the seed file, classifier input and output |
 | Slack approvals: the Slack user token's bearer header and the conversation and thread ids go only to Slack. Only after approval does the frozen draft go to Slack, with unfurls off and a random operation UUID as message metadata and `client_msg_id`; apps that read the message's metadata can see the UUID. Signal gets the journal's records: the native message id is plain; the draft, reason and approval details are sealed by Signal | The thread root's preview and the app's operation UUID are never sent to Signal |
 | The lease: your Signal handle, a random instance id and the lease period, as a lease in Signal's lease API (not an event) or, where Signal does not offer one, as a claim event | Rule names, and why an item matched |
@@ -119,6 +120,14 @@ Beacon's hosts. OpenCode's `--auto` uses permissions configured for the checkout
    GitHub fine-grained tokens without a reported grant must be newly issued read-only tokens entered directly by
    the operator, who checks those permissions at issuance. Google tokens are exchanged using PKCE and checked `state`; access
    tokens are kept only in memory. Signal must use HTTPS except for a loopback test endpoint. No daemon runs as root.
+   Paired Signal setup is an explicit offline operation for an initialized, unbound localhost instance.
+   It refuses action or delivery history rather than assigning it to a person, and checks the journal
+   without replay or repair. Private nonsecret configuration is inert until one vault replacement
+    commits both role-bound keys for the same person and journal. Both readers fail closed on an
+    incomplete pair. The starter has no sources or send rules and is not started by the service.
+    Legacy collector init and paired apply exclude each other per state directory. A prepared or
+    complete pair refuses legacy init and a Tailscale origin switch before credential prompts or
+    state changes. Source enrollment refuses the paired starter before opening a provider connection.
 8. **Logs carry no content.** Log lines have fixed event names and carry counts, source names, outcomes, statuses,
    fixed Signal error codes and fixed reason codes. An unrecognized Signal error code becomes `other`. The
    supervised collector writes pass summaries to `collector.log` in the service state directory (`~/Library/Application Support/beacon/collector.log` on macOS), rotated by size with

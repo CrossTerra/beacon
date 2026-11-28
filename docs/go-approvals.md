@@ -236,6 +236,15 @@ retries once when the target entry is unchanged; a changed entry, or a second co
 differ. The collector, approval preflight and Signal record sender use this vault. Passkey-sealed write tokens
 stay separate; Beacon refuses to use a write token that already appears in the unattended vault.
 
+[`beacon setup apply-signal`](install.md#connect-signal-offline-on-a-new-localhost-installation) holds the
+offline instance lock from local checks through verification and publication. The private, nonsecret
+`signal-onboarding/` preparation is flushed before one KDBX replacement saves both bound entries. Both
+readers check the preparation and the complete pair in one vault generation. A process exit before vault
+publication leaves no usable new connection; after publication the same setup can confirm the existing
+pair without rewriting it. Candidates left by an interrupted write are not read for activation. Beacon
+preserves the existing key store and serializes its database publications; close any external vault editor
+before an offline write.
+
 ## Journal and record delivery
 
 `journal.log` is an owner-only append-only file, protected by `instance.lock` in the private state directory.
@@ -283,10 +292,16 @@ attributed to a run. For an operator it queues a resume of the stopped head, or 
 when requested during a send. It cannot approve or retry
 an action, skip a record or resend an acknowledged one.
 
-To connect Signal, stop the service and run `beacon setup --signal`. Paste the setup code from Signal's `/beacon`
-page in hidden input. Setup verifies the app and its person and stores the key under the exact Signal/app binding
-in the unattended vault. A cutover must rotate the existing app actor's key, not create a different actor. The
-collector has a separate config, key and outbox. A missing or unreadable approval-app key leaves delivery pending.
+For an unbound localhost installation with a setup-only journal, use
+[`beacon setup apply-signal`](install.md#connect-signal-offline-on-a-new-localhost-installation). Service startup
+requires the whole paired activation. If the vault later becomes unavailable while the service is running,
+delivery waits. The apply command itself never sends journal records.
+
+For the separate approval-app workflow, stop the service and run `beacon setup --signal`. Paste the setup code
+from Signal's `/beacon` page in hidden input. Setup verifies the app and its person and stores the key under the
+exact Signal/app binding in the unattended vault. A cutover must rotate the existing app actor's key, not create
+a different actor. The collector has a separate config, key and outbox. A missing or unreadable approval-app key
+leaves delivery pending.
 
 Run records use `agent-run:{handle}:{runner id without run_}`. The report or failure detail is sealed at
 `owner+agents` and marked `from: "runner"`: it is data for the session that requested the run, never an

@@ -39,18 +39,19 @@ var (
 const checkGrantPath = "/api/api-keys?limit=100"
 
 type verificationFixture struct {
-	t       *testing.T
-	appMe   approval.Object
-	relayMe approval.Object
-	app     approval.Object
-	relay   approval.Object
-	person  approval.Object
-	grant   approval.Object
-	calls   []string
-	opened  bool
-	refuse  string
-	status  int
-	before  func(string)
+	t        *testing.T
+	appMe    approval.Object
+	relayMe  approval.Object
+	app      approval.Object
+	relay    approval.Object
+	person   approval.Object
+	grant    approval.Object
+	calls    []string
+	opened   bool
+	refuse   string
+	status   int
+	before   func(string)
+	relayKey string
 }
 
 func signalVerificationFixture(t *testing.T) *verificationFixture {
@@ -71,7 +72,7 @@ func signalVerificationFixture(t *testing.T) *verificationFixture {
 		o["deactivated_at"], o["directory"], o["executes"], o["reconciles"] = nil, false, []string{}, []string{}
 		return o
 	}
-	return &verificationFixture{t: t, appMe: me(checkApp, true, "write", "read"), relayMe: me(checkRelay, false, "write", "relay", "read"),
+	return &verificationFixture{t: t, relayKey: checkRelayKey, appMe: me(checkApp, true, "write", "read"), relayMe: me(checkRelay, false, "write", "relay", "read"),
 		app: detail(checkApp, true), relay: detail(checkRelay, false),
 		person: approval.Object{"id": checkPerson,
 			"type": "human", "handle": "fixture", "deactivated_at": nil, "identities": []string{checkIdentity, "zitadel:example.test:user:fixture"}},
@@ -96,7 +97,7 @@ func (f *verificationFixture) transport(allowed []string) http.RoundTripper {
 		role := "app"
 		switch r.Header.Get("Authorization") {
 		case "Bearer " + checkAppKey:
-		case "Bearer " + checkRelayKey:
+		case "Bearer " + f.relayKey:
 			role = "collector"
 		default:
 			f.t.Fatal("verification did not use a fixture credential")

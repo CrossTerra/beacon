@@ -3,6 +3,7 @@ package actionexec
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/CrossTerra/beacon/internal/approval"
 	"github.com/CrossTerra/beacon/internal/egress"
 	"github.com/CrossTerra/beacon/internal/keychain"
+	"github.com/CrossTerra/beacon/internal/localstate"
 	"github.com/CrossTerra/beacon/internal/vault"
 )
 
@@ -73,29 +75,55 @@ func (s GitHubSettings) binding() (vault.Binding, error) {
 }
 
 func LoadSettings(dir string) (Settings, error) {
+	s, _, err := loadProviderSettings(dir)
+	if err != nil {
+		return Settings{}, err
+	}
+	p, err := localstate.LoadSignalPreparation(dir)
+	if err != nil || p != nil && s.Signal != nil {
+		return Settings{}, errSettings
+	}
+	if p != nil {
+		s.Signal = &SignalSettings{Origin: p.Origin, Actor: p.ApprovalActor, Person: p.Person, Handle: p.Handle, prepared: p}
+	}
+	return s, nil
+}
+
+// UnboundSettingsDigest validates the existing provider settings without merging any Signal
+// preparation. A legacy Signal binding, even one with no key, is not an unbound installation.
+func UnboundSettingsDigest(dir string) ([32]byte, error) {
+	s, digest, err := loadProviderSettings(dir)
+	if err != nil || s.Signal != nil {
+		return [32]byte{}, errors.New("offline setup requires valid provider settings without a legacy Signal binding")
+	}
+	return digest, nil
+}
+
+func loadProviderSettings(dir string) (Settings, [32]byte, error) {
 	f, err := approval.OpenPrivate(filepath.Join(dir, settingsName), os.O_RDONLY)
 	if errors.Is(err, os.ErrNotExist) {
-		return Settings{}, nil
+		return Settings{}, [32]byte{}, nil
 	}
 	if err != nil {
-		return Settings{}, errSettings
+		return Settings{}, [32]byte{}, errSettings
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil || len(b) > 4096 {
-		return Settings{}, errSettings
+		return Settings{}, [32]byte{}, errSettings
 	}
 	// Reject duplicate keys and malformed JSON before decoding the settings schema.
-	if _, err := approval.ParseObject(b); err != nil {
-		return Settings{}, errSettings
+	o, err := approval.ParseObject(b)
+	if err != nil || approval.CheckKeys(o, "", "github", "slack", "signal") != nil {
+		return Settings{}, [32]byte{}, errSettings
 	}
 	d := json.NewDecoder(strings.NewReader(string(b)))
 	d.DisallowUnknownFields()
 	var s Settings
 	if d.Decode(&s) != nil {
-		return Settings{}, errSettings
+		return Settings{}, [32]byte{}, errSettings
 	}
-	return s, s.check()
+	return s, sha256.Sum256(b), s.check()
 }
 
 func (s Settings) check() error {

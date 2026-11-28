@@ -57,9 +57,9 @@ If the helper cannot verify a custom unit but the binary supports reissue, use
 When passkey registration fails, the page shows the browser's error name and message, PRF status, and browser
 user agent. Only a fixed reason code is logged to `serve.log` on macOS (the systemd user journal on Linux).
 
-Updates never run setup again. To change the origin, stop the service and run `beacon setup --origin …`
-explicitly. Confirming removes every passkey and the write vault, but not the journal, unattended credentials
-or Signal key. After restarting,
+Updates never run setup again. On an instance without paired Signal setup, change the origin by stopping
+the service and running `beacon setup --origin …` explicitly. Confirming removes every passkey and the write
+vault, but not the journal, unattended credentials or Signal key. After restarting,
 register again and re-enter the write credentials. Changing to localhost does not delete other Tailscale routes.
 
 `beacon open` prints a temporary sign-in link; open it yourself. The collector's `beacon init` and
@@ -102,6 +102,47 @@ This command **only verifies the credentials you enter**. It does not open the v
 create a collector config, change a passkey, or activate delivery. You can repeat the check without stopping
 the service. `beacon init` and `beacon setup --signal` remain separate configuration commands; the verifier
 does not run either one.
+
+### Connect Signal offline on a new localhost installation
+
+After installation, with the Beacon service stopped and any vault editor closed, run in your terminal:
+
+```sh
+beacon setup apply-signal --signal-origin https://signal.example.com --person @your-handle
+```
+
+Use the same independent origin and person selection and the same two hidden prompts as above. There is
+no need to run `verify-signal` first. Apply repeats the ownership, role and exact-grant checks while it
+holds the offline instance lock. It reads Signal but does not create, rotate or revoke a key there.
+
+This path requires an initialized, previously unbound localhost instance with an accessible unattended
+vault, no existing collector config or Signal binding, and no Swift cutover. A passkey is optional. The
+journal must contain only its header, optionally followed by one intact initial passkey enrollment. Apply
+refuses any action history (even if delivered), other journal entries, incomplete enrollment or a held
+service lock. It does not repair or reset anything. Use the normal installer paths; `--state-dir DIR` can
+select another initialized instance, but custom collector configs are not supported by this command.
+
+Apply prepares private, nonsecret files in `signal-onboarding/` inside the state directory, then saves both
+bound keys together in the existing `unattended.kdbx`. Neither reader can use the new connection until
+the matching pair is committed. The collector starter is `signal-onboarding/config.yaml`: read-only,
+dry-run, with empty rules and no sources. Apply does not import credentials, copy rules or cursors, read
+Slack, or start a service or collector. A later explicit service start enables approval record delivery
+for this journal. A paired instance does not supervise a collector; to check the starter separately, use
+`beacon run --once --config /path/to/state/signal-onboarding/config.yaml`.
+
+If interrupted, leave the files in place and the service stopped, and rerun the same command with the
+same origin, person and keys. Beacon reverifies before continuing, checks that the preparation is intact,
+and reports no change for the exact committed pair when the setup state still matches. It refuses edited
+or stale preparations, partial pairs and rotation. Until an interrupted preparation is completed, approval
+startup and the collector starter refuse to use it.
+
+After preparation, `beacon init` (including `--force`) and `beacon setup --signal` refuse on that instance
+before asking for a key. `beacon init` cannot run concurrently with apply on the same state directory.
+Independent legacy instances can still initialize with their own config and vault.
+`beacon setup --origin tailscale` refuses before changing the journal, contacting Tailscale or resetting
+passkeys. Explicit localhost passkey recovery is unchanged. `beacon source add` refuses the read-only
+starter before asking for a token or starting OAuth. These commands cannot take over a prepared or
+committed pair; retry `apply-signal` for an interrupted connection.
 
 ### Service controls
 

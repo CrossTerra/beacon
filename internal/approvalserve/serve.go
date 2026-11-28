@@ -63,13 +63,24 @@ func Run(ctx context.Context, opts Options) (err error) {
 		supClosed = true
 		return sup.Close()
 	}
-	var startup func(*os.File) error
-	if opts.Supervision != nil {
-		startup = func(lock *os.File) error {
-			var err error
+	var configured actionexec.Settings
+	startup := func(lock *os.File) error {
+		var err error
+		if opts.Supervision != nil {
 			sup, err = supervisor.Open(ctx, opts.StateDir, lock, *opts.Supervision)
+			if err != nil {
+				return err
+			}
+		}
+		configured, err = actionexec.LoadSettings(opts.StateDir)
+		if err != nil {
 			return err
 		}
+		if configured.Signal.Paired() && (opts.AfterJournal != "" || opts.ArchiveSignal != nil ||
+			opts.Supervision != nil && len(opts.Supervision.Jobs) != 0) {
+			return errors.New("paired Signal setup does not support a cutover or a separate supervised collector")
+		}
+		return configured.Signal.CheckActivation(opts.StateDir)
 	}
 	j, err := approval.OpenJournalBeforeReplay(opts.StateDir, opts.Now(), opts.AfterJournal, startup)
 	defer func() {
@@ -105,8 +116,7 @@ func Run(ctx context.Context, opts Options) (err error) {
 			runFailed = runs.Failed()
 		}
 	}
-	configured, err := actionexec.LoadSettings(opts.StateDir)
-	if err != nil {
+	if err := configured.Signal.CheckJournal(j.ID()); err != nil {
 		return err
 	}
 	if old, next := opts.ArchiveSignal, configured.Signal; old != nil && next != nil &&

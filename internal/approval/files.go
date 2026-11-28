@@ -91,17 +91,30 @@ func FlushDirectory(dir string) error {
 	return err
 }
 
+// SyncPrivateFile flushes a candidate's bytes before its durable name is published.
+func SyncPrivateFile(f *os.File) error { return syncJournal(f) }
+
 // heldLocks records instance locks this process already owns. A second flock in this process fails, so
 // in-process registration must notice the journal's lock instead of taking another.
 var heldLocks sync.Map
 
+const instanceLockName = "instance.lock"
+
 // LockInstance holds the same lock future offline setup and migration commands must take. Do not remove the
 // lock file: doing so would allow different processes to lock different inodes at the same path.
 func LockInstance(dir string) (*os.File, error) {
+	f, err := lockInstance(dir, os.O_RDWR|os.O_CREATE)
+	if err == nil {
+		heldLocks.Store(filepath.Clean(dir), f)
+	}
+	return f, err
+}
+
+func lockInstance(dir string, flags int) (*os.File, error) {
 	if _, err := CheckPrivate(dir, os.ModeDir|0o700); err != nil {
 		return nil, err
 	}
-	f, err := OpenPrivate(filepath.Join(dir, "instance.lock"), os.O_RDWR|os.O_CREATE)
+	f, err := OpenPrivate(filepath.Join(dir, instanceLockName), flags)
 	if err != nil {
 		return nil, err
 	}
@@ -112,8 +125,60 @@ func LockInstance(dir string) (*os.File, error) {
 		}
 		return nil, err
 	}
-	heldLocks.Store(filepath.Clean(dir), f)
 	return f, nil
+}
+
+// OfflineLock is a freshly acquired instance lock, never one borrowed from a live journal.
+type OfflineLock struct {
+	dir  string
+	file *os.File
+	base os.FileInfo
+}
+
+// LockOffline requires an initialized instance; it does not create a missing lock file.
+func LockOffline(dir string) (*OfflineLock, error) {
+	base, err := CheckPrivate(dir, os.ModeDir|0o700)
+	if err != nil {
+		return nil, err
+	}
+	f, err := lockInstance(dir, os.O_RDWR)
+	if err != nil {
+		return nil, err
+	}
+	l := &OfflineLock{dir: dir, file: f, base: base}
+	if err := l.Check(); err != nil {
+		l.Close()
+		return nil, err
+	}
+	return l, nil
+}
+
+func (l *OfflineLock) Dir() string { return l.dir }
+
+// Check also detects replacement of the state directory or lock inode while we were working.
+func (l *OfflineLock) Check() error {
+	if l == nil || l.file == nil {
+		return ErrLocked
+	}
+	base, err := CheckPrivate(l.dir, os.ModeDir|0o700)
+	if err != nil || !os.SameFile(base, l.base) {
+		return ErrLocked
+	}
+	f, err := l.file.Stat()
+	current, pathErr := CheckPrivate(filepath.Join(l.dir, instanceLockName), 0o600)
+	if err != nil || pathErr != nil || !os.SameFile(f, current) {
+		return ErrLocked
+	}
+	return nil
+}
+
+func (l *OfflineLock) Close() error {
+	if l.file == nil {
+		return nil
+	}
+	err := l.file.Close()
+	l.file = nil
+	return err
 }
 
 // HoldsInstance reports whether this process already owns the instance lock.

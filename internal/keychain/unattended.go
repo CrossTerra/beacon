@@ -17,12 +17,16 @@ import (
 type Unattended struct {
 	Dir      string
 	Bindings map[string]vault.Binding
+	Signal   *vault.SignalPair // set only for the canonical, verified starter config
 }
 
 func (s Unattended) Get(account string) (Secret, error) {
 	b, ok := s.Bindings[account]
 	if !ok {
 		return Secret{}, ErrNotFound
+	}
+	if b.Service == "signal-collector" && s.Signal != nil {
+		return ReadPreparedSignal(s.Dir, *s.Signal, b)
 	}
 	return ReadBound(s.Dir, b)
 }
@@ -31,6 +35,9 @@ func (s Unattended) Set(account string, value Secret) error {
 	b, ok := s.Bindings[account]
 	if !ok {
 		return ErrNotFound
+	}
+	if s.Signal != nil {
+		return vault.ErrConflict
 	}
 	return StoreBound(s.Dir, b, value)
 }
